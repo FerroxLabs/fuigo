@@ -4817,7 +4817,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-shell"
-version = "1.0.13"
+version = "1.0.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -5399,7 +5399,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.13"
+version = "1.0.1"
 dependencies = [
  "semver",
 ]
