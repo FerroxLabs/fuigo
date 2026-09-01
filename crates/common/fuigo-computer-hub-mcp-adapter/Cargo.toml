@@ -1,0 +1,30 @@
+[package]
+license = "Apache-2.0"
+name = "fuigo-computer-hub-mcp-adapter"
+version = "0.1.0"
+edition.workspace = true
+description = "Bridge between MCP servers and the Ferrox Labs Computer Hub, registering MCP-discovered tools as native hub tools."
+
+[features]
+metrics = ["dep:prometheus"]
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+prometheus = { workspace = true, optional = true }
+
+fuigo-tool-protocol = { workspace = true }
+fuigo-tool-runtime = { workspace = true }
+fuigo-tool-types = { workspace = true }
+fuigo-computer-hub-sdk = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+futures = { workspace = true }
+
+[lints]
+workspace = true
