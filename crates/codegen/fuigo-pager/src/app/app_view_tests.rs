@@ -4035,13 +4035,26 @@ fn welcome_pending_l_triggers_login() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
 }
+/// Enter takes the DEFAULT menu action, and the default is now the API key.
+/// Upstream it was `Login`, because "Login with grok.com" was the only row.
+/// `l` still starts an interactive login (see the test above) for the installs
+/// that have a provider configured.
 #[test]
-fn welcome_pending_enter_triggers_login() {
+fn welcome_pending_enter_opens_api_key_entry() {
     let mut app = test_app();
     app.auth_state = AuthState::Pending { error: None };
     app.welcome_prompt_focused = false;
     let outcome = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Action(Action::Login)));
+    assert!(matches!(outcome, InputOutcome::Action(Action::EnterApiKey)));
+}
+
+#[test]
+fn welcome_pending_k_opens_api_key_entry() {
+    let mut app = test_app();
+    app.auth_state = AuthState::Pending { error: None };
+    app.welcome_prompt_focused = false;
+    let outcome = app.handle_input(&key_event(KeyCode::Char('k'), KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Action(Action::EnterApiKey)));
 }
 #[test]
 fn welcome_pending_n_is_unchanged() {

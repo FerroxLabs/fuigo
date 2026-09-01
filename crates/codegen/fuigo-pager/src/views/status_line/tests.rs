@@ -160,7 +160,9 @@ fn render_ansi_emits_absolute_link_spans() {
 
     assert_eq!(spans.len(), 1);
     let span = &spans[0];
-    // Area x 3, plus 2 columns of padding, plus the 7 of `[Fuigo] `.
-    assert_eq!((span.row, span.col_start, span.col_end), (5, 12, 16));
+    // Area x 3, plus 2 columns of padding, plus the 8 of `[Fuigo] `.
+    // The comment said 7 because upstream's prefix was `[Grok] `; the rebrand
+    // grew the literal by a column and left the arithmetic behind.
+    assert_eq!((span.row, span.col_start, span.col_end), (5, 13, 17));
     assert_eq!(span.url.as_ref(), "https://example.com/repo");
 }

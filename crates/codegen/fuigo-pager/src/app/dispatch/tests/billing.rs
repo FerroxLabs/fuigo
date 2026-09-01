@@ -310,34 +310,22 @@ fn credit_limit_translate_max_tier_retry_is_second_option() {
     }
 }
 
+/// Fuigo sells no subscriptions, so no tier string can put a user below max
+/// and no upsell path fires. Locking this down deliberately: if someone later
+/// reintroduces tier matching, these two tests are where they must say so.
 #[test]
-fn is_max_tier_positive_match() {
+fn is_max_tier_is_true_for_every_tier_string() {
     assert!(is_max_tier(Some("superfuigo_heavy")));
     assert!(is_max_tier(Some("SuperGrok Heavy")));
-    assert!(is_max_tier(Some("SUPERFUIGO_HEAVY")));
+    assert!(is_max_tier(Some("free")));
+    assert!(is_max_tier(Some("")));
 }
 
 #[test]
-fn is_max_tier_non_max_and_unknown() {
-    assert!(!is_max_tier(Some("superfuigo")));
-    assert!(!is_max_tier(Some("premium")));
-    assert!(!is_max_tier(Some("free")));
-    // Unknown defaults to non-max, so the Q&A is shown
-    assert!(!is_max_tier(None));
-}
-
-#[test]
-fn is_max_tier_handles_mixed_case_and_whitespace() {
-    assert!(is_max_tier(Some("SuperGrok_Heavy")));
-    assert!(is_max_tier(Some("superfuigo heavy")));
-    assert!(is_max_tier(Some("SUPERFUIGO HEAVY")));
-}
-
-#[test]
-fn is_max_tier_rejects_partial_matches() {
-    assert!(!is_max_tier(Some("superfuigo_heav")));
-    assert!(!is_max_tier(Some("superfuigo_heavy_plus")));
-    assert!(!is_max_tier(Some("")));
+fn is_max_tier_is_true_when_the_tier_is_unknown() {
+    // Upstream an unknown tier meant "show the upgrade Q&A". With nothing to
+    // upgrade to, the safe default inverts: assume the user is fully entitled.
+    assert!(is_max_tier(None));
 }
 
 #[test]
@@ -402,7 +390,7 @@ fn upsell_non_max_qa_heading_is_spending_cap_when_payg_on() {
 }
 
 #[test]
-fn upsell_non_max_upgrade_url_is_superfuigo() {
+fn upsell_non_max_upgrade_url_is_flux_billing() {
     let mut app = test_app_with_agent();
     open_upsell_qa(
         &mut app,
@@ -412,12 +400,12 @@ fn upsell_non_max_upgrade_url_is_superfuigo() {
         .id
         .as_deref()
         .unwrap();
-    assert!(url.contains("superfuigo"), "got: {url}");
-    assert!(url.contains("referrer=fuigo-build"), "got: {url}");
+    assert!(url.contains("fluxrouter.ai"), "got: {url}");
+    assert!(!url.contains("grok.com"), "must not send users to grok.com: {url}");
 }
 
 #[test]
-fn upsell_non_max_payg_url_is_usage() {
+fn upsell_non_max_payg_url_is_flux_billing() {
     let mut app = test_app_with_agent();
     open_upsell_qa(
         &mut app,
@@ -427,7 +415,7 @@ fn upsell_non_max_payg_url_is_usage() {
         .id
         .as_deref()
         .unwrap();
-    assert!(url.contains("_s=usage"), "got: {url}");
+    assert!(url.contains("fluxrouter.ai"), "got: {url}");
 }
 
 #[test]
@@ -793,7 +781,7 @@ fn manage_billing_gates_on_consumer_billing_surface() {
     let mut app = test_app_with_agent();
     dispatch(Action::ManageBilling, &mut app);
     let opened = std::fs::read_to_string(&out).unwrap_or_default();
-    assert!(opened.contains("grok.com/?_s=usage"), "got: {opened}");
+    assert!(opened.contains("fluxrouter.ai"), "got: {opened}");
     let _ = std::fs::remove_file(&out);
 
     // Non-consumer: silent no-op (slash command never offers manage).
