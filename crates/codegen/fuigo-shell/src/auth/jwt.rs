@@ -3,12 +3,38 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
+/// Install a JWT crypto provider exactly once per process.
+///
+/// `jsonwebtoken` 10 panics rather than erroring when it cannot pick a provider
+/// from its own features, and in this workspace BOTH are enabled: `fuigo-shell`
+/// asks for `rust_crypto`, while `fuigo-file-utils -> gcloud-storage ->
+/// gcloud-auth` turns on `jsonwebtoken/aws_lc_rs`. Cargo unifies the two, so the
+/// choice becomes ambiguous and every JWT call is a panic waiting for whoever
+/// touches a token first.
+///
+/// The binary gets away with it by accident: `warm_async_http_client` runs at
+/// boot and installs a provider through `fuigo_extra_ca`. Nothing guarantees
+/// that ordering, and unit tests -- which never boot -- hit the panic directly.
+/// Upstream had already patched two individual test helpers with this same call
+/// rather than fixing the ordering.
+///
+/// Installing here makes it order-independent. `install_default` returns Err if
+/// a provider is already installed, which is the normal case and is ignored:
+/// first install wins, and either provider decodes these tokens.
+pub fn ensure_jwt_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    });
+}
+
 #[derive(Deserialize)]
 struct Claims {
     exp: Option<i64>,
 }
 
 pub fn parse_jwt_expiration(token: &str) -> Option<DateTime<Utc>> {
+    ensure_jwt_crypto_provider();
     jsonwebtoken::dangerous::insecure_decode::<Claims>(token)
         .ok()
         .and_then(|data| data.claims.exp)

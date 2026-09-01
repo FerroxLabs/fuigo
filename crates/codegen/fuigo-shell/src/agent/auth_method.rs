@@ -562,6 +562,20 @@ mod tests {
         }
     }
 
+    /// `default_inputs` with an interactive auth provider configured.
+    ///
+    /// Fuigo only advertises the interactive login method when an operator has
+    /// actually configured one -- upstream pushed it unconditionally, which is
+    /// what made a fresh install try to log in to xAI before its first frame.
+    /// Tests about method ORDERING and suppression still need a login method to
+    /// exist, so they start from this instead.
+    fn inputs_with_login_provider() -> AuthMethodsBuildInputs<'static> {
+        AuthMethodsBuildInputs {
+            has_auth_provider_command: true,
+            ..default_inputs()
+        }
+    }
+
     fn method_ids(built: &BuiltAuthMethods) -> Vec<&str> {
         built.methods.iter().map(|m| m.id().0.as_ref()).collect()
     }
@@ -669,11 +683,26 @@ mod tests {
         );
     }
 
-    /// Brand-new user (no API key, no cached token): only `grok.com` is advertised, and the pager will (correctly) show the login screen.
-    /// `default_auth_method_id` is None so the pager falls back to the advertised login method.
+    /// Brand-new user, nothing configured: NOTHING is advertised.
+    ///
+    /// Upstream advertised `grok.com` here, and the pager reads
+    /// `methods.first()` to decide whether to start an interactive login -- so
+    /// this one line is what made a fresh install dial xAI at boot. An empty
+    /// list is the state the pager renders as the welcome menu, with
+    /// "Enter API key" first.
     #[test]
-    fn fresh_user_only_advertises_fuigo_com_and_requires_login() {
+    fn fresh_user_advertises_nothing_and_gets_the_api_key_menu() {
         let built = build_auth_methods(default_inputs());
+
+        assert!(built.methods.is_empty());
+        assert!(built.default_auth_method_id.is_none());
+    }
+
+    /// ...but an operator who configured an auth provider still gets the login
+    /// method, leading, exactly as before.
+    #[test]
+    fn configured_auth_provider_still_advertises_interactive_login() {
+        let built = build_auth_methods(inputs_with_login_provider());
 
         assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::FuigoCom));
         assert!(built.default_auth_method_id.is_none());
@@ -852,7 +881,7 @@ mod tests {
         assert!(!has_external_api_key);
         let built = build_auth_methods(AuthMethodsBuildInputs {
             has_external_api_key,
-            ..default_inputs()
+            ..inputs_with_login_provider()
         });
         assert!(
             !built
@@ -887,7 +916,7 @@ mod tests {
         );
         let built = build_auth_methods(AuthMethodsBuildInputs {
             has_external_api_key: false,
-            ..default_inputs()
+            ..inputs_with_login_provider()
         });
         assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::FuigoCom));
     }
@@ -1065,7 +1094,7 @@ mod tests {
         let built = build_auth_methods(AuthMethodsBuildInputs {
             has_external_api_key: false,
             has_cached_token: mgr.current().is_some(),
-            ..default_inputs()
+            ..inputs_with_login_provider()
         });
         assert_eq!(
             first_kind(&built.methods),
@@ -1106,7 +1135,7 @@ mod tests {
             has_external_api_key: true,
             has_cached_token: true,
             preferred_method: Some(PreferredAuthMethod::Oidc),
-            ..default_inputs()
+            ..inputs_with_login_provider()
         });
         assert_eq!(
             method_ids(&built),
@@ -1121,7 +1150,7 @@ mod tests {
             has_external_api_key: true,
             has_cached_token: false,
             preferred_method: Some(PreferredAuthMethod::Oidc),
-            ..default_inputs()
+            ..inputs_with_login_provider()
         });
         assert_eq!(method_ids(&built), vec![FUIGO_COM_METHOD_ID]);
         assert!(built.default_auth_method_id.is_none());

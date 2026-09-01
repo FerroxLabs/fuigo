@@ -149,19 +149,30 @@ mod tests {
             )
             .unwrap(),
         );
+        // Session and deployment fetches go through the AUXILIARY proxy, which
+        // Fuigo leaves unset -- so these resolve to a bare path and reach
+        // nothing. The invariant that still matters is the one below: neither
+        // may follow `fuigo_api_base_url`, or a session/deployment credential
+        // would be presented to the inference host.
         let session = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::Session);
-        assert_eq!(session.url, "https://cli-chat-proxy.grok.com/v1/models");
+        assert_eq!(session.url, "/models");
         assert_eq!(session.auth, EndpointAuth::Session);
         let deployment = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::Deployment);
-        assert_eq!(deployment.url, "https://cli-chat-proxy.grok.com/v1/models");
+        assert_eq!(deployment.url, "/models");
         assert_eq!(deployment.auth, EndpointAuth::Session);
+        for u in [&session.url, &deployment.url] {
+            assert!(!u.contains("acme-corp"), "must not follow inference: {u}");
+        }
         let api = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::ApiKey);
         assert_eq!(api.url, "https://inference.acme-corp.example/fuigo/v1/models");
         assert_eq!(api.auth, EndpointAuth::ApiKey);
         let default = EndpointsConfig::from_config_value(&toml::Value::Table(Default::default()));
         assert_eq!(
             ListModelsEndpoint::from_endpoints(&default, ModelFetchAuth::ApiKey).url,
-            "https://api.x.ai/v1/models"
+            format!(
+                "{}/models",
+                crate::agent::config::FUIGO_API_BASE_URL_DEFAULT
+            )
         );
         let custom = EndpointsConfig::from_config_value(
             &toml::from_str(

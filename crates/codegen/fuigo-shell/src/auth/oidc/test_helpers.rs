@@ -63,6 +63,7 @@ pub(super) async fn start_mock_idp() -> (String, tokio::task::JoinHandle<()>) {
     let id_token = {
         let mut hdr = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         hdr.kid = Some(TEST_KID.to_owned());
+        crate::auth::jwt::ensure_jwt_crypto_provider();
         jsonwebtoken::encode(
             &hdr,
             &Claims {

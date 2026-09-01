@@ -18,7 +18,7 @@ impl SessionActor {
         };
         let info = self.build_session_info().await;
         // `/tokenize-text` is the Ferrox Labs tokenizer
-        // Always use the baked product default (grok-4.6 from `default_models.json`), not the session model
+        // Always use the baked product default (`flux-auto` from `default_models.json`), not the session model
         // The session model may be a third-party id the endpoint does not serve
         let model = crate::models::default_model();
         tracing::info!(model, "session_context_snapshot: tokenizing");
@@ -371,9 +371,12 @@ mod tests {
         }
     }
 
+    /// The tokenizer must use the BAKED product default, not the session model
+    /// -- pinning the literal is how that stays honest. Fuigo ships FluxRouter
+    /// lanes, so the literal moved from "grok-4.6" to "flux-auto".
     #[test]
     fn tokenize_uses_baked_product_default_model() {
-        assert_eq!(crate::models::default_model(), "grok-4.6");
+        assert_eq!(crate::models::default_model(), "flux-auto");
     }
 
     #[test]

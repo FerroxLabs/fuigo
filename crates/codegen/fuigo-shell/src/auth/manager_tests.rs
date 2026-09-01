@@ -3139,6 +3139,7 @@ fn ensure_crypto_provider() {
 /// A signed (HS256) access token carrying a `Team` principal, matching the shape `peek_access_token_principal` extracts in production.
 fn team_jwt(principal_id: &str) -> String {
     ensure_crypto_provider();
+    crate::auth::jwt::ensure_jwt_crypto_provider();
     jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         &serde_json::json!({
@@ -3154,6 +3155,7 @@ fn team_jwt(principal_id: &str) -> String {
 /// An access token carrying `principal_id` but NO `principal_type`.
 fn principal_id_only_jwt(principal_id: &str) -> String {
     ensure_crypto_provider();
+    crate::auth::jwt::ensure_jwt_crypto_provider();
     jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         &serde_json::json!({

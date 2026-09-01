@@ -1456,7 +1456,13 @@ mod tests {
         unsafe {
             std::env::set_var(FUIGO_API_KEY_ENV_VAR, "test-key");
             std::env::remove_var(LEGACY_FUIGO_API_KEY_ENV_VAR);
-            std::env::remove_var(PROXY_ENV_VAR);
+            // A fleet policy channel must EXIST for "fail closed" to mean
+            // anything: `should_open_at_startup` opens the gate outright when
+            // no policy can reach the process, because there is then no admin
+            // decision to wait for. Upstream got a channel for free from the
+            // compiled-in proxy default; Fuigo ships none, so the test has to
+            // configure one. Loopback satisfies `is_cli_chat_proxy_url`.
+            std::env::set_var(PROXY_ENV_VAR, "http://localhost:18081/v1");
         }
         let session = FuigoAuth {
             expires_at: chrono::DateTime::from_timestamp(9_999_999_999, 0),
