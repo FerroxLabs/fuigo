@@ -14,7 +14,10 @@ const NPM_PACKAGE: &str = "@fuigo-official/fuigo";
 pub const GH_RELEASE_REPO: &str = "fuigo-org-shared/fuigo-build";
 
 /// Primary CLI base URL: Cloudflare-fronted x.ai endpoint with edge caching for binaries and origin-respecting no-cache for channel pointers.
-pub(crate) const CLI_BASE_URL_PRIMARY: &str = "https://x.ai/cli";
+/// Update channel base. Empty until Fuigo has its own release CDN — the
+/// upstream host serves xAI's signed binaries, and an updater pointed there
+/// would replace a Fuigo install with `grok`.
+pub(crate) const CLI_BASE_URL_PRIMARY: &str = "";
 
 /// Fallback CLI base URL: direct GCS, used when the primary is unreachable (Cloudflare outage, regional CF egress issue, DNS hijack, etc.).
 pub(crate) const CLI_BASE_URL_FALLBACK: &str =

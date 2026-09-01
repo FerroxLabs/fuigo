@@ -46,7 +46,11 @@ pub(crate) fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
 pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://cli-chat-proxy.grok.com/v1";
-pub const FUIGO_API_BASE_URL_DEFAULT: &str = "https://api.x.ai/v1";
+/// Fuigo's default inference host. FluxRouter is OpenAI-compatible and fronts
+/// Claude, GPT-5, Gemini, DeepSeek and the rest behind one key, so this single
+/// default is all a new install needs. Override with `FUIGO_API_BASE_URL` or a
+/// per-model `base_url` for BYOK / self-hosted inference.
+pub const FUIGO_API_BASE_URL_DEFAULT: &str = "https://api.fluxrouter.ai/v1";
 const NO_INLINE_CITATIONS_RESPONSE_INCLUDE: &str = "no_inline_citations";
 /// One or more environment variable names that may hold a model API key.
 ///

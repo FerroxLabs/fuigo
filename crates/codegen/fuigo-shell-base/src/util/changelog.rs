@@ -1,6 +1,7 @@
 //! Changelog fetching from CDN with local disk cache.
 //!
-//! Both markdown (`*.external.md`) and JSON (`*.external.json`) changelogs are published per-version to the CDN at `x.ai/cli/changelogs/`.
+//! Both markdown (`*.external.md`) and JSON (`*.external.json`) changelogs are published per-version to the CDN named by `FUIGO_CHANGELOG_BASE_URL`.
+//! With that variable unset (the default) no network call is made at all.
 //!
 //! `ChangelogManager::fetch()` retrieves both formats in parallel and returns a `Changelog` with optional markdown and structured entries.
 //! Consumers pick the format they need:
@@ -9,8 +10,21 @@
 
 use std::path::PathBuf;
 
-/// CDN base for all changelogs (proxies to GCS, cache-friendly).
-const CHANGELOG_BASE: &str = "https://x.ai/cli/changelogs";
+/// CDN base for all changelogs, read from `FUIGO_CHANGELOG_BASE_URL`.
+///
+/// Fuigo publishes no changelog CDN yet, so this is unset by default and the
+/// manager stays offline. It must NOT fall back to the upstream host: that CDN
+/// serves xAI's release notes, and rendering them in a Fuigo welcome screen
+/// both leaks a request to a third party on every boot and shows copy that is
+/// not ours. Observed live before this change — the panel advertised
+/// "Windows users can now correctly open ~/.grok" while every bundled
+/// changelog in this tree says `~/.fuigo`.
+fn changelog_base() -> Option<String> {
+    std::env::var("FUIGO_CHANGELOG_BASE_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+}
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A single structured changelog entry from the published JSON changelog.
@@ -85,7 +99,10 @@ impl ChangelogManager {
     /// JSON is cached only after a successful parse; the markdown cache is write-through since it's consumed as raw text.
     pub fn fetch(&self) -> Changelog {
         // Always re-resolve from env so a caller holding an older manager (or a stale OnceLock) still reads the live harness home
-        Self::from_env_home().fetch_with(changelog_offline(), CHANGELOG_BASE)
+        let base = changelog_base();
+        // No configured CDN means no network call at all — cache only.
+        let offline = changelog_offline() || base.is_none();
+        Self::from_env_home().fetch_with(offline, base.as_deref().unwrap_or(""))
     }
 
     /// Fetch using this manager's already-resolved cache paths, an explicit offline flag, and an explicit CDN base.
@@ -243,7 +260,7 @@ mod tests {
         .unwrap();
 
         // Offline path: read only the seeded disk cache, no network.
-        let changelog = manager_for(&home).fetch_with(true, CHANGELOG_BASE);
+        let changelog = manager_for(&home).fetch_with(true, "https://cdn.invalid/changelogs");
         assert_eq!(
             changelog.markdown.as_deref(),
             Some("# seeded offline md\n"),
