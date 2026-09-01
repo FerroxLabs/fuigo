@@ -216,12 +216,45 @@ jobs:
           "$BIN" --version | grep -q "$EXPECTED" || {
             echo "::error::binary reports $("$BIN" --version), expected $EXPECTED"; exit 1; }
 
-      # macOS arm64 requires a signature to execute at all; the linker applies
-      # an ad-hoc one. Verify it survived, because an invalidated signature is
-      # SIGKILL with no diagnostic on the user's machine.
-      - name: Verify ad-hoc signature (macOS)
+      # Two separate checks, because the signing rule is per-architecture and
+      # both darwin jobs now share one runner.
+      #
+      # SIGNATURE. arm64 requires a signature to execute at all and the linker
+      # applies an ad-hoc one; an invalidated signature is SIGKILL with no
+      # diagnostic on the user's machine, so it is verified. x86_64 gets no
+      # such signature -- ld does not apply one, and none is required.
+      # Confirmed both ways on a local arm64 mac: the native arm64 link is
+      # "valid on disk", the x86_64 link is "code object is not signed at all
+      # / In architecture: x86_64", and the unsigned x86_64 binary runs. A
+      # native macos-13 build would have been identical. Architectural, not a
+      # consequence of cross-compiling, so x86_64 is exempt rather than fixed.
+      #
+      # ARCHITECTURE. This is the check that actually earns its place. Both
+      # darwin targets build on the same arm64 runner, so if `--target` were
+      # ever dropped, darwin-x64 would silently ship an arm64 binary -- and the
+      # smoke test could not catch it, because an arm64 binary runs perfectly
+      # on an arm64 host. Users on Intel macs would get the failure instead.
+      - name: Verify macOS binary
         if: runner.os == 'macOS'
-        run: codesign --verify --verbose=1 "target/${{ matrix.target }}/release/${{ matrix.bin }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          archs=$(lipo -archs "$BIN")
+          echo "architectures: $archs"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)
+              [ "$archs" = "arm64" ] || {
+                echo "::error::expected arm64, built $archs"; exit 1; }
+              codesign --verify --verbose=1 "$BIN"
+              ;;
+            x86_64-apple-darwin)
+              [ "$archs" = "x86_64" ] || {
+                echo "::error::expected x86_64, built $archs -- did --target get dropped?"; exit 1; }
+              echo "x86_64 carries no ad-hoc signature by design; codesign --verify not applicable"
+              ;;
+            *) echo "::error::unhandled macOS target ${{ matrix.target }}"; exit 1 ;;
+          esac
 
       - uses: actions/upload-artifact@v4
         with:
