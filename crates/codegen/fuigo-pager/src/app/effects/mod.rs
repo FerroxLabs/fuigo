@@ -2326,6 +2326,40 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::SubmitApiKey { request_seq, key } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({ "key": key });
+                    let req = acp::ExtRequest::new(
+                        "x.ai/setApiKey",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize api key params")
+                            .into(),
+                    );
+                    match acp_send(req, &tx).await {
+                        // No `meta`: an API key carries no account identity, so
+                        // there is nothing for `apply_auth_meta` to apply. Reusing
+                        // AuthComplete means the key path gets the same
+                        // become-authenticated handling as an interactive login
+                        // (view restore, stashed-prompt retry, bundle status)
+                        // rather than a second, subtly different copy of it.
+                        Ok(_) => TaskResult::AuthComplete {
+                            request_seq,
+                            meta: None,
+                        },
+                        Err(e) => {
+                            let error = e.to_string();
+                            ulog::error(
+                                "storing api key failed",
+                                None,
+                                Some(serde_json::json!({ "error": &error })),
+                            );
+                            TaskResult::AuthFailed { request_seq, error }
+                        }
+                    }
+                });
+        }
         Effect::FetchMcpsList { agent_id, session_id, cache } => {
             let tx = acp_tx.clone();
             tasks

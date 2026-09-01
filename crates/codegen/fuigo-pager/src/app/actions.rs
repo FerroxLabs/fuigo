@@ -611,6 +611,10 @@ pub enum Action {
     CancelLogin,
     /// User submitted a manually-pasted auth token (loopback mode).
     SubmitAuthCode(String),
+    /// Open the API-key entry screen from the first-run welcome menu.
+    EnterApiKey,
+    /// User submitted an API key typed or pasted into that screen.
+    SubmitApiKey(String),
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
@@ -1677,6 +1681,10 @@ pub enum Effect {
     PollAuthUrl { request_seq: u64 },
     /// Submit a manually-pasted auth code (ext request).
     SubmitAuthCode { request_seq: u64, code: String },
+    /// Persist an API key through the agent (`x.ai/setApiKey`).
+    /// The agent owns `auth.json`, so the key is never written from the TUI
+    /// process — in leader mode they are not even the same process.
+    SubmitApiKey { request_seq: u64, key: String },
     /// Fetch MCP server list from the shell (x.ai/mcp/list).
     FetchMcpsList {
         agent_id: AgentId,

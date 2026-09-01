@@ -716,10 +716,31 @@ pub fn render_welcome(
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
-            let label = params.login_label.unwrap_or("grok.com");
-            let login_text = format!("Login with {}", label);
-            let menu = [("l", login_text.as_str()), ("q", "Quit")];
-            let msg = error.as_deref().map(|e| (e, theme.accent_error));
+            // API key first. Upstream offered only "Login with grok.com", which
+            // for Fuigo is a host the egress guard refuses and an account that
+            // does not exist. A key is the whole credential here.
+            //
+            // The interactive login row is kept only when something real backs
+            // it -- an OIDC issuer or an external auth provider the operator
+            // configured. `login_label` is None when nothing does, and in that
+            // case offering the row at all would be a dead end.
+            let login_text = params
+                .login_label
+                .map(|label| format!("Login with {}", label));
+            let mut menu: Vec<(&str, &str)> = vec![("k", "Enter API key")];
+            if let Some(text) = login_text.as_deref() {
+                menu.push(("l", text));
+            }
+            menu.push(("q", "Quit"));
+            let menu = menu;
+            // No error means first run, not a failure: say what is needed in
+            // the neutral colour rather than leaving the screen unexplained.
+            const NEEDS_KEY: &str = "Fuigo needs an API key to reach a model.";
+            let msg = Some(
+                error
+                    .as_deref()
+                    .map_or((NEEDS_KEY, theme.gray), |e| (e, theme.accent_error)),
+            );
             let info = PromptInfo {
                 model_name: params.model_name,
                 flags: params.flags,
@@ -1351,6 +1372,71 @@ fn render_welcome_authenticating(
     let top_pad = content_area.height.saturating_sub(logo_line_count) / 10;
 
     match mode {
+        // API key entry. Deliberately quieter than the OAuth arms: there is no
+        // URL to copy, no browser handoff and nothing to wait for, so the screen
+        // is just a heading, the masked box and where to get a key.
+        AuthMode::ApiKey => {
+            let [_, logo_area, _, msg_area, _, prompt_area, _, hint_area, _] = Layout::vertical([
+                Constraint::Length(top_pad),
+                Constraint::Length(logo_line_count),
+                Constraint::Length(1), // gap
+                Constraint::Length(2), // heading + provenance
+                Constraint::Min(1),    // gap
+                Constraint::Length(5), // prompt box
+                Constraint::Length(1), // gap
+                Constraint::Length(1), // hints
+                Constraint::Min(0),
+            ])
+            .areas(content_area);
+
+            render_logo(logo_area, buf, theme, content_area.height);
+
+            let lines = vec![
+                Line::from(Span::styled(
+                    "Paste your FluxRouter API key",
+                    Style::default().fg(theme.gray_bright),
+                ))
+                .alignment(Alignment::Center),
+                Line::from(vec![
+                    Span::styled("One key reaches every model  ", Style::default().fg(theme.gray)),
+                    Span::styled("fluxrouter.ai", Style::default().fg(theme.accent_user)),
+                ])
+                .alignment(Alignment::Center),
+            ];
+            Paragraph::new(lines).render(msg_area, buf);
+
+            let [_, prompt_centered, _] = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(content_area.width),
+                Constraint::Min(0),
+            ])
+            .flex(Flex::Center)
+            .areas(prompt_area);
+            render_auth_input_box(
+                prompt_centered,
+                buf,
+                theme,
+                auth_code_input,
+                auth_code_cursor_byte,
+                "sk-flux-...",
+            );
+
+            let mut hint_spans = vec![
+                Span::styled(
+                    "enter",
+                    Style::default()
+                        .fg(theme.accent_user)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  connect    ", Style::default().fg(theme.gray)),
+            ];
+            hint_spans.extend(quit_hint_spans(theme));
+            Paragraph::new(Line::from(hint_spans).alignment(Alignment::Center))
+                .render(hint_area, buf);
+
+            (None, None)
+        }
+
         AuthMode::Loopback => {
             // Manual token paste: show copy prompt and input box
             let h_pad: u16 = content_area.width / 6;
@@ -1434,6 +1520,7 @@ fn render_welcome_authenticating(
                 theme,
                 auth_code_input,
                 auth_code_cursor_byte,
+                "Paste your token here...",
             );
 
             // Hints
@@ -2525,6 +2612,7 @@ fn render_auth_input_box(
     theme: &Theme,
     input: &str,
     cursor_byte: usize,
+    placeholder: &str,
 ) {
     let prompt_block = Block::default()
         .borders(Borders::ALL)
@@ -2543,7 +2631,7 @@ fn render_auth_input_box(
         let prompt_width = prompt.width() as u16;
         let input_width = inner.width.saturating_sub(prompt_width);
         let (display, cursor_column) =
-            masked_auth_token_view(input, cursor_byte, input_width as usize);
+            masked_auth_token_view(input, cursor_byte, input_width as usize, placeholder);
 
         let style = if input.is_empty() {
             Style::default().fg(theme.gray_dim)
@@ -2637,9 +2725,14 @@ fn build_masked_auth_token(input: &str, cursor_byte: usize) -> MaskedAuthToken {
     }
 }
 
-fn masked_auth_token_view(input: &str, cursor_byte: usize, width: usize) -> (String, usize) {
+fn masked_auth_token_view(
+    input: &str,
+    cursor_byte: usize,
+    width: usize,
+    placeholder: &str,
+) -> (String, usize) {
     if input.is_empty() {
-        return ("Paste your token here...".to_string(), 0);
+        return (placeholder.to_string(), 0);
     }
     let masked = build_masked_auth_token(input, cursor_byte);
     let buffer =
@@ -2722,7 +2815,7 @@ mod tests {
     #[test]
     fn masked_auth_token_preserves_reveal_policy() {
         assert_eq!(
-            masked_auth_token_view("", 0, 24),
+            masked_auth_token_view("", 0, 24, "Paste your token here..."),
             ("Paste your token here...".to_string(), 0)
         );
         assert_eq!(build_masked_auth_token("12345678", 8).display, "12345678");
@@ -2764,7 +2857,7 @@ mod tests {
 
         for width in [1, 2, 5] {
             for cursor in [before, inside, after] {
-                let (view, cursor_column) = masked_auth_token_view(&token, cursor, width);
+                let (view, cursor_column) = masked_auth_token_view(&token, cursor, width, "");
                 assert!(view.width() <= width);
                 assert!(cursor_column < width);
                 assert!(!view.contains('\u{200b}'));
@@ -2776,7 +2869,7 @@ mod tests {
 
         let wide_prefix = "中bcdefgh";
         let wide_token = format!("{wide_prefix}HIDDEN{suffix}");
-        let (_, cursor_column) = masked_auth_token_view(&wide_token, wide_prefix.len(), 40);
+        let (_, cursor_column) = masked_auth_token_view(&wide_token, wide_prefix.len(), 40, "");
         assert_eq!(cursor_column, wide_prefix.graphemes(true).count());
     }
 
@@ -2787,7 +2880,7 @@ mod tests {
         let area = Rect::new(0, 0, 9, 3);
         let theme = Theme::current();
         let mut buffer = Buffer::empty(area);
-        render_auth_input_box(area, &mut buffer, &theme, token, cursor);
+        render_auth_input_box(area, &mut buffer, &theme, token, cursor, "");
         assert!((0..area.width).any(|x| buffer[(x, 1)].bg == theme.text_primary));
     }
 
