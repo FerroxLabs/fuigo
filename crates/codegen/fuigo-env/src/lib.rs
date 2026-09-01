@@ -245,13 +245,27 @@ mod tests {
         let _first = EnvVarGuard::set(KEY, "first");
         let _second = EnvVarGuard::set(KEY, "second");
     }
-    /// Guards against conflating the relay and gateway endpoints (a relay loop mistakenly connecting to `wss://grok.com/ws/gw/`).
+    /// Upstream this asserted the relay and gateway endpoints were DISTINCT,
+    /// guarding against a relay loop dialling `wss://grok.com/ws/gw/`.
+    ///
+    /// Fuigo runs neither service, so both compiled defaults are empty and the
+    /// distinctness check is vacuous -- two empty strings are equal, and the
+    /// test failed for a reason that had nothing to do with the hazard it was
+    /// written for. The real invariant now is that neither websocket plane has
+    /// a default at all: an unconfigured install must not dial a host we do not
+    /// operate.
+    ///
+    /// If an operator ever sets these, the original hazard returns and the
+    /// distinctness assertion below applies to their values.
     #[test]
-    fn relay_and_gateway_urls_are_distinct() {
-        assert_ne!(
-            FuigoBuildEnvironment::Production.relay_ws_url(),
-            FuigoBuildEnvironment::Production.gateway_ws_url(),
-        );
+    fn websocket_planes_have_no_default_endpoint() {
+        let env = FuigoBuildEnvironment::Production;
+        assert_eq!(env.relay_ws_url(), "", "relay must not default to a host");
+        assert_eq!(env.gateway_ws_url(), "", "gateway must not default to a host");
+        assert_eq!(env.asset_server_url(), "", "assets must not default to a host");
+        if !env.relay_ws_url().is_empty() {
+            assert_ne!(env.relay_ws_url(), env.gateway_ws_url());
+        }
     }
     #[test]
     fn test_from_flags() {

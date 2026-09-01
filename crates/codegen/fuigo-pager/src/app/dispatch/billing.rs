@@ -14,23 +14,39 @@ use fuigo_telemetry::session_ctx::log_event;
 /// After this, the user can still manually check via the [Refresh] button.
 pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Whether the user is at the highest subscription tier (SuperGrok Heavy).
+/// Whether the user is at the highest subscription tier.
 ///
-/// Returns `true` only when `subscription_tier` positively matches a known max-tier identifier.
-/// An unknown (`None`) or unrecognized tier returns `false`, so lower-tier users always get the Q&A modal with the upgrade option.
-pub(super) fn is_max_tier(subscription_tier: Option<&str>) -> bool {
-    let Some(t) = subscription_tier else {
-        return false; // Unknown: default to Q&A.
-    };
-    // Lowercase and replace spaces with underscores to match both JWT-derived keys ("superfuigo_heavy") and CCP display names ("SuperGrok Heavy")
-    t.to_ascii_lowercase().replace(' ', "_") == "superfuigo_heavy"
+/// ALWAYS TRUE in Fuigo, which sells no subscriptions.
+///
+/// Upstream this matched the tier string against xAI's top plan and returned
+/// `false` for anything else, which routed the user into a Q&A modal offering
+/// an upgrade at `grok.com/supergrok`. Fuigo has no tiers to be below and no
+/// upgrade to sell, and the egress guard refuses that host anyway -- so the
+/// honest answer is that nobody is under-provisioned, and the upsell paths
+/// downstream of this simply never fire.
+///
+/// Kept as a function rather than deleted so the call sites (dashboard, voice,
+/// credit-limit handling) keep their shape for whenever Fuigo does have
+/// billing of its own to express.
+pub(super) fn is_max_tier(_subscription_tier: Option<&str>) -> bool {
+    true
 }
 
-/// URL for upgrading the subscription tier.
-pub(crate) const UPSELL_URL_UPGRADE: &str = "https://grok.com/supergrok?referrer=grok-build";
+/// Where a user goes when they run out of credit.
+///
+/// Both constants pointed at grok.com, which the egress guard now refuses and
+/// which sells a subscription Fuigo users do not have. FluxRouter is where the
+/// money actually is -- its own 402 names this page: "Top up at
+/// https://fluxrouter.ai/home/billing".
+///
+/// They are the same destination because Fuigo has one billing surface, not a
+/// tier ladder plus a credit meter. Kept as two constants so the call sites
+/// (subscription vs pay-as-you-go) keep their distinct meaning if that ever
+/// stops being true.
+pub(crate) const UPSELL_URL_UPGRADE: &str = "https://fluxrouter.ai/home/billing";
 
-/// URL for managing pay-as-you-go or on-demand spending and purchasing credits.
-pub(crate) const UPSELL_URL_PAYG: &str = "https://grok.com?_s=usage";
+/// URL for managing pay-as-you-go spending and purchasing credits.
+pub(crate) const UPSELL_URL_PAYG: &str = "https://fluxrouter.ai/home/billing";
 
 /// Billing mode for credit-limit upsell copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

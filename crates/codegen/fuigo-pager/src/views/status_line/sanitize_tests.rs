@@ -26,10 +26,13 @@ type ScanCase = (
 fn scanner_strips_escapes_and_records_link_columns() {
     let cases: &[ScanCase] = &[
         (
+            // The prefix is 8 columns: `[Fuigo] `. It was 7 upstream (`[Grok] `),
+            // and the rebrand lengthened the literal without touching these
+            // column numbers.
             "a bel-terminated link after plain text",
             "[Fuigo] \x1b]8;;https://example.com/repo\x07repo\x1b]8;;\x07",
             "[Fuigo] repo",
-            &[(7, 11, "https://example.com/repo")],
+            &[(8, 12, "https://example.com/repo")],
         ),
         (
             "an st-terminated link whose colour paints no columns",

@@ -388,7 +388,13 @@ mod tests {
         let models = sample_models();
         let mut ctx = make_ctx(&models);
         let cmd = model::ModelCommand;
-        let result = cmd.run(&mut ctx, "fuigo 4.5");
+        // The ARGUMENT is a model id, and model ids are protected wire values
+        // that the rebrand deliberately left alone -- `sample_models()` still
+        // contains "grok-4.5". The transform rewrote this literal anyway,
+        // because here it is just a string, so the test began asking for a
+        // model that does not exist. The assertion below is the giveaway: it
+        // still expects "grok-4.5".
+        let result = cmd.run(&mut ctx, "grok 4.5");
         match result {
             CommandResult::Action(Action::SetDefaultModel(id)) => {
                 assert_eq!(id.0.as_ref(), "grok-4.5");

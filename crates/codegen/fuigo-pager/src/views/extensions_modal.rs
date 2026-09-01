@@ -6747,7 +6747,7 @@ mod tests {
                     git_url: Some("https://example.com/r.git".into()),
                 },
                 5,
-                "grok-mp:xAI Official",
+                "fuigo-mp:Ferrox Labs Official",
                 "Ferrox Labs Official",
             ),
             (
@@ -6807,7 +6807,7 @@ mod tests {
         let mut mp = make_plugin("mp-tool");
         mp.marketplace_source = Some("Ferrox Labs Official".into());
         let group = plugin_group(&mp);
-        assert_eq!(group.key, "grok-mp:xAI Official");
+        assert_eq!(group.key, "fuigo-mp:Ferrox Labs Official");
         assert_eq!(group.label, "Ferrox Labs Official");
 
         let mut direct = make_plugin("direct-tool");
@@ -6824,7 +6824,7 @@ mod tests {
         assert_eq!(plugin_group(&unknown).key, "origin:user");
 
         unknown.marketplace_source = Some("Ferrox Labs Official".into());
-        assert_eq!(plugin_group(&unknown).key, "grok-mp:xAI Official");
+        assert_eq!(plugin_group(&unknown).key, "fuigo-mp:Ferrox Labs Official");
     }
 
     #[test]

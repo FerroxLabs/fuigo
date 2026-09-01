@@ -3249,21 +3249,23 @@ mod tests {
 
         // Two headers and three rows make five entries
         assert_eq!(result.len(), 5);
-        // Groups are sorted alphabetically: fw-1 before fuigo.
-        // Header positions: 0 (fw-1), 2 (fuigo)
+        // Groups sort alphabetically, and the rename FLIPPED this fixture's
+        // order: "grok" sorted after "fw-1", but "fuigo" sorts before it
+        // ('u' < 'w'). So the two-row group now leads.
+        // Header positions: 0 (fuigo, 2 rows), 3 (fw-1, 1 row).
         assert_eq!(non_sel.len(), 5);
         assert!(non_sel[0], "first entry should be header (non-selectable)");
         assert!(!non_sel[1], "second entry should be selectable row");
-        assert!(non_sel[2], "third entry should be header (non-selectable)");
-        assert!(!non_sel[3], "fourth entry should be selectable row");
+        assert!(!non_sel[2], "third entry should be selectable row");
+        assert!(non_sel[3], "fourth entry should be header (non-selectable)");
         assert!(!non_sel[4], "fifth entry should be selectable row");
 
         // Verify headers
         assert!(
-            matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"fw-1")
+            matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"fuigo")
         );
         assert!(
-            matches!(&result[2], crate::views::picker::PickerEntry::Header { label } if label == &"fuigo")
+            matches!(&result[3], crate::views::picker::PickerEntry::Header { label } if label == &"fw-1")
         );
     }
 
@@ -3635,10 +3637,13 @@ mod tests {
 
     #[test]
     fn hero_box_inactive_when_warning_would_overflow() {
-        // Regression: the box is forced to the full 7-row logo, so even a 3-item menu needs 11 box rows
-        // A startup warning (error_height = 2) pushes the total past height 19
-        // The gate must therefore fall back to the stacked layout instead of overflowing by a row
-        let area = Rect::new(0, 0, 90, 19);
+        // Regression: the box is forced to the full logo, so even a 3-item menu
+        // needs 10 box rows (6-line wordmark; upstream's 7-line mark needed 11).
+        // A startup warning (error_height = 2) pushes the total past the
+        // available height, and the gate must fall back to the stacked layout
+        // rather than overflow by a row. The boundary moved down one row with
+        // the logo.
+        let area = Rect::new(0, 0, 90, 18);
         let with_warning = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             error_height: 2,
@@ -3718,9 +3723,10 @@ mod tests {
 
     #[test]
     fn hero_box_height_accounts_for_borders_and_padding() {
-        // At h >= 26, logo07 is used (7 lines). With menu_height=3:
-        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(7, 6) = 7.
-        // hero_box_height = 2 (borders) + 2 (v_pad) + 7 = 11.
+        // At h >= 26 the full logo is used. Fuigo's wordmark is 6 lines where
+        // upstream's braille mark was 7, so the arithmetic shifts down a row:
+        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(6, 6) = 6.
+        // hero_box_height = 2 (borders) + 2 (v_pad) + 6 = 10.
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3728,7 +3734,7 @@ mod tests {
             ..Default::default()
         });
         assert!(layout.has_hero_box());
-        assert_eq!(layout.hero_box.height, 11);
+        assert_eq!(layout.hero_box.height, 10);
     }
 
     #[test]
