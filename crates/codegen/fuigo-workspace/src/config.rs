@@ -741,7 +741,7 @@ pub struct WorkspaceConfig {
     /// Fail `session.bind`s without an explicit toolset closed instead of widening to `default_tool_config`.
     /// Set by sandbox-launched standalone servers; local/CLI embedders keep the default-catalog fallback.
     pub require_explicit_toolset: bool,
-    /// Confine `x.ai/fs/*` / `workspace.fs_*` resolution to the workspace root (reject `..`, absolute-outside-root, symlink escapes).
+    /// Confine `fuigo/fs/*` / `workspace.fs_*` resolution to the workspace root (reject `..`, absolute-outside-root, symlink escapes).
     /// Default `false` (unconfined); set to `true` only by the workspace server on a remote sandbox, where the root is a real tenant boundary.
     pub confine_fs_to_workspace_root: bool,
 }

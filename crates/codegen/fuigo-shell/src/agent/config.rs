@@ -3023,7 +3023,7 @@ pub(crate) fn resolve_turn_transient_retry(
 ///
 /// `util::config::resolve_mcp_push_server_status` delegates here so the precedence is single-sourced.
 ///
-/// The default is `true`: the pager's subscription to `x.ai/mcp/server_status` is wired on by default.
+/// The default is `true`: the pager's subscription to `fuigo/mcp/server_status` is wired on by default.
 /// The flag exists primarily as a kill switch.
 pub fn resolve_mcp_push_server_status(
     requirement: Option<bool>,
@@ -4564,7 +4564,7 @@ pub struct Features {
     /// Per-`Ready`-client transport-liveness pollers and the session-actor `StatusDispatcher`.
     ///
     /// When `true` (default), each successfully-handshaken MCP client gets a poller.
-    /// The poller detects rmcp service-loop termination and pushes `x.ai/mcp/server_status` updates to the client.
+    /// The poller detects rmcp service-loop termination and pushes `fuigo/mcp/server_status` updates to the client.
     /// When `false`, neither watchers nor the dispatcher are spawned, useful as an emergency kill switch for the rollout.
     /// `None` defers to env / default (true).
     ///
@@ -4587,11 +4587,11 @@ pub struct Features {
     /// The resolver reads raw TOML; declared only so `serde_ignored` allows the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_transient_retry: Option<bool>,
-    /// Pager-side subscription to the `x.ai/mcp/server_status` push.
+    /// Pager-side subscription to the `fuigo/mcp/server_status` push.
     ///
     /// When `true` (default), the pager subscribes to the per-server status delta the shell emits via the dispatcher.
     /// It patches the MCP servers modal in-place (no re-fetch round trip).
-    /// When `false`, the pager ignores the push and falls back to the legacy `x.ai/mcp/tools_changed` debounced refetch path.
+    /// When `false`, the pager ignores the push and falls back to the legacy `fuigo/mcp/tools_changed` debounced refetch path.
     /// `None` defers to env / default (true).
     ///
     /// Not read through this struct.

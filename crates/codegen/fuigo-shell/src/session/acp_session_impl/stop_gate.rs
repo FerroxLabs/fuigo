@@ -297,7 +297,7 @@ impl SessionActor {
 
         let payload = self.build_stop_payload(continuations_this_turn > 0).await;
         // The gate builds its envelope via `make_hook_envelope`, not the observe-notify `fire_hook`
-        // Client hooks get the awaited `x.ai/hooks/run` request below, not a fire-and-forget event
+        // Client hooks get the awaited `fuigo/hooks/run` request below, not a fire-and-forget event
         let envelope = self.make_hook_envelope(event, Some(prompt_id.to_string()), payload);
 
         let mut result = dispatcher::StopDispatchResult::default();

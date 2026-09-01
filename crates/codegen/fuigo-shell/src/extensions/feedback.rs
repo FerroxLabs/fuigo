@@ -1,4 +1,4 @@
-//! `x.ai/feedback`, `x.ai/feedback/dismiss`, `x.ai/btw`, and `x.ai/review/*` extension handlers.
+//! `fuigo/feedback`, `fuigo/feedback/dismiss`, `fuigo/btw`, and `fuigo/review/*` extension handlers.
 //!
 //! - `feedback` and `feedback/dismiss`: persist user ratings and text locally and forward to cli-chat-proxy.
 //! - `btw`: dispatch a side question to the active session via `SessionCommand::SideQuestion` and return the answer.
@@ -19,23 +19,23 @@ use fuigo_telemetry::id::agent_id;
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/btw" => {
+        "fuigo/btw" => {
             tracing::info!("handling /btw side question");
             handle_btw(agent, args).await
         }
-        "x.ai/feedback" | "x.ai/feedback/dismiss" => {
+        "fuigo/feedback" | "fuigo/feedback/dismiss" => {
             tracing::info!("handling user feedback");
             handle_feedback(agent, args).await
         }
-        "x.ai/feedback/upload-trace" => handle_upload_trace(agent, args).await,
-        m if m.starts_with("x.ai/review") => {
+        "fuigo/feedback/upload-trace" => handle_upload_trace(agent, args).await,
+        m if m.starts_with("fuigo/review") => {
             tracing::info!("handling review comment");
             handle_review(agent, args).await
         }
         _ => Err(acp::Error::method_not_found()),
     }
 }
-/// Handle `x.ai/btw`, a side question that doesn't interrupt the current turn.
+/// Handle `fuigo/btw`, a side question that doesn't interrupt the current turn.
 async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -80,7 +80,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
         ));
     }
     match args.method.as_ref() {
-        "x.ai/feedback" => {
+        "fuigo/feedback" => {
             let mut feedback_input: ClientFeedbackInput =
                 match serde_json::from_str::<ClientFeedbackInput>(args.params.get()) {
                     Ok(input) => input,
@@ -228,7 +228,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 .expect("to work");
             Ok(acp::ExtResponse::new(value))
         }
-        "x.ai/feedback/dismiss" => {
+        "fuigo/feedback/dismiss" => {
             let dismiss_input: FeedbackRequestDismiss = parse_params(args)?;
             tracing::info!(
                 session_id = %dismiss_input.session_id,
@@ -376,11 +376,11 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
 /// Record inline code review events.
 ///
 /// Methods:
-/// - `x.ai/review/comment`: record a new inline code comment to cloud storage
-/// - `x.ai/review/comment/delete`: record a tombstone event for a deleted comment
+/// - `fuigo/review/comment`: record a new inline code comment to cloud storage
+/// - `fuigo/review/comment/delete`: record a tombstone event for a deleted comment
 async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/review/comment" => {
+        "fuigo/review/comment" => {
             let request: CommentRequest = parse_params(args)?;
             let comment_id = uuid::Uuid::now_v7().to_string();
             tracing::info!(
@@ -441,7 +441,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .expect("to work");
             Ok(acp::ExtResponse::new(value))
         }
-        "x.ai/review/comment/delete" => {
+        "fuigo/review/comment/delete" => {
             let request: CommentDeleteRequest = parse_params(args)?;
             tracing::info!(
                 comment_id = %request.comment_id,

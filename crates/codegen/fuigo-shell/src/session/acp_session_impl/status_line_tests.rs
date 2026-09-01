@@ -184,7 +184,7 @@ async fn client_that_cannot_draw_the_row_never_builds_one() {
                 .expect("the emitter task panicked");
             assert!(
                 painted.try_recv().is_err(),
-                "the wake before x.ai/statusLine built a payload as well"
+                "the wake before fuigo/statusLine built a payload as well"
             );
         })
         .await;

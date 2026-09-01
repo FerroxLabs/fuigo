@@ -3,7 +3,7 @@
 use super::common::*;
 
 /// The suggestion the mock streams for every request.
-/// The mock's fixed mode answers the prompt turn and the turn-end `x.ai/suggestPrompt` call alike, so the ghost text mirrors this string.
+/// The mock's fixed mode answers the prompt turn and the turn-end `fuigo/suggestPrompt` call alike, so the ghost text mirrors this string.
 /// It is multi-word so the shell-side sanitizer (`sanitize_suggestion`) accepts it.
 const SUGGESTION: &str = "review the staged changes";
 

@@ -1077,7 +1077,7 @@ fn session_loaded_clears_stale_running_entries() {
         "no entries should be animating after SessionLoaded",
     );
 }
-/// A failed `x.ai/prompt_history` fetch arrives as `PromptHistoryLoaded` with an empty list.
+/// A failed `fuigo/prompt_history` fetch arrives as `PromptHistoryLoaded` with an empty list.
 #[test]
 fn a_restored_transcript_stays_recallable_after_a_failed_fetch() {
     let mut app = test_app();

@@ -1,4 +1,4 @@
-//! `x.ai/prompt_history` extension handler.
+//! `fuigo/prompt_history` extension handler.
 //!
 //! Returns the user-prompt history for a given cwd. Three paths:
 //! - **fast path** (no ids): reads the per-CWD `prompt_history.jsonl` file directly so Ctrl+R is instant; returns all sessions, most-recent-first.
@@ -41,7 +41,7 @@ struct PromptHistoryResponse {
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(_agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/prompt_history" => handle_prompt_history(args).await,
+        "fuigo/prompt_history" => handle_prompt_history(args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }

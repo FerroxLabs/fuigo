@@ -1,7 +1,7 @@
 [
   {
     "category": "features",
-    "description": "Memory system: /remember command, note modal with raw/enhanced preview, x.ai/memory/rewrite ACP extension, Ctrl+F fullscreen toggle for /memory modal.",
+    "description": "Memory system: /remember command, note modal with raw/enhanced preview, fuigo/memory/rewrite ACP extension, Ctrl+F fullscreen toggle for /memory modal.",
     "breaking_change": false
   },
   {

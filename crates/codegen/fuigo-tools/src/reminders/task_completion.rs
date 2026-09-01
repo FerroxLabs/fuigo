@@ -241,7 +241,7 @@ fn split_wrapped_monitor_event(event_text: &str) -> Option<(&str, &str)> {
 }
 /// Format drained [`MonitorEventNotification`]s for the turn loop's hidden
 /// synthetic user message. Model-facing only — the pager renders monitor
-/// events from the structured `x.ai/monitor_event` notification, never by
+/// events from the structured `fuigo/monitor_event` notification, never by
 /// parsing this text.
 ///
 /// One event (also the common case for slow monitors, which drain one

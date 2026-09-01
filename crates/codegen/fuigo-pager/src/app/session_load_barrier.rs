@@ -367,7 +367,7 @@ mod tests {
     }
 
     fn ext_session_update_raw(params: serde_json::Value) -> AcpClientMessage {
-        ext_notification("x.ai/session/update", params)
+        ext_notification("fuigo/session/update", params)
     }
 
     fn ext_notification(method: &str, params: serde_json::Value) -> AcpClientMessage {
@@ -846,7 +846,7 @@ mod tests {
             AcpLoadBacklog::LiveHead
         );
         let ext_notif_replay = ext_notification(
-            "x.ai/session_notification",
+            "fuigo/session_notification",
             json!({
                 "sessionId": "s",
                 "update": { "sessionUpdate": "agent_message_chunk" },
@@ -858,7 +858,7 @@ mod tests {
             AcpLoadBacklog::ReplayHead
         );
         let other_method = ext_notification(
-            "x.ai/task_completed",
+            "fuigo/task_completed",
             json!({ "sessionId": "s", "taskId": "t" }),
         );
         assert_eq!(

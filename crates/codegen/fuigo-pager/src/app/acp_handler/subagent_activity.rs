@@ -111,6 +111,6 @@ pub(crate) fn finalize_killed_subagent(
         return false;
     };
 
-    let notif = acp::ExtNotification::new("x.ai/session/update", params.into());
+    let notif = acp::ExtNotification::new("fuigo/session/update", params.into());
     handle_session_notification_with_origin(&notif, app, LifecycleOrigin::Reconciliation)
 }

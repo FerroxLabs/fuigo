@@ -49,7 +49,7 @@ use tokio::sync::{mpsc, watch};
 /// - Version 1: ConversationItem format (used for new sessions)
 pub const CHAT_FORMAT_VERSION: u8 = 1;
 
-/// Maximum Unicode scalars in a session title (`/rename`, dashboard editor, and the `x.ai/session/rename` ext boundary).
+/// Maximum Unicode scalars in a session title (`/rename`, dashboard editor, and the `fuigo/session/rename` ext boundary).
 /// Counted after control-strip and trim.
 pub const MAX_TITLE_SCALARS: usize = 100;
 
@@ -1510,7 +1510,7 @@ impl SessionPersistence {
         };
         if let Ok(params) = serde_json::value::to_raw_value(&notification) {
             gateway.forward_fire_and_forget(acp::ExtNotification::new(
-                "x.ai/session_notification",
+                "fuigo/session_notification",
                 params.into(),
             ));
         }

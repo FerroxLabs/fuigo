@@ -366,7 +366,7 @@ pub struct AcpUpdateTracker {
     pub(crate) task_tool_background: std::collections::HashMap<String, bool>,
     /// Tool call IDs marked as background (`is_background=true`).
     ///
-    /// First-detection (no scrollback entry yet): defers entry creation until `x.ai/task_backgrounded` creates a `BgTask` block.
+    /// First-detection (no scrollback entry yet): defers entry creation until `fuigo/task_backgrounded` creates a `BgTask` block.
     /// Late-detection (Execute block already exists): suppresses further output streaming; `handle_task_backgrounded` demotes the existing block.
     ///
     /// Value is the optional description from `raw_input.description`.
@@ -2359,7 +2359,7 @@ fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
 }
 /// Check if a tool call is a background execute (`is_background=true`).
 ///
-/// These are deferred from scrollback; the `x.ai/task_backgrounded` notification creates a `BgTask` block instead of an `Execute` block.
+/// These are deferred from scrollback; the `fuigo/task_backgrounded` notification creates a `BgTask` block instead of an `Execute` block.
 ///
 /// Eager ACP messages often use `kind=Other` with `title=run_terminal_command` before the kind is refined to Execute.
 /// Still treat those as execute tools when `raw_input` requests background so we don't flash the function name.

@@ -133,7 +133,7 @@ fn prompt_request_meta_omits_screen_mode_when_unset() {
     let meta = prompt_request_meta("p-2", None);
     assert_eq!(meta, serde_json::json!({ "promptId": "p-2" }));
 }
-/// Text-only interjections must omit the `content` key entirely; the legacy `x.ai/interject` wire shape stays byte-identical.
+/// Text-only interjections must omit the `content` key entirely; the legacy `fuigo/interject` wire shape stays byte-identical.
 #[test]
 fn interject_params_omit_content_when_no_blocks() {
     let sid = acp::SessionId::new("s1");
@@ -153,7 +153,7 @@ fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
                 "cwd": "",
                 "summary": "Compare GPU vendors",
                 "source": "conversation",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
+                "_meta": { "fuigo/session": { "kind": "chat" } }
             }]
         });
     let entries = parse_session_picker_entries(&payload);
@@ -171,7 +171,7 @@ fn picker_keeps_old_conversation_past_cutoff() {
                 "summary": "Ancient chat",
                 "source": "conversation",
                 "updatedAt": "2020-01-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
+                "_meta": { "fuigo/session": { "kind": "chat" } }
             }]
         });
     let entries = parse_session_picker_entries(&payload);
@@ -204,7 +204,7 @@ fn picker_keeps_untitled_conversation_as_untitled() {
                 "summary": "",
                 "source": "conversation",
                 "updatedAt": "2026-07-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
+                "_meta": { "fuigo/session": { "kind": "chat" } }
             }]
         });
     let entries = parse_session_picker_entries(&payload);
@@ -286,7 +286,7 @@ fn session_list_partial_parses_reasons() {
     let payload = |reason: &str| {
         serde_json::json!({
                 "sessions": [],
-                "_meta": { "x.ai/partial": { "conversations": true, "reason": reason } }
+                "_meta": { "fuigo/partial": { "conversations": true, "reason": reason } }
             })
     };
     assert_eq!(
@@ -310,7 +310,7 @@ fn session_list_partial_parses_reasons() {
 fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
     let healthy = serde_json::json!({
             "sessions": [],
-            "_meta": { "x.ai/partial": { "conversations": false } }
+            "_meta": { "fuigo/partial": { "conversations": false } }
         });
     assert_eq!(parse_session_list_partial(&healthy), None);
     let legacy = serde_json::json!({ "sessions": [] });
@@ -904,7 +904,7 @@ async fn persist_setting_type_mismatch_errors_simple_mode() {
 }
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-/// Spawn a fake ACP agent that counts `x.ai/yolo_mode_changed` notifications.
+/// Spawn a fake ACP agent that counts `fuigo/yolo_mode_changed` notifications.
 /// Exits when the channel closes.
 fn spawn_fake_acp_agent(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpAgentMessage>,
@@ -914,7 +914,7 @@ fn spawn_fake_acp_agent(
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let fuigo_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == "x.ai/yolo_mode_changed" {
+                if args.request.method.as_ref() == "fuigo/yolo_mode_changed" {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -1025,7 +1025,7 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
     assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
-            "ACP `x.ai/yolo_mode_changed` notification must fire exactly once \
+            "ACP `fuigo/yolo_mode_changed` notification must fire exactly once \
              on BestEffort path (regardless of disk outcome)",
         );
     assert!(
@@ -1350,7 +1350,7 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
         while let Some(msg) = rx.recv().await {
             if let AcpAgentMessage::ExtMethod(args) = msg {
                 match args.request.method.as_ref() {
-                    "x.ai/marketplace/list" => {
+                    "fuigo/marketplace/list" => {
                         let response = serde_json::json!({
                                 "result": {
                                     "sources": [{
@@ -1384,7 +1384,7 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
                             .response_tx
                             .send(Ok(acp::ExtResponse::new(Arc::from(raw))));
                     }
-                    "x.ai/marketplace/action" => {
+                    "fuigo/marketplace/action" => {
                         action_calls_for_task.fetch_add(1, Ordering::SeqCst);
                         let req: fuigo_hooks_plugins_types::MarketplaceActionRequest = serde_json::from_str(
                                 args.request.params.get(),
@@ -1417,7 +1417,7 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
                             .response_tx
                             .send(Ok(acp::ExtResponse::new(Arc::from(raw))));
                     }
-                    "x.ai/plugins/notify-updates" => {
+                    "fuigo/plugins/notify-updates" => {
                         saw_success_notification_for_task.store(true, Ordering::SeqCst);
                         let raw = serde_json::value::RawValue::from_string("{}".into())
                             .expect("serialize notify response");
@@ -1553,7 +1553,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
         other => panic!("expected ForeignResumeHintDetected, got {other:?}"),
     }
 }
-/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`); browse opts into `allowRelax` and parses `x.ai/listScope`.
+/// `FetchSessionList` wire shape: search sends `query` (no `allowRelax`); browse opts into `allowRelax` and parses `fuigo/listScope`.
 /// All outcomes echo `seq` and `query`.
 #[tokio::test]
 async fn fetch_session_list_pushes_query_and_echoes_seq() {
@@ -1565,7 +1565,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let AcpAgentMessage::ExtMethod(args) = msg {
-                assert_eq!(args.request.method.as_ref(), "x.ai/session/list");
+                assert_eq!(args.request.method.as_ref(), "fuigo/session/list");
                 let params: serde_json::Value = serde_json::from_str(
                         args.request.params.get(),
                     )
@@ -1580,7 +1580,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
                     serde_json::json!({
                             "result": {
                                 "sessions": [],
-                                "_meta": { "x.ai/listScope": "repo" },
+                                "_meta": { "fuigo/listScope": "repo" },
                             }
                         })
                 } else {
@@ -1650,7 +1650,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             assert_eq!(query, None);
             assert!(
                     scope.is_relaxed(),
-                    "_meta[\"x.ai/listScope\"] must parse into the task result"
+                    "_meta[\"fuigo/listScope\"] must parse into the task result"
                 );
         }
         other => panic!("expected SessionListLoaded, got {other:?}"),
@@ -1711,7 +1711,7 @@ async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let AcpAgentMessage::ExtMethod(args) = msg {
-                assert_eq!(args.request.method.as_ref(), "x.ai/session/list");
+                assert_eq!(args.request.method.as_ref(), "fuigo/session/list");
                 let params = serde_json::from_str(args.request.params.get())
                     .expect("params JSON");
                 *captured_for_task.lock().unwrap() = Some(params);
@@ -1783,7 +1783,7 @@ async fn fetch_session_list_sends_kind_facet_filter() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
     assert_eq!(
-            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
+            captured[0]["_meta"]["fuigo/facetFilters"]["kind"],
             serde_json::json!(["build"])
         );
 }
@@ -1797,7 +1797,7 @@ async fn fetch_workflows_list_sends_session_id() {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if let AcpAgentMessage::ExtMethod(args) = msg {
-                assert_eq!(args.request.method.as_ref(), "x.ai/workflows/list");
+                assert_eq!(args.request.method.as_ref(), "fuigo/workflows/list");
                 let params: serde_json::Value = serde_json::from_str(
                         args.request.params.get(),
                     )
@@ -1926,7 +1926,7 @@ async fn deep_search_sessions_echoes_routing_and_policy() {
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].0, "x.ai/session/search");
+    assert_eq!(captured[0].0, "fuigo/session/search");
     assert_eq!(captured[0].1["headless"], "only");
 }
 /// The card-detail executor must echo host, generation, seq, and the row identity verbatim; a session missing on disk zeroes the stats.
@@ -2286,7 +2286,7 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("chat_mode must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["fuigo/session"]["kind"], "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "K12: chat mode must omit Build agentProfile"
@@ -2312,7 +2312,7 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         scrub_chat_workspace_bind_meta(&mut meta);
     }
     let meta = meta.expect("chat_kind must produce meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["fuigo/session"]["kind"], "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "entry chat_kind must strip Build agentProfile"
@@ -2331,7 +2331,7 @@ fn assert_chat_meta_has_no_workspace_bind_keys(meta: &serde_json::Value) {
             );
     }
     assert!(
-            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            meta.get("fuigo/cloud_existing_workspace").is_none(),
             "chat meta without attach must not include existing workspace: {meta}"
         );
 }
@@ -2345,7 +2345,7 @@ fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
     apply_chat_kind_meta(&mut meta);
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat create must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["fuigo/session"]["kind"], "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2358,9 +2358,9 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
     {
         let obj = meta.get_or_insert_with(acp::Meta::new);
         obj.insert("envId".into(), serde_json::json!("env-poison"));
-        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("srv-poison"));
+        obj.insert("fuigo/cloud_server_id".into(), serde_json::json!("srv-poison"));
         obj.insert(
-            "x.ai/cloud_existing_workspace".into(),
+            "fuigo/cloud_existing_workspace".into(),
             serde_json::json!({
                     "server_id": "srv-poison",
                     "cwd": "/ws",
@@ -2369,7 +2369,7 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat load must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["fuigo/session"]["kind"], "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2383,17 +2383,17 @@ fn scrub_chat_workspace_matrix_attach_exception() {
     {
         let obj = meta.as_mut().unwrap();
         obj.insert("envId".into(), serde_json::json!("env-x"));
-        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-x"));
+        obj.insert("fuigo/cloud_server_id".into(), serde_json::json!("hub-x"));
         obj.insert(
-            "x.ai/cloud_existing_workspace".into(),
+            "fuigo/cloud_existing_workspace".into(),
             serde_json::json!({"server_id": "srv-x", "cwd": "/ws"}),
         );
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let scrubbed = meta.as_ref().unwrap();
     assert!(scrubbed.get("envId").is_none());
-    assert!(scrubbed.get("x.ai/cloud_server_id").is_none());
-    assert!(scrubbed.get("x.ai/cloud_existing_workspace").is_none());
+    assert!(scrubbed.get("fuigo/cloud_server_id").is_none());
+    assert!(scrubbed.get("fuigo/cloud_existing_workspace").is_none());
     let mut meta = Some(acp::Meta::new());
     apply_local_workspace_meta(
         &mut meta,
@@ -2406,22 +2406,22 @@ fn scrub_chat_workspace_matrix_attach_exception() {
     {
         let obj = meta.as_mut().unwrap();
         obj.insert("envId".into(), serde_json::json!("env-must-go"));
-        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-must-go"));
+        obj.insert("fuigo/cloud_server_id".into(), serde_json::json!("hub-must-go"));
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let scrubbed = meta.as_ref().unwrap();
     assert!(scrubbed.get("envId").is_none(), "envId must stay scrubbed");
     assert!(
-            scrubbed.get("x.ai/cloud_server_id").is_none(),
+            scrubbed.get("fuigo/cloud_server_id").is_none(),
             "Direct hub must stay scrubbed"
         );
     assert_eq!(
-            scrubbed["x.ai/cloud_existing_workspace"]["server_id"],
+            scrubbed["fuigo/cloud_existing_workspace"]["server_id"],
             "srv-dogfood"
         );
-    assert_eq!(scrubbed["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(scrubbed["x.ai/local_workspace"]["server_id"], "srv-dogfood");
-    assert_eq!(scrubbed["x.ai/local_workspace"]["cwd"], "/tmp/repo");
+    assert_eq!(scrubbed["fuigo/local_workspace"]["mode"], "attach");
+    assert_eq!(scrubbed["fuigo/local_workspace"]["server_id"], "srv-dogfood");
+    assert_eq!(scrubbed["fuigo/local_workspace"]["cwd"], "/tmp/repo");
 }
 #[cfg(feature = "local-workspace")]
 #[test]
@@ -2437,11 +2437,11 @@ fn to_meta_chat_attach_stamps_local_and_existing() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-1");
+    assert_eq!(meta["fuigo/session"]["kind"], "chat");
+    assert_eq!(meta["fuigo/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["fuigo/cloud_existing_workspace"]["server_id"], "srv-1");
     assert!(meta.get("envId").is_none());
-    assert!(meta.get("x.ai/cloud_server_id").is_none());
+    assert!(meta.get("fuigo/cloud_server_id").is_none());
 }
 #[cfg(feature = "local-workspace")]
 #[test]
@@ -2457,11 +2457,11 @@ fn to_meta_chat_own_stamps_intent_without_existing() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "own");
-    assert_eq!(meta["x.ai/local_workspace"]["cwd"], "/tmp/repo-own");
-    assert!(meta["x.ai/local_workspace"].get("server_id").is_none());
+    assert_eq!(meta["fuigo/local_workspace"]["mode"], "own");
+    assert_eq!(meta["fuigo/local_workspace"]["cwd"], "/tmp/repo-own");
+    assert!(meta["fuigo/local_workspace"].get("server_id").is_none());
     assert!(
-            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            meta.get("fuigo/cloud_existing_workspace").is_none(),
             "own must not stamp existing; shell mints server_id"
         );
     assert!(meta.get("envId").is_none());
@@ -2503,9 +2503,9 @@ fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
     let mut meta = flags.to_meta();
     finalize_chat_session_meta(&mut meta, true, &flags);
     let meta = meta.expect("meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-wt");
+    assert_eq!(meta["fuigo/session"]["kind"], "chat");
+    assert_eq!(meta["fuigo/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["fuigo/cloud_existing_workspace"]["server_id"], "srv-wt");
     assert!(meta.get("envId").is_none());
 }
 #[test]

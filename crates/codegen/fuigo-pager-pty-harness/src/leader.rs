@@ -171,14 +171,14 @@ mod tests {
     /// Wrap a session update as the envelope stored in `updates.jsonl`.
     fn envelope(update_json: &str) -> String {
         format!(
-            r#"{{"timestamp":1,"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{update_json}}}}}"#
+            r#"{{"timestamp":1,"method":"_fuigo/session/update","params":{{"sessionId":"s","update":{update_json}}}}}"#
         )
     }
 
     #[test]
     fn parse_update_payloads_unwraps_and_tolerates_torn_trailing_line() {
         let body = format!(
-            "{}\n{}\n{{\"timestamp\":2,\"method\":\"_x.ai/sess",
+            "{}\n{}\n{{\"timestamp\":2,\"method\":\"_fuigo/sess",
             envelope(
                 r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#
             ),

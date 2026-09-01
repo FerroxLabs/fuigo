@@ -10,7 +10,7 @@
 
     fn version_mismatch_notif(params: &serde_json::Value) -> acp::ExtNotification {
         acp::ExtNotification::new(
-            "x.ai/leader/version_mismatch",
+            "fuigo/leader/version_mismatch",
             std::sync::Arc::from(serde_json::value::to_raw_value(params).unwrap()),
         )
     }
@@ -120,7 +120,7 @@
     fn unknown_ext_method_returns_false_and_shows_no_toast() {
         let mut app = make_app_with_agent("sess-1");
         let notif = acp::ExtNotification::new(
-            "x.ai/leader/not_a_method",
+            "fuigo/leader/not_a_method",
             std::sync::Arc::from(
                 serde_json::value::to_raw_value(&serde_json::json!({
                     "clientVersion": "0.1.157",

@@ -35,7 +35,7 @@ pub struct WorkflowAgentInfo {
 }
 
 /// `_meta` key on rename fan-out (`SessionSummaryGenerated` and ACP `SessionInfoUpdate`). Old clients ignore unknown meta.
-pub const TITLE_IS_MANUAL_META_KEY: &str = "x.ai/titleIsManual";
+pub const TITLE_IS_MANUAL_META_KEY: &str = "fuigo/titleIsManual";
 
 /// `_meta` object carried on a manual-rename fan-out.
 pub fn title_is_manual_meta() -> serde_json::Value {
@@ -583,7 +583,7 @@ pub enum SessionUpdate {
     },
     /// A short "where was I" recap of the session so far.
     ///
-    /// The `x.ai/recap` ext method emits it: `/recap` sets `auto = false`, and returning to the terminal after being away sets `auto = true`.
+    /// The `fuigo/recap` ext method emits it: `/recap` sets `auto = false`, and returning to the terminal after being away sets `auto = true`.
     /// The pager renders it as an informational scrollback line; it is never added to the model conversation.
     SessionRecap {
         /// The one-line recap text (roughly 25 to 40 words; capped at a generous safety limit, so a normal recap is shown in full).
@@ -990,7 +990,7 @@ pub enum SessionUpdate {
     /// Fire-and-forget, **never persisted**. Subscribers clear the pending ⏳ for this `tool_call_id`.
     InteractionResolved { tool_call_id: String },
     /// The durable, replayable signal that a turn reached its terminal outcome.
-    /// Rides the persisted `_x.ai/session/update` rail, unlike the fire-and-forget `x.ai/session/prompt_complete` notification.
+    /// Rides the persisted `_fuigo/session/update` rail, unlike the fire-and-forget `fuigo/session/prompt_complete` notification.
     /// A viewer that re-attaches mid-turn can therefore finalize the turn from replay instead of staying stuck on "Waiting…".
     TurnCompleted {
         /// Correlation key the re-attaching viewer finalizes the turn on: the prompt/turn whose terminal outcome this carries.
@@ -1106,7 +1106,7 @@ impl From<&crate::session::image_normalize::ImageCompressionInfo> for ImageCompr
 pub const DISK_FULL_ERROR_TYPE: &str = "disk_full";
 pub const DISK_FULL_USER_MESSAGE: &str = "Out of disk space. Free some space and try again.";
 
-/// `x.ai/session/prompt_complete` payload key of a failed stop's typed error kind.
+/// `fuigo/session/prompt_complete` payload key of a failed stop's typed error kind.
 /// camelCase like its payload siblings (`stopReason`, `cancelTrigger`). Value: `SamplingErrorKind::as_str()`.
 /// The durable twin carries the same value in [`SessionUpdate::TurnCompleted`]'s typed `error_kind` field.
 pub const PROMPT_COMPLETE_ERROR_KIND_KEY: &str = "errorKind";

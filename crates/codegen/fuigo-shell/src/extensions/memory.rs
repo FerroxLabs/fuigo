@@ -1,4 +1,4 @@
-//! Extension handlers for `x.ai/compact_conversation`, `x.ai/memory/flush`, and `x.ai/memory/rewrite`.
+//! Extension handlers for `fuigo/compact_conversation`, `fuigo/memory/flush`, and `fuigo/memory/rewrite`.
 //! `memory/rewrite` turns a raw memory note into structured markdown with a one-shot LLM call.
 
 use agent_client_protocol as acp;
@@ -12,9 +12,9 @@ use crate::session::{CompactConversationRequest, CompactConversationResponse, Se
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        m if m.starts_with("x.ai/compact_conversation") => handle_compact(agent, args).await,
-        "x.ai/memory/flush" => handle_flush(agent, args).await,
-        "x.ai/memory/rewrite" => handle_rewrite(agent, args).await,
+        m if m.starts_with("fuigo/compact_conversation") => handle_compact(agent, args).await,
+        "fuigo/memory/flush" => handle_flush(agent, args).await,
+        "fuigo/memory/rewrite" => handle_rewrite(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }

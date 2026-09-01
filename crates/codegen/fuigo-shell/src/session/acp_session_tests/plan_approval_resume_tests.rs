@@ -1,6 +1,6 @@
 //! Resume re-park of the `exit_plan_mode` approval and the mid-turn disconnect handling.
 //!
-//! On resume the shell re-issues the `x.ai/exit_plan_mode` reverse-request when `awaiting_plan_approval` was persisted.
+//! On resume the shell re-issues the `fuigo/exit_plan_mode` reverse-request when `awaiting_plan_approval` was persisted.
 //! That recreates a live waiter, so the pager's existing approve/revise/abandon path works unchanged.
 //! These tests pin the reverse-request shape, when the awaiting bit is set and cleared, and the mid-turn disconnect path.
 //! A graceful client disconnect must NOT auto-approve.
@@ -88,7 +88,7 @@ async fn request_plan_approval_issues_reverse_request_and_clears_flag() {
             );
 
             let (method, session_id) = responder.await.unwrap();
-            assert_eq!(method.as_deref(), Some("x.ai/exit_plan_mode"));
+            assert_eq!(method.as_deref(), Some("fuigo/exit_plan_mode"));
             assert_eq!(
                 session_id.as_deref(),
                 Some("test-actor"),

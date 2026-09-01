@@ -9,7 +9,7 @@ pub(super) struct SendNowOutcome {
     pub(super) mutated: bool,
 }
 
-/// Running-turn display fields for `x.ai/queue/changed` (clients paint turn-start UI).
+/// Running-turn display fields for `fuigo/queue/changed` (clients paint turn-start UI).
 pub(super) struct RunningPromptDisplay {
     pub id: String,
     pub text: String,
@@ -528,7 +528,7 @@ impl SessionActor {
             entry_count = payload.entries.len(),
             entries = ?payload.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
             session = self.session_info.id.0.as_ref(),
-            "broadcasting x.ai/queue/changed to subscribers",
+            "broadcasting fuigo/queue/changed to subscribers",
         );
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
             self.notifications
@@ -807,7 +807,7 @@ impl SessionActor {
     /// During an active goal, plain prompts become steering while bash stays queued.
     /// Missing, stale, running, or foreign rows are benign no-ops.
     ///
-    /// Always re-broadcasts `x.ai/queue/changed` so every client reconciles (the row vanishes on success, is unchanged on a no-op).
+    /// Always re-broadcasts `fuigo/queue/changed` so every client reconciles (the row vanishes on success, is unchanged on a no-op).
     /// `new_text` (when `Some`) replaces the stored queue text in the interjection: the client edited the row before interjecting.
     /// It goes through the same version check, so a stale version no-ops the edit too.
     /// Exception: when the interject no-ops but the row is still queued, a version-matching `new_text` is saved to the row as an LWW edit.
@@ -1007,7 +1007,7 @@ impl SessionActor {
     /// 1. Rebuild the underlying `prompt_blocks` as a single [`acp::TextContent`] block carrying `new_text`.
     ///    (Any non-text blocks such as pasted images on the original prompt are not preserved: the user has explicitly typed replacement text.)
     /// 2. Update `queue_meta.text`, bump `queue_meta.version`, and record `last_editor` (the original `owner` attribution is preserved).
-    /// 3. Re-broadcast `x.ai/queue/changed` so every subscriber renders the new text and version.
+    /// 3. Re-broadcast `fuigo/queue/changed` so every subscriber renders the new text and version.
     ///
     /// **No-op cases** (the edit is discarded, and no re-broadcast is needed since promote or remove already broadcast the queue change):
     /// - The id is not in `pending_inputs` (already drained / removed).

@@ -151,7 +151,7 @@
 
     #[test]
     fn interjection_notification_pushes_block_to_matching_session() {
-        // Multi-client: an interjection typed in one pane is broadcast by the shell as x.ai/session/interjection
+        // Multi-client: an interjection typed in one pane is broadcast by the shell as fuigo/session/interjection
         // EVERY attached pane (incl. the originator, which no longer pushes a local block) renders it.
         let mut app = make_app_with_agent("sess-view");
         let affected =

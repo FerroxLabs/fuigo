@@ -1,4 +1,4 @@
-//! The MCP elicitation card (`x.ai/mcp/elicit`): routes key, mouse, and paste input and resolves accept, decline, and cancel.
+//! The MCP elicitation card (`fuigo/mcp/elicit`): routes key, mouse, and paste input and resolves accept, decline, and cancel.
 //! Also promotes the next pending request when a card closes, and stashes and restores the composer draft.
 
 use super::AgentView;

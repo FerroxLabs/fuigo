@@ -394,7 +394,7 @@ pub(super) fn handle_gate_refreshed(
     }
 }
 
-/// `x.ai/auth/check_subscription` completed.
+/// `fuigo/auth/check_subscription` completed.
 /// Meta is authoritative (`apply_auth_meta` also drops any deferred gate).
 /// A failed check only promotes the deferred gate it was verifying (the `verify` generation).
 /// Generic watch, focus, and paywall-chain failures never touch it.
@@ -564,7 +564,7 @@ pub(super) fn dispatch_open_superfuigo_url(app: &mut AppView) -> Vec<Effect> {
         .as_ref()
         .and_then(|g| g.url.as_deref())
         .unwrap_or("https://grok.com/supergrok?referrer=grok-build");
-    // Funnel attribution: tag SuperGrok upsell clicks from the CLI with `referrer=fuigo-build`, matching the OAuth consent flow and x.ai/cli links
+    // Funnel attribution: tag SuperGrok upsell clicks from the CLI with `referrer=fuigo-build`, matching the OAuth consent flow and fuigo/cli links
     // It applies even when the URL came from remote settings's `gate_url`, so nothing depends on the remote flag being configured correctly
     // If the URL already specifies a referrer it's left alone
     let url = crate::app::link_opener::ensure_query_param(url, "referrer", "fuigo-build");

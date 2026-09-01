@@ -385,7 +385,7 @@ fn cancel_agent_turn(
 
     // Server-authoritative queue: the agent owns the drain
     // On an interactive cancel we only tear down the running turn and let the agent promote the FRONT queued prompt as the next turn
-    // Its `x.ai/queue/changed` rebroadcast (carrying `running_prompt_id`) is the source of truth
+    // Its `fuigo/queue/changed` rebroadcast (carrying `running_prompt_id`) is the source of truth
     // The pager adopts it via `handle_queue_changed` / `apply_turn_start_shim`
     // We do NOT pull any queued prompt back into the input or predict the new queue order client-side
     // The user's first queued prompt is what runs next
@@ -530,13 +530,13 @@ fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
     })
 }
 
-/// Grace window between a driver-side `x.ai/session/prompt_complete` broadcast and that turn's `session/prompt` RPC response.
+/// Grace window between a driver-side `fuigo/session/prompt_complete` broadcast and that turn's `session/prompt` RPC response.
 /// Past it, [`reconcile_overdue_turn_ends`] finishes the turn from the broadcast.
 /// The healthy-path gap is milliseconds (the shell emits the broadcast just before writing the RPC response).
 /// An expiry means the response is genuinely lost, not merely slow.
 pub(crate) const TURN_END_RECONCILE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Finish turns whose end was announced by `x.ai/session/prompt_complete` but whose `session/prompt` RPC response never arrived.
+/// Finish turns whose end was announced by `fuigo/session/prompt_complete` but whose `session/prompt` RPC response never arrived.
 ///
 /// The RPC response is the driver's only turn-state exit, and it can be lost in leader response routing / reconnect races.
 /// The loss left the TUI latched in `TurnCancelling` until a restart (Esc dead, prompts piling into a queue that never drains).

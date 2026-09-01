@@ -1,6 +1,6 @@
 //! Shared DTO types for hooks/plugins ACP extensions.
 //!
-//! This crate defines the wire format for `x.ai/hooks/*` and `x.ai/plugins/*`
+//! This crate defines the wire format for `fuigo/hooks/*` and `fuigo/plugins/*`
 //! ACP extension methods. It is dependency-free (only `serde`) so both
 //! `fuigo-shell` and `fuigo-pager` can depend on it without pulling
 //! in domain logic.
@@ -258,7 +258,7 @@ pub struct HookInfo {
     pub removable: bool,
 }
 
-/// Response for `x.ai/hooks/list`.
+/// Response for `fuigo/hooks/list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HooksListResponse {
@@ -325,7 +325,7 @@ pub struct PluginInfo {
     pub conflict: Option<String>,
 }
 
-/// Response for `x.ai/plugins/list`.
+/// Response for `fuigo/plugins/list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginsListResponse {
@@ -383,7 +383,7 @@ pub struct McpServerInfo {
     pub config_source: Option<String>,
 }
 
-/// Response for `x.ai/mcp/list` as consumed by the pager.
+/// Response for `fuigo/mcp/list` as consumed by the pager.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServersListResponse {
@@ -564,7 +564,7 @@ impl PluginComponents {
 // Action types
 // ---------------------------------------------------------------------------
 
-/// Request wrapper for `x.ai/hooks/action`.
+/// Request wrapper for `fuigo/hooks/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HooksActionRequest {
@@ -603,7 +603,7 @@ pub enum HooksAction {
     },
 }
 
-/// Request wrapper for `x.ai/plugins/action`.
+/// Request wrapper for `fuigo/plugins/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginsActionRequest {
@@ -644,7 +644,7 @@ pub enum PluginsAction {
     },
 }
 
-/// Shared action response for both `x.ai/hooks/action` and `x.ai/plugins/action`.
+/// Shared action response for both `fuigo/hooks/action` and `fuigo/plugins/action`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionOutcome {
@@ -1089,10 +1089,10 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Marketplace types (wire format for x.ai/marketplace/* ACP endpoints)
+// Marketplace types (wire format for fuigo/marketplace/* ACP endpoints)
 // ---------------------------------------------------------------------------
 
-/// Response for `x.ai/marketplace/list`.
+/// Response for `fuigo/marketplace/list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceListResponse {
@@ -1165,7 +1165,7 @@ pub struct MarketplacePluginEntry {
     pub remote_subdir: Option<String>,
 }
 
-/// Request wrapper for `x.ai/marketplace/action`.
+/// Request wrapper for `fuigo/marketplace/action`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceActionRequest {

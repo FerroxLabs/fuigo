@@ -137,7 +137,7 @@ impl acp::Agent for MvpAgent {
             client_type = ?client_type,
             event = "code_nav_capability_parsed",
             "code-nav capability initialized from initialize request; \
-             index will start lazily on first x.ai/code/* request if eligible"
+             index will start lazily on first fuigo/code/* request if eligible"
         );
         let interactive_trust_client = Self::parse_interactive_trust_capability(
             &arguments,
@@ -444,14 +444,14 @@ impl acp::Agent for MvpAgent {
                         .load_session(true)
                         .meta(
                             serde_json::json!({
-                    "x.ai/fs_notify": true,
+                    "fuigo/fs_notify": true,
                     // Advertised so SDKs can warn when a registration depends on hook behavior this agent doesn't honor
-                    "x.ai/hooks": {
+                    "fuigo/hooks": {
                         "blockingEvents": crate::extensions::hooks::ADVERTISED_BLOCKING_EVENTS,
                         "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
                         "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
                     },
-                    "x.ai/capabilities": {
+                    "fuigo/capabilities": {
                         "toolOverrides": tool_overrides_capability(),
                     },
                 })
@@ -473,7 +473,7 @@ impl acp::Agent for MvpAgent {
                     "fuigoShell": true,
                     // Re-deriving this precedence client-side has regressed OIDC refresh, so clients consume the agent's choice from here
                     "defaultAuthMethodId": default_auth_method_id_wire,
-                    // The agent can drive in-process SDK MCP servers over the ACP reverse channel (`x.ai/mcp/sdk_call`)
+                    // The agent can drive in-process SDK MCP servers over the ACP reverse channel (`fuigo/mcp/sdk_call`)
                     // The SDK reads this to enable transport="acp"
                     (fuigo_mcp::wire::MCP_SDK): true,
                     // `session/new` / `session/load` accept per-session plugin roots in `_meta.pluginDirs`
@@ -495,7 +495,7 @@ impl acp::Agent for MvpAgent {
                         .is_feature_enabled(crate::agent::config::Feature::CancelRewind),
                     // Resolved session-recap state (remote settings / config / env; default ON)
                     // The client gates BOTH its automatic away-recap poll and the manual `/recap` on this
-                    // A disabled feature produces zero `x.ai/recap` traffic
+                    // A disabled feature produces zero `fuigo/recap` traffic
                     "sessionRecap": self.cfg.borrow().is_session_recap_enabled(),
                     "feedbackTraceOffer": self.feedback_trace_offer(),
                     "voiceMode": self.cfg.borrow().is_voice_mode_enabled(),
@@ -1444,7 +1444,7 @@ impl acp::Agent for MvpAgent {
                 self.gateway
                     .forward_fire_and_forget(
                         acp::ExtNotification::new(
-                            "x.ai/session/prompt_complete",
+                            "fuigo/session/prompt_complete",
                             params.into(),
                         ),
                     );
@@ -2248,67 +2248,67 @@ impl acp::Agent for MvpAgent {
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
         let result = match method.as_ref() {
-            "x.ai/getApiKey" | "x.ai/setApiKey" => {
+            "fuigo/getApiKey" | "fuigo/setApiKey" => {
                 crate::extensions::auth::handle(self, &args).await
             }
-            "x.ai/session/info" | "x.ai/session/close" | "x.ai/session/list"
-            | "x.ai/sessions/list" => {
+            "fuigo/session/info" | "fuigo/session/close" | "fuigo/session/list"
+            | "fuigo/sessions/list" => {
                 crate::agent::handlers::session::handle(self, &args).await
             }
-            "x.ai/workspaces/list" => {
+            "fuigo/workspaces/list" => {
                 crate::agent::handlers::workspaces::handle(self, &args).await
             }
-            "x.ai/models/list" => {
+            "fuigo/models/list" => {
                 crate::agent::handlers::models::handle(self, &args).await
             }
-            "x.ai/session/updates" => {
+            "fuigo/session/updates" => {
                 crate::extensions::session_updates::handle(&args, &self.gateway).await
             }
-            "x.ai/session/state" => {
+            "fuigo/session/state" => {
                 crate::extensions::session_state::handle_state(&args).await
             }
-            "x.ai/session/import" => {
+            "fuigo/session/import" => {
                 crate::extensions::session_state::handle_import(&args).await
             }
-            "x.ai/session/load_history" => {
+            "fuigo/session/load_history" => {
                 crate::extensions::chat_conversation_history::handle(self, &args).await
             }
-            "x.ai/session/search" => {
+            "fuigo/session/search" => {
                 crate::extensions::session_search::handle(self, &args).await
             }
-            "x.ai/session/resolve_local_for_worktree_resume"
-            | "x.ai/session/rehydrate" => {
+            "fuigo/session/resolve_local_for_worktree_resume"
+            | "fuigo/session/rehydrate" => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::worktree::handle(self, &ops, &args).await
             }
             #[cfg(feature = "local-workspace")]
-            "x.ai/session/add_local_workspace" => {
+            "fuigo/session/add_local_workspace" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
-            "x.ai/session/rename" | "x.ai/session/delete"
-            | "x.ai/session/update_mcp_servers" | "x.ai/session/fork"
-            | "x.ai/plugins/reload" | "x.ai/commands/list" => {
+            "fuigo/session/rename" | "fuigo/session/delete"
+            | "fuigo/session/update_mcp_servers" | "fuigo/session/fork"
+            | "fuigo/plugins/reload" | "fuigo/commands/list" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             m if InternalMethod::from_name(m).is_some() => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
-            "x.ai/session/repair" => crate::extensions::repair::handle(self, &args).await,
-            "x.ai/session/usage" => crate::extensions::usage::handle(self, &args).await,
-            "x.ai/memory/flush" | "x.ai/memory/rewrite" => {
+            "fuigo/session/repair" => crate::extensions::repair::handle(self, &args).await,
+            "fuigo/session/usage" => crate::extensions::usage::handle(self, &args).await,
+            "fuigo/memory/flush" | "fuigo/memory/rewrite" => {
                 crate::extensions::memory::handle(self, &args).await
             }
-            "x.ai/skills/refresh-baseline" => {
+            "fuigo/skills/refresh-baseline" => {
                 self.refresh_skill_baseline_for_all_sessions();
                 crate::extensions::to_ext_response(
                     Ok(serde_json::json!({"ok": true})),
                 )
             }
-            "x.ai/interject" => crate::extensions::interject::handle(self, &args).await,
-            "x.ai/feedback" | "x.ai/feedback/dismiss" | "x.ai/feedback/upload-trace"
-            | "x.ai/btw" => crate::extensions::feedback::handle(self, &args).await,
-            "x.ai/recap" => crate::extensions::recap::handle(self, &args).await,
-            "x.ai/cloud/terminate" => {
+            "fuigo/interject" => crate::extensions::interject::handle(self, &args).await,
+            "fuigo/feedback" | "fuigo/feedback/dismiss" | "fuigo/feedback/upload-trace"
+            | "fuigo/btw" => crate::extensions::feedback::handle(self, &args).await,
+            "fuigo/recap" => crate::extensions::recap::handle(self, &args).await,
+            "fuigo/cloud/terminate" => {
                 crate::extensions::auth_gate::require_fuigo_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2340,7 +2340,7 @@ impl acp::Agent for MvpAgent {
                     })?;
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
-            "x.ai/cloud/env/list" => {
+            "fuigo/cloud/env/list" => {
                 crate::extensions::auth_gate::require_fuigo_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2365,7 +2365,7 @@ impl acp::Agent for MvpAgent {
                 }),
                 )
             }
-            "x.ai/cloud/env/create" => {
+            "fuigo/cloud/env/create" => {
                 crate::extensions::auth_gate::require_fuigo_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2422,7 +2422,7 @@ impl acp::Agent for MvpAgent {
                 }),
                 )
             }
-            "x.ai/cloud/env/update" => {
+            "fuigo/cloud/env/update" => {
                 crate::extensions::auth_gate::require_fuigo_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2482,7 +2482,7 @@ impl acp::Agent for MvpAgent {
                 }),
                 )
             }
-            "x.ai/cloud/env/delete" => {
+            "fuigo/cloud/env/delete" => {
                 crate::extensions::auth_gate::require_fuigo_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2509,87 +2509,87 @@ impl acp::Agent for MvpAgent {
                     })?;
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
-            "x.ai/billing" => crate::extensions::billing::handle(self, &args).await,
-            "x.ai/auto-topup-rule" => {
+            "fuigo/billing" => crate::extensions::billing::handle(self, &args).await,
+            "fuigo/auto-topup-rule" => {
                 crate::extensions::billing::handle(self, &args).await
             }
-            "x.ai/share_session" => crate::extensions::share::handle(self, &args).await,
-            "x.ai/privacy/setCodingDataRetention" => {
+            "fuigo/share_session" => crate::extensions::share::handle(self, &args).await,
+            "fuigo/privacy/setCodingDataRetention" => {
                 crate::extensions::privacy::handle(self, &args).await
             }
-            "x.ai/consent/record" => {
+            "fuigo/consent/record" => {
                 crate::extensions::consent::handle(self, &args).await
             }
-            "x.ai/rollout/survey" => {
+            "fuigo/rollout/survey" => {
                 crate::extensions::rollout::handle(self, &args).await
             }
-            "x.ai/prompt_history" => {
+            "fuigo/prompt_history" => {
                 crate::extensions::prompt_history::handle(self, &args).await
             }
-            "x.ai/suggest" => crate::extensions::suggest::handle(self, &args).await,
-            "x.ai/suggestPrompt" => crate::extensions::suggest::handle(self, &args).await,
-            s if s.starts_with("x.ai/auth/") => {
+            "fuigo/suggest" => crate::extensions::suggest::handle(self, &args).await,
+            "fuigo/suggestPrompt" => crate::extensions::suggest::handle(self, &args).await,
+            s if s.starts_with("fuigo/auth/") => {
                 crate::extensions::auth::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/session_summaries/") => {
+            s if s.starts_with("fuigo/session_summaries/") => {
                 crate::agent::handlers::session::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/git/worktree/") => {
+            s if s.starts_with("fuigo/git/worktree/") => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::worktree::handle(self, &ops, &args).await
             }
-            s if s.starts_with("x.ai/git/") => {
+            s if s.starts_with("fuigo/git/") => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::git::handle(self, &ops, &args).await
             }
-            s if s.starts_with("x.ai/compact_conversation") => {
+            s if s.starts_with("fuigo/compact_conversation") => {
                 crate::extensions::memory::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/plugins/") => {
+            s if s.starts_with("fuigo/plugins/") => {
                 crate::extensions::plugins::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/marketplace/") => {
+            s if s.starts_with("fuigo/marketplace/") => {
                 crate::extensions::marketplace::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/hooks/") => {
+            s if s.starts_with("fuigo/hooks/") => {
                 crate::extensions::hooks::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/hunk-tracker/") => {
+            s if s.starts_with("fuigo/hunk-tracker/") => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::hunk_tracker::handle(self, &ops, &args).await
             }
-            s if s.starts_with("x.ai/pr/") => {
+            s if s.starts_with("fuigo/pr/") => {
                 crate::extensions::pr::handle(self, &args).await
             }
             s if s.starts_with(crate::extensions::mcp::mcp_methods::PREFIX) => {
                 crate::extensions::mcp::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/task/") => {
+            s if s.starts_with("fuigo/task/") => {
                 crate::extensions::task::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/scheduler/") => {
+            s if s.starts_with("fuigo/scheduler/") => {
                 crate::extensions::task::handle_scheduler(self, &args).await
             }
-            s if s.starts_with("x.ai/subagent/") => {
+            s if s.starts_with("fuigo/subagent/") => {
                 crate::extensions::task::handle_subagent(self, &args).await
             }
-            s if s.starts_with("x.ai/terminal/") => {
+            s if s.starts_with("fuigo/terminal/") => {
                 crate::extensions::terminal::handle(self, &args).await
             }
             s if crate::extensions::fs::is_fs_method(s) => {
                 crate::extensions::fs::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/search/") => {
+            s if s.starts_with("fuigo/search/") => {
                 crate::extensions::search::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/bundle/") => {
+            s if s.starts_with("fuigo/bundle/") => {
                 crate::extensions::bundle::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/code/") => {
+            s if s.starts_with("fuigo/code/") => {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::code_nav::handle(self, &ops, &args).await
             }
-            s if s.starts_with("x.ai/skills/") || s == "x.ai/workflows/list" => {
+            s if s.starts_with("fuigo/skills/") || s == "fuigo/workflows/list" => {
                 let compat = self.cfg.borrow().compat_resolved;
                 crate::extensions::skills::handle(
                         self,
@@ -2599,13 +2599,13 @@ impl acp::Agent for MvpAgent {
                     )
                     .await
             }
-            s if s.starts_with("x.ai/review") => {
+            s if s.starts_with("fuigo/review") => {
                 crate::extensions::feedback::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/debug/") => {
+            s if s.starts_with("fuigo/debug/") => {
                 crate::extensions::debug::handle(self, &args).await
             }
-            s if s.starts_with("x.ai/rewind") => {
+            s if s.starts_with("fuigo/rewind") => {
                 crate::extensions::rewind::handle(self, &args).await
             }
             other => {
@@ -2627,7 +2627,7 @@ impl acp::Agent for MvpAgent {
         args: acp::ExtNotification,
     ) -> Result<(), acp::Error> {
         tracing::info!("Received extension notification: method={}", args.method);
-        if args.method.as_ref() == "x.ai/yolo_mode_changed"
+        if args.method.as_ref() == "fuigo/yolo_mode_changed"
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
@@ -2700,7 +2700,7 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if args.method.as_ref() == "x.ai/permissions/reset" {
+        if args.method.as_ref() == "fuigo/permissions/reset" {
             let mut updated = 0;
             self.session_registry
                 .for_each_resident(|_, h| {
@@ -2721,7 +2721,7 @@ impl acp::Agent for MvpAgent {
         if args.method.as_ref() == InternalMethod::EvictSessions.name() {
             self.handle_evict_sessions(&args.params).await;
         }
-        if args.method.as_ref() == "x.ai/toggle_plan_mode"
+        if args.method.as_ref() == "fuigo/toggle_plan_mode"
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
@@ -2758,7 +2758,7 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if args.method.as_ref().starts_with("x.ai/queue/")
+        if args.method.as_ref().starts_with("fuigo/queue/")
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
@@ -2796,14 +2796,14 @@ impl acp::Agent for MvpAgent {
                 }
             }
         }
-        if args.method.as_ref() == "x.ai/terminal/pty/input"
+        if args.method.as_ref() == "fuigo/terminal/pty/input"
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
         {
             crate::extensions::terminal::handle_pty_input(&params).await;
         }
-        if args.method.as_ref() == "_x.ai/session/update" {
+        if args.method.as_ref() == "_fuigo/session/update" {
             if let Ok(notification) = serde_json::from_str::<
                 SessionNotification,
             >(args.params.get()) {
@@ -2827,7 +2827,7 @@ impl acp::Agent for MvpAgent {
                 tracing::warn!("Failed to parse Ferrox Labs session notification params");
             }
         }
-        if args.method.as_ref() == "x.ai/telemetry/non_git_decision" {
+        if args.method.as_ref() == "fuigo/telemetry/non_git_decision" {
             #[derive(serde::Deserialize)]
             struct NonGitDecisionParams {
                 decision: String,
@@ -2853,7 +2853,7 @@ impl acp::Agent for MvpAgent {
                 tracing::warn!("Failed to parse non_git_decision telemetry params");
             }
         }
-        if args.method.as_ref() == "x.ai/telemetry/multi_agent_followup" {
+        if args.method.as_ref() == "fuigo/telemetry/multi_agent_followup" {
             #[derive(serde::Deserialize)]
             struct MultiAgentFollowupParams {
                 preferred_agent_label: char,
@@ -2889,7 +2889,7 @@ impl acp::Agent for MvpAgent {
                 tracing::warn!("Failed to parse multi-agent followup telemetry params");
             }
         }
-        if args.method.as_ref() == "x.ai/telemetry/multi_agent_apply" {
+        if args.method.as_ref() == "fuigo/telemetry/multi_agent_apply" {
             #[derive(serde::Deserialize)]
             struct MultiAgentApplyParams {
                 applied_agent_label: char,
@@ -2925,7 +2925,7 @@ impl acp::Agent for MvpAgent {
                 tracing::warn!("Failed to parse multi-agent apply telemetry params");
             }
         }
-        if args.method.as_ref() == "x.ai/telemetry/multi_agent_discard" {
+        if args.method.as_ref() == "fuigo/telemetry/multi_agent_discard" {
             #[derive(serde::Deserialize)]
             struct MultiAgentDiscardParams {
                 /// (label, session_id, model_id)

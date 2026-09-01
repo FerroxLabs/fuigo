@@ -322,7 +322,7 @@ pub(super) fn dispatch_enter_api_key(app: &mut AppView) -> Vec<Effect> {
 
 /// User submitted an API key.
 ///
-/// An empty submission is ignored rather than sent: `x.ai/setApiKey` treats an
+/// An empty submission is ignored rather than sent: `fuigo/setApiKey` treats an
 /// empty key as "clear the stored credential", which is the opposite of what
 /// someone pressing Enter on a blank box wants.
 pub(super) fn dispatch_submit_api_key(app: &mut AppView, key: String) -> Vec<Effect> {

@@ -713,12 +713,12 @@ pub struct AppView {
     /// Periodic billing poll requested (credits >= 99%).
     pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard).
-    /// Populated from `x.ai/sessions/list` polls and `x.ai/sessions/changed` broadcasts.
+    /// Populated from `fuigo/sessions/list` polls and `fuigo/sessions/changed` broadcasts.
     /// Empty in non-leader mode, which gates roster rendering.
     pub leader_roster: Vec<crate::app::roster::RosterEntry>,
     /// Local on-disk session list (dormant/idle sessions) shown on the dashboard when NOT in leader mode.
     /// There is no live leader roster to poll outside leader mode.
-    /// We fetch the same `x.ai/session/list` the resume picker uses and render those as idle rows.
+    /// We fetch the same `fuigo/session/list` the resume picker uses and render those as idle rows.
     /// Entries are stored as [`crate::app::roster::RosterEntry`] (activity `Dormant`) so they reuse the existing roster-row rendering / attach path.
     /// Empty in leader mode.
     pub dashboard_local_sessions: Vec<crate::app::roster::RosterEntry>,
@@ -749,12 +749,12 @@ pub struct AppView {
         fuigo_dashboard_store::MemberMetadata,
     >,
     /// Server-authoritative shared prompt queues, keyed by `sessionId`.
-    /// Reconciled from `x.ai/queue/changed` broadcasts so every client renders the same ordered queue (including prompts queued by other clients).
+    /// Reconciled from `fuigo/queue/changed` broadcasts so every client renders the same ordered queue (including prompts queued by other clients).
     /// Empty in non-leader mode.
     pub shared_prompt_queues:
         std::collections::HashMap<String, Vec<crate::app::prompt_queue::QueueEntryWire>>,
     /// Optimistic echo rows for prompts the pager sent server-authoritatively (plain prompt typed while a turn is running).
-    /// The confirming `x.ai/queue/changed` broadcast has not yet arrived. Keyed by `sessionId`.
+    /// The confirming `fuigo/queue/changed` broadcast has not yet arrived. Keyed by `sessionId`.
     /// Pinned into `shared_prompt_queues` on reconcile so the row doesn't flicker.
     /// Dropped once the authoritative broadcast reflects the id (or it starts running). Never persisted.
     pub optimistic_prompt_echoes:
@@ -777,7 +777,7 @@ pub struct AppView {
     pub cancel_rewind_enabled: bool,
     /// Whether session recap (`/recap` and the automatic away recap) is rolled out.
     /// Resolved by the shell and advertised on ACP initialize (`sessionRecap`).
-    /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
+    /// When false, the pager must not request recaps (zero `fuigo/recap` traffic).
     pub session_recap_available: bool,
     /// Shell-advertised eligibility for the `/feedback` trace-upload offer, exactly as received (initialize meta / auth-meta refreshes).
     /// Read it through [`Self::feedback_trace_offer`], which subtracts the latch.
@@ -979,7 +979,7 @@ pub struct AppView {
     /// Automatically enabled by `plan_mode`.
     pub ask_user: bool,
     /// Process-wide gateway light-frontend from CLI `--chat` only.
-    /// Stamps `_meta["x.ai/session"].kind = "chat"` and omits Build agent profiles on create/load while set.
+    /// Stamps `_meta["fuigo/session"].kind = "chat"` and omits Build agent profiles on create/load while set.
     /// `/chat` does **not** set this (uses [`Self::deferred_startup`] one-shot state instead).
     pub chat_mode: bool,
     /// Welcome picker mode; ignored when `local_workspace_startup_locked`.
@@ -1742,7 +1742,7 @@ impl AppView {
     /// Sync the deny list into every slash surface (welcome prompt, all agents, dashboard) so restricted commands hide/show in lockstep.
     /// Mirrors [`Self::apply_voice_mode_enabled`].
     ///
-    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the `x.ai/settings/update` handler when the subscription tier changes.
+    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the `fuigo/settings/update` handler when the subscription tier changes.
     /// A mid-session upgrade thus lifts the restrictions without a restart.
     pub fn apply_tier_restrictions(&mut self) {
         let restricted = self.team_name.is_none()
@@ -2103,7 +2103,7 @@ impl AppView {
             &self.dashboard_local_sessions
         }
     }
-    /// Reconcile the shared prompt queue for a session from a `x.ai/queue/changed` broadcast.
+    /// Reconcile the shared prompt queue for a session from a `fuigo/queue/changed` broadcast.
     /// The broadcast is authoritative: it fully replaces the previously-known queue for that session.
     /// An empty list clears the entry.
     ///
@@ -2172,7 +2172,7 @@ impl AppView {
     }
     /// Push an optimistic echo row for a server-authoritative prompt the pager just sent.
     /// (A plain prompt or agent-bound kind typed while a turn is running.)
-    /// The row is keyed by `prompt_id` so the authoritative `x.ai/queue/changed` broadcast replaces it (matched by `id`) rather than duplicating it.
+    /// The row is keyed by `prompt_id` so the authoritative `fuigo/queue/changed` broadcast replaces it (matched by `id`) rather than duplicating it.
     /// `kind` (`"prompt"`/`"bash"`/…) drives the row's display and, on adoption, the turn-start shim's block and focus flag.
     pub fn push_optimistic_prompt_echo(
         &mut self,

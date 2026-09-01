@@ -26,7 +26,7 @@ Protocol (ACP).
 
 ![Fuigo TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
-**Learn more about Fuigo at [x.ai/cli](https://x.ai/cli)**
+**Learn more about Fuigo at [fuigo/cli](https://x.ai/cli)**
 
 This repository contains the Rust source for the `fuigo` CLI/TUI and its agent
 runtime. It is synced periodically from the Ferrox Labs monorepo.

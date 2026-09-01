@@ -67,7 +67,7 @@ pub(crate) fn forward_to_hunk_tracker(
     }
 }
 
-/// Dedup key for `x.ai/git_head_changed`, shared by the watcher's `GitHead` consumer and the post-edit `maybe_notify_git_branch` path.
+/// Dedup key for `fuigo/git_head_changed`, shared by the watcher's `GitHead` consumer and the post-edit `maybe_notify_git_branch` path.
 /// Both compute the same identity (branch | is_worktree | main_repo | commit).
 /// The commit SHA is included so a same-branch commit (agent runs `git commit`) still notifies clients.
 /// The changes panel must drop the now-committed files.
@@ -258,7 +258,7 @@ pub(crate) struct CapabilityInputs {
     pub client_notify: bool,
     pub hunk_tracking: bool,
     pub code_nav: bool,
-    /// `x.ai/gitHeadChanged`; opt-in (absent means off).
+    /// `fuigo/gitHeadChanged`; opt-in (absent means off).
     pub git_head_changed: Option<bool>,
 }
 
@@ -316,7 +316,7 @@ impl ClientNotify {
 
         match self.mode {
             ClientFsMode::Events => {
-                // Present-tense strings are the `x.ai/fs_notify` wire protocol; do not sync to internal variant names
+                // Present-tense strings are the `fuigo/fs_notify` wire protocol; do not sync to internal variant names
                 let kind_str = match kind {
                     FsEventKind::Created => "Create",
                     FsEventKind::Modified => "Modify",
@@ -335,7 +335,7 @@ impl ClientNotify {
                 if let Ok(raw) = to_raw_value(&params) {
                     self.gateway
                         .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/fs_notify",
+                            "fuigo/fs_notify",
                             raw.into(),
                         ));
                 }
@@ -361,7 +361,7 @@ impl ClientNotify {
                 if let Ok(raw) = to_raw_value(&params) {
                     self.gateway
                         .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/fs/index/delta",
+                            "fuigo/fs/index/delta",
                             raw.into(),
                         ));
                 }
@@ -421,7 +421,7 @@ impl ClientNotify {
                 if let Ok(raw) = serde_json::value::to_raw_value(&params) {
                     self.gateway
                         .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/fs/index",
+                            "fuigo/fs/index",
                             raw.into(),
                         ));
                 }
@@ -527,7 +527,7 @@ impl GitHead {
             if let Ok(raw) = serde_json::value::to_raw_value(&params) {
                 self.gateway
                     .forward_fire_and_forget(acp::ExtNotification::new(
-                        "x.ai/git_head_changed",
+                        "fuigo/git_head_changed",
                         raw.into(),
                     ));
             }

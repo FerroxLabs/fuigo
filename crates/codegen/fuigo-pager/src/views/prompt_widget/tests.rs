@@ -4186,7 +4186,7 @@
 
     // -- Predicted-next-prompt suggestion through PromptWidget ----------------
 
-    /// Widget with an active gate and a loaded suggestion: the state right after a turn ends with `x.ai/suggestPrompt` resolved.
+    /// Widget with an active gate and a loaded suggestion: the state right after a turn ends with `fuigo/suggestPrompt` resolved.
     fn widget_with_prompt_suggestion(text: &str) -> PromptWidget {
         let mut pw = PromptWidget::new();
         pw.prompt_suggestion_active = true;

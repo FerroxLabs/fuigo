@@ -43,7 +43,7 @@ struct WorkspacesListResponse {
 
 #[derive(Debug, Serialize)]
 struct WorkspacesMeta {
-    #[serde(rename = "x.ai/partial")]
+    #[serde(rename = "fuigo/partial")]
     partial: PartialInfo,
 }
 
@@ -165,7 +165,7 @@ mod tests {
         let value = serde_json::to_value(degraded_response("no_oauth")).unwrap();
         assert_eq!(value["workspaces"].as_array().unwrap().len(), 0);
         assert!(value.get("nextPageToken").is_none());
-        assert_eq!(value["_meta"]["x.ai/partial"]["workspaces"], true);
-        assert_eq!(value["_meta"]["x.ai/partial"]["reason"], "no_oauth");
+        assert_eq!(value["_meta"]["fuigo/partial"]["workspaces"], true);
+        assert_eq!(value["_meta"]["fuigo/partial"]["reason"], "no_oauth");
     }
 }

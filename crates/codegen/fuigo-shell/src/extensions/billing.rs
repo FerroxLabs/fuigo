@@ -1,4 +1,4 @@
-//! `x.ai/billing` extension handler.
+//! `fuigo/billing` extension handler.
 //!
 //! Fetches the authenticated user's Fuigo billing configuration (credit limit, usage, on-demand cap, billing period, history) from the backend.
 //! The pager and desktop use it to display credits and usage.
@@ -136,11 +136,11 @@ pub struct GetAutoTopupRuleResponse {
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/billing" => {
+        "fuigo/billing" => {
             tracing::info!("handling billing config request");
             handle_get_billing(agent).await
         }
-        "x.ai/auto-topup-rule" => {
+        "fuigo/auto-topup-rule" => {
             tracing::info!("handling auto top-up rule request");
             handle_get_auto_topup_rule(agent).await
         }
@@ -189,7 +189,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
     let auth = super::auth_gate::require_fuigo_auth(
         &agent.auth_manager,
         "Authentication required to fetch billing data",
-        "Billing data requires auth with grok.com. Run `fuigo login` to authenticate.",
+        "Billing data requires an authenticated session. Run `fuigo login` to authenticate.",
     )?;
 
     let proxy_base = agent.cli_chat_proxy_base_url();
@@ -264,7 +264,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             .or_else(|| rs.subscription_tier.clone())
     });
 
-    // Every prompt, `/usage`, and poll path hits `x.ai/billing`
+    // Every prompt, `/usage`, and poll path hits `fuigo/billing`
     // Log the fetched credits snapshot so support can correlate the limit UI with real balances
     fuigo_telemetry::unified_log::info(
         "billing: fetched credits config",
@@ -279,7 +279,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
     let auth = super::auth_gate::require_fuigo_auth(
         &agent.auth_manager,
         "Authentication required to fetch auto top-up rule",
-        "Auto top-up data requires auth with grok.com. Run `fuigo login` to authenticate.",
+        "Auto top-up data requires an authenticated session. Run `fuigo login` to authenticate.",
     )?;
 
     let proxy_base = agent.cli_chat_proxy_base_url();

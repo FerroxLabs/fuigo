@@ -880,7 +880,7 @@ fn collect_diff_stats(
     }
     DiffStatsResult { stats, paths }
 }
-/// Payload for the `x.ai/git_head_changed` ACP extension notification.
+/// Payload for the `fuigo/git_head_changed` ACP extension notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHeadChanged {

@@ -32,7 +32,7 @@ pub(crate) struct NotificationBridgeConfig {
     /// Persistence handle for FIFO ordinary writes and durable tombstone barriers.
     pub persistence: PersistenceHandle,
     /// When true, send incremental `output_delta` instead of full `output` in bash streaming updates.
-    /// The client must opt in via the `x.ai/incrementalBashOutput` capability.
+    /// The client must opt in via the `fuigo/incrementalBashOutput` capability.
     pub incremental_bash_output: bool,
     /// Plan mode tracker shared with the session actor.
     /// Used to transition state on `PlanModeEntered` / `PlanModeExited` tool notifications.
@@ -95,8 +95,8 @@ fn stamp_scheduler_meta(
 ) {
     stamp_event_id(config, meta);
     let meta = meta.get_or_insert_with(acp::Meta::new);
-    meta.insert("x.ai/schedulerGeneration".to_owned(), generation.into());
-    meta.insert("x.ai/schedulerRevision".to_owned(), revision.into());
+    meta.insert("fuigo/schedulerGeneration".to_owned(), generation.into());
+    meta.insert("fuigo/schedulerRevision".to_owned(), revision.into());
 }
 fn durable_append_landed(result: Result<(), DurableAppendError>) -> Result<(), String> {
     match result {
@@ -154,7 +154,7 @@ async fn handle_scheduled_task_removed(
             config
                 .gateway
                 .forward_fire_and_forget(acp::ExtNotification::new(
-                    "x.ai/scheduled_task_deleted",
+                    "fuigo/scheduled_task_deleted",
                     params.into(),
                 ));
             Ok(())
@@ -324,7 +324,7 @@ async fn handle_notification(
                 .ok();
             if let Some(params) = params {
                 let ext_notification =
-                    acp::ExtNotification::new("x.ai/task_backgrounded", params.into());
+                    acp::ExtNotification::new("fuigo/task_backgrounded", params.into());
                 config.gateway.forward_fire_and_forget(ext_notification);
             }
         }
@@ -684,7 +684,7 @@ async fn handle_notification(
                     config
                         .gateway
                         .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/scheduled_task_inject_prompt",
+                            "fuigo/scheduled_task_inject_prompt",
                             params.into(),
                         ));
                 }
@@ -708,7 +708,7 @@ async fn handle_notification(
                 config
                     .gateway
                     .forward_fire_and_forget(acp::ExtNotification::new(
-                        "x.ai/scheduled_task_fired",
+                        "fuigo/scheduled_task_fired",
                         params.into(),
                     ));
             }
@@ -748,7 +748,7 @@ async fn handle_notification(
                 config
                     .gateway
                     .forward_fire_and_forget(acp::ExtNotification::new(
-                        "x.ai/monitor_event",
+                        "fuigo/monitor_event",
                         params.into(),
                     ));
             }
@@ -802,7 +802,7 @@ async fn handle_notification(
                 config
                     .gateway
                     .forward_fire_and_forget(acp::ExtNotification::new(
-                        "x.ai/scheduled_task_created",
+                        "fuigo/scheduled_task_created",
                         params.into(),
                     ));
             }

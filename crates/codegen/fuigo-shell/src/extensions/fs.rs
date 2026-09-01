@@ -162,11 +162,11 @@ async fn confine_local(
     Err(acp::Error::invalid_params().data(workspace_err.to_string()))
 }
 pub(crate) fn is_fs_method(method: &str) -> bool {
-    method.starts_with("x.ai/fs/")
+    method.starts_with("fuigo/fs/")
 }
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/fs/list" => {
+        "fuigo/fs/list" => {
             let req = parse_params::<FsListRequest>(args)?;
             let path = resolve_path(agent, &req.path, req.session_id.as_ref())?;
             let (path, confine_root) = confine_local(agent, &path, req.session_id.as_ref()).await?;
@@ -174,7 +174,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let result = fs::list(&path, &params, confine_root).await;
             to_ext_response(result)
         }
-        "x.ai/fs/exists" => {
+        "fuigo/fs/exists" => {
             let req = parse_params::<FsExistsRequest>(args)?;
             let path = resolve_path(agent, &req.path, req.session_id.as_ref())?;
             let (path, _) = match confine_local(agent, &path, req.session_id.as_ref()).await {
@@ -184,7 +184,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let result = fs::exists(&path).await;
             to_ext_response(result)
         }
-        "x.ai/fs/read_file" => {
+        "fuigo/fs/read_file" => {
             let req = parse_params::<FsReadFileRequest>(args)?;
             let max_lines = req.max_lines;
             let path_str = req.path.clone();
@@ -224,7 +224,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 Err(e) => to_ext_response(Err::<FsReadFileData, _>(e)),
             }
         }
-        "x.ai/fs/write_file" => {
+        "fuigo/fs/write_file" => {
             let req = parse_params::<FsWriteFileRequest>(args)?;
             let path = resolve_path(agent, &req.path, req.session_id.as_ref())?;
             let (path, _) = confine_local(agent, &path, req.session_id.as_ref()).await?;
@@ -233,7 +233,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .map(|_| Empty {});
             to_ext_response(result)
         }
-        "x.ai/fs/delete_file" => {
+        "fuigo/fs/delete_file" => {
             let req = parse_params::<FsDeleteFileRequest>(args)?;
             let path = resolve_path(agent, &req.path, req.session_id.as_ref())?;
             let (path, _) = confine_local(agent, &path, req.session_id.as_ref()).await?;

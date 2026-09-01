@@ -73,7 +73,7 @@ pub(super) fn immediate_server_send_eligible(agent: &AgentView, leader_mode: boo
 }
 
 /// Push the optimistic shared-queue echo for an immediate server-authoritative send and mirror it into the owning agent.
-/// The queue pane then renders it immediately, before the confirming `x.ai/queue/changed` broadcast.
+/// The queue pane then renders it immediately, before the confirming `fuigo/queue/changed` broadcast.
 pub(super) fn push_server_queue_echo(
     app: &mut AppView,
     agent_id: AgentId,
@@ -99,7 +99,7 @@ pub(super) fn push_server_queue_echo(
 /// That covers a prompt restored on cancel, removed, drained, or otherwise resolved without becoming the running turn.
 ///
 /// The agent's `pending_inputs` is the single source of truth for queue contents and order.
-/// The only client-side queue state is the optimistic echo that bridges the round-trip before the confirming `x.ai/queue/changed` broadcast.
+/// The only client-side queue state is the optimistic echo that bridges the round-trip before the confirming `fuigo/queue/changed` broadcast.
 /// Once a prompt's RPC resolves (or we pull it back on cancel) it will never reappear in a future broadcast, so its echo must be dropped.
 /// Otherwise the reconcile in [`AppView::apply_queue_changed`] keeps re-pinning the stale row onto the end of every subsequent broadcast.
 /// That both resurrects the removed prompt and scrambles the queue order.
@@ -196,7 +196,7 @@ impl QueueDrain {
 /// Only a parked wait counts.
 /// Live watchers (`/loop`, background commands) survive idle thinking turns, and a foreground tool is not a wait.
 /// Treating either as busy would interject a follow-up the user meant to queue.
-/// Goes out as `x.ai/interject`, never send-now (cancel semantics).
+/// Goes out as `fuigo/interject`, never send-now (cancel semantics).
 ///
 /// Releases the **last** queued plain prompt (the one this send just pushed), not the front.
 /// An earlier follow-up queued while thinking must stay queued.
@@ -874,7 +874,7 @@ pub(crate) fn apply_turn_start_shim(
     agent.session.current_prompt_id = Some(prompt_id.clone());
     agent.attached_as_viewer = adopted_from_other_client;
     // A new (adopted) turn is starting: drop the prior turn's chips but keep the seen ring
-    // A buffer-replayed `x.ai/follow_ups` for an older response then stays rejected (no stale revival)
+    // A buffer-replayed `fuigo/follow_ups` for an older response then stays rejected (no stale revival)
     // This is correct for both passive-viewer and self-driven adoption
     // The adopted turn's own follow_ups still re-render via the stamped `promptId` match in `apply_follow_ups` (the current_prompt_id set above)
     // No seen-ring un-recording is therefore needed
@@ -1171,7 +1171,7 @@ pub(super) fn dispatch_run_edited_queued_command(
                 return vec![];
             };
             match server {
-                // Server rows are never mutated client-side; the `x.ai/queue/changed` rebroadcast is the visual result
+                // Server rows are never mutated client-side; the `fuigo/queue/changed` rebroadcast is the visual result
                 Some(server) => effects.push(Effect::QueueRemove {
                     session_id,
                     id: server.id,
@@ -2069,7 +2069,7 @@ mod tests {
         );
     }
 
-    /// Via the shim: after starting a new turn, a buffer-replayed `x.ai/follow_ups` for a prior turn's response stays rejected (no stale revival).
+    /// Via the shim: after starting a new turn, a buffer-replayed `fuigo/follow_ups` for a prior turn's response stays rejected (no stale revival).
     /// Its `promptId` is not the active turn and it is already seen.
     /// Covers the self-driven turn start (`p-self`).
     #[test]
