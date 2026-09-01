@@ -1,0 +1,33 @@
+name: runner-probe
+
+# Throwaway. Answers one question in ~30s instead of after a 2-hour release
+# build: are GitHub's ARM runners actually schedulable for THIS repo?
+#
+# An unavailable runner label does not error -- the job queues forever. That is
+# the worst possible failure mode to discover at the end of a long matrix, so
+# it gets its own cheap probe. Delete this workflow once the answer is known.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-14
+          - macos-13
+          - windows-latest
+          - windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Report
+        shell: bash
+        run: |
+          echo "runner:  ${{ matrix.runner }}"
+          echo "os:      $(uname -s 2>/dev/null || echo windows)"
+          echo "arch:    $(uname -m 2>/dev/null || echo unknown)"
+          echo "cmake:   $(command -v cmake || echo MISSING)"
