@@ -72,7 +72,7 @@ fn manual_install_cmd(channel: &str) -> String {
 fn reinstall_hint(installer: &str, channel: &str) -> String {
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @fuigo-official/fuigo".to_string(),
-        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo fuigo-org-shared/fuigo-build --pattern 'fuigo-*' --output fuigo && chmod +x fuigo".to_string(),
+        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo FerroxLabs/fuigo --pattern 'fuigo-*' --output fuigo && chmod +x fuigo".to_string(),
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd(channel)),
     }
 }
@@ -2352,7 +2352,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
     Ok(())
 }
 
-/// Download and install fuigo from GitHub Releases (fuigo-org-shared/fuigo-build).
+/// Download and install fuigo from GitHub Releases ([`crate::version::GH_RELEASE_REPO`]).
 ///
 /// Uses `gh release download` to fetch the binary matching the current platform.
 /// This works anywhere the `gh` CLI is authenticated, without needing npm or internal network access.

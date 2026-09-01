@@ -11,7 +11,12 @@ use fuigo_shell::util::fuigo_home::fuigo_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
 const NPM_PACKAGE: &str = "@fuigo-official/fuigo";
-pub const GH_RELEASE_REPO: &str = "fuigo-org-shared/fuigo-build";
+/// The repo the gh-release installer pulls from.
+///
+/// Was `fuigo-org-shared/fuigo-build` -- a name the rebrand invented from
+/// upstream's org, owned by nobody. An updater pointed at a non-existent repo
+/// fails in a way that reads like a network problem.
+pub const GH_RELEASE_REPO: &str = "FerroxLabs/fuigo";
 
 /// Update channel base. Empty until Fuigo has its own release CDN — the
 /// upstream host serves xAI's signed binaries, and an updater pointed there

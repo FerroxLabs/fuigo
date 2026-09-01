@@ -402,7 +402,7 @@ async fn fetch_gh_release_passes_repo_flag() {
     let log = g.args_log();
     assert!(log[0].contains("--repo"), "args: {}", log[0]);
     assert!(
-        log[0].contains("fuigo-org-shared/fuigo-build"),
+        log[0].contains("FerroxLabs/fuigo"),
         "args: {}",
         log[0]
     );
