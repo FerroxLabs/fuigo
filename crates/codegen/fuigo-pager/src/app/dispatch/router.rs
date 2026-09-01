@@ -1,7 +1,7 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
-    dispatch_cancel_login, dispatch_login, dispatch_logout, dispatch_submit_auth_code,
-    dispatch_switch_account,
+    dispatch_cancel_login, dispatch_enter_api_key, dispatch_login, dispatch_logout,
+    dispatch_submit_api_key, dispatch_submit_auth_code, dispatch_switch_account,
 };
 use super::billing::dispatch_open_superfuigo_url;
 use super::ctx::{
@@ -1175,6 +1175,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::Login => dispatch_login(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
+        Action::EnterApiKey => dispatch_enter_api_key(app),
+        Action::SubmitApiKey(key) => dispatch_submit_api_key(app, key),
         Action::CopyAuthUrl => {
             dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)
         }

@@ -417,6 +417,13 @@ pub enum AuthMode {
     Loopback,
     /// RFC 8628 device flow: device code and copyable URL, no paste box.
     Device,
+    /// Paste an API key. No browser, no URL, no round trip to an identity
+    /// provider — the key IS the credential.
+    ///
+    /// This is Fuigo's primary path, not a fallback. Upstream's first-run
+    /// screen offered only "Login with grok.com", which is a host Fuigo cannot
+    /// reach and an account nobody here has.
+    ApiKey,
 }
 /// Folder-trust state for the welcome screen.
 ///
@@ -3815,7 +3822,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     }
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
-                if key!('l').matches(key) || key!(Enter).matches(key) {
+                if key!('k').matches(key) || key!(Enter).matches(key) {
+                    return InputOutcome::Action(Action::EnterApiKey);
+                }
+                if key!('l').matches(key) {
                     return InputOutcome::Action(Action::Login);
                 }
             }
@@ -3826,7 +3836,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::Unchanged;
             }
             AuthState::Authenticating {
-                mode: AuthMode::Loopback,
+                mode: mode @ (AuthMode::Loopback | AuthMode::ApiKey),
                 ..
             } => {
                 if key!(Esc).matches(key)
@@ -3841,7 +3851,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if key!(Enter).matches(key) {
                     let trimmed = ctx.auth_code_input.text().trim().to_string();
                     if !trimmed.is_empty() {
-                        return InputOutcome::Action(Action::SubmitAuthCode(trimmed));
+                        return InputOutcome::Action(if matches!(mode, AuthMode::ApiKey) {
+                            Action::SubmitApiKey(trimmed)
+                        } else {
+                            Action::SubmitAuthCode(trimmed)
+                        });
                     }
                     return InputOutcome::Unchanged;
                 }
@@ -3890,7 +3904,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 return InputOutcome::ActionThenForward(Action::NewSession);
             }
             AuthState::Authenticating {
-                mode: AuthMode::Loopback,
+                mode: AuthMode::Loopback | AuthMode::ApiKey,
                 ..
             } => {
                 let _ = ctx.auth_code_input.insert_paste(text);
@@ -3913,7 +3927,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         && mouse.row < rect.y + rect.height
                     {
                         if matches!(ctx.auth_state, AuthState::Pending { .. }) {
-                            return dispatch_pending_menu_action(i);
+                            return dispatch_pending_menu_action(i, ctx.menu_rects.len());
                         }
                         if ctx.is_zdr_blocked {
                             return dispatch_zdr_menu_action(i);
@@ -4153,11 +4167,19 @@ fn handle_menu_nav(
     }
 }
 /// Dispatch an action for a welcome menu item when not yet authenticated.
-/// Menu layout: item 0 is Login, item 1 is Quit.
-fn dispatch_pending_menu_action(index: usize) -> InputOutcome {
+///
+/// Item 0 is "Enter API key" and the LAST item is Quit. A "Login with ..." row
+/// sits between them only when an interactive provider is configured, so the
+/// menu is either 2 or 3 rows. `menu_len` comes from the rects the renderer
+/// actually produced, which keeps this in step with the menu by construction
+/// rather than by two places agreeing on a layout.
+fn dispatch_pending_menu_action(index: usize, menu_len: usize) -> InputOutcome {
+    if index + 1 == menu_len {
+        return InputOutcome::Action(Action::Quit);
+    }
     match index {
-        0 => InputOutcome::Action(Action::Login),
-        1 => InputOutcome::Action(Action::Quit),
+        0 => InputOutcome::Action(Action::EnterApiKey),
+        1 => InputOutcome::Action(Action::Login),
         _ => InputOutcome::Unchanged,
     }
 }

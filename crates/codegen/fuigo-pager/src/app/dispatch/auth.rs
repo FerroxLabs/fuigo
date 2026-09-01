@@ -292,6 +292,51 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     }
 }
 
+/// Open the API-key entry screen.
+///
+/// Unlike [`dispatch_login`] this starts no flow and contacts nothing: it just
+/// puts the welcome screen into a state that draws a masked input box. There is
+/// no provider to poll and no URL to wait for, so no `Effect` is returned and
+/// `handle` stays `None`.
+///
+/// The `request_seq` is still allocated so a late `AuthComplete` or `AuthFailed`
+/// from a previously abandoned interactive login cannot land on this attempt.
+pub(super) fn dispatch_enter_api_key(app: &mut AppView) -> Vec<Effect> {
+    if !matches!(app.active_view, ActiveView::Welcome) {
+        app.auth_return_view = Some(app.active_view);
+        show_welcome(app);
+    }
+    abort_prior_auth(app);
+
+    let request_seq = app.next_auth_request_seq;
+    app.next_auth_request_seq += 1;
+    app.auth_code_input.reset();
+    app.auth_state = AuthState::Authenticating {
+        request_seq,
+        handle: None,
+        auth_url: None,
+        mode: AuthMode::ApiKey,
+    };
+    vec![]
+}
+
+/// User submitted an API key.
+///
+/// An empty submission is ignored rather than sent: `x.ai/setApiKey` treats an
+/// empty key as "clear the stored credential", which is the opposite of what
+/// someone pressing Enter on a blank box wants.
+pub(super) fn dispatch_submit_api_key(app: &mut AppView, key: String) -> Vec<Effect> {
+    let request_seq = match &app.auth_state {
+        AuthState::Authenticating { request_seq, .. } => *request_seq,
+        _ => return vec![],
+    };
+    let key = key.trim().to_owned();
+    if key.is_empty() {
+        return vec![];
+    }
+    vec![Effect::SubmitApiKey { request_seq, key }]
+}
+
 /// User submitted a manually-pasted auth token in loopback mode.
 pub(super) fn dispatch_submit_auth_code(app: &mut AppView, code: String) -> Vec<Effect> {
     let request_seq = match &app.auth_state {

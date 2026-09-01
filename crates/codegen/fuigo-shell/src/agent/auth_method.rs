@@ -278,7 +278,19 @@ fn push_interactive_login(
         let issuer = enterprise_oidc_issuer
             .expect("enterprise_oidc_issuer is required when has_enterprise_oidc is true");
         methods.push(oidc_auth_method(issuer, login_label));
-    } else {
+    } else if has_auth_provider_command {
+        // Only when the operator actually configured an auth provider command.
+        //
+        // Upstream pushed this UNCONDITIONALLY, and that is the whole reason a
+        // fresh Fuigo tried to log in to xAI at boot. With no key on disk the
+        // advertised list was `[grok.com]`, the pager read `methods.first()`,
+        // saw a method needing interactive login, and dispatched Action::Login
+        // before drawing a frame -- straight at a host Fuigo does not use and
+        // an account the user does not have.
+        //
+        // With no provider configured the list is now empty, which the pager
+        // already handles: it shows the welcome menu, where "Enter API key" is
+        // the first row.
         methods.push(fuigo_com_auth_method(login_label, has_auth_provider_command));
     }
 }

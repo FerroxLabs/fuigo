@@ -1255,12 +1255,15 @@ pub(crate) async fn run(
     // Effects stashed until after the initial render, so the user sees the welcome/auth UI right away
     let mut post_render_effects = if needs_interactive_login {
         if connection.auth_methods.is_empty() {
-            // preferred_method pin unavailable: no advertised method to start
-            app.auth_state = super::app_view::AuthState::Pending {
-                error: Some(
-                    fuigo_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string(),
-                ),
-            };
+            // No advertised method. Upstream reached here only when a
+            // `preferred_method` pin could not be satisfied, so it showed that
+            // pin's error. For Fuigo this is now the ordinary FIRST RUN: no key
+            // yet, and no interactive provider configured, because we no longer
+            // advertise a vendor login nobody can use.
+            //
+            // `error: None` keeps it out of the error colour. The welcome menu
+            // explains itself, and "Enter API key" is its first row.
+            app.auth_state = super::app_view::AuthState::Pending { error: None };
             vec![]
         } else {
             dispatch::dispatch(Action::Login, &mut app)
