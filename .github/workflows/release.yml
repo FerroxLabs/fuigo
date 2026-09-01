@@ -79,11 +79,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # aws-lc-rs builds C. Present on the GitHub images already, but pinned
-      # here so a future image change fails loudly instead of mysteriously.
-      - name: Install cmake (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake
+      # aws-lc-rs builds C, so cmake must exist. Probed 2026-09-01: present on
+      # every runner in this matrix (/usr/local/bin on Ubuntu, /opt/homebrew
+      # on macOS, C:\Program Files\CMake on Windows).
+      #
+      # This asserts rather than installs. `apt-get update` is a live network
+      # fetch from a mirror and a routine source of CI flakes, and installing
+      # would only add /usr/bin/cmake behind the image's newer /usr/local/bin
+      # copy on PATH -- a slower build with the same outcome. If a future image
+      # drops cmake, this fails in seconds with a legible message instead of
+      # 40 minutes later inside aws-lc-sys's build script.
+      - name: Assert cmake
+        shell: bash
+        run: |
+          command -v cmake || {
+            echo "::error::cmake missing on ${{ matrix.runner }} -- the image changed; add an install step"; exit 1; }
+          cmake --version | head -1
 
       - uses: Swatinem/rust-cache@v2
         with:
