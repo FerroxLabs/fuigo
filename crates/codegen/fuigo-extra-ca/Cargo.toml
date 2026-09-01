@@ -12,6 +12,8 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots", "rustls-tls
 # ensure_default_crypto_provider needs aws-lc-rs; unification would mask its absence.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-native-certs = { workspace = true }
+# spawn_blocking, for the egress guard's delegate resolution.
+tokio = { workspace = true }
 tracing = { workspace = true }
 webpki-roots = { workspace = true }
 
@@ -21,6 +23,7 @@ rcgen = { workspace = true }
 # ring, so the preinstalled-provider test can install a non-aws-lc-rs default.
 rustls = { workspace = true, features = ["ring"] }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

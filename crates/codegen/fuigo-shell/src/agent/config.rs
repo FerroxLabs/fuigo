@@ -45,7 +45,16 @@ pub const DEFAULT_AGENT_TYPE: &str = "fuigo-build-plan";
 pub(crate) fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
-pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://cli-chat-proxy.grok.com/v1";
+/// Auxiliary-service host. EMPTY by design.
+///
+/// Upstream this was `https://cli-chat-proxy.grok.com/v1` and it carried far
+/// more than its name suggests: the boot `/settings` prefetch (which is where
+/// announcements, promo campaigns and subscription tier arrive), `/models`,
+/// feedback, trace upload, `/deployment/config` and the internal OTLP firehose.
+/// Leaving it set meant a fresh Fuigo install contacted xAI before it drew its
+/// first frame. Fuigo runs none of those services, so the default is empty and
+/// `has_proxy()` gates every call site.
+pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "";
 /// Fuigo's default inference host. FluxRouter is OpenAI-compatible and fronts
 /// Claude, GPT-5, Gemini, DeepSeek and the rest behind one key, so this single
 /// default is all a new install needs. Override with `FUIGO_API_BASE_URL` or a
@@ -285,17 +294,33 @@ impl EndpointsConfig {
         resolved.external_otel_master_switch = external_otel_master_switch;
         resolved
     }
-    /// The cli-chat-proxy base URL through which all auxiliary services (and OAuth/session inference) resolve.
-    /// Explicit `cli_chat_proxy_base_url`, else the public default.
-    /// NEVER falls back to `fuigo_api_base_url`: that is the inference endpoint (API-key auth) only.
+    /// Base URL for the auxiliary first-party services: feedback, trace upload,
+    /// managed deployment config and the internal OTLP firehose.
+    ///
+    /// Upstream this defaulted to xAI's cli-chat-proxy and was never allowed to
+    /// fall back to the inference host. Fuigo has no such services, so the
+    /// default is EMPTY and every auxiliary call is inert until an operator
+    /// points `endpoints.cli_chat_proxy_base_url` at something they run. An
+    /// empty base is the off switch, not a broken config.
     pub fn proxy_url(&self) -> String {
         blank_as_unset(&self.cli_chat_proxy_base_url)
             .unwrap_or_else(|| CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_owned())
     }
+    /// Whether the auxiliary-service host is configured at all.
+    /// Callers must check this before firing: with no proxy the correct
+    /// behaviour is to skip the call, not to request a relative URL.
+    pub fn has_proxy(&self) -> bool {
+        !self.proxy_url().is_empty()
+    }
+    /// Where inference goes.
+    ///
+    /// Upstream split this: OAuth sessions inferred through the proxy, API-key
+    /// sessions through `api.x.ai`. Fuigo has ONE gateway and one auth mode, so
+    /// this falls back to `fuigo_api_base_url` (FluxRouter) rather than to the
+    /// proxy. Without this, a default install with no `[model.*]` override sends
+    /// every prompt to the upstream proxy host.
     pub(crate) fn resolve_inference_base_url(&self) -> String {
-        self.models_base_url
-            .clone()
-            .unwrap_or_else(|| self.proxy_url())
+        blank_as_unset(&self.models_base_url).unwrap_or_else(|| self.fuigo_api_base_url.clone())
     }
     /// Feedback endpoint, an auxiliary service, so it defaults to the cli-chat-proxy, never `fuigo_api_base_url`.
     pub(crate) fn resolve_feedback_base_url(&self) -> String {

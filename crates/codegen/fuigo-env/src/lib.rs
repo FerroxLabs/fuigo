@@ -18,12 +18,23 @@ pub struct FuigoBuildEndpoints {
     pub gateway_ws_url: &'static str,
     pub ws_origin: &'static str,
 }
+/// Compiled endpoint defaults. All EMPTY.
+///
+/// Upstream these named xAI's first-party estate — the chat proxy, the asset
+/// CDN, and the two websocket planes (`wss://code.grok.com/ws/code-agent` for
+/// the relay, `wss://grok.com/ws/gw/` for the gateway). Fuigo operates none of
+/// them, and a default-on websocket to a host we do not control is the worst
+/// kind of leftover: it never appears in an HTTP client audit.
+///
+/// Empty means the corresponding feature is off until an operator sets the
+/// matching `FUIGO_*` override. Do not repoint these at FluxRouter: it is an
+/// inference gateway, not a relay or an asset host.
 const PRODUCTION_ENDPOINTS: FuigoBuildEndpoints = FuigoBuildEndpoints {
-    cli_chat_proxy_base_url: "https://cli-chat-proxy.grok.com/v1",
-    asset_server_url: "https://assets.grok.com",
-    relay_ws_url: "wss://code.grok.com/ws/code-agent",
-    gateway_ws_url: "wss://grok.com/ws/gw/",
-    ws_origin: "https://grok.com",
+    cli_chat_proxy_base_url: "",
+    asset_server_url: "",
+    relay_ws_url: "",
+    gateway_ws_url: "",
+    ws_origin: "",
 };
 pub const PROD_CLI_CHAT_PROXY_BASE_URL: &str = PRODUCTION_ENDPOINTS.cli_chat_proxy_base_url;
 pub const PROD_ASSET_SERVER_URL: &str = PRODUCTION_ENDPOINTS.asset_server_url;

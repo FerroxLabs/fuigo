@@ -11,6 +11,8 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 
+pub mod egress;
+
 pub const MAX_EXTRA_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 
 pub const ENV_FUIGO_EXTRA_CA_BUNDLE: &str = "FUIGO_EXTRA_CA_BUNDLE";
@@ -48,10 +50,13 @@ pub fn build_reqwest_client(
     configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
 ) -> reqwest::Result<reqwest::Client> {
     ensure_default_crypto_provider();
+    // The egress guard is installed AFTER `configure` so a caller cannot
+    // replace it with its own resolver by accident.
     let mut builder = configure(reqwest::Client::builder())
         .use_rustls_tls()
         .tls_built_in_native_certs(false)
-        .tls_built_in_webpki_certs(true);
+        .tls_built_in_webpki_certs(true)
+        .dns_resolver(egress::resolver());
     for cert in shared_reqwest_roots() {
         builder = builder.add_root_certificate(cert);
     }
@@ -67,7 +72,8 @@ pub fn build_blocking_reqwest_client(
     let mut builder = configure(reqwest::blocking::Client::builder())
         .use_rustls_tls()
         .tls_built_in_native_certs(false)
-        .tls_built_in_webpki_certs(true);
+        .tls_built_in_webpki_certs(true)
+        .dns_resolver(egress::resolver());
     for cert in shared_reqwest_roots() {
         builder = builder.add_root_certificate(cert);
     }

@@ -1,0 +1,69 @@
+Fuigo
+Copyright 2026 Ferrox Labs
+
+This product includes software developed by SpaceXAI
+(Copyright 2023-2026 SpaceXAI), licensed under the Apache License,
+Version 2.0. See the LICENSE file for the full licence text.
+
+--------------------------------------------------------------------------
+NOTICE OF MODIFICATION  (Apache License 2.0, section 4(b))
+--------------------------------------------------------------------------
+
+Fuigo is a modified derivative work of Grok Build, xAI's command-line
+coding agent.
+
+    Upstream:       https://github.com/xai-org/grok-build
+    Upstream HEAD:  bb7f39d5858cbf5e00de639367f59debbdcb0138
+    Synced from:    d761e8ba538084df023de79d26892eaf73ed7411
+    Upstream date:  2026-08-31
+    Forked:         2026-09-01
+    Fork version:   Fuigo 1.0.1 (upstream was 1.0.13)
+
+Every file in this distribution that derives from Grok Build has been
+modified. The modifications are extensive and mechanical rather than
+localised, so rather than annotate ~2,960 individual files, this notice
+states the change set as a whole:
+
+  1. RENAMING. All product, company, crate, module, type, environment
+     variable and filesystem identifiers bearing the "Grok", "xAI" or
+     "SpaceXAI" marks were renamed to "Fuigo" / "Ferrox Labs". The
+     transform that performed this is published in this repository's
+     history under tools/rebrand/ and is reproducible from the upstream
+     revision named above.
+
+  2. INFERENCE BACKEND. The default inference, model-catalogue and
+     authentication endpoints were repointed from xAI's services
+     (api.x.ai, cli-chat-proxy.grok.com, auth.x.ai) to FluxRouter
+     (api.fluxrouter.ai). The shipped default model list was replaced.
+
+  3. REMOVED SERVICES. First-party telemetry, announcements, promotional
+     campaigns, subscription gating, update distribution and changelog
+     fetching were removed or made inert, as they address xAI services
+     that Fuigo has no relationship with.
+
+  4. DEFECT FIXES. Four build defects present in the upstream public
+     snapshot were repaired so the test suite compiles.
+
+--------------------------------------------------------------------------
+TRADEMARKS
+--------------------------------------------------------------------------
+
+The Apache License grants rights to the code, not to the marks. Section 6
+expressly withholds trademark rights. "Grok", "xAI", "SpaceXAI" and the
+associated logos are trademarks of their owner and are NOT licensed to,
+claimed by, or used by Fuigo as an indication of origin. They are referred
+to here solely to identify the upstream work as this licence requires.
+
+Fuigo is not affiliated with, endorsed by, or sponsored by xAI or SpaceXAI.
+
+Where upstream model identifiers (for example "grok-4.6") survive in this
+source tree, they are wire protocol values naming a third party's service,
+not branding. They are listed in tools/rebrand/allowlist.toml.
+
+--------------------------------------------------------------------------
+THIRD-PARTY DEPENDENCIES
+--------------------------------------------------------------------------
+
+See THIRD-PARTY-NOTICES for the licences of bundled dependencies, and
+third_party/NOTICE for vendored sources. Both ship unmodified from
+upstream.
