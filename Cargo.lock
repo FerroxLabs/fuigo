@@ -5222,7 +5222,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-tools"
-version = "0.1.220-alpha.4"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5312,7 +5312,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-tools-api"
-version = "0.1.220-alpha.4"
+version = "1.0.1"
 dependencies = [
  "fuigo-proto-build",
  "fuigo-tool-protocol",
@@ -5369,7 +5369,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-update"
-version = "0.1.220-alpha.4"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "dunce",
@@ -5444,7 +5444,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-workspace"
-version = "0.1.220-alpha.4"
+version = "1.0.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

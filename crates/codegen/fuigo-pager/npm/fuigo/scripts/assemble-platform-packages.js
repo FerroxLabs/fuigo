@@ -35,6 +35,25 @@ const META_PKG_JSON = path.resolve(__dirname, '..', 'package.json');
 const meta = JSON.parse(fs.readFileSync(META_PKG_JSON, 'utf8'));
 const VERSION = meta.version;
 
+// Refuse to assemble a version that disagrees with the binary being packed.
+//
+// npm publishes the META package's number, but `fuigo --version` prints
+// `fuigo_version::VERSION`. These were allowed to drift once already -- the
+// meta package said 0.1.220-alpha.4 (copied from an unrelated internal crate)
+// while the binary said 1.0.1 -- and nothing caught it, because nothing was
+// comparing them. Failing here is cheap; a published mismatch is not.
+{
+    const { execFileSync } = require('child_process');
+    try {
+        execFileSync(process.execPath,
+            [path.join(__dirname, 'sync-version.js'), '--check'],
+            { stdio: 'inherit' });
+    } catch {
+        console.error('[assemble] refusing to build: npm versions disagree with the Rust version.');
+        process.exit(1);
+    }
+}
+
 function ensureDir(p) { fs.mkdirSync(path.dirname(p), { recursive: true }); }
 
 async function packPlatform({ platform, arch, envVar, defaultSource, binName }) {

@@ -1,6 +1,6 @@
 {
     "name": "@fuigo-official/fuigo-win32-x64",
-    "version": "0.2.0-dev",
+    "version": "1.0.1",
     "description": "win32-x64 binary for @fuigo-official/fuigo. Do not install directly; install @fuigo-official/fuigo instead.",
     "license": "Apache-2.0",
     "files": [
