@@ -254,7 +254,7 @@ pub(crate) fn turn_sentinel(n: u8) -> String {
 /// Seeded server name; it only renders once the MCP list fetch resolves.
 pub(crate) const MCP_TEST_SERVER: &str = "ptytestmcp";
 
-/// Budget for session creation plus the `x.ai/mcp/list` round-trip.
+/// Budget for session creation plus the `fuigo/mcp/list` round-trip.
 pub(crate) const MCP_MENU_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configured servers list with a status badge even when never connected.

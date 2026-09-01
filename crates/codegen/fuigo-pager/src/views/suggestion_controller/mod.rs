@@ -3,7 +3,7 @@
 //! Ghost text is rendered as dimmed italic text after the cursor.
 //! Progressive matching trims the ghost when the user types a character that matches the ghost's prefix, avoiding unnecessary network requests.
 //!
-//! On a text change (after debounce), the controller sends an `x.ai/suggest` request through the Effect pipeline.
+//! On a text change (after debounce), the controller sends an `fuigo/suggest` request through the Effect pipeline.
 //! Stale responses are discarded via generation tracking.
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,14 +39,14 @@ pub(crate) struct GhostTextState {
     pub(crate) generation: u64,
 }
 
-/// Parsed ghost suggestion from an ACP `x.ai/suggest` response.
+/// Parsed ghost suggestion from an ACP `fuigo/suggest` response.
 #[derive(Debug, Clone)]
 pub struct GhostSuggestionParsed {
     pub suffix: String,
     pub source: SuggestionSource,
 }
 
-/// A single completion item from an ACP `x.ai/suggest` response.
+/// A single completion item from an ACP `fuigo/suggest` response.
 // `Default` (empty item) exists for downstream test fixtures
 // With `..Default::default()`, out-of-crate literals (e.g. fuigo-pager-minimal's) keep compiling when optional fields are added.
 #[derive(Debug, Clone, Default)]
@@ -75,7 +75,7 @@ impl CompletionItemParsed {
     }
 }
 
-/// Parsed response from an ACP `x.ai/suggest` request.
+/// Parsed response from an ACP `fuigo/suggest` request.
 #[derive(Debug, Clone)]
 pub struct SuggestResponseParsed {
     pub ghost: Option<GhostSuggestionParsed>,
@@ -84,7 +84,7 @@ pub struct SuggestResponseParsed {
 }
 
 impl SuggestResponseParsed {
-    /// Parse a raw JSON value from an ACP `x.ai/suggest` response.
+    /// Parse a raw JSON value from an ACP `fuigo/suggest` response.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
         let result = value.get("result").unwrap_or(value);
         let generation = result.get("generation")?.as_u64()?;
@@ -181,7 +181,7 @@ pub enum SuggestionAction {
     Debounce { generation: u64 },
 }
 
-/// Wire `limit` for `x.ai/suggest` fetches.
+/// Wire `limit` for `fuigo/suggest` fetches.
 /// Matches the shell file provider's ranked-result cap (`MAX_RESULTS` in the shell crate's `file_provider.rs`), which ranks BEFORE capping.
 /// The dropdown renders 6 rows and scrolls the rest.
 /// Both fetch sites (Tab and the as-you-type debounce) must send the same value or their candidate sets diverge.
@@ -295,7 +295,7 @@ pub struct SuggestionController {
     /// Whether AI-powered suggestions are enabled.
     /// Resolved at construction from `FUIGO_SUGGESTIONS_AI` env var.
     pub ai_enabled: bool,
-    /// Model to use for AI suggestions. Sent in the `x.ai/suggest` request.
+    /// Model to use for AI suggestions. Sent in the `fuigo/suggest` request.
     /// Resolved at construction from `FUIGO_SUGGESTIONS_AI_MODEL` env var.
     pub ai_model: Option<String>,
 }
@@ -669,7 +669,7 @@ impl SuggestionController {
         generation == self.generation
     }
 
-    /// Called when an ACP `x.ai/suggest` response arrives, with the text and cursor the request was built from.
+    /// Called when an ACP `fuigo/suggest` response arrives, with the text and cursor the request was built from.
     /// Those are the anchor item `replace_range` offsets index into and the position Tab targets.
     /// Takes ownership to avoid copying strings. Discards stale responses.
     pub fn on_suggestions_loaded(

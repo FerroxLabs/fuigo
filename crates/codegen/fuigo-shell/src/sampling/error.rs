@@ -22,19 +22,26 @@ pub const RATE_LIMITED_ERROR_CODE: i32 = -32003;
 pub const RATE_LIMITED_USER_MESSAGE_OAUTH: &str =
     "You\u{2019}ve hit the rate limit for your plan. Upgrade your account or try again later.";
 
-/// API key / team rate-limit copy.
-/// Personal grok.com upgrades do not raise API team limits; admins purchase credits or a higher spend-based tier.
-/// See https://docs.x.ai/developers/rate-limits#rate-limit-tiers
-pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit your team\u{2019}s API rate limit. Ask a team admin to purchase more credits for higher limits, or try again later. See https://docs.x.ai/developers/rate-limits#rate-limit-tiers";
+/// API key rate-limit copy.
+///
+/// Previously described xAI's team-credit model and linked docs.x.ai. Fuigo
+/// keys are FluxRouter or direct-provider keys, whose limits are set by
+/// whoever issued them, so the copy no longer asserts a billing model it
+/// cannot know.
+pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit the rate limit for this API key. Check the limits set by your key\u{2019}s provider, or try again later.";
 
 /// Well-known free-usage exhaustion code CCP returns on HTTP 429.
 /// Matches `prod_util_well_known_errors::SUBSCRIPTION_FREE_USAGE_EXHAUSTED`.
 /// sampling-types' `parse_error_bytes` prepends the flat `code` to the flattened message, so this reaches clients embedded in error detail.
 pub const FREE_USAGE_EXHAUSTED_ERROR_CODE: &str = "subscription:free-usage-exhausted";
 
-/// User-facing free-usage exhaustion copy (paywall).
-/// Promises no reset duration; the backend config drives the quota window.
-pub const FREE_USAGE_USER_MESSAGE: &str = "You\u{2019}ve reached your free Fuigo usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build";
+/// User-facing free-usage exhaustion copy.
+/// Promises no reset duration; the provider's config drives the quota window.
+///
+/// This was the most incoherent string in the tree: it named Fuigo's usage
+/// limit in one clause and sold SuperGrok in the next, with a referral tag.
+/// Fuigo has no free tier and no subscription to upsell.
+pub const FREE_USAGE_USER_MESSAGE: &str = "You\u{2019}ve reached the usage limit for this key. Add credit with your provider, use a different key, or try again later.";
 
 /// Whether flattened server detail is free-usage-quota exhaustion (paywall), not transient throttling.
 /// Sniffs the well-known code embedded by `parse_error_bytes`.

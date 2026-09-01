@@ -54,7 +54,7 @@ impl DeferredStartupActions {
         std::mem::take(self)
     }
 }
-/// Build `x.ai/session/fork` params shared by TUI effects and headless.
+/// Build `fuigo/session/fork` params shared by TUI effects and headless.
 ///
 /// `new_cwd` is the write namespace for the child (parent session cwd when
 /// cross-cwd); preflight must use the same path via [`effective_fork_new_cwd`].
@@ -125,7 +125,7 @@ pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {
     }
     false
 }
-/// Parse `newSessionId` from an `x.ai/session/fork` ACP response body.
+/// Parse `newSessionId` from an `fuigo/session/fork` ACP response body.
 pub fn fork_response_new_session_id(resp_json: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(resp_json).unwrap_or_default();
     if v.get("error").is_some_and(|e| !e.is_null()) {
@@ -671,7 +671,7 @@ pub enum MaterializedStartup {
         /// The target missed local id and title resolution and was deferred to the worktree resume handler.
         /// Worktree failure messages append the no-match hint only for this outcome (never inferred from shape).
         deferred_local_miss: bool,
-        /// Pre-TUI conversation-only remote restore: the follow-up `LoadSession` must send `x.ai/restore_code: false`.
+        /// Pre-TUI conversation-only remote restore: the follow-up `LoadSession` must send `fuigo/restore_code: false`.
         /// Agent `[cli] restore_code` must not checkout in-place on the new local child.
         suppress_code_restore: bool,
     },

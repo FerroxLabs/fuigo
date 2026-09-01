@@ -16,7 +16,7 @@ pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_b
 /// TUI dispatch, headless dispatch, and the session-load ACP barrier all share this list.
 /// A new method thus cannot be handled in one path and classified `Unrelated` in another.
 pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
-    matches!(method, "x.ai/session_notification" | "x.ai/session/update")
+    matches!(method, "fuigo/session_notification" | "fuigo/session/update")
 }
 
 use fuigo_telemetry::process_info::{
@@ -102,7 +102,7 @@ pub struct AcpConnection {
     pub cancel_rewind_enabled: bool,
     /// Whether the session-recap feature is rolled out for this connection.
     /// The shell resolves it (remote settings, config, env; default OFF) and advertises it in `InitializeResponse.meta.sessionRecap`.
-    /// The client gates its automatic away-recap poll and the manual `/recap` on this so a disabled feature produces zero `x.ai/recap` traffic.
+    /// The client gates its automatic away-recap poll and the manual `/recap` on this so a disabled feature produces zero `fuigo/recap` traffic.
     /// Defaults to `false` when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
     /// Shell-side feedback trace-offer eligibility (see `feedbackTraceOffer`).
@@ -132,7 +132,7 @@ pub struct ConnectFlags {
     pub laziness_debug_log: Option<std::path::PathBuf>,
     /// Storage mode override.
     pub storage_mode: Option<String>,
-    /// Whether this client will draw a status row, advertised as `x.ai/statusLine` so the agent can skip an unpainted payload.
+    /// Whether this client will draw a status row, advertised as `fuigo/statusLine` so the agent can skip an unpainted payload.
     pub status_line: bool,
     /// Client identifier for ACP Initialize metadata.
     pub client_identifier: Option<String>,
@@ -491,10 +491,10 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
     let hunk_mode =
         crate::settings::canonical_hunk_tracker_mode(flags.hunk_tracker_mode.as_deref());
     let mut meta = serde_json::json!({
-        "x.ai/incrementalBashOutput": true,
-        "x.ai/hunkTracker": { "mode": hunk_mode },
-        "x.ai/bashOutputNoColor": true,
-        "x.ai/gitHeadChanged": true,
+        "fuigo/incrementalBashOutput": true,
+        "fuigo/hunkTracker": { "mode": hunk_mode },
+        "fuigo/bashOutputNoColor": true,
+        "fuigo/gitHeadChanged": true,
     });
     meta[fuigo_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
     meta
@@ -840,9 +840,9 @@ mod tests {
 
     #[test]
     fn is_session_update_ext_method_covers_both_carriers() {
-        assert!(is_session_update_ext_method("x.ai/session_notification"));
-        assert!(is_session_update_ext_method("x.ai/session/update"));
-        assert!(!is_session_update_ext_method("x.ai/task_completed"));
+        assert!(is_session_update_ext_method("fuigo/session_notification"));
+        assert!(is_session_update_ext_method("fuigo/session/update"));
+        assert!(!is_session_update_ext_method("fuigo/task_completed"));
         assert!(!is_session_update_ext_method("session/update"));
     }
 
@@ -1139,12 +1139,12 @@ mod tests {
     fn client_capabilities_meta_defaults_absent_or_blank_mode_to_off() {
         // Nothing set and a set-but-blank value both advertise the `off` default (never `""`, which maps to AllDirty)
         let absent = client_capabilities_meta(&ConnectFlags::default());
-        assert_eq!(absent["x.ai/hunkTracker"]["mode"], "off");
+        assert_eq!(absent["fuigo/hunkTracker"]["mode"], "off");
         let blank = client_capabilities_meta(&ConnectFlags {
             hunk_tracker_mode: Some("   ".into()),
             ..Default::default()
         });
-        assert_eq!(blank["x.ai/hunkTracker"]["mode"], "off");
+        assert_eq!(blank["fuigo/hunkTracker"]["mode"], "off");
     }
 
     /// The agent gates the whole payload on this key, so a misspelling on either side switches the feature off with nothing to show for it.
@@ -1168,7 +1168,7 @@ mod tests {
                 hunk_tracker_mode: Some(raw.into()),
                 ..Default::default()
             });
-            assert_eq!(meta["x.ai/hunkTracker"]["mode"], "off", "raw={raw}");
+            assert_eq!(meta["fuigo/hunkTracker"]["mode"], "off", "raw={raw}");
         }
     }
 }

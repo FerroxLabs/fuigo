@@ -653,12 +653,12 @@ async fn test_subagent_notifications_round_trip() {
             lines.len()
         );
     let spawned_json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(spawned_json["method"], "_x.ai/session/update");
+    assert_eq!(spawned_json["method"], "_fuigo/session/update");
     let spawned_update = &spawned_json["params"]["update"];
     assert_eq!(spawned_update["sessionUpdate"], "subagent_spawned");
     assert_eq!(spawned_update["subagent_id"], "child-001");
     let finished_json: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-    assert_eq!(finished_json["method"], "_x.ai/session/update");
+    assert_eq!(finished_json["method"], "_fuigo/session/update");
     let finished_update = &finished_json["params"]["update"];
     assert_eq!(finished_update["sessionUpdate"], "subagent_finished");
     assert_eq!(finished_update["tool_calls"], 5);

@@ -55,7 +55,7 @@ pub enum ConfigUpdate {
     /// That method content-dedupes self-writes (`persist` / `renew_ttl`) before applying.
     /// The variant carries no payload: validation (TTL, version, auth method) requires `ModelsManager` state the reloader doesn't have.
     ModelsCacheChanged,
-    /// Updated UI settings; the agent broadcasts `x.ai/config_changed` to IPC clients.
+    /// Updated UI settings; the agent broadcasts `fuigo/config_changed` to IPC clients.
     Ui {
         theme: Option<String>,
         yolo: bool,

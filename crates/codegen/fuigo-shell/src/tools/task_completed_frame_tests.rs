@@ -199,7 +199,7 @@ fn the_reservation_matches_the_line_the_transport_writes() {
 
     assert_eq!(line.len() - body.len(), WRAPPER_BYTES + METHOD.len());
     // Replay sends its own method through the same budget.
-    assert!("x.ai/session/update".len() <= METHOD.len());
+    assert!("fuigo/session/update".len() <= METHOD.len());
 }
 
 #[test]

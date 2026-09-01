@@ -1,9 +1,9 @@
 //! MCP extension methods and business logic.
 //!
-//! - `x.ai/mcp/list`: list available MCP servers (agent-scoped or session-annotated)
-//! - `x.ai/mcp/call`: invoke an MCP tool directly, outside the LLM loop
-//! - `x.ai/mcp/servers_updated`: the local and plugin catalog after launch-dir discovery or a folder-trust grant (not gateway connectors)
-//! - `x.ai/mcp/server_status`: per-server delta pushed by the `StatusDispatcher`.
+//! - `fuigo/mcp/list`: list available MCP servers (agent-scoped or session-annotated)
+//! - `fuigo/mcp/call`: invoke an MCP tool directly, outside the LLM loop
+//! - `fuigo/mcp/servers_updated`: the local and plugin catalog after launch-dir discovery or a folder-trust grant (not gateway connectors)
+//! - `fuigo/mcp/server_status`: per-server delta pushed by the `StatusDispatcher`.
 //!   The triggers: transport-closed pollers, handshake failures, config diffs, and server-pushed list-changed notifications.
 //!   See [`crate::session::mcp_dispatcher`] for the coalescing and payload-shaping logic.
 //!   Re-exported below so other crates have a single import point.
@@ -21,28 +21,28 @@ use fuigo_mcp::wire;
 
 use super::{ExtResult, parse_params, to_ext_response};
 
-/// Agent-only `x.ai/mcp/*` ACP method/notification names.
+/// Agent-only `fuigo/mcp/*` ACP method/notification names.
 ///
 /// Unlike [`wire::MCP_CALL`] (the cross-SDK contract, which stays in `fuigo_mcp::wire`), these methods are NOT spoken by the SDK.
 /// They are private to the channel between the agent and the client.
 /// They are centralized here only to avoid scattering the same string literal across dispatch and notification send sites.
 pub mod mcp_methods {
     /// Shared prefix that routes every MCP ext method to this module's dispatcher.
-    pub const PREFIX: &str = "x.ai/mcp/";
+    pub const PREFIX: &str = "fuigo/mcp/";
 
-    pub const LIST: &str = "x.ai/mcp/list";
-    pub const READ_RESOURCE: &str = "x.ai/mcp/read_resource";
-    pub const AUTH_STATUS: &str = "x.ai/mcp/auth_status";
-    pub const AUTH_TRIGGER: &str = "x.ai/mcp/auth_trigger";
-    pub const SETUP: &str = "x.ai/mcp/setup";
-    pub const TOGGLE: &str = "x.ai/mcp/toggle";
-    pub const TOGGLE_TOOL: &str = "x.ai/mcp/toggle_tool";
-    pub const UPSERT: &str = "x.ai/mcp/upsert";
-    pub const DELETE: &str = "x.ai/mcp/delete";
+    pub const LIST: &str = "fuigo/mcp/list";
+    pub const READ_RESOURCE: &str = "fuigo/mcp/read_resource";
+    pub const AUTH_STATUS: &str = "fuigo/mcp/auth_status";
+    pub const AUTH_TRIGGER: &str = "fuigo/mcp/auth_trigger";
+    pub const SETUP: &str = "fuigo/mcp/setup";
+    pub const TOGGLE: &str = "fuigo/mcp/toggle";
+    pub const TOGGLE_TOOL: &str = "fuigo/mcp/toggle_tool";
+    pub const UPSERT: &str = "fuigo/mcp/upsert";
+    pub const DELETE: &str = "fuigo/mcp/delete";
 
-    pub const SERVERS_UPDATED: &str = "x.ai/mcp/servers_updated";
-    pub const TOOLS_CHANGED: &str = "x.ai/mcp/tools_changed";
-    pub const INIT_PROGRESS: &str = "x.ai/mcp/init_progress";
+    pub const SERVERS_UPDATED: &str = "fuigo/mcp/servers_updated";
+    pub const TOOLS_CHANGED: &str = "fuigo/mcp/tools_changed";
+    pub const INIT_PROGRESS: &str = "fuigo/mcp/init_progress";
 }
 use crate::agent::MvpAgent;
 use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpState};
@@ -259,8 +259,8 @@ pub struct McpToolsChanged {
     pub tools: Vec<McpToolEntry>,
 }
 
-// Re-export the `x.ai/mcp/server_status` schema and method constant from the dispatcher module
-// External callers then have a single import point alongside the other `x.ai/mcp/*` types
+// Re-export the `fuigo/mcp/server_status` schema and method constant from the dispatcher module
+// External callers then have a single import point alongside the other `fuigo/mcp/*` types
 //
 // The canonical definitions stay in [`crate::session::mcp_dispatcher`]: their primary consumer is the dispatcher loop and its unit tests
 // This import from `session` into `extensions` inverts the typical `extensions` to `session` flow
@@ -313,13 +313,13 @@ pub async fn notify_servers_updated(
     if let Ok(params) = serde_json::value::to_raw_value(&payload) {
         let notification = acp::ExtNotification::new(mcp_methods::SERVERS_UPDATED, params.into());
         let _ = gateway.ext_notification(notification).await;
-        tracing::info!("Sent x.ai/mcp/servers_updated notification to client");
+        tracing::info!("Sent fuigo/mcp/servers_updated notification to client");
     }
 }
 
 // ── Dispatch ────────────────────────────────────────────────────────
 
-/// Inbound `x.ai/mcp/*` methods this agent services, resolved from the wire string.
+/// Inbound `fuigo/mcp/*` methods this agent services, resolved from the wire string.
 ///
 /// Single source of truth for forward-method routing: [`handle`] maps each variant to its handler.
 /// An unknown method yields `None`, which `handle` answers with `method_not_found`.
@@ -1897,7 +1897,7 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 mod tests {
     use super::*;
 
-    /// The emit-only reverse method (`x.ai/mcp/sdk_call`) shares the `x.ai/mcp/` prefix.
+    /// The emit-only reverse method (`fuigo/mcp/sdk_call`) shares the `fuigo/mcp/` prefix.
     /// `mvp_agent`'s dispatcher therefore routes an inbound copy of it to this module's `handle`.
     /// It must NOT collide with any forward route, so it has no `McpRoute`.
     /// `handle` then returns `method_not_found` instead of misrouting a stray inbound reverse call to `handle_call`.
@@ -1910,7 +1910,7 @@ mod tests {
         assert_eq!(
             route_mcp_method(wire::MCP_SDK_CALL),
             None,
-            "inbound x.ai/mcp/sdk_call must not resolve to a forward handler"
+            "inbound fuigo/mcp/sdk_call must not resolve to a forward handler"
         );
         // Sanity: the forward sibling on the same prefix DOES route.
         assert_eq!(route_mcp_method(wire::MCP_CALL), Some(McpRoute::Call));

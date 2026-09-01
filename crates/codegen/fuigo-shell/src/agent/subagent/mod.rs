@@ -1929,7 +1929,7 @@ fn goal_tick_cmd_tx(
 /// The actor's `SubagentProgress` arm never persists these ticks.
 ///
 /// Notifications are **not** persisted to JSONL; they are transient UI hints, not authoritative lifecycle events.
-/// The TUI can resync via `x.ai/subagent/list_running` on reconnect.
+/// The TUI can resync via `fuigo/subagent/list_running` on reconnect.
 #[allow(clippy::too_many_arguments)]
 fn spawn_progress_publisher(
     signals_handle: crate::session::signals::SessionSignalsHandle,
@@ -1996,7 +1996,7 @@ fn spawn_progress_publisher(
             }
             if let Some(params) = params {
                 let ext_notification =
-                    acp::ExtNotification::new("x.ai/session_notification", params.into());
+                    acp::ExtNotification::new("fuigo/session_notification", params.into());
                 gateway.forward_fire_and_forget(ext_notification);
             }
         }

@@ -62,7 +62,7 @@ fn expired_auth_manager(
     (dir, am)
 }
 
-/// `x.ai/session_notification` payloads the client was sent.
+/// `fuigo/session_notification` payloads the client was sent.
 type FuigoUpdates = Arc<parking_lot::Mutex<Vec<serde_json::Value>>>;
 
 fn drain_gateway(

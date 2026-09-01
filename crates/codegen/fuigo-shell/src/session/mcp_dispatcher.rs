@@ -10,7 +10,7 @@
 //! Two events with the same key collapse into the latest one.
 //! An MCP server bursting 100 `tools/list_changed` notifications inside 10 ms produces exactly one ACP push.
 //!
-//! Each surviving entry is emitted as an ACP [`agent_client_protocol::ExtNotification`] with method `x.ai/mcp/server_status`.
+//! Each surviving entry is emitted as an ACP [`agent_client_protocol::ExtNotification`] with method `fuigo/mcp/server_status`.
 //! The payload schema is defined by [`McpServerStatusPayload`].
 //!
 //! ## Contract
@@ -40,7 +40,7 @@ use crate::extensions::mcp::{MANAGED_GATEWAY_ENTRY_PREFIX, McpServerSource};
 pub(crate) const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
 /// Method name for the ACP push.
-pub const SERVER_STATUS_METHOD: &str = "x.ai/mcp/server_status";
+pub const SERVER_STATUS_METHOD: &str = "fuigo/mcp/server_status";
 
 /// JSON payload pushed over ACP. Fields written in camelCase per ACP convention.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -319,7 +319,7 @@ pub(crate) fn build_payload(
 
 /// Per-flush side effects:
 /// - update `shutting_down` for `ConfigRemoved` / `Ready` keys,
-/// - emit one ACP `x.ai/mcp/server_status` push per surviving buffer entry, via the provided gateway.
+/// - emit one ACP `fuigo/mcp/server_status` push per surviving buffer entry, via the provided gateway.
 ///
 /// Failures are logged and dropped; the dispatcher must not block the session actor.
 pub(crate) fn flush_window(
@@ -515,7 +515,7 @@ pub(crate) async fn drop_dead_clients(
 /// 2. `drop_dead_clients`: remove `TransportClosed` entries from [`McpState::owned_clients`] BEFORE pushing status notifications.
 ///    Eviction is gated on client identity (see [`collect_close_candidates`]).
 ///    Stale `TransportClosed` keys are stripped from the window so they push no status, emit no disconnect span, and schedule no restart.
-/// 3. `flush_window`: emit ACP `x.ai/mcp/server_status` per surviving entry.
+/// 3. `flush_window`: emit ACP `fuigo/mcp/server_status` per surviving entry.
 /// 4. `maybe_schedule_restart`: decide per `TransportClosed` / `HandshakeFailed` key whether to spawn an `auto_restart_stdio` task.
 ///    The gate lives in [`crate::session::mcp_restart`].
 ///    Skipped entirely when `restart_actions` is `None` (e.g. `mcp.auto_restart=false`).

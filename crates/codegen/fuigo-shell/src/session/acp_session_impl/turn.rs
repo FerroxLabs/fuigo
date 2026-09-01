@@ -1712,7 +1712,7 @@ impl SessionActor {
     /// The message is tagged `SyntheticReason::SystemReminder` so compaction/fork/pruning skip it.
     /// Deliberately a bare `push_user_message`, not `inject_synthetic_user_message`.
     /// The latter persists a `UserMessageChunk` to `updates.jsonl`, which resume replays; the raw XML would render as a user prompt.
-    /// Clients see monitor events only via the structured `x.ai/monitor_event` channel.
+    /// Clients see monitor events only via the structured `fuigo/monitor_event` channel.
     pub(crate) async fn inject_pending_monitor_events(&self) {
         let Some(buffer) = &self.tool_context.monitor_event_buffer else {
             return;
@@ -3810,7 +3810,7 @@ mod user_echo_broadcast_tests {
         );
     }
     /// Interject-fallback turns are persist-only.
-    /// Every pane already rendered the text from the `x.ai/session/interjection` broadcast, so a live echo would duplicate the block.
+    /// Every pane already rendered the text from the `fuigo/session/interjection` broadcast, so a live echo would duplicate the block.
     #[test]
     fn interject_fallback_turn_is_persist_only() {
         assert_eq!(

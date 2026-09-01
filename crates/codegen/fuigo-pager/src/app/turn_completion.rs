@@ -1,7 +1,7 @@
 //! Finalizing a turn from a terminal turn signal.
 //!
 //! The pager learns a turn reached its terminal outcome from two rails.
-//! One is the fire-and-forget `x.ai/session/prompt_complete` broadcast, kept for one release so leaders that have not yet upgraded still work.
+//! One is the fire-and-forget `fuigo/session/prompt_complete` broadcast, kept for one release so leaders that have not yet upgraded still work.
 //! The other is the durable `FuigoSessionUpdate::TurnCompleted`, which is persisted and replayed.
 //! Both converge on [`finalize_turn_from_terminal`] so the turn-finalize behavior lives in one place.
 //! A viewer that re-attaches mid-turn can then finalize the turn from replay instead of staying stuck on "Waiting…".

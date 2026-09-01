@@ -1607,7 +1607,7 @@ fn rewind_metric_helpers_record_observable_effects() {
 async fn client_ext_sink_receives_emitted_notification() {
     let handle = make_handle();
     assert!(!handle.has_client_ext_sink());
-    handle.emit_client_ext("x.ai/noop".to_string(), serde_json::json!({}));
+    handle.emit_client_ext("fuigo/noop".to_string(), serde_json::json!({}));
     let captured = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let sink_captured = captured.clone();
     handle.set_client_ext_sink(Arc::new(move |method, params| {
@@ -1615,16 +1615,16 @@ async fn client_ext_sink_receives_emitted_notification() {
     }));
     assert!(handle.has_client_ext_sink());
     handle.emit_client_ext(
-        "x.ai/search/fuzzy/status".to_string(),
+        "fuigo/search/fuzzy/status".to_string(),
         serde_json::json!({"a": 1}),
     );
     let got = captured.lock();
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].0, "x.ai/search/fuzzy/status");
+    assert_eq!(got[0].0, "fuigo/search/fuzzy/status");
     assert_eq!(got[0].1, serde_json::json!({"a": 1}));
 }
 /// End-to-end local streaming: open and change a fuzzy search over real files, then run the notification driver.
-/// A correctly-shaped `x.ai/search/fuzzy/status` must be delivered through the sink with the match.
+/// A correctly-shaped `fuigo/search/fuzzy/status` must be delivered through the sink with the match.
 #[tokio::test]
 async fn fuzzy_change_streams_status_through_sink() {
     use crate::file_system::TargetClientId;
@@ -1635,7 +1635,7 @@ async fn fuzzy_change_streams_status_through_sink() {
     let captured = Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
     let sink_captured = captured.clone();
     handle.set_client_ext_sink(Arc::new(move |method, params| {
-        if method == "x.ai/search/fuzzy/status" {
+        if method == "fuigo/search/fuzzy/status" {
             sink_captured.lock().push(params);
         }
     }));

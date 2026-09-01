@@ -253,7 +253,7 @@ impl AgentView {
         ));
     }
 
-    /// Apply an `x.ai/follow_ups` notification, keyed by `response_id` (newest-response-wins).
+    /// Apply an `fuigo/follow_ups` notification, keyed by `response_id` (newest-response-wins).
     ///
     /// Monotonic accept-the-newer: a never-seen `response_id` is strictly newer than any previously accepted one, so it supersedes the shown chips.
     /// A re-delivery of an already-accepted (hence older) response is ignored, so a buffer-replay or duplicate cannot clobber the newest chips.
@@ -273,13 +273,13 @@ impl AgentView {
         self.apply_follow_ups_with_prompt(response_id, None, suggestions)
     }
 
-    /// `apply_follow_ups` with the turn identity (`prompt_id`) the shell stamps on each `x.ai/follow_ups` notification.
+    /// `apply_follow_ups` with the turn identity (`prompt_id`) the shell stamps on each `fuigo/follow_ups` notification.
     /// It is the same `promptId` the shell stamps on every `session/update`.
     /// The identity makes viewer-adoption dedup deterministic:
     ///
     /// - A re-delivery for the adopted turn (`prompt_id` equals `session.current_prompt_id`) re-renders even when turn adoption cleared its chips.
     ///   Chips that were applied and then cleared reappear instead of being lost until reload.
-    /// - A buffer-replayed `x.ai/follow_ups` for a prior turn's `response_id` stays rejected by the seen-ring (its `prompt_id` isn't the active one).
+    /// - A buffer-replayed `fuigo/follow_ups` for a prior turn's `response_id` stays rejected by the seen-ring (its `prompt_id` isn't the active one).
     ///   Stale chips are therefore never revived on the new turn.
     ///
     /// `prompt_id == None` (older shells, or a replay path that lacks it) is treated as "not provably the current turn".
@@ -396,7 +396,7 @@ impl AgentView {
         true
     }
 
-    /// Buffer a stamped `x.ai/follow_ups` for a turn that is not yet current, keyed by its `promptId`.
+    /// Buffer a stamped `fuigo/follow_ups` for a turn that is not yet current, keyed by its `promptId`.
     /// A newer delivery for the same `promptId` overwrites the earlier one (keep the latest).
     /// The FIFO order list bounds the map to [`MAX_PENDING_FOLLOW_UPS`], evicting only the oldest entry.
     fn buffer_pending_follow_ups(
@@ -425,7 +425,7 @@ impl AgentView {
         }
     }
 
-    /// Flush a buffered `x.ai/follow_ups` for `prompt_id` (a turn that has just become current).
+    /// Flush a buffered `fuigo/follow_ups` for `prompt_id` (a turn that has just become current).
     /// Renders the chips through [`apply_follow_ups_with_prompt`].
     /// Now that `current_prompt_id == prompt_id`, the stamped delivery is accepted as the active turn's.
     /// Returns whether chips were rendered; a no-op when nothing is buffered for `prompt_id`.
@@ -464,7 +464,7 @@ impl AgentView {
     }
 
     /// Reload reset that preserves the running turn's follow-ups for `keep_prompt_id` (the turn the load is about to adopt).
-    /// On `SessionLoaded` the running turn's `x.ai/follow_ups` arrive on the ext channel during `loading_replay`.
+    /// On `SessionLoaded` the running turn's `fuigo/follow_ups` arrive on the ext channel during `loading_replay`.
     /// An unconditional reset would drop them before adoption could re-render them, so the chips would never appear unless the server resent them.
     /// The running turn's chips live in one of two places at reset time:
     ///

@@ -1571,7 +1571,7 @@ pub use fuigo_workspace::project_config::find_project_configs;
 /// plus every ancestor project `.fuigo/config.toml` ([`find_project_configs`], extending `paths` and `disabled`),
 /// plus the imported `enabledPlugins` merge.
 ///
-/// Shared by `reload_plugins_impl`, `x.ai/commands/list`, and the agent's eager plugin-registry fan-out.
+/// Shared by `reload_plugins_impl`, `fuigo/commands/list`, and the agent's eager plugin-registry fan-out.
 /// All three must discover the same plugins for a given cwd.
 /// Centralizing it prevents the paths/disabled/discovered-command drift those callers would otherwise accumulate.
 pub(crate) fn resolve_effective_plugins_config(

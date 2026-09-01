@@ -1,7 +1,7 @@
 //! Plan-approval chrome restored by the shell after quit and resume.
 //!
 //! When `exit_plan_mode` is parked and the user quits, the shell persists `awaiting_plan_approval = true` in `plan_mode.json`.
-//! On `--continue` the shell re-issues the `x.ai/exit_plan_mode` reverse-request, a real live ACP waiter.
+//! On `--continue` the shell re-issues the `fuigo/exit_plan_mode` reverse-request, a real live ACP waiter.
 //! The pager then re-shows approval chrome through its normal path with no pager-side disk logic.
 //! Approving then leaves plan mode and starts the implement turn.
 //!

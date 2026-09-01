@@ -103,7 +103,7 @@ Switch between the prompt input and scrollback pane.
 
 Four surfaces block the agent on your answer and take over the keyboard while
 they are open: the **question card** (`ask_user_question`), the **MCP
-elicitation card** (`x.ai/mcp/elicit`), the **permission prompt**, and the
+elicitation card** (`fuigo/mcp/elicit`), the **permission prompt**, and the
 **cancel-turn panel**. When more than one is open the permission prompt has the
 keyboard first, then the cancel-turn panel, then question, then elicitation —
 and the shortcuts bar always shows the keys of whichever one is receiving them.
@@ -128,7 +128,7 @@ They share one contract:
   keyboard is parked, the next `Esc` returns to the dashboard, leaving the card
   pending. (`Ctrl+\` still leaves from any state.)
 
-### MCP elicitation card (`x.ai/mcp/elicit`)
+### MCP elicitation card (`fuigo/mcp/elicit`)
 
 Shown when an MCP server asks for user input (form fields or URL consent).
 The title always includes the MCP server name.

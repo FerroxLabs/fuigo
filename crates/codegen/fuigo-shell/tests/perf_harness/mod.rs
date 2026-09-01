@@ -143,7 +143,7 @@ impl acp::Client for PerfRecorder {
     }
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
-        if args.method.as_ref() != "x.ai/session_notification" {
+        if args.method.as_ref() != "fuigo/session_notification" {
             return Ok(());
         }
         let Ok(params) = serde_json::from_str::<Value>(args.params.get()) else {

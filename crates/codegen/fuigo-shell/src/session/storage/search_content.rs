@@ -141,7 +141,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
             .and_then(|p| p.update);
         let tag = update_peek.as_ref().map(|u| u.session_update);
 
-        // Content events arrive on ACP "session/update"; control events (rewind markers) on the Ferrox Labs "_x.ai/session/update" extension
+        // Content events arrive on ACP "session/update"; control events (rewind markers) on the Ferrox Labs "_fuigo/session/update" extension
         if !is_fuigo {
             match tag {
                 Some(t) if t == *USER_MESSAGE_CHUNK => {

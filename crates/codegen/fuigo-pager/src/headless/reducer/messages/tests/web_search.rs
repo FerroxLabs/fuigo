@@ -38,7 +38,7 @@ fn tool_name_and_kind_prefer_canonical_x_ai_tool_over_acp_fields() {
     )
     .kind(acp::ToolKind::Other)
     .meta(
-        json!({"x.ai/tool": {"name": "x_search", "kind": "search"}})
+        json!({"fuigo/tool": {"name": "x_search", "kind": "search"}})
             .as_object()
             .cloned(),
     );

@@ -25,14 +25,14 @@ pub(crate) type PendingInteractions = Arc<Mutex<HashMap<String, PendingKind>>>;
 pub enum PendingKind {
     /// `request_permission` for a tool action.
     Permission,
-    /// `x.ai/ask_user_question`.
+    /// `fuigo/ask_user_question`.
     Question,
-    /// `x.ai/exit_plan_mode` plan approval.
+    /// `fuigo/exit_plan_mode` plan approval.
     PlanApproval,
     McpElicitation,
 }
 
-/// The resume re-park issues `x.ai/exit_plan_mode` from a detached task with no running turn.
+/// The resume re-park issues `fuigo/exit_plan_mode` from a detached task with no running turn.
 /// That makes it the one parked interaction that also carries a persisted gate (`awaiting_plan_approval`).
 /// `session_has_live_work` consults this to keep the session resident until the decision is answered or a real disconnect `Err`s the reverse-request.
 /// Otherwise an idle-unload drops the parked future and its guard clears the on-disk gate.
@@ -55,7 +55,7 @@ fn broadcast(gateway: &GatewaySender, session_id: &acp::SessionId, update: Fuigo
     };
     if let Ok(params) = serde_json::value::to_raw_value(&notification) {
         gateway.forward_fire_and_forget(acp::ExtNotification::new(
-            "x.ai/session_notification",
+            "fuigo/session_notification",
             params.into(),
         ));
     }

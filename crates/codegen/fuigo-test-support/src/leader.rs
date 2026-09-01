@@ -98,17 +98,17 @@ impl acp::Client for LeaderAcpClient {
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
         match &*args.method {
-            "x.ai/leader_reconnected" => {
+            "fuigo/leader_reconnected" => {
                 self.capture
                     .reconnected_count
                     .fetch_add(1, Ordering::SeqCst);
             }
-            "x.ai/models/update" => {
+            "fuigo/models/update" => {
                 self.capture
                     .models_update_count
                     .fetch_add(1, Ordering::SeqCst);
             }
-            "x.ai/settings/update" => {
+            "fuigo/settings/update" => {
                 self.capture
                     .settings_update_count
                     .fetch_add(1, Ordering::SeqCst);
@@ -819,12 +819,12 @@ impl LeaderStdioClient {
         self.capture.notification_count.load(Ordering::SeqCst)
     }
 
-    /// Count of `x.ai/models/update` notifications received (catalog self-heal).
+    /// Count of `fuigo/models/update` notifications received (catalog self-heal).
     pub fn models_update_count(&self) -> u32 {
         self.capture.models_update_count.load(Ordering::SeqCst)
     }
 
-    /// Count of `x.ai/settings/update` notifications received (settings self-heal).
+    /// Count of `fuigo/settings/update` notifications received (settings self-heal).
     pub fn settings_update_count(&self) -> u32 {
         self.capture.settings_update_count.load(Ordering::SeqCst)
     }

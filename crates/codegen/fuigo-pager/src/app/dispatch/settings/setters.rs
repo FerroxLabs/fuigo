@@ -1623,7 +1623,7 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
     }
     // Mirror the new default into the app-level model state too
     // A later `/new` or `/clear` creates a fresh session by cloning `app.models` (`dispatch_new_session_inner_with_id`)
-    // Without this mirror, that new session (and the welcome card it commits) would show the previous default until the next `x.ai/models/update` roundtrip
+    // Without this mirror, that new session (and the welcome card it commits) would show the previous default until the next `fuigo/models/update` roundtrip
     if app.models.available.contains_key(id) {
         app.models.set_current(id.clone(), None);
     }

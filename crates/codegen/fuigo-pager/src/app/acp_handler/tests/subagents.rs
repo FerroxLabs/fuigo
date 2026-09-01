@@ -294,7 +294,7 @@
             handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     test_subagent_spawned("sess-parent", &child_sid),
                 ),
                 &mut app,
@@ -302,7 +302,7 @@
             handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     test_subagent_finished(&child_sid),
                 ),
                 &mut app,
@@ -334,7 +334,7 @@
         let affected = handle(
             make_ext_session_notification_with_method(
                 "sess-parent",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 test_subagent_spawned("sess-parent", child_sid),
             ),
             &mut app,
@@ -370,7 +370,7 @@
         let affected = handle(
             make_ext_session_notification_with_method(
                 "sess-parent",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 test_subagent_finished(child_sid),
             ),
             &mut app,
@@ -420,7 +420,7 @@
             });
             let raw = serde_json::value::to_raw_value(&payload).unwrap();
             AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
-                request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+                request: acp::ExtNotification::new("fuigo/session_notification", raw.into()),
                 response_tx: tx,
             })
         };
@@ -534,7 +534,7 @@
                 meta: Some(serde_json::json!({ "eventId": event_id })),
             };
             acp::ExtNotification::new(
-                "x.ai/session_notification",
+                "fuigo/session_notification",
                 serde_json::value::to_raw_value(&payload).unwrap().into(),
             )
         };
@@ -1150,7 +1150,7 @@
             let _ = handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     spawned,
                 ),
                 &mut app,
@@ -1208,7 +1208,7 @@
             let _ = handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     test_subagent_finished(child_sid),
                 ),
                 &mut app,
@@ -1268,7 +1268,7 @@
             let _ = handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     spawned,
                 ),
                 &mut app,
@@ -1284,7 +1284,7 @@
             let _ = handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     test_subagent_finished(child_sid),
                 ),
                 &mut app,
@@ -1365,7 +1365,7 @@
                 let _ = handle(
                     make_ext_session_notification_with_method(
                         "sess-parent",
-                        "x.ai/session/update",
+                        "fuigo/session/update",
                         test_subagent_finished(self.child_sid),
                     ),
                     &mut self.app,
@@ -1468,13 +1468,13 @@
 
         fn child_compaction_started_line(child_sid: &str) -> String {
             format!(
-                r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"auto_compact_started","tokens_used":9000,"context_window":10000,"percentage":90,"reason":"threshold"}}}}}}"#
+                r#"{{"method":"_fuigo/session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"auto_compact_started","tokens_used":9000,"context_window":10000,"percentage":90,"reason":"threshold"}}}}}}"#
             )
         }
 
         fn child_compaction_completed_line(child_sid: &str) -> String {
             format!(
-                r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"auto_compact_completed","tokens_after":100,"elapsed_ms":5}}}}}}"#
+                r#"{{"method":"_fuigo/session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"auto_compact_completed","tokens_after":100,"elapsed_ms":5}}}}}}"#
             )
         }
 
@@ -1959,7 +1959,7 @@
             let _ = handle(
                 make_ext_session_notification_with_method(
                     "sess-parent",
-                    "x.ai/session/update",
+                    "fuigo/session/update",
                     spawned,
                 ),
                 &mut app,
@@ -1993,9 +1993,9 @@
     fn both_session_transports_produce_the_same_subagent_row() {
         let child_sid = "child-equiv";
         let (spawn_notif, finish_notif) =
-            run_subagent_lifecycle_via_method("x.ai/session_notification", child_sid);
+            run_subagent_lifecycle_via_method("fuigo/session_notification", child_sid);
         let (spawn_update, finish_update) =
-            run_subagent_lifecycle_via_method("x.ai/session/update", child_sid);
+            run_subagent_lifecycle_via_method("fuigo/session/update", child_sid);
 
         assert_eq!(spawn_notif.description, spawn_update.description);
         assert_eq!(spawn_notif.subagent_type, spawn_update.subagent_type);
@@ -2044,7 +2044,7 @@
         let affected = handle(
             make_ext_session_notification_with_method(
                 "sess-A",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 test_subagent_spawned("sess-A", child_sid),
             ),
             &mut app,
@@ -2076,7 +2076,7 @@
         let affected = handle(
             make_ext_session_notification_with_method(
                 "sess-A",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 test_subagent_finished(child_sid),
             ),
             &mut app,
@@ -2103,7 +2103,7 @@
         let affected = handle(
             make_ext_session_notification_with_method(
                 "sess-unknown",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 test_subagent_spawned("sess-unknown", "child-unknown"),
             ),
             &mut app,
@@ -2128,7 +2128,7 @@
         // Valid JSON but not a SessionNotification: parse must fail quietly.
         let raw =
             serde_json::value::to_raw_value(&serde_json::json!({"unexpected": true})).unwrap();
-        let request = acp::ExtNotification::new("x.ai/session/update", raw.into());
+        let request = acp::ExtNotification::new("fuigo/session/update", raw.into());
         let msg = AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
             request,
             response_tx: tx,
@@ -2138,7 +2138,7 @@
 
         assert!(
             !affected,
-            "malformed x.ai/session/update params must not redraw"
+            "malformed fuigo/session/update params must not redraw"
         );
         assert!(
             app.agents.get(&AgentId(0)).unwrap().scrollback.is_empty(),

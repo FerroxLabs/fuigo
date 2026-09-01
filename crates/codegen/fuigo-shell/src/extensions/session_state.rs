@@ -1,5 +1,5 @@
-//! `x.ai/session/state` reads a session's metadata columns.
-//! `x.ai/session/import` writes them, with the transcript, to recreate a session on another host.
+//! `fuigo/session/state` reads a session's metadata columns.
+//! `fuigo/session/import` writes them, with the transcript, to recreate a session on another host.
 
 use std::path::{Path, PathBuf};
 
@@ -41,8 +41,8 @@ fn validate_session_uuid(session_id: &str) -> Result<(), acp::Error> {
         .map_err(|_| acp::Error::invalid_params().data("sessionId must be a UUID"))
 }
 
-/// `x.ai/session/state`: return metadata columns keyed by logical name.
-/// Errors when the session isn't found on this host; a single record's absence is an error, unlike the empty collection `x.ai/session/updates` returns.
+/// `fuigo/session/state`: return metadata columns keyed by logical name.
+/// Errors when the session isn't found on this host; a single record's absence is an error, unlike the empty collection `fuigo/session/updates` returns.
 pub(crate) async fn handle_state(args: &acp::ExtRequest) -> ExtResult {
     let request: StateRequest = super::parse_params(args)?;
     validate_session_uuid(&request.session_id)?;
@@ -73,7 +73,7 @@ struct ImportRequest {
     updates: Vec<Value>,
 }
 
-/// `x.ai/session/import`: recreate a session on this host from mirrored columns and transcript.
+/// `fuigo/session/import`: recreate a session on this host from mirrored columns and transcript.
 /// A session that already exists locally is left unchanged.
 pub(crate) async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     let mut request: ImportRequest = super::parse_params(args)?;

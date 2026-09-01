@@ -101,7 +101,7 @@ fn spawn_gateway_drain(
                     let _ = args.response_tx.send(Ok(()));
                 }
                 fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
-                    if args.request.method.as_ref() == "x.ai/hooks/event" =>
+                    if args.request.method.as_ref() == "fuigo/hooks/event" =>
                 {
                     let _ = hook_tx.send(());
                 }

@@ -194,10 +194,10 @@ struct ReinitOutcome {
 struct AgentLoadOutcome {
     agent_id: super::agent::AgentId,
     success: bool,
-    /// `x.ai/runningPromptId` from the reload response: the turn another client is driving mid-reconnect.
+    /// `fuigo/runningPromptId` from the reload response: the turn another client is driving mid-reconnect.
     /// Adopted at finalize (mirrors the `SessionLoaded` adoption in `dispatch.rs`).
     running_prompt_id: Option<String>,
-    /// `x.ai/schedulerBackgroundLoops` from the reload response.
+    /// `fuigo/schedulerBackgroundLoops` from the reload response.
     /// A reconnect re-spawns the session actor, which re-pins the fire mode, so the pre-reconnect value can be stale.
     /// Adopt the reloaded one or `/loop` describes a runtime the new actor will not use.
     scheduler_background_loops: Option<bool>,

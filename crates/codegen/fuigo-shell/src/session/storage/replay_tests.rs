@@ -24,7 +24,7 @@ fn acp_envelope(session_update_json: &str) -> String {
 
 fn fuigo_envelope(session_update_json: &str) -> String {
     format!(
-        r#"{{"timestamp":1,"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
+        r#"{{"timestamp":1,"method":"_fuigo/session/update","params":{{"sessionId":"s","update":{session_update_json}}}}}"#
     )
 }
 
@@ -162,7 +162,7 @@ fn prepare_replay_cursor_refused_when_tail_has_event_id_less_line() {
         r#"{"eventId":"ev1"}"#,
     );
     // Ferrox Labs-style line persisted by an older binary: no _meta at all.
-    let old_fuigo = r#"{"timestamp":2,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"}}}"#;
+    let old_fuigo = r#"{"timestamp":2,"method":"_fuigo/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"}}}"#;
     let raw = format!("{a1}\n{old_fuigo}\n");
 
     let prepared = prepare_replay_lines(&raw, Some("ev1"));
@@ -173,7 +173,7 @@ fn prepare_replay_cursor_refused_when_tail_has_event_id_less_line() {
     assert_eq!(prepared.lines.len(), 2, "full history is replayed");
 
     // Same history with the trailing line stamped resolves incrementally.
-    let new_fuigo = r#"{"timestamp":2,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"},"_meta":{"eventId":"ev2"}}}"#;
+    let new_fuigo = r#"{"timestamp":2,"method":"_fuigo/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"hook_annotation","message":"trailing"},"_meta":{"eventId":"ev2"}}}"#;
     let raw = format!("{a1}\n{new_fuigo}\n");
     let prepared = prepare_replay_lines(&raw, Some("ev1"));
     assert!(!prepared.mark_replay);
@@ -611,12 +611,12 @@ fn filter_delta_replay_drops_blank_acu_and_rewinds() {
 fn prepare_replay_reports_spawn_without_finish() {
     let spawn = |id: &str, child: &str| {
         format!(
-            r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{id}","parent_session_id":"s","child_session_id":"{child}","subagent_type":"general-purpose","description":"task"}},"_meta":{{"eventId":"s-1"}}}}}}"#
+            r#"{{"method":"_fuigo/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{id}","parent_session_id":"s","child_session_id":"{child}","subagent_type":"general-purpose","description":"task"}},"_meta":{{"eventId":"s-1"}}}}}}"#
         )
     };
     let finish = |id: &str| {
         format!(
-            r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{id}","child_session_id":"c{id}","status":"completed","tool_calls":0,"turns":0,"duration_ms":0}},"_meta":{{"eventId":"s-2"}}}}}}"#
+            r#"{{"method":"_fuigo/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_finished","subagent_id":"{id}","child_session_id":"c{id}","status":"completed","tool_calls":0,"turns":0,"duration_ms":0}},"_meta":{{"eventId":"s-2"}}}}}}"#
         )
     };
     // `a` spawns and finishes (paired); `b` only spawns (orphan).

@@ -38,7 +38,7 @@ pub(crate) fn visible_held_server_row(
 pub enum QueueRowOrigin {
     /// A client-local `pending_prompts` entry (skill/image/bash/cron/etc., or any idle-drained prompt). Edits mutate the local queue directly.
     Local,
-    /// A server-authoritative `shared_prompt_queues` entry (plain prompt queued while running). Edits route to the agent as `x.ai/queue/*`.
+    /// A server-authoritative `shared_prompt_queues` entry (plain prompt queued while running). Edits route to the agent as `fuigo/queue/*`.
     Server,
 }
 

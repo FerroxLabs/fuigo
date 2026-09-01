@@ -170,7 +170,7 @@ fn internal_reload_request_line(
 ) -> String {
     crate::leader::protocol::internal_request_line(id, method, params)
 }
-/// Start a skills file watcher and wire it to inject `x.ai/internal/reload_skills` messages into the shared ACP incoming stream.
+/// Start a skills file watcher and wire it to inject `fuigo/internal/reload_skills` messages into the shared ACP incoming stream.
 /// The messages fire when SKILL.md files change on disk.
 ///
 /// Returns the watcher task, or `None` if no directories could be watched.
@@ -1271,7 +1271,7 @@ pub async fn run_leader(
                             info!("UI config change detected by watcher");
                             let notification = serde_json::json!({
                                 "jsonrpc": "2.0",
-                                "method": "x.ai/config_changed",
+                                "method": "fuigo/config_changed",
                                 "params": {
                                     "section": "ui",
                                     "changes": {
@@ -1725,7 +1725,7 @@ mod tests {
         assert!(line.ends_with('\n'), "must be a newline-terminated line");
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(
-            msg["method"], "_x.ai/internal/reload_models",
+            msg["method"], "_fuigo/internal/reload_models",
             "wire method must carry the `_` ext prefix or the ACP decoder \
              rejects it with method_not_found"
         );
@@ -1744,7 +1744,7 @@ mod tests {
             serde_json::json!({}),
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(msg["method"], "_x.ai/internal/auth_cleared");
+        assert_eq!(msg["method"], "_fuigo/internal/auth_cleared");
     }
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]

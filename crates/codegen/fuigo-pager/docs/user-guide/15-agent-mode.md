@@ -141,21 +141,21 @@ Each update names its type, so a client can render distinct panels for reasoning
 
 ## Extension methods
 
-Beyond the base ACP protocol, Fuigo defines extension methods under the `x.ai/` prefix for Ferrox Labs-specific functionality. These cover:
+Beyond the base ACP protocol, Fuigo defines extension methods under the `fuigo/` prefix for Ferrox Labs-specific functionality. These cover:
 
 | Category                   | Prefix               | Examples                                         |
 | -------------------------- | -------------------- | ------------------------------------------------ |
-| **Filesystem**             | `x.ai/fs/*`          | `list`, `exists`, `read_file`, `write_file`      |
-| **Git**                    | `x.ai/git/*`         | `status`, `stage`, `commit`, `diffs`, `discard`  |
-| **Git Worktree**           | `x.ai/git/worktree/*`| `create`, `remove`, `apply`, `list`, `gc`        |
-| **Search**                 | `x.ai/search/*`      | `fuzzy/open`, `fuzzy/change`, `content`          |
-| **Terminal**               | `x.ai/terminal/*`    | `create`, `kill`, `output`, `wait_for_exit`      |
-| **Session Management**     | `x.ai/session/*`     | `fork`, `resolve_local_for_worktree_resume`      |
-| **Conversation & History** | `x.ai/*`             | `prompt_history`, `rewind/*`, `compact_conversation` |
-| **Authentication**         | `x.ai/auth/*`        | `get_url`, `submit_code`                         |
-| **Feedback & Telemetry**   | `x.ai/*`             | `feedback`, `telemetry/*`                        |
+| **Filesystem**             | `fuigo/fs/*`          | `list`, `exists`, `read_file`, `write_file`      |
+| **Git**                    | `fuigo/git/*`         | `status`, `stage`, `commit`, `diffs`, `discard`  |
+| **Git Worktree**           | `fuigo/git/worktree/*`| `create`, `remove`, `apply`, `list`, `gc`        |
+| **Search**                 | `fuigo/search/*`      | `fuzzy/open`, `fuzzy/change`, `content`          |
+| **Terminal**               | `fuigo/terminal/*`    | `create`, `kill`, `output`, `wait_for_exit`      |
+| **Session Management**     | `fuigo/session/*`     | `fork`, `resolve_local_for_worktree_resume`      |
+| **Conversation & History** | `fuigo/*`             | `prompt_history`, `rewind/*`, `compact_conversation` |
+| **Authentication**         | `fuigo/auth/*`        | `get_url`, `submit_code`                         |
+| **Feedback & Telemetry**   | `fuigo/*`             | `feedback`, `telemetry/*`                        |
 
-The tables here show representative methods in each category. The `x.ai/*` set is Ferrox Labs-specific and may expand across releases, so treat it as non-exhaustive and discover the available methods from the agent's `initialize` response.
+The tables here show representative methods in each category. The `fuigo/*` set is Ferrox Labs-specific and may expand across releases, so treat it as non-exhaustive and discover the available methods from the agent's `initialize` response.
 
 ### Notifications (agent to client)
 
@@ -163,13 +163,13 @@ The agent sends push notifications to clients for real-time updates:
 
 | Notification               | Description                          |
 | -------------------------- | ------------------------------------ |
-| `x.ai/search/fuzzy/status` | Fuzzy search results update          |
-| `x.ai/git/worktree/status` | Worktree creation progress           |
-| `x.ai/fs_notify`           | Filesystem change notification       |
-| `x.ai/fs/index`            | Full file index update               |
-| `x.ai/fs/index/delta`      | Incremental file index update        |
-| `x.ai/session_notification`| Session-specific updates (diff review, retry state, auto-compact) |
-| `x.ai/session/update`      | Session update (tool calls, content) |
+| `fuigo/search/fuzzy/status` | Fuzzy search results update          |
+| `fuigo/git/worktree/status` | Worktree creation progress           |
+| `fuigo/fs_notify`           | Filesystem change notification       |
+| `fuigo/fs/index`            | Full file index update               |
+| `fuigo/fs/index/delta`      | Incremental file index update        |
+| `fuigo/session_notification`| Session-specific updates (diff review, retry state, auto-compact) |
+| `fuigo/session/update`      | Session update (tool calls, content) |
 
 ---
 

@@ -848,12 +848,12 @@ pub(crate) fn spawn_gateway_loop_counting_prompt_hooks(
                     let params: serde_json::Value =
                         serde_json::from_str(args.request.params.get()).unwrap_or_default();
                     match args.request.method.as_ref() {
-                        "x.ai/hooks/event" => {
+                        "fuigo/hooks/event" => {
                             if params["notificationType"] == "permission_prompt" {
                                 permission_prompt_hooks.fetch_add(1, Ordering::SeqCst);
                             }
                         }
-                        "x.ai/session_notification" => {
+                        "fuigo/session_notification" => {
                             captured.lock().unwrap().push(params["update"].clone());
                         }
                         _ => {}
@@ -917,7 +917,7 @@ pub(crate) fn spawn_capturing_gateway_loop(
                     let _ = args.response_tx.send(Ok(()));
                 }
                 fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                    if args.request.method.as_ref() == "x.ai/session_notification" {
+                    if args.request.method.as_ref() == "fuigo/session_notification" {
                         let params: serde_json::Value =
                             serde_json::from_str(args.request.params.get()).unwrap_or_default();
                         fuigo_captured.lock().unwrap().push(params["update"].clone());

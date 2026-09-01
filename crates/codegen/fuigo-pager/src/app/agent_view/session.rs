@@ -628,7 +628,7 @@ impl AgentView {
         self.cancel_latency = None;
         self.session.start_turn(&mut self.scrollback);
     }
-    /// Adopt the in-flight turn another client is driving, conveyed by the `session/load` response meta (`x.ai/runningPromptId`).
+    /// Adopt the in-flight turn another client is driving, conveyed by the `session/load` response meta (`fuigo/runningPromptId`).
     /// Enters TurnRunning and matches subsequent live deltas.
     /// No user-prompt block is pushed; the turn's prompt and prior chunks arrived via the replay.
     pub(crate) fn adopt_running_prompt(&mut self, prompt_id: String) {
@@ -1264,7 +1264,7 @@ impl AgentView {
         ));
         self.set_restricted_commands(restricted_commands);
     }
-    /// ACP `kind` for `x.ai/session/rename`: which list (Chat or Build) this session opened on.
+    /// ACP `kind` for `fuigo/session/rename`: which list (Chat or Build) this session opened on.
     pub(crate) fn rename_kind(&self) -> fuigo_shell::session::unified_list::SessionKind {
         if self.conversation_entry {
             fuigo_shell::session::unified_list::SessionKind::Chat

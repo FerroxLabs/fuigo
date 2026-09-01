@@ -564,7 +564,7 @@ impl AgentBuilder {
     }
     /// Set the skills config (custom paths, ignore globs) from config.toml.
     /// Without this, only auto-discovered skills (cwd/.fuigo/skills, ~/.fuigo/skills)
-    /// are included — custom paths added via `x.ai/skills/add` would be ignored.
+    /// are included — custom paths added via `fuigo/skills/add` would be ignored.
     pub fn with_skills_config(mut self, config: crate::prompt::skills::SkillsConfig) -> Self {
         self.skills_config = config;
         self

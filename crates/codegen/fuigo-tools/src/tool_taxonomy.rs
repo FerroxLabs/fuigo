@@ -22,9 +22,9 @@ pub mod field {
     pub const PATTERN: &str = "pattern";
 }
 /// The single `_meta` key holding the canonical tool identity as one nested
-/// object (mirroring `x.ai/mcp_tool`). Consumers deserialize it into
+/// object (mirroring `fuigo/mcp_tool`). Consumers deserialize it into
 /// [`CanonicalToolMeta`].
-pub const TOOL_META_KEY: &str = "x.ai/tool";
+pub const TOOL_META_KEY: &str = "fuigo/tool";
 /// Version of the canonical tool `_meta` contract. Bump on any breaking change
 /// to keys or value shapes so consumers can adapt.
 pub const TOOL_META_VERSION: u32 = 1;
@@ -33,7 +33,7 @@ impl ToolKind {
     /// function of the kind, so equivalent tools across toolsets share it
     /// (`read_file` and `Read` → `Read`; `run_terminal_cmd` and `Shell` →
     /// `Run Command`). Display only; the model's tool name is `name` in
-    /// `x.ai/tool`. Exhaustive, so a new `ToolKind` must add a label to compile.
+    /// `fuigo/tool`. Exhaustive, so a new `ToolKind` must add a label to compile.
     pub fn presentation_name(self) -> &'static str {
         match self {
             ToolKind::Read => "Read",
@@ -195,7 +195,7 @@ pub struct ToolIdentity {
 /// as one nested object under [`TOOL_META_KEY`].
 ///
 /// ```json
-/// "x.ai/tool": {
+/// "fuigo/tool": {
 ///   "version": 1,
 ///   "name": "read_file",
 ///   "kind": "read",
@@ -231,7 +231,7 @@ pub struct ToolIdentity {
 ///   `namespace` is a closed enum (no `other` sink), so a new toolset fails
 ///   strict typed deserialization of the whole envelope — intentional, to force
 ///   typed consumers with exhaustive matches to update. Out-of-tree consumers
-///   should read `namespace` loosely (as a string) and, on any `x.ai/tool`
+///   should read `namespace` loosely (as a string) and, on any `fuigo/tool`
 ///   parse failure, treat it as absent and fall back to `raw_input` + the ACP
 ///   `kind`. `version` bumps only on removal or meaning change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -264,7 +264,7 @@ impl CanonicalToolMeta {
         }
     }
     /// Attach under [`TOOL_META_KEY`], preserving existing `_meta` keys
-    /// (`bash_mode`, `backend`, `x.ai/mcp_tool`, …).
+    /// (`bash_mode`, `backend`, `fuigo/mcp_tool`, …).
     pub fn merge_into(&self, existing: Option<serde_json::Value>) -> serde_json::Value {
         debug_assert!(
             matches!(existing, None | Some(serde_json::Value::Object(_))),

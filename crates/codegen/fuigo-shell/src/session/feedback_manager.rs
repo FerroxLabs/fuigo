@@ -494,7 +494,7 @@ impl FeedbackManager {
 
     /// Force-generate a feedback request for local testing, bypassing all heuristics, sampling, cooldown, and enabled checks.
     ///
-    /// Engineers developing clients can call this via the `x.ai/debug/trigger_feedback` ACP extension method.
+    /// Engineers developing clients can call this via the `fuigo/debug/trigger_feedback` ACP extension method.
     /// It exercises the full feedback notification and response flow without needing a real session that meets tier criteria.
     ///
     /// When a `feedback_client` is configured, the request is also recorded via the feedback API, exactly like a real trigger.

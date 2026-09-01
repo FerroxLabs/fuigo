@@ -243,7 +243,7 @@ mod interjection_broadcast_tests {
     use super::*;
 
     /// A mid-turn interjection must be broadcast to every attached client, not just the originator, so all panes viewing the same session render it.
-    /// This locks the wire contract the pager's `handle_interjection` depends on: method `x.ai/session/interjection` carrying `sessionId` and `text`.
+    /// This locks the wire contract the pager's `handle_interjection` depends on: method `fuigo/session/interjection` carrying `sessionId` and `text`.
     #[tokio::test]
     async fn broadcast_interjection_emits_sessionid_and_text() {
         let local = tokio::task::LocalSet::new();
@@ -260,14 +260,14 @@ mod interjection_broadcast_tests {
                 let mut payload = None;
                 while let Ok(msg) = gateway_rx.try_recv() {
                     if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg
-                        && args.request.method.as_ref() == "x.ai/session/interjection"
+                        && args.request.method.as_ref() == "fuigo/session/interjection"
                     {
                         payload =
                             serde_json::from_str::<serde_json::Value>(args.request.params.get())
                                 .ok();
                     }
                 }
-                let payload = payload.expect("an x.ai/session/interjection broadcast");
+                let payload = payload.expect("an fuigo/session/interjection broadcast");
                 assert_eq!(
                     payload.get("sessionId").and_then(|v| v.as_str()),
                     Some("test-actor"),

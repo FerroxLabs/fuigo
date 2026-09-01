@@ -78,7 +78,7 @@ impl MvpAgent {
     /// Dispatches by on-disk method name:
     /// - ACP updates (`"session/update"`) become a typed `SessionNotification` for correct TUI dispatch.
     ///   Direct dispatch preserves Rust types, not method strings.
-    /// - Ferrox Labs updates (`"_x.ai/session/update"`) become an `ExtNotification`.
+    /// - Ferrox Labs updates (`"_fuigo/session/update"`) become an `ExtNotification`.
     ///
     /// When `mark_replay` is true, the notification is tagged with `_meta.isReplay: true` so the client knows it's historical data.
     /// Cursor-based reconnects set this to false for events after the cursor so the client processes them as live updates.
@@ -99,14 +99,14 @@ impl MvpAgent {
                 return None;
             }
         };
-        // updates.jsonl only persists `_x.ai/session/update` and `session/update`.
+        // updates.jsonl only persists `_fuigo/session/update` and `session/update`.
         // Unknown methods fall through to the ACP parse below and are dropped on error.
         let method = env.method.unwrap_or("session/update");
         let Some(raw_params) = env.params else {
             tracing::debug!("replay: skipping JSONL line with no params");
             return None;
         };
-        let is_fuigo = method == "_x.ai/session/update";
+        let is_fuigo = method == "_fuigo/session/update";
 
         if is_fuigo {
             // The fast-path forwards raw params with no `_meta` round-trip, so it can stamp nothing
@@ -120,7 +120,7 @@ impl MvpAgent {
                     return Some(
                         self.gateway
                             .forward_with_completion(acp::ExtNotification::new(
-                                "x.ai/session/update",
+                                "fuigo/session/update",
                                 std::sync::Arc::from(owned),
                             )),
                     );
@@ -139,10 +139,10 @@ impl MvpAgent {
                         m.insert("isReplay".to_string(), serde_json::json!(true));
                     }
                     if let Some(pd) = persist_data {
-                        m.insert("x.ai/persist".to_string(), pd.clone());
+                        m.insert("fuigo/persist".to_string(), pd.clone());
                     }
                     if let Some(tid) = target_client_id {
-                        m.insert("x.ai/leaderClientId".to_string(), tid.clone());
+                        m.insert("fuigo/leaderClientId".to_string(), tid.clone());
                     }
                 }
             }
@@ -152,7 +152,7 @@ impl MvpAgent {
                 return Some(
                     self.gateway
                         .forward_with_completion(acp::ExtNotification::new(
-                            "x.ai/session/update",
+                            "fuigo/session/update",
                             std::sync::Arc::from(raw_val),
                         )),
                 );
@@ -180,7 +180,7 @@ impl MvpAgent {
         // Stamp the leader unicast target regardless of mark_replay
         // The leader then routes both historical and post-cursor live deltas only to the loading client
         if let Some(tid) = target_client_id {
-            stamp_meta_value(&mut notification.meta, "x.ai/leaderClientId", tid);
+            stamp_meta_value(&mut notification.meta, "fuigo/leaderClientId", tid);
         }
         Some(self.gateway.forward_with_completion(notification))
     }

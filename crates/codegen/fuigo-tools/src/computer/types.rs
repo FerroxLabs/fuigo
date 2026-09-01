@@ -284,7 +284,7 @@ impl TaskSnapshot {
 
 /// Result of killing a terminal task.
 ///
-/// Serialized over the wire in the `x.ai/task/kill` ext response
+/// Serialized over the wire in the `fuigo/task/kill` ext response
 /// (`fuigo-shell::extensions::task::KillTaskResponse`) and deserialized
 /// by clients (fuigo-pager), so it derives both serde directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

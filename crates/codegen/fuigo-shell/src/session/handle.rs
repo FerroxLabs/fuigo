@@ -32,7 +32,7 @@ pub(crate) enum SessionLiveState {
 }
 /// `_meta` key carrying [`SessionHandle::scheduler_background_loops`] on the `session/new` and `session/load` responses.
 /// Defined here so the shell that publishes it and the clients that read it share one spelling.
-pub const SCHEDULER_BACKGROUND_LOOPS_META_KEY: &str = "x.ai/schedulerBackgroundLoops";
+pub const SCHEDULER_BACKGROUND_LOOPS_META_KEY: &str = "fuigo/schedulerBackgroundLoops";
 /// Permission event receivers are returned separately from `spawn_session_actor` and should be stored/managed by the caller.
 #[derive(Clone)]
 pub struct SessionHandle {
@@ -109,7 +109,7 @@ pub struct SessionHandle {
     /// Explicit origin client metadata captured when the session was created.
     /// Used for per-session User-Agent rendering and for scoping leader-mode client behaviors like yolo broadcasts.
     pub origin_client: Option<crate::http::OriginClientInfo>,
-    /// Whether the client that created this session advertised `x.ai/codeNavigation.enabled`.
+    /// Whether the client that created this session advertised `fuigo/codeNavigation.enabled`.
     /// Stored per-session for leader mode.
     /// A later `initialize()` from a different client cannot retroactively change code-nav eligibility for already-running sessions.
     pub code_nav_enabled: bool,
@@ -121,11 +121,11 @@ pub struct SessionHandle {
     /// Stored per-session so subagents inherit it at spawn.
     pub non_interactive: bool,
     /// Plan mode tracker, shared with the session actor via Arc.
-    /// Exposed so the `x.ai/toggle_plan_mode` handler can toggle plan mode without going through the session command channel.
+    /// Exposed so the `fuigo/toggle_plan_mode` handler can toggle plan mode without going through the session command channel.
     pub plan_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
     /// Debug flag: when set to `true`, the next turn unconditionally triggers auto-compaction regardless of context window usage.
     /// Consumed (reset to `false`) atomically on use via `compare_exchange`.
-    /// Set via `x.ai/debug/arm_auto_compact`.
+    /// Set via `fuigo/debug/arm_auto_compact`.
     pub force_compact: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub permission_handle: fuigo_workspace::permission::PermissionHandle,
     /// The parent SessionActor's live `Auth401AttributionCallback` (if any).

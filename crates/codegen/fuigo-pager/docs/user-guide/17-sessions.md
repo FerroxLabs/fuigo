@@ -285,7 +285,7 @@ Output is JSON with `sessionId`, `updatedAt`, `session`, and `turns`. A specific
 
 When working with subagents or session forks, Fuigo can create isolated git worktrees per session. Each worktree gets its own copy of the working directory, so file changes in one session do not affect another.
 
-Worktree sessions are managed internally through the `x.ai/git/worktree/*` extension methods. Key operations:
+Worktree sessions are managed internally through the `fuigo/git/worktree/*` extension methods. Key operations:
 
 - **Create**: Create a new worktree for an isolated session
 - **Apply**: Merge worktree changes back into the main working directory

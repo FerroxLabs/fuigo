@@ -490,7 +490,7 @@ pub struct McpSetupServerEntry {
 }
 
 /// Collect MCP configs that declare a `setup` schema from config and plugins.
-/// Used to show setup-required rows and drive `x.ai/mcp/setup`.
+/// Used to show setup-required rows and drive `fuigo/mcp/setup`.
 ///
 /// User/project **TOML** includes `enabled = false` so Space-disabled setup servers stay visible.
 /// (`handle_list` derives `session.enabled` from `disabled_mcp_servers`.)

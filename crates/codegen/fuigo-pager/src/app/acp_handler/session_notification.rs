@@ -183,7 +183,7 @@ fn synthesize_replay_turn_marker(
         })
     })
 }
-/// Handle `x.ai/session_notification` and replay-path `x.ai/session/update`.
+/// Handle `fuigo/session_notification` and replay-path `fuigo/session/update`.
 ///
 /// Routes by `session_id` so events for an inactive agent still mutate that agent's state.
 /// The redraw decision is gated on whether the matched agent is the currently visible one.
@@ -221,7 +221,7 @@ pub(super) fn handle_session_notification_with_origin(
             tracing::debug!(
                 session_id = session_notif.session_id.0.as_ref(),
                 method = notif.method.as_ref(),
-                "load-race: x.ai/session_notification DROPPED — no agent matches session_id"
+                "load-race: fuigo/session_notification DROPPED — no agent matches session_id"
             );
             return false;
         }
@@ -247,7 +247,7 @@ pub(super) fn handle_session_notification_with_origin(
         agent,
         &meta,
         session_notif.session_id.0.as_ref(),
-        "x.ai/session/update",
+        "fuigo/session/update",
     ) {
         return false;
     }
@@ -289,7 +289,7 @@ pub(super) fn handle_session_notification_with_origin(
             session_id = session_notif.session_id.0.as_ref(),
             event_seq = meta.event_seq,
             last_applied = agent.last_applied_fuigo_event_seq,
-            "x.ai/session update DROPPED by dedup highwater (event_seq <= last_applied)"
+            "fuigo/session update DROPPED by dedup highwater (event_seq <= last_applied)"
         );
         return false;
     }

@@ -1321,7 +1321,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
 /// Interactive cancel (`kill_background_tasks = false`, the Ctrl+C path) aborts the running turn.
 /// It removes ONLY the running prompt, the front of `pending_inputs`.
 /// Every queued prompt is PRESERVED; the new front is the user's next queued prompt.
-/// The `Cancel` handler's follow-up `maybe_start_running_task` promotes the new front and rebroadcasts `x.ai/queue/changed`.
+/// The `Cancel` handler's follow-up `maybe_start_running_task` promotes the new front and rebroadcasts `fuigo/queue/changed`.
 /// The cancelling client never pulls a queued prompt back into its input; the server queue is the single source of truth for what runs next.
 ///
 /// Regression for two bugs.

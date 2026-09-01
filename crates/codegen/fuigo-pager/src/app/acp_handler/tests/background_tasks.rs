@@ -1,7 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// Regression (resume sync): the on-disk replay stream re-emits persisted notifications through the generic `x.ai/session/update` envelope.
+    /// Regression (resume sync): the on-disk replay stream re-emits persisted notifications through the generic `fuigo/session/update` envelope.
     /// A background `monitor`/bash task (`TaskBackgrounded`) must restore into `bg_tasks` on a resumed / second terminal.
     /// It must not be dropped by the default match arm.
     /// The idle "watching" status line and the Tasks pane then match the originating terminal.
@@ -22,7 +22,7 @@
             description: None,
         };
         handle(
-            make_ext_session_notification_with_method("sess-1", "x.ai/session/update", update),
+            make_ext_session_notification_with_method("sess-1", "fuigo/session/update", update),
             &mut app,
         );
 
@@ -48,7 +48,7 @@
         handle(
             make_ext_session_notification_with_method(
                 "sess-1",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 FuigoSessionUpdate::ScheduledTaskCreated {
                     task_id: "loop-1".into(),
                     prompt: "check deploy".into(),
@@ -69,7 +69,7 @@
         handle(
             make_ext_session_notification_with_method(
                 "sess-1",
-                "x.ai/session/update",
+                "fuigo/session/update",
                 FuigoSessionUpdate::ScheduledTaskDeleted {
                     task_id: "loop-1".into(),
                     reason: Default::default(),
@@ -171,7 +171,7 @@
             meta: None,
         };
         let raw = serde_json::value::to_raw_value(&notif).unwrap();
-        let notif = acp::ExtNotification::new("x.ai/task_backgrounded", raw.into());
+        let notif = acp::ExtNotification::new("fuigo/task_backgrounded", raw.into());
         assert!(handle_task_backgrounded(&notif, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -223,7 +223,7 @@
             meta: None,
         };
         let raw = serde_json::value::to_raw_value(&notif).unwrap();
-        let notif = acp::ExtNotification::new("x.ai/task_backgrounded", raw.into());
+        let notif = acp::ExtNotification::new("fuigo/task_backgrounded", raw.into());
         assert!(handle_task_backgrounded(&notif, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -664,7 +664,7 @@
             meta: replayed.then(crate::acp::meta::ReplayMetaStamp::replayed),
         };
         let raw = serde_json::value::to_raw_value(&notif).unwrap();
-        acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw))
+        acp::ExtNotification::new("fuigo/task_completed", std::sync::Arc::from(raw))
     }
 
     /// Short bg shells can exit (and `TaskCompleted` arrive) before their `TaskBackgrounded`.
@@ -709,7 +709,7 @@
             meta: None,
         };
         let raw = serde_json::value::to_raw_value(&notif).unwrap();
-        let late = acp::ExtNotification::new("x.ai/task_backgrounded", std::sync::Arc::from(raw));
+        let late = acp::ExtNotification::new("fuigo/task_backgrounded", std::sync::Arc::from(raw));
         assert!(handle_task_backgrounded(&late, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();

@@ -153,7 +153,7 @@ fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effec
 /// Construct the placeholder agent, push discoverability markers, flip the discovery gate, switch to the new agent, and emit the fork effect.
 ///
 /// `worktree == true` reuses the [`Effect::CreateWorktreeSession`] pipeline (with `load_session_id` set to the parent session id).
-/// `worktree == false` emits [`Effect::ForkSession`], which calls `x.ai/session/fork` directly.
+/// `worktree == false` emits [`Effect::ForkSession`], which calls `fuigo/session/fork` directly.
 pub(in crate::app::dispatch) fn dispatch_fork_resolved(
     app: &mut AppView,
     worktree: bool,

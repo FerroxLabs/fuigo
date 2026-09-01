@@ -1,4 +1,4 @@
-//! Keeps `x.ai/task_completed` lines short enough for a client to read.
+//! Keeps `fuigo/task_completed` lines short enough for a client to read.
 //! That holds both when this build sends one and when replay reaches one an earlier build wrote.
 //! Bounding the output field alone does not bound the line: the wrapper and the JSON encoding go on top of it.
 
@@ -12,7 +12,7 @@ use crate::extensions::notification::{SessionNotification, SessionUpdate};
 pub(crate) const FRAME_MAX_BYTES: usize = 32 * 1024;
 
 /// The method the bridge sends; the budget is derived from it.
-pub(crate) const METHOD: &str = "x.ai/task_completed";
+pub(crate) const METHOD: &str = "fuigo/task_completed";
 
 /// The JSON-RPC wrapper, the `_` an extension method carries, and the newline.
 const WRAPPER_BYTES: usize = r#"{"jsonrpc":"2.0","method":"_","params":}"#.len() + 1;
