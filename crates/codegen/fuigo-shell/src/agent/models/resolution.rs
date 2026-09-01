@@ -74,6 +74,27 @@ pub(crate) fn resolve_default_model(
     );
 
     let first_or_fallback = || -> (String, ModelEntry) {
+        // The BAKED default outranks "whatever the catalogue listed first".
+        //
+        // Upstream reached the bundled default only when nothing was visible,
+        // because their remote settings always supplied a `default_model` hint
+        // above this point. FluxRouter's /v1/models has no such field, so with
+        // a key on a fresh install the fetched catalogue replaced the baked
+        // list and the default silently became its first entry -- `flux-fast`,
+        // the cheapest tier, for a coding agent. That is server ordering, not a
+        // product decision.
+        //
+        // Everything above still wins: CLI flag, env, config, remote hint. This
+        // only changes which of the two FALLBACKS applies first, and it falls
+        // through to the old behaviour whenever the baked default is not in the
+        // catalogue.
+        let baked = crate::models::default_model();
+        if let Some((key, entry)) = visible
+            .get_key_value(baked)
+            .or_else(|| visible.iter().find(|(_, m)| m.has_model_id(baked)))
+        {
+            return (key.clone(), entry.clone());
+        }
         if let Some((key, first)) = visible.first() {
             return (key.clone(), first.clone());
         }
