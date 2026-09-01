@@ -4,7 +4,8 @@ pub mod find_protoc;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, iter};
+use std::env;
+use std::fs;
 
 /// Find the protoc well-known types include directory.
 ///
@@ -141,12 +142,33 @@ impl FuigoProtoBuilder {
             );
         }
 
+        // protoc writes the dependency list to a real file, and we read it
+        // back. Upstream passed `--dependency_out=/dev/stdout` and
+        // `--descriptor_set_out=/dev/null` and parsed protoc's stdout, which
+        // is a Unix-only trick: on Windows those paths do not exist and protoc
+        // exits with `/dev/stdout: No such file or directory`, failing the
+        // build of fuigo-tools-api before a single line of Rust is compiled.
+        //
+        // OUT_DIR is the correct home for both files -- cargo owns it, gives
+        // each build script its own, and cleans it up.
+        let out_dir = PathBuf::from(
+            env::var_os("OUT_DIR").context("OUT_DIR not set; not running under cargo?")?,
+        );
+        let dep_path = out_dir.join("protoc-dependency-out.d");
+        let descriptor_path = out_dir.join("protoc-descriptor-out.bin");
+
         // Can only process one input file when using --dependency_out=FILE.
         for proto in protos {
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
             command
-                .arg("--dependency_out=/dev/stdout")
-                .arg("--descriptor_set_out=/dev/null");
+                .arg(format!(
+                    "--dependency_out={}",
+                    dep_path.to_str().context("OUT_DIR not UTF-8")?
+                ))
+                .arg(format!(
+                    "--descriptor_set_out={}",
+                    descriptor_path.to_str().context("OUT_DIR not UTF-8")?
+                ));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -172,22 +194,43 @@ impl FuigoProtoBuilder {
                 return Err(anyhow::anyhow!("protoc command failed"));
             }
 
-            let output =
-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
+            let output = fs::read_to_string(&dep_path)
+                .with_context(|| format!("reading {}", dep_path.display()))?;
 
-            let mut lines = output.lines();
-            let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
-            })?;
-            for line in iter::once(rem).chain(lines) {
+            // Make-style: `<target>: <dep> \<newline> <dep> ...`. We want only
+            // the dependency list, so find where the target ends.
+            //
+            // Do NOT strip a fixed prefix. The target is now a real path, and
+            // on Windows it starts `C:\...` -- the drive-letter colon is not
+            // the separator. The separator is the first colon followed by
+            // whitespace (or end of input), which `C:` never is.
+            let sep = output
+                .char_indices()
+                .find(|&(i, c)| {
+                    c == ':'
+                        && output[i + 1..]
+                            .chars()
+                            .next()
+                            .is_none_or(|next| next.is_whitespace())
+                })
+                .map(|(i, _)| i)
+                .with_context(|| {
+                    format!("protoc dependency output has no target separator: {output:?}")
+                })?;
+
+            for line in output[sep + 1..].lines() {
                 let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
+                let line = line.strip_suffix("\\").unwrap_or(line).trim();
+                if line.is_empty() {
+                    continue;
+                }
                 // Depending on absolute paths like
                 // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
                 // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
+                // Windows protoc emits backslashes, so match either separator.
+                if line.contains("/include/google/protobuf/")
+                    || line.contains("\\include\\google\\protobuf\\")
+                {
                     continue;
                 }
 
