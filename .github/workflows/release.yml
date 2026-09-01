@@ -126,6 +126,72 @@ jobs:
             echo "::error::cmake missing on ${{ matrix.runner }} -- the image changed; add an install step"; exit 1; }
           cmake --version | head -1
 
+      # protoc is a BUILD-TIME dependency and it is on none of the runners.
+      # fuigo-tools-api's build.rs calls fuigo_proto_build, which compiles
+      # proto/fuigo-tools.proto. Without protoc the whole matrix dies ~3
+      # minutes in with "failed to run custom build command for
+      # fuigo-tools-api" -- observed on macos-14 and ubuntu-24.04-arm alike.
+      #
+      # The repo does vendor `bin/protoc`, but that is a dotslash stub: it
+      # needs the `dotslash` launcher (absent here), and its platform table
+      # covers only macos-aarch64, linux-x86_64 and linux-aarch64 -- there is
+      # no Windows entry at all, so installing dotslash would still leave two
+      # targets broken. find_protoc() checks $PROTOC first, so this pins the
+      # same version the stub does (29.3) and points $PROTOC at it directly.
+      #
+      # The three unix digests are lifted from bin/protoc's own dotslash table,
+      # so CI installs byte-for-byte what local dev runs. The win64 digest was
+      # computed from the pinned release asset, which the stub does not cover.
+      - name: Install protoc 29.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=29.3
+          host="$(uname -s)-$(uname -m)"
+          case "$host" in
+            Darwin-arm64)   asset=osx-aarch_64   sha=2b8a3403cd097f95f3ba656e14b76c732b6b26d7f183330b11e36ef2bc028765 ;;
+            Linux-x86_64)   asset=linux-x86_64   sha=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a ;;
+            Linux-aarch64)  asset=linux-aarch_64 sha=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32 ;;
+            # git-bash reports x86_64 even on windows-11-arm, and win64 is the
+            # right asset for both Windows runners regardless: Windows-on-ARM
+            # runs x64 binaries, and protoc only has to run on the host.
+            MINGW*|MSYS*)   asset=win64          sha=57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383 ;;
+            *) echo "::error::no protoc mapping for host $host"; exit 1 ;;
+          esac
+
+          url="https://github.com/protocolbuffers/protobuf/releases/download/v$V/protoc-$V-$asset.zip"
+          echo "host=$host -> $url"
+          curl -fsSL -o protoc.zip "$url"
+
+          # An unverified download that lands on PATH for a release build is a
+          # supply-chain hole; fail rather than trust the CDN.
+          if command -v sha256sum >/dev/null; then
+            echo "$sha  protoc.zip" | sha256sum -c -
+          else
+            echo "$sha  protoc.zip" | shasum -a 256 -c -
+          fi
+
+          mkdir -p "$RUNNER_TEMP/protoc"
+          if command -v unzip >/dev/null; then
+            unzip -q protoc.zip -d "$RUNNER_TEMP/protoc"
+          else
+            # Git-for-Windows does not ship unzip; the image always has PowerShell.
+            powershell -NoProfile -Command \
+              "Expand-Archive -Path protoc.zip -DestinationPath '$RUNNER_TEMP/protoc' -Force"
+          fi
+          rm -f protoc.zip
+
+          case "$host" in
+            MINGW*|MSYS*)
+              # Rust's Command::new cannot use an MSYS path like /d/a/_temp/...
+              echo "PROTOC=$(cygpath -w "$RUNNER_TEMP/protoc/bin/protoc.exe")" >> "$GITHUB_ENV"
+              "$RUNNER_TEMP/protoc/bin/protoc.exe" --version ;;
+            *)
+              chmod +x "$RUNNER_TEMP/protoc/bin/protoc"
+              echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+              "$RUNNER_TEMP/protoc/bin/protoc" --version ;;
+          esac
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
