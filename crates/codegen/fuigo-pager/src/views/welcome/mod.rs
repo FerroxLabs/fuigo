@@ -480,7 +480,7 @@ pub(super) fn render_version_badge(
             spans.push(Span::styled(
                 "Fuigo  ",
                 Style::default()
-                    .fg(theme.text_primary)
+                    .fg(theme.accent_user)
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
@@ -500,7 +500,7 @@ pub(super) fn render_version_badge(
             spans.push(Span::styled(
                 "Fuigo  ",
                 Style::default()
-                    .fg(theme.text_primary)
+                    .fg(theme.accent_user)
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
@@ -1381,8 +1381,8 @@ fn render_welcome_authenticating(
                 Constraint::Length(logo_line_count),
                 Constraint::Length(1), // gap
                 Constraint::Length(2), // heading + provenance
-                Constraint::Min(1),    // gap
-                Constraint::Length(5), // prompt box
+                Constraint::Length(2), // gap
+                Constraint::Length(3), // prompt box: border, field, border
                 Constraint::Length(1), // gap
                 Constraint::Length(1), // hints
                 Constraint::Min(0),
@@ -1405,9 +1405,12 @@ fn render_welcome_authenticating(
             ];
             Paragraph::new(lines).render(msg_area, buf);
 
+            // A key is ~51 chars; 56 columns shows one whole without scrolling,
+            // and stops the box from spanning a wide terminal edge to edge.
+            let box_width = content_area.width.saturating_sub(4).min(56).max(24);
             let [_, prompt_centered, _] = Layout::horizontal([
                 Constraint::Min(0),
-                Constraint::Length(content_area.width),
+                Constraint::Length(box_width),
                 Constraint::Min(0),
             ])
             .flex(Flex::Center)
