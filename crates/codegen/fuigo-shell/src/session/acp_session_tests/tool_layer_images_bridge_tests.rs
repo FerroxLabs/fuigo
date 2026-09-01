@@ -1,4 +1,5 @@
 //! Wiring tests for MCP tool-layer images through `handle_bridge_tool_success`.
+use base64::Engine as _;
 use super::support::*;
 use super::*;
 use fuigo_sampling_types::{ContentPart, ConversationItem};
