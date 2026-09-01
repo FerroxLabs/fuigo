@@ -19,9 +19,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
+      # NOT dtolnay/rust-toolchain@stable with `targets:`. rust-toolchain.toml
+      # pins 1.94.0, so cargo inside the repo uses 1.94.0 no matter what that
+      # action installed -- round 2a added the target to `stable` and then
+      # failed with "can't find crate for `core`" against 1.94.0.
+      # `rustup target add` run from inside the repo targets the pinned
+      # toolchain, which is the one that actually builds.
+      - name: Add target to the PINNED toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-apple-darwin
+          rustup target list --installed
 
       - name: Can this runner execute x86_64?
         run: |
