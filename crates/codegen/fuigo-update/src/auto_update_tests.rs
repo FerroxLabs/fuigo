@@ -934,7 +934,7 @@ fn test_reinstall_hint_gh_release_mentions_gh_command() {
         "should suggest gh release download: {hint}"
     );
     assert!(
-        hint.contains("fuigo-org-shared/fuigo-build"),
+        hint.contains("FerroxLabs/fuigo"),
         "should name the repo: {hint}"
     );
 }
