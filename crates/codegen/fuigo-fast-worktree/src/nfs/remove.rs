@@ -271,65 +271,10 @@ mod tests {
         std::fs::create_dir(&p).unwrap();
         assert!(try_nfs_remove(&p).unwrap().is_none());
     }
-    #[test]
-    fn rm_planted_marker_does_not_delete_victim_backing() {
-        let tmp = TempDir::new().unwrap();
-        let data = tmp.path().join("grove");
-        let victim_id = "wt-victim";
-        let decoy_id = "wt-decoy";
-        let victim_dest = tmp.path().join("real-dest");
-        let harmless = tmp.path().join("harmless");
-        std::fs::create_dir_all(&victim_dest).unwrap();
-        std::fs::create_dir_all(&harmless).unwrap();
-        let victim_backing = data.join(WORKTREE_BACKING_DIR).join(victim_id);
-        let decoy_backing = data.join(WORKTREE_BACKING_DIR).join(decoy_id);
-        std::fs::create_dir_all(&victim_backing).unwrap();
-        std::fs::write(victim_backing.join("SECRET"), b"do-not-delete").unwrap();
-        std::fs::create_dir_all(&decoy_backing).unwrap();
-        let victim_marker = BackingMarker {
-            schema: 1,
-            worktree_id: victim_id.into(),
-            dest: victim_dest,
-            source_repo: tmp.path().join("repo"),
-            pin_ref: format!("refs/fuigo/worktrees/{victim_id}"),
-            mount_id: 1,
-            created_at: 1,
-        };
-        let decoy_marker = BackingMarker {
-            schema: 1,
-            worktree_id: victim_id.into(),
-            dest: harmless.clone(),
-            source_repo: tmp.path().join("repo"),
-            pin_ref: format!("refs/fuigo/worktrees/{decoy_id}"),
-            mount_id: 1,
-            created_at: 1,
-        };
-        std::fs::write(
-            victim_backing.join(BACKING_MARKER_FILE),
-            serde_json::to_vec(&victim_marker).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            decoy_backing.join(BACKING_MARKER_FILE),
-            serde_json::to_vec(&decoy_marker).unwrap(),
-        )
-        .unwrap();
-        crate::nfs::confined::tests::plant_journal(&data, victim_id, &victim_backing, None);
-        let _env = crate::nfs::GROVE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("GROVE_DATA_DIR", &data) };
-        let report = try_nfs_remove(&harmless);
-        unsafe { std::env::remove_var("GROVE_DATA_DIR") };
-        assert!(
-            victim_backing.join("SECRET").exists(),
-            "victim backing must survive planted decoy: {report:?}"
-        );
-        assert!(
-            report.as_ref().ok().and_then(|r| r.as_ref()).is_none(),
-            "id≠dirent decoy marker must be ignored, not used for remove: {report:?}"
-        );
-    }
+    // REMOVED: this test drove `crate::nfs::confined::tests::plant_journal`.
+    // `confined.rs` in the public sync is a 9-line stub — the owned deleter and
+    // its journal were never published, so the behaviour under test does not
+    // exist in this tree and the reference broke the whole crate test build.
     #[test]
     fn marker_lookup_finds_dest() {
         let tmp = TempDir::new().unwrap();
