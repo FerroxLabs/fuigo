@@ -352,23 +352,55 @@ jobs:
       # optionalDependencies to an EXACT version, so publishing it first leaves
       # a window in which `npm i fuigo` resolves nothing
       # installable. Platform packages first, meta last.
+      # RESUMABLE ON PURPOSE. npm refuses to republish an existing version, so
+      # a plain loop cannot be retried after a partial publish -- it dies on
+      # the first already-published package and never reaches the ones that
+      # still need it. That is not hypothetical: v1.0.1 published four of six
+      # and then tripped npm's spam detection on the fifth, leaving a state no
+      # naive re-run could recover.
+      #
+      # The sleep is for the same incident. Creating six similarly-named
+      # packages back-to-back is exactly the burst npm's name heuristic
+      # watches for; it flagged the fifth after four in ~30 seconds. Spacing
+      # them out costs two minutes on a release that already takes an hour.
       - name: Publish platform packages
         if: github.event_name == 'push' || inputs.dry_run == false
         working-directory: crates/codegen/fuigo-pager/npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
+          set -euo pipefail
+          first=1
           for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
-            echo "--- fuigo-$p"
-            (cd "fuigo-$p" && npm publish --access public)
+            name="fuigo-$p"
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "--- $name@$VERSION already published, skipping"
+              continue
+            fi
+            [ "$first" = 1 ] || sleep 20
+            first=0
+            echo "--- publishing $name@$VERSION"
+            (cd "$name" && npm publish --access public)
           done
 
+      # Guarded the same way, so a re-run after a partial publish is safe.
+      # This one must not go early: its optionalDependencies pin exact
+      # versions, so publishing it before all six platform packages exist
+      # leaves `npm i fuigo` resolving nothing installable.
       - name: Publish meta package
         if: github.event_name == 'push' || inputs.dry_run == false
         working-directory: crates/codegen/fuigo-pager/npm/fuigo
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "fuigo@$VERSION" version >/dev/null 2>&1; then
+            echo "fuigo@$VERSION already published, nothing to do"
+            exit 0
+          fi
+          npm publish --access public
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
