@@ -114,6 +114,7 @@ pub(crate) fn peek_access_token_principal(
         #[serde(default)]
         team_id: Option<String>,
     }
+    crate::auth::jwt::ensure_jwt_crypto_provider();
     let token_data =
         jsonwebtoken::dangerous::insecure_decode::<MinimalClaims>(access_token).ok()?;
     let pt = token_data.claims.principal_type?;
@@ -135,6 +136,7 @@ pub(crate) fn peek_access_token_principal_id(access_token: &str) -> Option<Strin
         #[serde(default, alias = "principalId")]
         principal_id: Option<String>,
     }
+    crate::auth::jwt::ensure_jwt_crypto_provider();
     jsonwebtoken::dangerous::insecure_decode::<PrincipalIdClaim>(access_token)
         .ok()?
         .claims
@@ -626,6 +628,7 @@ pub(super) async fn validate_and_extract_user_info(
     expected_client_id: &str,
     expected_nonce: &str,
 ) -> anyhow::Result<OidcUserInfo> {
+    crate::auth::jwt::ensure_jwt_crypto_provider();
     let header = jsonwebtoken::decode_header(token)?;
     let kid = header
         .kid
@@ -993,6 +996,7 @@ mod tests {
         ensure_crypto_provider();
         fn make_jwt(claims: serde_json::Value) -> String {
             let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+            crate::auth::jwt::ensure_jwt_crypto_provider();
             jsonwebtoken::encode(
                 &header,
                 &claims,
@@ -1033,6 +1037,7 @@ mod tests {
     fn peek_access_token_principal_id_does_not_require_type() {
         ensure_crypto_provider();
         fn make_jwt(claims: serde_json::Value) -> String {
+            crate::auth::jwt::ensure_jwt_crypto_provider();
             jsonwebtoken::encode(
                 &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
                 &claims,

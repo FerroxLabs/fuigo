@@ -1,4 +1,40 @@
 use super::*;
+
+/// A URL that `is_cli_chat_proxy_url` accepts, for the tests that exercise the
+/// proxy-specific header and auth behaviour.
+///
+/// It used to be `crate::env::PROD_CLI_CHAT_PROXY_BASE_URL`, which is now EMPTY
+/// -- Fuigo ships no first-party auxiliary host -- so those tests were asserting
+/// proxy behaviour against the empty string and failing.
+///
+/// Loopback is used rather than naming an upstream host: the predicate accepts
+/// it, and the behaviour under test ("when pointed at a cli-chat-proxy, send its
+/// headers") is about the SHAPE of the endpoint, not about xAI specifically.
+/// That compatibility is retained for anyone running such a proxy themselves.
+const A_CLI_CHAT_PROXY_URL: &str = "http://localhost:18080/v1";
+
+/// A URL that the FIRST-PARTY predicates (`is_fuigo_api_url`,
+/// `is_prod_cli_chat_proxy_url`) recognise.
+///
+/// Distinct from [`A_CLI_CHAT_PROXY_URL`]: loopback satisfies
+/// `is_cli_chat_proxy_url` but is deliberately NOT first-party, so tests about
+/// first-party credential handling need a real one.
+///
+/// This is a predicate fixture, never dialled -- and the egress guard would
+/// refuse it if anything tried.
+///
+/// It has to be an `*.x.ai` host, which is now the ONLY first-party form left:
+/// `is_prod_cli_chat_proxy_url` compares against `PROD_CLI_CHAT_PROXY_BASE_URL`,
+/// and that is empty, so the cli-chat-proxy arm can never match. The `*.x.ai`
+/// arm at `fuigo-shell-base/src/util/mod.rs:122` is hardcoded and survives.
+///
+/// That makes "first-party" effectively vestigial for Fuigo, which operates no
+/// hosts of its own -- FluxRouter is deliberately third-party, so no session
+/// bearer is auto-stamped onto it. Left alone rather than made always-false:
+/// the predicate also gates credential REFUSAL under `disable_api_key_auth`,
+/// which is documented to fail closed, and loosening that deserves its own
+/// change rather than riding along with a rename.
+const A_FIRST_PARTY_URL: &str = "https://api.x.ai/v1";
 use serial_test::serial;
 use fuigo_test_support::EnvGuard;
 #[test]
@@ -166,7 +202,7 @@ fn subagent_permission_mode_precedence() {
 #[test]
 fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
     let mut headers = IndexMap::new();
-    inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
+    inject_url_derived_headers(&mut headers, None, A_CLI_CHAT_PROXY_URL);
     assert_eq!(
         headers.get("X-XAI-Token-Auth").map(String::as_str),
         Some("xai-grok-cli")
@@ -199,7 +235,7 @@ fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
 fn inject_url_derived_headers_preserves_caller_extra_headers() {
     let mut headers = IndexMap::new();
     headers.insert("x-custom-byok".to_string(), "value".to_string());
-    inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
+    inject_url_derived_headers(&mut headers, None, A_CLI_CHAT_PROXY_URL);
     assert_eq!(
         headers.get("x-custom-byok").map(String::as_str),
         Some("value")
@@ -213,7 +249,7 @@ fn inject_url_derived_headers_preserves_caller_extra_headers() {
 fn inject_url_derived_headers_does_not_overwrite_existing_entries() {
     let mut headers = IndexMap::new();
     headers.insert("X-XAI-Token-Auth".to_string(), "caller-set".to_string());
-    inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
+    inject_url_derived_headers(&mut headers, None, A_CLI_CHAT_PROXY_URL);
     assert_eq!(
         headers.get("X-XAI-Token-Auth").map(String::as_str),
         Some("caller-set"),
@@ -369,7 +405,8 @@ fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
     )
     .expect("hidden default web search model should resolve");
     assert_eq!(resolved.model, crate::models::default_web_search_model());
-    assert_eq!(resolved.base_url, endpoints.proxy_url());
+    // Inference resolves to the single gateway, not the (now unset) aux proxy.
+    assert_eq!(resolved.base_url, endpoints.fuigo_api_base_url);
     assert_eq!(resolved.api_backend, ApiBackend::Responses);
     assert_eq!(
         resolved.api_key.as_deref(),
@@ -501,8 +538,11 @@ fn session_resolver_is_not_stamped_onto_third_party_samplers() {
         third_party.bearer_resolver.is_none(),
         "a third-party endpoint must keep its resolved credential"
     );
+    // Explicitly first-party, NOT `resolve_inference_base_url()`. That now
+    // returns FluxRouter, which these predicates correctly classify as
+    // third-party -- a session bearer resolver must not be stamped onto it.
     let mut first_party = SamplerConfig {
-        base_url: EndpointsConfig::default().resolve_inference_base_url(),
+        base_url: A_FIRST_PARTY_URL.to_string(),
         ..SamplerConfig::default()
     };
     stamp_session_local_sampler_fields(&mut first_party, &session_cfg, None, None);
@@ -1135,12 +1175,7 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
 #[test]
 fn sampling_config_scopes_no_inline_citations_include() {
     for (supports_search, backend, base_url, expected) in [
-        (
-            true,
-            ApiBackend::Responses,
-            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
-            true,
-        ),
+        (true, ApiBackend::Responses, A_FIRST_PARTY_URL, true),
         (true, ApiBackend::Responses, "https://api.x.ai/v1", true),
         (false, ApiBackend::Responses, "https://api.x.ai/v1", false),
         (
@@ -1191,8 +1226,8 @@ fn default_models_dual_endpoint_routing() {
         let session_creds = resolve_credentials(&entry, Some("tok"));
         assert_eq!(
             session_creds.base_url,
-            endpoints.proxy_url(),
-            "{model_id}: SessionToken must route to cli-chat-proxy"
+            endpoints.fuigo_api_base_url,
+            "{model_id}: every credential kind reaches the one gateway"
         );
         let api_key_creds = ResolvedCredentials {
             api_key: Some("key".into()),
@@ -1445,7 +1480,7 @@ fn resolve_credentials_env_key_byok_keeps_api_key_auth_with_session() {
 fn proxy_messages_models_use_bearer_auth_scheme() {
     let mut model = test_model_entry(
         "grok-4.5",
-        crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
+        A_CLI_CHAT_PROXY_URL,
         None,
         None,
         None,
@@ -1462,7 +1497,7 @@ fn proxy_messages_models_use_bearer_auth_scheme() {
     assert_eq!(config.api_backend, ApiBackend::Messages);
     assert_eq!(config.auth_scheme, AuthScheme::Bearer);
     assert_eq!(config.api_key, Some("tok".to_string()));
-    assert_eq!(config.base_url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
+    assert_eq!(config.base_url, A_CLI_CHAT_PROXY_URL);
     assert_eq!(
         config
             .extra_headers
@@ -1665,7 +1700,7 @@ fn user_override_adds_api_key_to_default_model() {
     assert_eq!(model.api_key, Some("user-custom-api-key".to_string()));
     assert_eq!(model.info.model, dm);
     assert_eq!(
-        model.info.base_url, "https://cli-chat-proxy.grok.com/v1",
+        model.info.base_url, FUIGO_API_BASE_URL_DEFAULT,
         "base_url should inherit from default, not be stale"
     );
 }
@@ -3134,8 +3169,11 @@ fn config_models_default_custom_model_is_in_resolved_model_list() {
     assert_eq!(model.info.model, "grok-4.5");
     assert_eq!(model.info.base_url, "https://inference.example.com/v1");
 }
+/// Upstream split inference by credential kind: a session token went to the
+/// cli-chat-proxy, an API key to api.x.ai. Fuigo has ONE gateway and one auth
+/// mode, so both land on the same host.
 #[test]
-fn e2e_default_model_with_session_routes_to_proxy() {
+fn e2e_default_model_with_session_routes_to_the_gateway() {
     let (_, models) = resolve_models_from_toml("", None);
     let model = models
         .get(crate::models::default_model())
@@ -3143,13 +3181,13 @@ fn e2e_default_model_with_session_routes_to_proxy() {
     let sampling = resolve_sampling(model, Some("session-token-123"));
     assert_eq!(sampling.api_key.as_deref(), Some("session-token-123"));
     assert_eq!(
-        sampling.base_url, "https://cli-chat-proxy.grok.com/v1",
-        "session auth should route to cli-chat-proxy, not api.x.ai"
+        sampling.base_url, FUIGO_API_BASE_URL_DEFAULT,
+        "session auth must reach the gateway, never an upstream host"
     );
 }
 #[test]
 #[serial]
-fn e2e_default_model_with_external_api_key_routes_to_api_fuigo() {
+fn e2e_default_model_with_external_api_key_routes_to_the_gateway() {
     let (_, models) = resolve_models_from_toml("", None);
     let model = models
         .get(crate::models::default_model())
@@ -3158,8 +3196,8 @@ fn e2e_default_model_with_external_api_key_routes_to_api_fuigo() {
     let sampling = resolve_sampling(model, None);
     assert_eq!(sampling.api_key.as_deref(), Some("fuigo-external-key"));
     assert_eq!(
-        sampling.base_url, "https://api.x.ai/v1",
-        "external API key should route to api.x.ai via api_base_url"
+        sampling.base_url, FUIGO_API_BASE_URL_DEFAULT,
+        "an external API key reaches the gateway via api_base_url"
     );
     unsafe { std::env::remove_var("FUIGO_API_KEY") };
 }
@@ -3169,7 +3207,7 @@ fn e2e_user_config_overrides_prefetched_model() {
     let mut prefetched = IndexMap::new();
     prefetched.insert(
         dm.to_string(),
-        test_model_entry(dm, "https://cli-chat-proxy.grok.com/v1", None, None, None),
+        test_model_entry(dm, FUIGO_API_BASE_URL_DEFAULT, None, None, None),
     );
     let (_, models) = resolve_models_from_toml(
         &format!(
@@ -3283,7 +3321,7 @@ fn e2e_duplicate_model_field_both_entries_survive() {
     assert_eq!(sampling.base_url, "https://inference.example.com/v1");
     let sampling = resolve_sampling(default, Some("session-key"));
     assert_eq!(sampling.api_key.as_deref(), Some("session-key"));
-    assert_eq!(sampling.base_url, "https://cli-chat-proxy.grok.com/v1",);
+    assert_eq!(sampling.base_url, FUIGO_API_BASE_URL_DEFAULT);
 }
 #[test]
 fn e2e_enterprise_custom_endpoint_skips_fuigo_defaults() {
@@ -3376,8 +3414,8 @@ fn e2e_enterprise_endpoints_plus_partial_model_override() {
     );
     let model = models.get(dm).expect("model should exist");
     assert_eq!(
-        model.info.base_url, "https://enterprise-proxy.acme.com/v1",
-        "base_url must inherit from [endpoints], not stale default"
+        model.info.base_url, "https://enterprise-api.acme.com/v1",
+        "inference inherits fuigo_api_base_url, not the aux proxy"
     );
     assert_eq!(model.api_key.as_deref(), Some("acme-api-key"));
     assert_eq!(
@@ -3391,8 +3429,9 @@ fn e2e_enterprise_endpoints_plus_partial_model_override() {
         "model's own api_key must beat session token"
     );
     assert_eq!(
-        sampling.base_url, "https://enterprise-proxy.acme.com/v1",
-        "sampling must route to enterprise proxy"
+        sampling.base_url, "https://enterprise-api.acme.com/v1",
+        "sampling routes to the enterprise INFERENCE host; the proxy is for \
+         auxiliary services only"
     );
 }
 #[test]
@@ -3409,8 +3448,8 @@ fn e2e_enterprise_endpoints_only_no_model_override() {
         .get(crate::models::default_model())
         .expect("model should exist");
     assert_eq!(
-        model.info.base_url, "https://enterprise-proxy.acme.com/v1",
-        "default model should use enterprise cli_chat_proxy_base_url"
+        model.info.base_url, "https://enterprise-api.acme.com/v1",
+        "default model uses the enterprise fuigo_api_base_url"
     );
     assert_eq!(
         model.api_base_url.as_deref(),
@@ -3452,20 +3491,36 @@ fn aux_endpoints_resolve_to_proxy_never_inference() {
         cli_chat_proxy_base_url: None,
         ..Default::default()
     };
-    let proxy = CLI_CHAT_PROXY_BASE_URL_DEFAULT;
-    assert_eq!(cfg.proxy_url(), proxy);
-    assert_eq!(cfg.resolve_inference_base_url(), proxy);
-    assert_eq!(cfg.resolve_models_list_url(), format!("{proxy}/models"));
+    // The invariant INVERTED from upstream. There it was "auxiliary services
+    // resolve to the proxy, inference never does". Fuigo has one inference
+    // gateway and no auxiliary services, so:
+    //
+    //   inference  -> fuigo_api_base_url          (never the proxy)
+    //   auxiliary  -> the proxy, which is UNSET   (so they are inert)
+    //
+    // The half that still matters is the second clause of the original: an
+    // override of inference alone must NOT drag the auxiliary endpoints along
+    // with it. A deployment key or a trace upload must never be sent to
+    // whatever host someone pointed inference at.
+    assert_eq!(cfg.proxy_url(), "", "no auxiliary host by default");
+    assert!(!cfg.has_proxy());
     assert_eq!(
-        cfg.resolve_managed_config_url(),
-        format!("{proxy}/deployment/config")
+        cfg.resolve_inference_base_url(),
+        inference,
+        "inference follows fuigo_api_base_url"
     );
-    assert_eq!(cfg.resolve_feedback_base_url(), proxy);
-    assert_eq!(cfg.resolve_trace_upload_url(), proxy);
-    assert_eq!(
-        cfg.resolve_otlp_traces_endpoint(),
-        format!("{proxy}/traces")
-    );
+    for (what, got) in [
+        ("feedback", cfg.resolve_feedback_base_url()),
+        ("trace upload", cfg.resolve_trace_upload_url()),
+        ("managed config", cfg.resolve_managed_config_url()),
+        ("otlp traces", cfg.resolve_otlp_traces_endpoint()),
+        ("models list", cfg.resolve_models_list_url()),
+    ] {
+        assert!(
+            !got.contains("acme-corp"),
+            "{what} must not follow the inference override: {got}"
+        );
+    }
     assert_eq!(cfg.fuigo_api_base_url, inference);
     let overridden = EndpointsConfig {
         cli_chat_proxy_base_url: Some("https://proxy.enterprise.example/v1".to_string()),
@@ -3514,7 +3569,8 @@ fn loader_managed_config_url_never_follows_inference_endpoint() {
     assert!(cfg.endpoints.cli_chat_proxy_base_url.is_none());
     assert_eq!(
         cfg.endpoints.resolve_managed_config_url(),
-        format!("{CLI_CHAT_PROXY_BASE_URL_DEFAULT}/deployment/config")
+        format!("{CLI_CHAT_PROXY_BASE_URL_DEFAULT}/deployment/config"),
+        "with no proxy configured this is a bare path, which reaches nothing"
     );
     assert!(
         !cfg.endpoints
@@ -7430,7 +7486,13 @@ fn remote_settings_disarm_managed_config_signatures() {
         ..Default::default()
     };
     apply_remote_settings_side_effects(Some(&settings));
-    assert!(!fuigo_config::signed_policy::verification_active());
+    // Disarm is refused: it requires a TRUSTED origin, and Fuigo configures no
+    // first-party proxy, so `is_prod_cli_chat_proxy_url` is never satisfied.
+    // Tightening still applies (below); only the loosening direction is gated.
+    assert!(
+        fuigo_config::signed_policy::verification_active(),
+        "an untrusted origin must not be able to disarm signature verification"
+    );
     let settings = crate::util::config::RemoteSettings {
         managed_config_signature_verification: Some(true),
         ..Default::default()
@@ -7466,9 +7528,14 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
         std::env::remove_var("FUIGO_CLI_CHAT_PROXY_BASE_URL");
     }
     apply_remote_settings_side_effects(Some(&settings));
+    // Upstream this asserted the PROD proxy origin was trusted enough to disarm
+    // signature verification. Fuigo configures no first-party proxy, so no
+    // origin is trusted and the disarm is refused. That is the safer direction:
+    // remote settings from an untrusted origin can no longer switch off
+    // managed-config signature checking.
     assert!(
-        !fuigo_config::signed_policy::verification_active(),
-        "prod proxy origin must allow disarm when keys are embedded"
+        fuigo_config::signed_policy::verification_active(),
+        "with no trusted proxy origin, remote settings must NOT disarm verification"
     );
     fuigo_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),

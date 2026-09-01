@@ -146,6 +146,35 @@ impl OtelGate {
 
 #[cfg(test)]
 mod tests {
+    /// Fuigo ships no auxiliary proxy, so no fleet policy can reach the process
+    /// and the external-OTEL gate opens at startup even for a session user.
+    ///
+    /// This is NOT a fail-open. The gate decides whether a FLEET ADMIN's policy
+    /// gets to override the user's own OTEL exporter config. With no policy
+    /// channel there is no admin to defer to, and holding the gate shut would
+    /// mean a user's own configuration never took effect. Configure
+    /// `endpoints.cli_chat_proxy_base_url` and the original wait-for-policy
+    /// behaviour returns.
+    #[test]
+    fn no_proxy_means_no_fleet_policy_so_the_gate_opens() {
+        let channel = super::policy_channel(true, false);
+        assert_eq!(
+            channel,
+            super::PolicyChannel::Unavailable(super::NoPolicy::ProxyRepointed)
+        );
+        assert!(super::should_open_at_startup(super::StartupGate {
+            channel,
+            has_session: true,
+            session_pending: false,
+        }));
+        // With a channel, a session user waits for policy as before.
+        assert!(!super::should_open_at_startup(super::StartupGate {
+            channel: super::policy_channel(true, true),
+            has_session: true,
+            session_pending: false,
+        }));
+    }
+
     use super::*;
     use fuigo_telemetry::external::{
         is_settings_gate_open, mark_external_otel_settings_resolved,

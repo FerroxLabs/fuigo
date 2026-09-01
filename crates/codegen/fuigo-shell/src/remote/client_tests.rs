@@ -363,7 +363,11 @@ async fn fetch_subagent_bundle_success() {
     let headers = seen_headers.lock().unwrap();
     let headers = headers.last().unwrap();
     assert_eq!(headers.authorization.as_deref(), Some("Bearer token"));
-    assert_eq!(headers.token_auth.as_deref(), Some("xai-grok-cli"));
+    // `X-XAI-Token-Auth` is injected only for a TRUSTED first-party proxy, and
+    // `is_trusted_cli_chat_proxy_url` compares against the (now empty)
+    // PROD_CLI_CHAT_PROXY_BASE_URL, so it never matches. The header is an
+    // upstream nginx routing hint; Fuigo has no such tier.
+    assert_eq!(headers.token_auth.as_deref(), None);
     assert_eq!(headers.user_id.as_deref(), Some("user-1"));
     assert_eq!(headers.email.as_deref(), Some("test@example.com"));
     assert_eq!(headers.alpha_test_key, None);
@@ -457,7 +461,10 @@ fn parse_reads_model_family() {
         "model_family": "xai"
     });
     let result = parse_remote_model_value(&value, "https://default.url").unwrap();
-    assert_eq!(result.model_family.as_deref(), Some("fuigo"));
+    // `model_family` is a wire value echoed from the server, not branding: the
+    // parser passes it through verbatim. The rebrand rewrote this expectation
+    // while leaving the input above -- they disagreed.
+    assert_eq!(result.model_family.as_deref(), Some("xai"));
     let value = serde_json::json!({
         "model": "acme-1",
         "contextWindow": 400_000,
@@ -836,10 +843,15 @@ fn endpoints(
         ..Default::default()
     }
 }
+/// Inference follows `fuigo_api_base_url`, NOT the auxiliary proxy. Upstream
+/// routed it through the proxy; that is the inversion this fork depends on.
 #[test]
-fn inference_url_defaults_to_proxy() {
-    let ep = endpoints("https://proxy.grok.com/v1", None, None);
-    assert_eq!(ep.resolve_inference_base_url(), "https://proxy.grok.com/v1");
+fn inference_url_defaults_to_the_gateway_not_the_proxy() {
+    let ep = endpoints("https://proxy.example.com/v1", None, None);
+    assert_eq!(
+        ep.resolve_inference_base_url(),
+        crate::agent::config::FUIGO_API_BASE_URL_DEFAULT
+    );
 }
 #[test]
 fn inference_url_uses_models_base_url() {
@@ -914,7 +926,11 @@ fn deployment_config_url_uses_cli_chat_proxy_when_not_overridden() {
     )
     .unwrap();
     let url = EndpointsConfig::from_config_value(&managed).resolve_managed_config_url();
-    assert_eq!(url, "https://cli-chat-proxy.grok.com/v1/deployment/config");
+    // With no auxiliary proxy configured this is a bare path, which reaches
+    // nothing -- the point of the assertion is that it does NOT follow the
+    // inference endpoint.
+    assert_eq!(url, "/deployment/config");
+    assert!(!url.contains("fluxrouter"), "must not follow inference: {url}");
     assert!(
         !url.contains("acme-corp"),
         "deployment key would be sent to the inference host: {url}"

@@ -25,10 +25,21 @@ impl AuthStatus {
         }
         if agent_config.create_auth_manager().current().is_some() {
             let backend = crate::auth::backend::ActiveAuthBackend::default();
-            return Self::LoggedIn(crate::auth::backend::AuthBackend::login_host(
+            let host = crate::auth::backend::AuthBackend::login_host(
                 &backend,
                 &agent_config.fuigo_com_config,
-            ));
+            );
+            // `login_host` reads `fuigo_ws_origin`, which Fuigo ships EMPTY --
+            // there is no web-login origin. A session can still exist (external
+            // auth provider, OIDC), and reporting "" would render as
+            // "Logged in to " with nothing after it. Name the host the
+            // credential actually talks to instead.
+            let host = if host.is_empty() {
+                crate::auth::backend::host_of(&agent_config.endpoints.fuigo_api_base_url)
+            } else {
+                host
+            };
+            return Self::LoggedIn(host);
         }
         let models = crate::agent::config::resolve_model_list(agent_config, None);
         if crate::agent::auth_method::should_advertise_fuigo_api_key(
@@ -101,7 +112,10 @@ mod tests {
     use crate::auth::{AuthMode, FuigoAuth};
     use serial_test::serial;
     use fuigo_test_support::EnvGuard;
-    const EXPECTED_LOGIN_HOST: &str = "grok.com";
+    /// Fuigo has no web-login origin, so `AuthStatus::resolve` falls back to
+    /// naming the inference gateway -- the host the session credential is
+    /// actually presented to.
+    const EXPECTED_LOGIN_HOST: &str = "api.fluxrouter.ai/v1";
     /// A session the compiled-in backend recognises as its own, which `AuthBackend::owns` requires.
     fn session_credential() -> FuigoAuth {
         FuigoAuth {
