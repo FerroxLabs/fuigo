@@ -111,9 +111,17 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
         .max(1) as f32;
     let secs = anim_phase_secs();
 
-    // Blend each glyph from the resting gray toward the bright text color by its shine opacity, so a sheen sweeps across the braille art
-    // Adjacent glyphs that land on the same blended color share one Span to hold down the per-frame allocation
-    let base = theme.gray;
+    // Adjacent glyphs that land on the same blended color share one Span to hold down the per-frame allocation.
+    //
+    // The mark itself is the brand accent -- on Hearth, hot metal -- and the
+    // glint flares toward the bright text colour as it sweeps, so it reads as
+    // light moving across the surface rather than as a colour change.
+    //
+    // `base` is pulled back toward the canvas so the resting logo sits at
+    // roughly three-quarter strength; at full accent it fights the menu beneath
+    // it for attention. Both ends stay theme-driven, so every other theme gets
+    // its own accent here rather than a hardcoded hue.
+    let base = blend_color(theme.bg_base, theme.accent_user, 0.78).unwrap_or(theme.accent_user);
     let hilite = theme.text_primary;
     let logo_lines: Vec<Line> = lines
         .iter()
