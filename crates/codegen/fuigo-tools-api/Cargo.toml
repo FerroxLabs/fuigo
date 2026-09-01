@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "fuigo-tools-api"
-version = "0.1.220-alpha.4"
+version = "1.0.1"
 edition.workspace = true
 description = "Protobuf API definitions for Fuigo tools"
 

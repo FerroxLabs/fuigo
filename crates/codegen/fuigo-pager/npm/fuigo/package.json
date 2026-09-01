@@ -1,6 +1,6 @@
 {
     "name": "@fuigo-official/fuigo",
-    "version": "0.1.220-alpha.4",
+    "version": "1.0.1",
     "description": "Bring Fuigo into your terminal",
     "license": "Apache-2.0",
     "bin": {
@@ -19,7 +19,11 @@
         "x64"
     ],
     "scripts": {
-        "postinstall": "node bin/postinstall.js"
+        "postinstall": "node bin/postinstall.js",
+        "sync-version": "node scripts/sync-version.js",
+        "check-version": "node scripts/sync-version.js --check",
+        "assemble": "node scripts/assemble-platform-packages.js",
+        "prepublishOnly": "node scripts/sync-version.js --check"
     },
     "publishConfig": {
         "access": "public"
@@ -31,11 +35,11 @@
         "@iarna/toml": "^3.0.0"
     },
     "optionalDependencies": {
-        "@fuigo-official/fuigo-darwin-arm64": "0.1.220-alpha.4",
-        "@fuigo-official/fuigo-darwin-x64": "0.1.220-alpha.4",
-        "@fuigo-official/fuigo-linux-arm64": "0.1.220-alpha.4",
-        "@fuigo-official/fuigo-linux-x64": "0.1.220-alpha.4",
-        "@fuigo-official/fuigo-win32-arm64": "0.1.220-alpha.4",
-        "@fuigo-official/fuigo-win32-x64": "0.1.220-alpha.4"
+        "@fuigo-official/fuigo-darwin-arm64": "1.0.1",
+        "@fuigo-official/fuigo-darwin-x64": "1.0.1",
+        "@fuigo-official/fuigo-linux-arm64": "1.0.1",
+        "@fuigo-official/fuigo-linux-x64": "1.0.1",
+        "@fuigo-official/fuigo-win32-arm64": "1.0.1",
+        "@fuigo-official/fuigo-win32-x64": "1.0.1"
     }
 }
