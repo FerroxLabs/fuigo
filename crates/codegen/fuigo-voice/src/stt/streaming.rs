@@ -23,7 +23,7 @@ pub enum StreamingSttEvent {
     Error { message: String },
 }
 
-/// Streaming STT over `wss://api.x.ai/v1/stt`.
+/// Streaming STT over the configured voice endpoint's `/v1/stt` route.
 pub struct StreamingSttSession {
     audio_tx: Option<mpsc::Sender<Vec<u8>>>,
     event_rx: mpsc::Receiver<StreamingSttEvent>,
@@ -253,7 +253,11 @@ mod tests {
 
     #[test]
     fn stt_url_includes_query_params() {
-        let cfg = VoiceConfig::default();
+        // An explicit host: the default no longer names one, by design.
+        let cfg = VoiceConfig {
+            api_base: "https://api.example.com".into(),
+            ..VoiceConfig::default()
+        };
         let url = build_stt_ws_url(&cfg).unwrap();
         let q = url.query().unwrap_or_default();
         assert!(q.contains("sample_rate=16000"));
@@ -265,6 +269,7 @@ mod tests {
     fn stt_url_resolves_auto_to_concrete_language() {
         let cfg = VoiceConfig {
             language: "auto".into(),
+            api_base: "https://api.example.com".into(),
             ..VoiceConfig::default()
         };
         let url = build_stt_ws_url(&cfg).unwrap();
@@ -292,6 +297,7 @@ mod tests {
     fn stt_url_passes_through_catalog_language() {
         let cfg = VoiceConfig {
             language: "ja".into(),
+            api_base: "https://api.example.com".into(),
             ..VoiceConfig::default()
         };
         let url = build_stt_ws_url(&cfg).unwrap();
@@ -300,7 +306,7 @@ mod tests {
 
     #[test]
     fn optional_header_inserted_when_present_skipped_when_empty() {
-        let mut req = "wss://api.x.ai/v1/stt".into_client_request().unwrap();
+        let mut req = "wss://api.example.com/v1/stt".into_client_request().unwrap();
         insert_optional_header(&mut req, "x-fuigo-client-identifier", "fuigo-shell");
         insert_optional_header(&mut req, "User-Agent", "");
         assert_eq!(
@@ -315,7 +321,7 @@ mod tests {
 
     #[test]
     fn optional_header_skips_invalid_value_without_panic() {
-        let mut req = "wss://api.x.ai/v1/stt".into_client_request().unwrap();
+        let mut req = "wss://api.example.com/v1/stt".into_client_request().unwrap();
         // A control char is not a valid header value; it must be dropped silently, never panic or fail the (already-authorized) handshake
         insert_optional_header(&mut req, "User-Agent", "bad\nvalue");
         assert!(

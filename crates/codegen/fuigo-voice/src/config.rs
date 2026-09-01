@@ -33,7 +33,16 @@ pub struct VoiceConfig {
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
-            api_base: "https://api.x.ai".into(),
+            // Empty, matching every other endpoint in fuigo-env's
+            // PRODUCTION_ENDPOINTS. This defaulted to `https://api.x.ai`, which
+            // was missed when the rest were severed -- so with voice enabled
+            // and nothing configured, microphone audio streamed to
+            // `wss://api.x.ai/v1/stt`. That is the one egress path in this
+            // codebase carrying raw user audio, so it fails closed now:
+            // `stt_ws_url()` errors on an empty base, and voice is unusable
+            // until `[voice].api_base` or `[endpoints].fuigo_api_base_url`
+            // names a host the user chose.
+            api_base: String::new(),
             stt_ws_path: "/v1/stt".into(),
             language: "en".into(),
             sample_rate: DEFAULT_SAMPLE_RATE,
@@ -60,7 +69,7 @@ impl VoiceConfig {
             .and_then(|t| toml::Value::Table(t.clone()).try_into().ok())
             .unwrap_or_default();
 
-        // Read `[voice].api_base` from the raw table, not `cfg`: serde default makes "unset" and an explicit `https://api.x.ai` indistinguishable
+        // Read `[voice].api_base` from the raw table, not `cfg`: serde default makes "unset" and an explicit host indistinguishable
         cfg.api_base = non_empty_str(
             voice_table
                 .and_then(|t| t.get("api_base"))
@@ -95,6 +104,18 @@ fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
 fn ws_url(api_base: &str, path: &str) -> Result<String, VoiceError> {
     let base = api_base.trim().trim_end_matches('/');
     let path = path.trim().trim_start_matches('/');
+    // Fail closed, and legibly. With no base this used to return
+    // Ok("wss:///v1/stt") -- a malformed URL that surfaces much later as an
+    // opaque parse error. Voice carries raw microphone audio, so an unset
+    // endpoint must be a clear refusal rather than a guess.
+    if base.is_empty() {
+        return Err(VoiceError::Config(
+            "voice endpoint is not configured: set `[voice].api_base` or \
+             `[endpoints].fuigo_api_base_url` to the host that should receive \
+             your microphone audio."
+                .into(),
+        ));
+    }
     if strip_scheme(base, "http://").is_some() || strip_scheme(base, "ws://").is_some() {
         return Err(VoiceError::Config(format!(
             "insecure voice api_base {api_base:?}: voice requires a TLS endpoint \
@@ -117,22 +138,36 @@ fn ws_url(api_base: &str, path: &str) -> Result<String, VoiceError> {
 mod tests {
     use super::*;
 
+    /// The default must name NO host. This test previously pinned
+    /// `wss://api.x.ai/v1/stt`, which is how the vendor default survived the
+    /// severance of every other endpoint: the test asserted it was correct.
     #[test]
-    fn default_stt_ws_uses_wss() {
-        assert_eq!(
-            VoiceConfig::default().stt_ws_url().unwrap(),
-            "wss://api.x.ai/v1/stt"
+    fn default_has_no_endpoint_and_fails_closed() {
+        assert!(VoiceConfig::default().api_base.is_empty());
+        let err = VoiceConfig::default().stt_ws_url().unwrap_err();
+        assert!(
+            format!("{err}").contains("not configured"),
+            "unset voice endpoint must refuse clearly, got: {err}"
         );
     }
 
     #[test]
+    fn configured_base_still_builds_a_wss_url() {
+        let cfg = VoiceConfig {
+            api_base: "https://api.example.com".into(),
+            ..VoiceConfig::default()
+        };
+        assert_eq!(cfg.stt_ws_url().unwrap(), "wss://api.example.com/v1/stt");
+    }
+
+    #[test]
     fn scheme_less_and_wss_bases() {
-        for base in ["api.x.ai", "wss://api.x.ai", "HTTPS://api.x.ai"] {
+        for base in ["api.example.com", "wss://api.example.com", "HTTPS://api.example.com"] {
             let cfg = VoiceConfig {
                 api_base: base.into(),
                 ..VoiceConfig::default()
             };
-            assert_eq!(cfg.stt_ws_url().unwrap(), "wss://api.x.ai/v1/stt");
+            assert_eq!(cfg.stt_ws_url().unwrap(), "wss://api.example.com/v1/stt");
         }
     }
 
@@ -208,7 +243,9 @@ language = "fr"
     }
 
     #[test]
-    fn whitespace_voice_api_base_without_endpoints_uses_default() {
+    /// Whitespace-only `api_base` is treated as unset. With nothing else to
+    /// fall back to that now means "no endpoint", not "the vendor's endpoint".
+    fn whitespace_voice_api_base_without_endpoints_falls_back_to_unset() {
         let table: toml::Table = toml::from_str(
             r#"
 [voice]
@@ -218,7 +255,8 @@ api_base = "  "
         .unwrap();
         let cfg = VoiceConfig::from_config_table(&table, None);
         assert_eq!(cfg.api_base, VoiceConfig::default().api_base);
-        assert_eq!(cfg.stt_ws_url().unwrap(), "wss://api.x.ai/v1/stt");
+        assert!(cfg.api_base.is_empty(), "must not inherit a vendor host");
+        assert!(cfg.stt_ws_url().is_err(), "unset endpoint must refuse");
     }
 
     #[test]
@@ -256,15 +294,15 @@ fuigo_api_base_url = "https://config.example.com"
 [endpoints]
 fuigo_api_base_url = "https://proxy.example.com/fuigo/v1"
 [voice]
-api_base = "https://api.x.ai"
+api_base = "https://api.example.com"
 language = "es"
 "#,
         )
         .unwrap();
         let cfg = VoiceConfig::from_config_table(&table, None);
-        assert_eq!(cfg.api_base, "https://api.x.ai");
+        assert_eq!(cfg.api_base, "https://api.example.com");
         assert_eq!(cfg.language, "es");
-        assert_eq!(cfg.stt_ws_url().unwrap(), "wss://api.x.ai/v1/stt");
+        assert_eq!(cfg.stt_ws_url().unwrap(), "wss://api.example.com/v1/stt");
     }
 
     #[test]
