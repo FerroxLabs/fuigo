@@ -13,15 +13,19 @@ const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
 const NPM_PACKAGE: &str = "@fuigo-official/fuigo";
 pub const GH_RELEASE_REPO: &str = "fuigo-org-shared/fuigo-build";
 
-/// Primary CLI base URL: Cloudflare-fronted x.ai endpoint with edge caching for binaries and origin-respecting no-cache for channel pointers.
 /// Update channel base. Empty until Fuigo has its own release CDN — the
 /// upstream host serves xAI's signed binaries, and an updater pointed there
 /// would replace a Fuigo install with `grok`.
 pub(crate) const CLI_BASE_URL_PRIMARY: &str = "";
 
-/// Fallback CLI base URL: direct GCS, used when the primary is unreachable (Cloudflare outage, regional CF egress issue, DNS hijack, etc.).
-pub(crate) const CLI_BASE_URL_FALLBACK: &str =
-    "https://storage.googleapis.com/fuigo-build-public-artifacts/cli";
+/// Upstream's GCS fallback, also empty.
+///
+/// It used to read `.../grok-build-public-artifacts/cli`. The rebrand renamed
+/// the bucket to `fuigo-build-public-artifacts`, which nobody owns — so the
+/// "fallback" was egress to a 404. Worse, an empty primary does NOT disable the
+/// updater: `fetch_gcs_version` just falls through to the next base. Both must
+/// be empty for the update path to be genuinely off.
+pub(crate) const CLI_BASE_URL_FALLBACK: &str = "";
 
 /// CLI base URLs in preference order.
 /// Callers (channel-pointer fetch, binary download, in-app updater) try each in turn and stop at the first success.
@@ -39,7 +43,16 @@ pub(crate) fn cli_base_urls() -> Vec<String> {
             tracing::warn!("FUIGO_CLI_BASE_URL ignored: only loopback bases are honored");
         }
     }
-    CLI_BASE_URLS.iter().map(|s| (*s).to_owned()).collect()
+    // Empty entries are dropped rather than requested. Upstream left them in,
+    // so a blank base produced the relative URL "/stable" and burned three
+    // retries (1s+2s+4s) before falling through to the next base. With every
+    // base empty this returns an empty vec and the callers report
+    // "no CLI base URLs configured" without touching the network.
+    CLI_BASE_URLS
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| (*s).to_owned())
+        .collect()
 }
 
 /// Parsed, not prefix-matched: `http://127.0.0.1:9@evil.com` starts with a
