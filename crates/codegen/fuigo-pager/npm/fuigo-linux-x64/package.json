@@ -1,7 +1,7 @@
 {
-    "name": "@fuigo-official/fuigo-linux-x64",
+    "name": "fuigo-linux-x64",
     "version": "1.0.1",
-    "description": "linux-x64 binary for @fuigo-official/fuigo. Do not install directly; install @fuigo-official/fuigo instead.",
+    "description": "linux-x64 binary for fuigo. Do not install directly; install fuigo instead.",
     "license": "Apache-2.0",
     "files": [
         "bin/",

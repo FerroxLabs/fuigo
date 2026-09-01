@@ -1,7 +1,7 @@
 {
-    "name": "@fuigo-official/fuigo-darwin-arm64",
+    "name": "fuigo-darwin-arm64",
     "version": "1.0.1",
-    "description": "darwin-arm64 binary for @fuigo-official/fuigo. Do not install directly; install @fuigo-official/fuigo instead.",
+    "description": "darwin-arm64 binary for fuigo. Do not install directly; install fuigo instead.",
     "license": "Apache-2.0",
     "files": [
         "bin/",

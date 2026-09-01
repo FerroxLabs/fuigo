@@ -4,7 +4,7 @@
 //! Seen when a user is behind a corporate npm registry mirror:
 //!
 //! ```text
-//! # Mirror returns 403 for the @fuigo-official scope
+//! # Mirror returns 403 for the fuigo package
 //! { "currentVersion": "0.1.181", "latestVersion": null,
 //!   "updateAvailable": false, "installer": "npm", "channel": "stable",
 //!   "autoUpdate": true,
@@ -68,7 +68,7 @@ async fn check_status_surfaces_npm_403_in_error_field() {
     g.set_exit_code(1);
     g.set_stderr(
         "npm error code E403\n\
-         npm error 403 403 Forbidden - GET https://registry-mirror.example.invalid/api/npm/js-virtual/@fuigo-official%2ffuigo\n\
+         npm error 403 403 Forbidden - GET https://registry-mirror.example.invalid/api/npm/js-virtual/fuigo\n\
          npm error 403 In most cases, you or one of your dependencies are requesting\n\
          npm error 403 a package version that is forbidden by your security policy",
     );
