@@ -1,4 +1,5 @@
-//! Ferrox Labs Speech-to-Text: streaming `wss://api.x.ai/v1/stt`.
+//! Streaming speech-to-text over the configured voice endpoint's `/v1/stt`
+//! WebSocket route. There is no default host: see `VoiceConfig::default`.
 
 mod streaming;
 mod types;
