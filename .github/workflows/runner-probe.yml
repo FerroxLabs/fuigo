@@ -1,33 +1,41 @@
 name: runner-probe
 
-# Throwaway. Answers one question in ~30s instead of after a 2-hour release
-# build: are GitHub's ARM runners actually schedulable for THIS repo?
+# Throwaway. Answers cheap scheduling/toolchain questions in ~30s instead of
+# after a 2-hour release build. Delete once the answers are recorded.
 #
-# An unavailable runner label does not error -- the job queues forever. That is
-# the worst possible failure mode to discover at the end of a long matrix, so
-# it gets its own cheap probe. Delete this workflow once the answer is known.
+# Round 1 answered: ubuntu-24.04, ubuntu-24.04-arm, windows-latest,
+# windows-11-arm and macos-14 all schedule, all have cmake. macos-13 queued
+# indefinitely -- the Intel image looks retired for this account.
+#
+# Round 2 asks the follow-up: can macos-14 (arm64) stand in for it? That needs
+# (a) an x86_64 cross-build to link, and (b) Rosetta to smoke-test the result.
 on:
   workflow_dispatch:
 
 jobs:
-  probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
-          - macos-14
-          - macos-13
-          - windows-latest
-          - windows-11-arm
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+  darwin-x64-on-arm:
+    runs-on: macos-14
+    timeout-minutes: 20
     steps:
-      - name: Report
-        shell: bash
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Can this runner execute x86_64?
         run: |
-          echo "runner:  ${{ matrix.runner }}"
-          echo "os:      $(uname -s 2>/dev/null || echo windows)"
-          echo "arch:    $(uname -m 2>/dev/null || echo unknown)"
-          echo "cmake:   $(command -v cmake || echo MISSING)"
+          echo "arch:    $(uname -m)"
+          echo "rosetta: $(ls /Library/Apple/usr/libexec/oah 2>/dev/null && echo present || echo MISSING)"
+          # The real question, not the proxy for it.
+          arch -x86_64 /usr/bin/true && echo "exec-x86_64: YES" || echo "exec-x86_64: NO"
+
+      # aws-lc-rs is the crate that decides whether this fallback is viable:
+      # it builds C through cmake and is the usual reason a macOS cross-build
+      # fails at link time. Build just it -- 2 minutes, not 90.
+      - name: Cross-build the C-heavy dependency
+        run: cargo build --release --target x86_64-apple-darwin -p aws-lc-rs
+
+      - name: What did it produce?
+        run: |
+          find target/x86_64-apple-darwin/release -name 'libaws_lc_*.rlib' -o -name '*.a' | head -5
