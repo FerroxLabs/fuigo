@@ -1,0 +1,257 @@
+name: release
+
+# Build all six platform binaries and publish the seven npm packages.
+#
+# WHY NATIVE RUNNERS FOR EVERY TARGET
+# The obvious design is two runners cross-compiling to six triples. Do not.
+# rustls pins `aws-lc-rs` (Cargo.toml), which builds C and needs cmake plus a
+# working cross toolchain for the host->target pair. Cross-compiling it is
+# solvable but it is a maintenance tax paid on every toolchain bump, and it
+# fails at link time in CI rather than on a developer's machine.
+#
+# GitHub now offers ARM runners for both Linux and Windows, so every target can
+# build natively and no cross toolchain exists to break. If `ubuntu-24.04-arm`
+# or `windows-11-arm` are unavailable on your plan, see FALLBACKS at the bottom.
+#
+#   Actions -> release -> Run workflow      (dry_run defaults to true)
+#   git tag v1.0.1 && git push --tags       (publishes for real)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and assemble, but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A release build of ~986 crates is long. Thin LTO and one codegen unit are
+  # already set by the profile; this only trims incremental-compilation state
+  # that a clean CI runner cannot use anyway.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.npm_platform }}
+    runs-on: ${{ matrix.runner }}
+    # The workspace is large; a cold cache genuinely takes this long.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            npm_platform: darwin-arm64
+            bin: fuigo-pager
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            npm_platform: darwin-x64
+            bin: fuigo-pager
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            npm_platform: linux-x64
+            bin: fuigo-pager
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            npm_platform: linux-arm64
+            bin: fuigo-pager
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            npm_platform: win32-x64
+            bin: fuigo-pager.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            npm_platform: win32-arm64
+            bin: fuigo-pager.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version; this action honours it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # aws-lc-rs builds C. Present on the GitHub images already, but pinned
+      # here so a future image change fails loudly instead of mysteriously.
+      - name: Install cmake (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          # Cache the release profile; the default only covers debug.
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p fuigo-pager-bin
+
+      # A binary that cannot start is worth catching here rather than after
+      # publish. Only meaningful where the runner can execute what it built,
+      # which with native runners is every target.
+      - name: Smoke test
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          "$BIN" --version
+          # The version must match the single source of truth. A mismatch here
+          # means FUIGO_VERSION leaked in from somewhere.
+          EXPECTED=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          "$BIN" --version | grep -q "$EXPECTED" || {
+            echo "::error::binary reports $("$BIN" --version), expected $EXPECTED"; exit 1; }
+
+      # macOS arm64 requires a signature to execute at all; the linker applies
+      # an ad-hoc one. Verify it survived, because an invalidated signature is
+      # SIGKILL with no diagnostic on the user's machine.
+      - name: Verify ad-hoc signature (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --verify --verbose=1 "target/${{ matrix.target }}/release/${{ matrix.bin }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fuigo-${{ matrix.npm_platform }}
+          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
+          retention-days: 3
+          # Already ~166 MB; the assemble step brotli-compresses it properly.
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    name: assemble and publish
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: fuigo-*
+
+      - name: Show what arrived
+        run: |
+          find artifacts -type f -exec ls -lh {} \;
+          test $(find artifacts -type f | wc -l) -eq 6 || {
+            echo "::error::expected 6 binaries, refusing to publish a partial set"; exit 1; }
+
+      # Deliberately NO `npm install` here.
+      #
+      # The meta package lists its six platform packages as
+      # optionalDependencies pinned to the version being released -- which does
+      # not exist in the registry until the step below publishes it. Installing
+      # first is a chicken-and-egg that fails on every FIRST publish of a
+      # version.
+      #
+      # It is also unnecessary: sync-version.js and
+      # assemble-platform-packages.js use only Node builtins (fs, path, zlib,
+      # child_process). The single runtime dependency, @iarna/toml, is used by
+      # bin/postinstall.js, which runs on the USER's machine at install time.
+
+      # Fails if any npm version disagrees with fuigo-version/Cargo.toml.
+      - name: Check versions
+        working-directory: crates/codegen/fuigo-pager/npm/fuigo
+        run: npm run check-version
+
+      - name: Assemble platform packages
+        working-directory: crates/codegen/fuigo-pager/npm/fuigo
+        env:
+          # brotli runs on the libuv pool (default 4), so without this two of
+          # the six compressions serialise.
+          UV_THREADPOOL_SIZE: 6
+          FUIGO_DARWIN_ARM64: ${{ github.workspace }}/artifacts/fuigo-darwin-arm64/fuigo-pager
+          FUIGO_DARWIN_X64: ${{ github.workspace }}/artifacts/fuigo-darwin-x64/fuigo-pager
+          FUIGO_LINUX_ARM64: ${{ github.workspace }}/artifacts/fuigo-linux-arm64/fuigo-pager
+          FUIGO_LINUX_X64: ${{ github.workspace }}/artifacts/fuigo-linux-x64/fuigo-pager
+          FUIGO_WIN32_ARM64: ${{ github.workspace }}/artifacts/fuigo-win32-arm64/fuigo-pager.exe
+          FUIGO_WIN32_X64: ${{ github.workspace }}/artifacts/fuigo-win32-x64/fuigo-pager.exe
+        run: npm run assemble
+
+      - name: Resolve version
+        id: v
+        # A tag name is attacker-influenceable by anyone who can push a tag, so
+        # it reaches the shell through env rather than ${{ }} interpolation --
+        # interpolation would splice it into the script text itself.
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          V=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Publishing $V"
+          # On a tag push, the tag must agree with the source of truth.
+          if [ "$REF_TYPE" = "tag" ]; then
+            [ "$REF_NAME" = "v$V" ] || {
+              echo "::error::tag $REF_NAME does not match version $V"; exit 1; }
+          fi
+
+      # ORDER IS LOAD-BEARING. The meta package pins its six
+      # optionalDependencies to an EXACT version, so publishing it first leaves
+      # a window in which `npm i @fuigo-official/fuigo` resolves nothing
+      # installable. Platform packages first, meta last.
+      - name: Publish platform packages
+        if: github.event_name == 'push' || inputs.dry_run == false
+        working-directory: crates/codegen/fuigo-pager/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
+            echo "--- @fuigo-official/fuigo-$p"
+            (cd "fuigo-$p" && npm publish --access public --provenance)
+          done
+
+      - name: Publish meta package
+        if: github.event_name == 'push' || inputs.dry_run == false
+        working-directory: crates/codegen/fuigo-pager/npm/fuigo
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Dry run summary
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        working-directory: crates/codegen/fuigo-pager/npm
+        run: |
+          echo "DRY RUN — nothing published."
+          for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64 ""; do
+            d="fuigo${p:+-$p}"; [ -d "$d" ] || continue
+            (cd "$d" && npm pack --dry-run 2>&1 | tail -6)
+          done
+
+# FALLBACKS
+#
+# If `ubuntu-24.04-arm` / `windows-11-arm` are not available to you:
+#
+#   linux-arm64   — use `cross` (Docker-based, brings its own sysroot):
+#                     cargo install cross
+#                     cross build --release --target aarch64-unknown-linux-gnu \
+#                       -p fuigo-pager-bin
+#                   Drop the smoke-test step for that target: the runner cannot
+#                   execute an aarch64 binary.
+#
+#   win32-arm64   — add the rustup target on windows-latest and cross-link:
+#                     rustup target add aarch64-pc-windows-msvc
+#                   aws-lc-rs needs the ARM64 MSVC toolchain component
+#                   (Microsoft.VisualStudio.Component.VC.Tools.ARM64) which is
+#                   NOT on the default image; install it with the VS installer
+#                   step or expect a link failure in aws-lc-sys.
+#
+# Either fallback means shipping a binary nobody executed before publish. Prefer
+# the native runners.
