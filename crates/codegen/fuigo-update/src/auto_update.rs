@@ -71,7 +71,7 @@ fn manual_install_cmd(channel: &str) -> String {
 
 fn reinstall_hint(installer: &str, channel: &str) -> String {
     match installer {
-        "npm" => "Please reinstall via npm:\n  npm i -g @fuigo-official/fuigo".to_string(),
+        "npm" => "Please reinstall via npm:\n  npm i -g fuigo".to_string(),
         "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo FerroxLabs/fuigo --pattern 'fuigo-*' --output fuigo && chmod +x fuigo".to_string(),
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd(channel)),
     }
@@ -2517,7 +2517,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
     warn_if_other_fuigo_processes_running();
 
     let version_arg = match target {
-        Some(ver) => format!("@fuigo-official/fuigo@{ver}"),
+        Some(ver) => format!("fuigo@{ver}"),
         None => {
             // All current callers resolve the version via get_latest_version (max(stable, alpha) for the alpha channel) before reaching here
             // Falling back to a raw dist-tag would bypass that logic, so warn loudly if this path is ever hit
@@ -2526,7 +2526,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
                 "install_npm called without a resolved version, falling back to dist-tag"
             );
             format!(
-                "@fuigo-official/fuigo@{}",
+                "fuigo@{}",
                 if channel == "alpha" {
                     "alpha"
                 } else {

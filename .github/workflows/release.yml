@@ -9,9 +9,10 @@ name: release
 # solvable but it is a maintenance tax paid on every toolchain bump, and it
 # fails at link time in CI rather than on a developer's machine.
 #
-# GitHub now offers ARM runners for both Linux and Windows, so every target can
-# build natively and no cross toolchain exists to break. If `ubuntu-24.04-arm`
-# or `windows-11-arm` are unavailable on your plan, see FALLBACKS at the bottom.
+# GitHub offers ARM runners for both Linux and Windows, so five of the six
+# targets build natively and no cross toolchain exists to break. The sixth,
+# darwin-x64, cross-compiles on macos-14 because the Intel image is gone --
+# see the matrix comment. Runner availability is tabulated at the bottom.
 #
 #   Actions -> release -> Run workflow      (dry_run defaults to true)
 #   git tag v1.0.1 && git push --tags       (publishes for real)
@@ -50,7 +51,18 @@ jobs:
             target: aarch64-apple-darwin
             npm_platform: darwin-arm64
             bin: fuigo-pager
-          - runner: macos-13
+          # NOT macos-13. The Intel image no longer schedules for this
+          # account -- probed 2026-09-01, the job sat queued for 30+ minutes
+          # while every other label started within 5. An unavailable label
+          # does not error, it queues forever, so this would have hung the
+          # matrix rather than failed it.
+          #
+          # macos-14 (arm64) covers it instead. Probed on the same day:
+          # aws-lc-sys cross-compiles its C for x86_64 in 46s and emits
+          # libaws_lc_0_39_1_crypto.a, and Rosetta 2 is installed on the image
+          # (`arch -x86_64` runs), so the smoke test below still executes the
+          # binary it just built. Nothing about this target ships untested.
+          - runner: macos-14
             target: x86_64-apple-darwin
             npm_platform: darwin-x64
             bin: fuigo-pager
@@ -74,10 +86,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins the version; this action honours it.
+      # Present only to guarantee rustup exists on every image; windows-11-arm
+      # is new enough that its preinstalled tooling is not worth assuming.
+      # Deliberately no `targets:` input -- see the next step for why.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+
+      # rust-toolchain.toml pins channel 1.94.0, and rustup honours that file
+      # for any cargo invoked inside the repo. So installing a target into
+      # `stable` -- which is what the action's `targets:` input does -- achieves
+      # nothing: cargo still runs 1.94.0, which does not have it. Not
+      # hypothetical; doing exactly that failed a probe with
+      #
+      #   error[E0463]: can't find crate for `core`
+      #   note: the `x86_64-apple-darwin` target may not be installed
+      #
+      # `rustup target add` run from inside the checkout resolves through
+      # rust-toolchain.toml and installs into the toolchain that actually
+      # builds. `rustup show` is printed so the log proves which one that was.
+      - name: Add target to the pinned toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add ${{ matrix.target }}
+          rustup target list --installed
 
       # aws-lc-rs builds C, so cmake must exist. Probed 2026-09-01: present on
       # every runner in this matrix (/usr/local/bin on Ubuntu, /opt/homebrew
@@ -144,7 +174,12 @@ jobs:
     environment: npm-publish
     permissions:
       contents: read
-      id-token: write # npm provenance
+      # No id-token permission, because nothing below asks npm for a
+      # provenance attestation. npm stopped accepting those from private
+      # source repositories on 2023-07-25, and FerroxLabs/fuigo is private --
+      # so requesting one would fail the publish AFTER a two-hour matrix had
+      # already succeeded. If the repo is ever made public, restore
+      # `id-token: write` here and the flag on both publish commands.
     steps:
       - uses: actions/checkout@v4
 
@@ -216,7 +251,7 @@ jobs:
 
       # ORDER IS LOAD-BEARING. The meta package pins its six
       # optionalDependencies to an EXACT version, so publishing it first leaves
-      # a window in which `npm i @fuigo-official/fuigo` resolves nothing
+      # a window in which `npm i fuigo` resolves nothing
       # installable. Platform packages first, meta last.
       - name: Publish platform packages
         if: github.event_name == 'push' || inputs.dry_run == false
@@ -225,8 +260,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
-            echo "--- @fuigo-official/fuigo-$p"
-            (cd "fuigo-$p" && npm publish --access public --provenance)
+            echo "--- fuigo-$p"
+            (cd "fuigo-$p" && npm publish --access public)
           done
 
       - name: Publish meta package
@@ -234,7 +269,7 @@ jobs:
         working-directory: crates/codegen/fuigo-pager/npm/fuigo
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+        run: npm publish --access public
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
@@ -246,9 +281,18 @@ jobs:
             (cd "$d" && npm pack --dry-run 2>&1 | tail -6)
           done
 
+# RUNNER AVAILABILITY, probed 2026-09-01 against this repo
+#
+#   ubuntu-24.04      schedules    cmake /usr/local/bin
+#   ubuntu-24.04-arm  schedules    cmake /usr/local/bin
+#   windows-latest    schedules    cmake C:\Program Files\CMake
+#   windows-11-arm    schedules    cmake C:\Program Files\CMake
+#   macos-14          schedules    cmake /opt/homebrew, Rosetta 2 present
+#   macos-13          QUEUES FOREVER -- treat the Intel image as gone
+#
 # FALLBACKS
 #
-# If `ubuntu-24.04-arm` / `windows-11-arm` are not available to you:
+# If `ubuntu-24.04-arm` / `windows-11-arm` stop being available to you:
 #
 #   linux-arm64   — use `cross` (Docker-based, brings its own sysroot):
 #                     cargo install cross
@@ -266,3 +310,8 @@ jobs:
 #
 # Either fallback means shipping a binary nobody executed before publish. Prefer
 # the native runners.
+#
+# darwin-x64 is already the exception: it cross-compiles on macos-14 because
+# macos-13 is gone. That one is safe to accept only because Rosetta 2 lets the
+# arm64 runner execute the x86_64 result, so the smoke test is real. Do not
+# extend the same reasoning to a target with no such escape hatch.

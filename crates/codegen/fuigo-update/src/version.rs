@@ -10,7 +10,7 @@ use fuigo_shell::env::FuigoBuildEnvironment;
 use fuigo_shell::util::fuigo_home::fuigo_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
-const NPM_PACKAGE: &str = "@fuigo-official/fuigo";
+const NPM_PACKAGE: &str = "fuigo";
 /// The repo the gh-release installer pulls from.
 ///
 /// Was `fuigo-org-shared/fuigo-build` -- a name the rebrand invented from

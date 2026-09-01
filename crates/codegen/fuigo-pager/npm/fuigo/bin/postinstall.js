@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs once after npm install/update. Reads the fuigo binary from the
-// matching per-platform optional dependency (@fuigo-official/fuigo-<platform>)
+// matching per-platform optional dependency (fuigo-<platform>)
 // and installs it to ~/.fuigo/bin/ using versioned filenames:
 //
 //   Unix:    fuigo-<version>  +  fuigo  (symlink)
@@ -36,7 +36,7 @@ const SUPPORTED = new Set([
     'win32-arm64',
 ]);
 if (!SUPPORTED.has(key)) {
-    console.error(`@fuigo-official/fuigo: unsupported platform ${key}`);
+    console.error(`fuigo: unsupported platform ${key}`);
     process.exit(0);
 }
 
@@ -45,7 +45,7 @@ if (!SUPPORTED.has(key)) {
 // other five are silently skipped. If the matching one is missing, npm was
 // likely invoked with --no-optional or the platform is unsupported.
 function resolvePlatformPackageDir() {
-    const platformPkg = `@fuigo-official/fuigo-${key}`;
+    const platformPkg = `fuigo-${key}`;
     try {
         return path.dirname(require.resolve(`${platformPkg}/package.json`));
     } catch {
@@ -56,7 +56,7 @@ function resolvePlatformPackageDir() {
 let version;
 try { version = require('../package.json').version; } catch {}
 if (!version) {
-    console.error('@fuigo-official/fuigo: unable to determine version');
+    console.error('fuigo: unable to determine version');
     process.exit(0);
 }
 
@@ -96,7 +96,7 @@ function installBinary(binName, sourceDir, vendorSubpath) {
 
     // Skip if this exact version is already installed.
     if (!fs.existsSync(versionedPath) && !writeVendorBinary(brotliPath, binaryPath, versionedPath)) {
-        console.error(`@fuigo-official/fuigo: missing binary at ${brotliPath}`);
+        console.error(`fuigo: missing binary at ${brotliPath}`);
         return false;
     }
 
@@ -119,7 +119,7 @@ function installBinary(binName, sourceDir, vendorSubpath) {
                     throw copyErr;
                 }
             } catch (e2) {
-                console.error(`@fuigo-official/fuigo: failed to update ${canonicalPath}: ${e2.message}`);
+                console.error(`fuigo: failed to update ${canonicalPath}: ${e2.message}`);
                 console.error('Close all running fuigo processes and try again.');
                 return false;
             }
@@ -134,7 +134,7 @@ function installBinary(binName, sourceDir, vendorSubpath) {
 
     // Don't report a broken wire-up as success.
     if (!fs.existsSync(canonicalPath)) {
-        console.error(`@fuigo-official/fuigo: ${canonicalName} did not resolve after install`);
+        console.error(`fuigo: ${canonicalName} did not resolve after install`);
         return false;
     }
 
@@ -180,9 +180,9 @@ function cleanupOldVersions(binName) {
 
 const platformDir = resolvePlatformPackageDir();
 if (!platformDir) {
-    console.error(`@fuigo-official/fuigo: platform package @fuigo-official/fuigo-${key} not installed.`);
+    console.error(`fuigo: platform package fuigo-${key} not installed.`);
     console.error('  This usually means npm was invoked with --no-optional, or the install failed.');
-    console.error('  Try: npm install -g @fuigo-official/fuigo');
+    console.error('  Try: npm install -g fuigo');
     process.exit(0);
 }
 
@@ -207,7 +207,7 @@ function installBinLink(platformDir) {
         fs.renameSync(tmp, entryPath);
     } catch (e) {
         // Losing the link only costs latency; the node launcher still works.
-        console.error(`@fuigo-official/fuigo: bin link not installed: ${e.message}`);
+        console.error(`fuigo: bin link not installed: ${e.message}`);
         try { fs.unlinkSync(tmp); } catch {}
     }
 }
@@ -231,7 +231,7 @@ const npmRegistry = process.env.FUIGO_NPM_REGISTRY
     || (() => {
         try {
             const resolved = execSync(
-                'npm config get @fuigo-official:registry',
+                'npm config get registry',
                 { encoding: 'utf8', timeout: 5000 }
             ).trim();
             if (resolved && resolved !== 'undefined') return resolved;

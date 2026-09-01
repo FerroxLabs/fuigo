@@ -38,7 +38,9 @@ const PLATFORMS = [
     'win32-arm64', 'win32-x64',
 ];
 
-const SCOPE = '@fuigo-official';
+// Unscoped. `fuigo` and the six `fuigo-<platform>` names are ours on npm;
+// the `@fuigo-official` scope this once used is not an org that exists.
+const PREFIX = 'fuigo';
 
 /**
  * The product version, read from fuigo-version's Cargo.toml.
@@ -98,7 +100,7 @@ function main() {
 
     meta.optionalDependencies = meta.optionalDependencies || {};
     for (const p of PLATFORMS) {
-        const name = `${SCOPE}/fuigo-${p}`;
+        const name = `${PREFIX}-${p}`;
         note(`  pin ${name}`, meta.optionalDependencies[name], version);
         meta.optionalDependencies[name] = version;
     }

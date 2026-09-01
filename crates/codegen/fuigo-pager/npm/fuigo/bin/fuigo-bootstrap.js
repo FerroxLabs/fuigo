@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Resolves the fuigo binary and runs it, in order of preference:
 //   1. $FUIGO_HOME/bin/fuigo, the versioned symlink postinstall.js installs
-//   2. bootstrap it from the per-platform @fuigo-official/fuigo-<platform>
+//   2. bootstrap it from the per-platform fuigo-<platform>
 //      package, decompressing the compressed binary into $FUIGO_HOME/bin
 //   3. decompress in place under node_modules (no resolvable version, or
 //      an unwritable home)
@@ -13,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
 
-const pkgName = '@fuigo-official/fuigo';
+const pkgName = 'fuigo';
 const IS_WINDOWS = process.platform === 'win32';
 const EXE = IS_WINDOWS ? '.exe' : '';
 const BIN_NAME = `fuigo${EXE}`;
@@ -34,7 +34,7 @@ function readLocalVersion() {
 // Returns null when npm skipped the matching optional dependency
 // (unsupported platform, or --no-optional).
 function resolvePlatformPackageDir() {
-    const platformPkg = `@fuigo-official/fuigo-${process.platform}-${process.arch}`;
+    const platformPkg = `fuigo-${process.platform}-${process.arch}`;
     try {
         return path.dirname(require.resolve(`${platformPkg}/package.json`));
     } catch {
@@ -108,7 +108,7 @@ function resolveBinary() {
     const platformDir = resolvePlatformPackageDir();
     if (!platformDir) {
         console.error(`${pkgName}: no platform binary installed for ${process.platform}-${process.arch}.`);
-        console.error(`  Expected sibling package @fuigo-official/fuigo-${process.platform}-${process.arch}.`);
+        console.error(`  Expected sibling package fuigo-${process.platform}-${process.arch}.`);
         console.error(`  This usually means npm skipped optionalDependencies (e.g. --no-optional)`);
         console.error(`  or the platform is not supported.`);
         process.exit(1);

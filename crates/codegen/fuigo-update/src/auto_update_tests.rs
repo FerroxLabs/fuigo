@@ -921,7 +921,7 @@ fn test_reinstall_hint_npm_mentions_npm_command() {
     let hint = reinstall_hint("npm", "stable");
     assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
     assert!(
-        hint.contains("@fuigo-official/fuigo"),
+        hint.contains("fuigo"),
         "should name the package: {hint}"
     );
 }
@@ -2428,7 +2428,7 @@ fn cli_object_candidates_try_windows_exe_first() {
 fn npm_entry_is_recognized_by_the_binary_location() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let native = root.join("lib/node_modules/@fuigo-official/fuigo/bin/fuigo-native");
+    let native = root.join("lib/node_modules/fuigo/bin/fuigo-native");
     std::fs::create_dir_all(native.parent().unwrap()).unwrap();
     std::fs::write(&native, "bin").unwrap();
     let path_entry = root.join("prefix-bin/fuigo");

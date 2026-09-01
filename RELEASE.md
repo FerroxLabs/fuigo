@@ -1,7 +1,10 @@
 # Releasing Fuigo
 
-Fuigo ships to npm as seven packages: a meta package `@fuigo-official/fuigo`
-and six per-platform binary packages listed as its `optionalDependencies`. npm
+Fuigo ships to npm as seven packages: a meta package `fuigo`
+and six per-platform binary packages (`fuigo-darwin-arm64` and friends) listed
+as its `optionalDependencies`. All seven are unscoped — an earlier revision
+used an `@fuigo-official` scope, which is not an npm org that exists and could
+never have been published to. `fuigo` itself is already ours. npm
 downloads only the one matching the host's `os`/`cpu`, so a user pulls one
 ~42 MB package, not six.
 
@@ -65,9 +68,16 @@ binary from a Windows PE — it just compresses bytes — so a placeholder there
 publishes a package that installs cleanly and then fails to execute, on a
 platform you probably cannot test from.
 
-A GitHub Actions matrix (macos-14, macos-13, ubuntu-latest ×2 via `cross`,
-windows-latest ×2) is the straightforward way to produce all six. Until that
-exists, release only the platforms you have genuinely built.
+`.github/workflows/release.yml` produces all six and is the supported path.
+Building them by hand is for debugging, not for shipping.
+
+Runner availability was probed 2026-09-01 and is worth knowing before editing
+that matrix: `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`,
+`windows-11-arm` and `macos-14` all schedule. **`macos-13` does not** — the job
+queues indefinitely rather than failing, which is the worst way to find out at
+the end of a two-hour build. `darwin-x64` therefore cross-compiles on
+`macos-14`; aws-lc-sys builds its C for x86_64 there in under a minute, and
+Rosetta 2 on the image means the smoke test still executes the binary.
 
 ---
 
@@ -94,6 +104,11 @@ cd ../fuigo-darwin-arm64 && npm publish --access public
 # … the other five …
 cd ../fuigo             && npm publish --access public
 ```
+
+No `--provenance`. npm has refused provenance attestations from private source
+repositories since 2023-07-25, and `FerroxLabs/fuigo` is private; asking for
+one fails the publish. If the repo is ever made public, add the flag back
+along with `id-token: write` in the workflow.
 
 ---
 

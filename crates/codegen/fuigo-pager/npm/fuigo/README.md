@@ -13,7 +13,7 @@ curl -fsSL https://x.ai/cli/install.sh | bash
 Or install with npm:
 
 ```bash
-npm i -g @fuigo-official/fuigo
+npm i -g fuigo
 ```
 
 ## Get Started
@@ -41,7 +41,7 @@ fuigo update
 Or if installed via npm:
 
 ```bash
-npm i -g @fuigo-official/fuigo@latest
+npm i -g fuigo@latest
 ```
 
 ## Supported Platforms
