@@ -1,0 +1,29 @@
+[package]
+license = "Apache-2.0"
+name = "fuigo-workspace-client"
+version = "0.1.0"
+edition.workspace = true
+description = "Lightweight typed client for hub-proxied workspace.* RPCs (shared by fuigo-shell proxy mode and other consumers)"
+
+[dependencies]
+semver = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+fuigo-computer-hub-sdk = { workspace = true }
+fuigo-workspace-types = { workspace = true }
+fuigo-tool-protocol = { workspace = true }
+fuigo-tool-runtime = { workspace = true }
+
+[features]
+default = []
+default-bazel = []
+[dev-dependencies]
+schemars = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+fuigo-tool-types = { workspace = true }
+
+[lints]
+workspace = true

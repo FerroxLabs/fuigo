@@ -1,0 +1,302 @@
+[package]
+name = "fuigo-pager"
+version = "1.0.1"
+edition.workspace = true
+license = "Apache-2.0"
+authors = ["Ferrox Labs"]
+
+[dependencies]
+# TTY safety — detach subprocesses from the controlling terminal
+dunce = { workspace = true }
+fuigo-tty-utils = { workspace = true }
+fuigo-version = { workspace = true }
+
+# Shared prompt-queue wire types
+fuigo-prompt-queue = { workspace = true }
+
+# Presentation-primitives layer (extracted)
+fuigo-pager-render = { path = "../fuigo-pager-render" }
+
+# The /gboom easter-egg game (extracted)
+fuigo-gboom = { path = "../fuigo-gboom" }
+
+# Diff hunk construction (extracted)
+fuigo-pager-diff = { path = "../fuigo-pager-diff" }
+
+# Rendering
+ratatui = { workspace = true, features = ["crossterm", "unstable-widget-ref"] }
+fuigo-announcements = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
+textwrap = { workspace = true }
+regex = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+strip-ansi-escapes = { workspace = true }
+
+# Markdown / syntax highlighting
+fuigo-markdown = { workspace = true }
+# Inline Mermaid rendering engine. Always compiled (no feature gate): the
+# dagre-based vendored engine renders detected ```mermaid fences out of process,
+# gated only at runtime by the `appearance.render_mermaid` setting.
+fuigo-mermaid = { workspace = true }
+syntect = { workspace = true }
+
+# Data
+similar = { workspace = true }
+indexmap = { workspace = true }
+blake3 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+strum = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true, features = ["serde"] }
+
+# ANSI parsing (tracing pane)
+ansi-to-tui = { workspace = true }
+
+# PTY for ssh wrapper, e2e tests, and benchmarking.
+portable-pty = "0.9"
+
+# Utilities
+anyhow = { workspace = true }
+shlex = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+clap_complete = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true, features = [
+    "sync",
+    "rt",
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "io-util",
+    "io-std",
+] }
+tokio-util = { workspace = true, features = ["compat"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Binary hardening: compile-time string obfuscation.
+# (cryptify / rustls / semver / tikv-jemallocator moved to the composition-root
+# binary `fuigo-pager-bin` with `main.rs`; this lib no longer references them.)
+obfstr = { workspace = true }
+
+# Fuzzy matching (history search daemon)
+nucleo = { workspace = true }
+
+# Prompt text input
+fuigo-ratatui-textarea = { workspace = true }
+fuigo-ratatui-inline = { workspace = true }
+
+# Update
+fuigo-update = { path = "../fuigo-update" }
+
+# ACP
+agent-client-protocol = { workspace = true }
+fuigo-acp-lib = { workspace = true }
+fuigo-file-utils = { path = "../fuigo-file-utils" }
+# Crash-recovery registry of open TUI sessions.
+fuigo-active-sessions = { workspace = true }
+fuigo-config = { workspace = true }
+fuigo-dirs = { workspace = true }
+fuigo-dashboard-store = { workspace = true }
+# Voice dictation. `audio` (mic capture) is enabled on every target. On
+# macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
+# backend instead, so cpal -> alsa-sys never reaches the static musl binary
+# (cpal is target-gated to non-Linux inside fuigo-voice).
+fuigo-voice = { path = "../fuigo-voice", default-features = false, features = ["audio"] }
+fuigo-shell = { workspace = true }
+# The status-line contract: the config the user writes and the payload the
+# agent sends. A leaf crate rather than the agent's, so the client reads it
+# from upstream of the crate that fills it in.
+fuigo-status-line = { workspace = true }
+fuigo-workspace = { workspace = true }
+# Foreign coding-agent session discovery.
+fuigo-foreign-sessions = { workspace = true }
+fuigo-token-estimation = { workspace = true }
+fuigo-telemetry = { workspace = true }
+fuigo-fast-worktree = { path = "../fuigo-fast-worktree", features = ["metadata"] }
+backon = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+fuigo-tools = { workspace = true }
+fuigo-agent = { workspace = true }
+fuigo-plugin-marketplace = { path = "../fuigo-plugin-marketplace" }
+# Blocked-card copy: `hook_display_name` lives next to the hook-name grammar.
+fuigo-hooks = { path = "../fuigo-hooks" }
+fuigo-hooks-plugins-types = { path = "../fuigo-hooks-plugins-types" }
+walkdir = { workspace = true }
+fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
+
+# Base64 encoding for image data
+base64 = { workspace = true }
+
+# Image decoding/resizing for clipboard image validation before send
+image = { workspace = true, features = ["png", "jpeg", "tiff", "gif", "webp"] }
+
+# ID generation
+uuid = { workspace = true, features = ["v4"] }
+
+# Path computation (plan file, etc.)
+shellexpand = "3.1"
+
+# libgit2 for the startup git-info populator (no fork/exec, runs once on launch
+# in spawn_blocking; the render path never touches git directly).
+git2 = { version = "0.20", default-features = false, features = [
+    "vendored-libgit2",
+] }
+urlencoding = { workspace = true }
+
+# Parsing (web_search)
+url = { workspace = true }
+
+# Crash diagnostics
+fuigo-crash-handler = { path = "../fuigo-crash-handler" }
+
+# Non-poisoning mutex for signal handler (active-sessions crash recovery).
+parking_lot.workspace = true
+
+# nix: signal handling in notifications/.
+# signal-hook: SIGWINCH handler for the `fuigo wrap` PTY wrapper (pty_wrap.rs).
+# libc: poll/read for non-blocking terminal reads in theme/osc11.rs.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["signal"] }
+signal-hook = { workspace = true }
+libc = { workspace = true }
+
+# core-foundation: IOKit power assertions for sleep prevention (SleepInhibitor).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true }
+
+# SetConsoleCtrlHandler for the exec-emulating screen-mode relaunch
+# (`/minimal` / `/fullscreen`): the waiting parent must ignore console Ctrl
+# events so only the relaunched child handles them. Version matches the other
+# in-repo consumers (fuigo-crash-handler, fuigo-system-power).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+# The fixture that builds a `[ui.status_line]` section field by field.
+fuigo-status-line = { workspace = true, features = ["test-support"] }
+fuigo-pager-render = { path = "../fuigo-pager-render", features = ["test-support"] }
+fuigo-gboom = { path = "../fuigo-gboom", features = ["test-support"] }
+fuigo-shell = { workspace = true, features = ["test-support"] }
+pretty_assertions = { workspace = true }
+insta = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+serial_test = { workspace = true }
+fuigo-agent = { workspace = true }
+fuigo-pager-pty-harness = { path = "../fuigo-pager-pty-harness" }
+# In-process leader-cluster harness (mock inference server; no cycle:
+# fuigo-test-support depends on neither the pager nor the shell).
+fuigo-test-support = { workspace = true, features = [] }
+# Provider install for the in-process leader-cluster tests.
+fuigo-extra-ca = { workspace = true }
+
+[[bench]]
+name = "render"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "edit_highlight"
+harness = false
+
+[[bench]]
+name = "resize"
+harness = false
+
+# PTY integration tests are split into coherent scheduling families. The test
+# modules remain under tests/pty_e2e/; these roots only define which cases share
+# one Cargo/Bazel process. All cases stay #[ignore]d for ordinary Cargo runs.
+# Selected Cargo runs must provide PAGER_BINARY; Bazel wires the sibling binary.
+[[test]]
+name = "doctor_early_dispatch"
+path = "tests/doctor_early_dispatch.rs"
+
+[[test]]
+name = "pty_e2e_smoke"
+path = "tests/pty_e2e_smoke.rs"
+
+[[test]]
+name = "pty_e2e_queue"
+path = "tests/pty_e2e_queue.rs"
+
+[[test]]
+name = "pty_e2e_scroll_selection"
+path = "tests/pty_e2e_scroll_selection.rs"
+
+[[test]]
+name = "pty_e2e_minimal"
+path = "tests/pty_e2e_minimal.rs"
+
+[[test]]
+name = "pty_e2e_config_ui"
+path = "tests/pty_e2e_config_ui.rs"
+
+[[test]]
+name = "pty_e2e_shell_tools"
+path = "tests/pty_e2e_shell_tools.rs"
+
+[[test]]
+name = "pty_e2e_persistence"
+path = "tests/pty_e2e_persistence.rs"
+
+[[test]]
+name = "pty_e2e_clipboard"
+path = "tests/pty_e2e_clipboard.rs"
+
+# Leader-mode PTY e2e — split from ordinary PTY families so multi-process
+# cluster bring-up never contends with their bounded pools.
+[[test]]
+name = "leader_pty_e2e"
+path = "tests/leader_pty_e2e/mod.rs"
+
+# Settings modal regression tests — keyboard/mouse dispatch + registry
+# contracts. Not gated by `--ignored`; runs on every `cargo test`.
+[[test]]
+name = "settings_e2e"
+path = "tests/settings_e2e.rs"
+
+# Declarative scripted TUI scenarios — opt-in because they spawn the real pager.
+[[test]]
+name = "scripted_scenarios"
+path = "tests/scripted_scenarios.rs"
+
+# Permission Auto mode PTY e2e (Shift+Tab → Auto banner via PtyHarness).
+[[test]]
+name = "pty_auto_mode"
+path = "tests/pty_auto_mode.rs"
+
+# Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
+# `cargo clippy --workspace -- -D warnings` on this package is stricter than
+# the workspace-default clippy allows used in CI.
+[lints]
+workspace = true
+
+[features]
+default = ["jemalloc", "sandbox-enforce"]
+default-bazel = [
+    "jemalloc",
+    "sandbox-enforce",
+    "test-support",
+    "local-workspace",
+    ]
+local-workspace = ["fuigo-shell/local-workspace"]
+# No-op on this crate: the actual `#[global_allocator]` (and the
+# `tikv-jemallocator` dep) live on the composition-root binary
+# `fuigo-pager-bin`, which owns `main.rs`. Kept as an empty feature so the
+# workspace-uniform `[jemalloc, sandbox-enforce]` default set resolves
+# here too and the generated `crate_features` stay valid.
+jemalloc = []
+sandbox-enforce = ["fuigo-sandbox/enforce"]
+release-dist = []
+# Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
+# `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
+# by `fuigo-pager-minimal`'s unit tests. Never enabled in production builds.
+test-support = ["fuigo-pager-render/test-support", "fuigo-gboom/test-support"]
