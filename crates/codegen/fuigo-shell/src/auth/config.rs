@@ -119,7 +119,16 @@ pub struct OAuth2ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
 }
-pub const XAI_OAUTH2_ISSUER: &str = "https://auth.x.ai";
+/// xAI's OAuth2 issuer. **Not a default.** Fuigo ships with no issuer at all.
+///
+/// Kept as a named constant because Grok OAuth is a supported *opt-in*: a user
+/// who wants it sets `FUIGO_OAUTH2_ISSUER` to this value together with
+/// `FUIGO_OAUTH2_CLIENT_ID` and the `grok-cli:access` scope. Naming it here
+/// documents the value and gives the tests something to seed.
+///
+/// It used to be the silent fallback, so `fuigo login` dialled xAI out of the
+/// box in a product that is not xAI's.
+pub const GROK_OAUTH2_ISSUER: &str = "https://auth.x.ai";
 /// A separate const so the frozen contract test pins the production allowlist even when the non-production feature adds staging and local origins.
 const PROD_ACCOUNTS_APP_ORIGINS: &[&str] = &["https://accounts.x.ai"];
 /// Production build: accepts only the production accounts app.
@@ -147,25 +156,79 @@ pub(crate) fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http:
 }
 /// Local-dev OAuth2 issuer (accounts-app running on localhost).
 const FUIGO_OAUTH2_LOCAL_ISSUER: &str = "http://localhost:22255";
-const DEFAULT_OAUTH2_REFERRER: &str = "fuigo-build";
 /// Returns `true` when `FUIGO_LOCAL_AUTH=1` is set, indicating the local accounts-app should be used as the OAuth2 issuer.
 pub(crate) fn use_local_auth() -> bool {
     std::env::var("FUIGO_LOCAL_AUTH")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false)
 }
-/// Returns the active Ferrox Labs OAuth2 issuer: the local-dev issuer when `FUIGO_LOCAL_AUTH=1` is set, otherwise the production issuer.
-pub fn fuigo_oauth2_issuer() -> &'static str {
-    if use_local_auth() {
-        FUIGO_OAUTH2_LOCAL_ISSUER
-    } else {
-        XAI_OAUTH2_ISSUER
+/// The configured OAuth2 issuer, or `""` when none is configured.
+///
+/// There is **no compiled default**. This returned `https://auth.x.ai`
+/// unconditionally, so `fuigo login` dialled xAI in a product that is not
+/// xAI's, and a doc comment described that as "the Ferrox Labs issuer".
+///
+/// An issuer is now something the user chooses, exactly like every other
+/// endpoint: set `FUIGO_OAUTH2_ISSUER` (with `FUIGO_OAUTH2_CLIENT_ID`).
+/// `FUIGO_LOCAL_AUTH=1` still selects the local-dev accounts app.
+pub fn fuigo_oauth2_issuer() -> String {
+    #[cfg(test)]
+    if let Some(issuer) = TEST_ISSUER_OVERRIDE.get() {
+        return issuer.clone();
     }
+    if use_local_auth() {
+        return FUIGO_OAUTH2_LOCAL_ISSUER.to_owned();
+    }
+    std::env::var("FUIGO_OAUTH2_ISSUER").unwrap_or_default()
 }
-/// Whether `issuer` is a recognised Ferrox Labs OAuth2 issuer (production or local-dev).
-/// Use this instead of comparing to [`XAI_OAUTH2_ISSUER`] so local-dev counts as first-party Ferrox Labs auth.
+
+/// Test-only configured issuer.
+///
+/// Tests that exercise issuer *matching* need an installation that has one.
+/// A `OnceLock` rather than `std::env::set_var`, which is `unsafe` in edition
+/// 2024 and races with every other test in the binary. Every caller installs
+/// the same value, so first-write-wins is deterministic.
+#[cfg(test)]
+static TEST_ISSUER_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// A `FuigoComConfig` with an OAuth2 provider installed, for tests that
+/// exercise login behaviour.
+///
+/// `FuigoComConfig::default()` no longer carries a provider — Fuigo ships
+/// without one — so tests about *how* login behaves must state that this
+/// installation is configured, rather than relying on a compiled-in vendor.
+#[cfg(test)]
+pub(crate) fn test_config_with_oauth2() -> FuigoComConfig {
+    set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
+    let mut cfg = FuigoComConfig::default();
+    cfg.oauth2 = Some(OAuth2ProviderConfig {
+        issuer: GROK_OAUTH2_ISSUER.to_owned(),
+        client_id: "test-client-id".to_owned(),
+        scopes: default_oauth2_scopes(),
+        principal_type: None,
+        principal_id: None,
+        referrer: None,
+    });
+    cfg.oidc = None;
+    cfg
+}
+
+/// Install the configured issuer for tests. Idempotent; first write wins.
+#[cfg(test)]
+pub(crate) fn set_test_oauth2_issuer(issuer: &str) {
+    let _ = TEST_ISSUER_OVERRIDE.set(issuer.to_owned());
+}
+
+/// Whether `issuer` is the issuer this installation is configured to trust.
+///
+/// Decides whether a stored token counts as a first-party account. With no
+/// issuer configured this is `false` for everything, which is the safe
+/// direction: an unknown token is not promoted to first-party.
 pub fn is_fuigo_oauth2_issuer(issuer: &str) -> bool {
-    issuer == XAI_OAUTH2_ISSUER || issuer == FUIGO_OAUTH2_LOCAL_ISSUER
+    if issuer.is_empty() {
+        return false;
+    }
+    issuer == FUIGO_OAUTH2_LOCAL_ISSUER || issuer == fuigo_oauth2_issuer()
 }
 /// auth.json scope key used by the pre-OIDC `fuigo login --legacy` flow.
 /// Matches the key format produced by the original `accounts.x.ai` relay auth.
@@ -191,10 +254,26 @@ impl FuigoComConfig {
         } else if let Some(ref oauth2) = self.oauth2 {
             oauth2.auth_scope()
         } else {
-            unreachable!("oauth2 config is always present (Ferrox Labs default or env override)")
+            // Fuigo ships with no OAuth provider, so this is a normal state,
+            // not an impossible one. It used to be `unreachable!`, which held
+            // only because a vendor issuer and client id were compiled in as a
+            // fallback; removing that turned the invariant into a panic on a
+            // fresh install.
+            //
+            // Returning a distinct sentinel keeps the 18 call sites working
+            // and is safe by construction: a real scope is `issuer::client_id`
+            // and no issuer is spelled `unconfigured`, so a lookup under this
+            // key cannot collide with a stored credential and simply misses.
+            // Nothing stores under it either -- `run_cli_login` refuses before
+            // it gets that far when no issuer is configured.
+            UNCONFIGURED_AUTH_SCOPE.to_owned()
         }
     }
 }
+/// Scope key used when no OAuth provider is configured. Cannot collide with a
+/// real `issuer::client_id` scope. See [`FuigoComConfig::auth_scope`].
+pub const UNCONFIGURED_AUTH_SCOPE: &str = "unconfigured::no-oauth-provider";
+
 impl OAuth2ProviderConfig {
     pub fn is_team_principal(&self) -> bool {
         self.principal_type.as_deref() == Some(TEAM_PRINCIPAL_TYPE)
@@ -216,10 +295,10 @@ impl OAuth2ProviderConfig {
                 .unwrap_or(default_scopes),
             principal_type,
             principal_id,
-            referrer: Some(
-                std::env::var("FUIGO_OAUTH2_REFERRER")
-                    .unwrap_or_else(|_| DEFAULT_OAUTH2_REFERRER.to_owned()),
-            ),
+            // Opt-in only. Its own field comment says it exists "so analytics
+            // can attribute OAuth usage" -- that is a tracking parameter for
+            // whoever operates the issuer, and it defaulted to "fuigo-build".
+            referrer: std::env::var("FUIGO_OAUTH2_REFERRER").ok(),
         })
     }
     /// Convert to [`OidcAuthConfig`] to reuse the OIDC login flow.
@@ -241,19 +320,18 @@ impl OAuth2ProviderConfig {
 impl Default for FuigoComConfig {
     fn default() -> Self {
         let oidc = OidcAuthConfig::from_env();
+        // No fallback provider. This previously defaulted to xAI's issuer and
+        // an obfuscated xAI OAuth client id compiled into the binary, so a
+        // fresh install had a working login to a vendor the user never chose.
+        //
+        // `None` here means `fuigo login` refuses until an issuer is
+        // configured -- enterprise OIDC, or FUIGO_OAUTH2_ISSUER +
+        // FUIGO_OAUTH2_CLIENT_ID. Grok OAuth is reached that way, as an
+        // opt-in: see [`GROK_OAUTH2_ISSUER`].
         let oauth2 = if oidc.is_some() {
             None
         } else {
-            Some(
-                OAuth2ProviderConfig::from_env().unwrap_or_else(|| OAuth2ProviderConfig {
-                    issuer: fuigo_oauth2_issuer().to_owned(),
-                    client_id: obfstr::obfstr!("b1a00492-073a-47ea-816f-4c329264a828").to_owned(),
-                    scopes: default_oauth2_scopes(),
-                    principal_type: None,
-                    principal_id: None,
-                    referrer: Some(DEFAULT_OAUTH2_REFERRER.to_owned()),
-                }),
-            )
+            OAuth2ProviderConfig::from_env()
         };
         Self {
             fuigo_ws_origin: std::env::var("FUIGO_WS_ORIGIN")

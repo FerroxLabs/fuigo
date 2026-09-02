@@ -634,12 +634,23 @@ mod tests {
                 "session credentials must not reach {denied}"
             );
         }
-        let resolved = embedding_session_credentials(
-            "https://api.x.ai/v1",
-            Some(&mgr),
-            Some(api_key_provider),
+        // "First party" is now whatever the installation configures, not a
+        // compiled-in vendor, so derive the allowed URL from the live trust
+        // set rather than naming a host. Reading it back keeps this
+        // deterministic no matter which test populated the OnceLock first.
+        fuigo_shell_base::util::set_trusted_api_origins([
+            "https://api.fluxrouter.ai/v1".to_string()
+        ]);
+        let first_party = fuigo_shell_base::util::trusted_api_origins()
+            .first()
+            .expect("a trusted origin must be installed")
+            .clone();
+        let resolved =
+            embedding_session_credentials(&first_party, Some(&mgr), Some(api_key_provider));
+        assert!(
+            !resolved.is_empty(),
+            "session credentials must reach the configured first-party origin {first_party}"
         );
-        assert!(!resolved.is_empty());
     }
     /// Deployment-key path has no recovery (operator owns the bearer).
     #[tokio::test]

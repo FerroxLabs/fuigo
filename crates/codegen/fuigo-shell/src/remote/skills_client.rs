@@ -802,7 +802,7 @@ mod tests {
     }
 
     fn test_auth_manager() -> Arc<AuthManager> {
-        use crate::auth::{AuthMode, FuigoAuth, FuigoComConfig, XAI_OAUTH2_ISSUER};
+        use crate::auth::{AuthMode, FuigoAuth, FuigoComConfig, GROK_OAUTH2_ISSUER};
         let dir = tempfile::tempdir().unwrap();
         let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());
         mgr.hot_swap(FuigoAuth {
@@ -812,7 +812,7 @@ mod tests {
             user_id: "user-1".into(),
             email: Some("test@example.com".into()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             ..Default::default()
         });
         std::mem::forget(dir);

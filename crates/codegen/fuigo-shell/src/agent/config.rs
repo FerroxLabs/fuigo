@@ -2118,7 +2118,58 @@ impl Config {
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
+        config.install_trusted_api_origins();
         Ok(config)
+    }
+
+    /// Install a first-party trust set for tests.
+    ///
+    /// These tests exercise *routing* — does a session bearer follow a
+    /// first-party endpoint and not a third-party one — rather than *policy*,
+    /// which is "no vendor is first-party unless configured". They therefore
+    /// need an installation that has configured origins.
+    ///
+    /// Both are installed because the suite uses `api.x.ai` as its
+    /// first-party fixture and FluxRouter is the shipped default; an
+    /// installation configured for Grok is a legitimate opt-in.
+    ///
+    /// The policy itself is asserted where it cannot be undermined by a test
+    /// that installs origins: `fuigo-shell-base/tests/trust_fails_closed.rs`,
+    /// which runs in its own process and installs nothing.
+    ///
+    /// Idempotent: the store is a `OnceLock` and every caller passes the same
+    /// value, so ordering does not matter.
+    #[cfg(test)]
+    pub(crate) fn install_test_trusted_origins() {
+        crate::util::set_trusted_api_origins([
+            "https://api.fluxrouter.ai/v1".to_string(),
+            "https://api.x.ai/v1".to_string(),
+        ]);
+    }
+
+    /// Publish the configured first-party API origins to `fuigo-shell-base`,
+    /// which decides where a session bearer may be attached.
+    ///
+    /// This must happen after `apply_env_overrides`, so `FUIGO_API_BASE_URL`
+    /// and friends are reflected. The underlying store is a `OnceLock`: the
+    /// first config to load wins, and a later one cannot widen the trust set.
+    ///
+    /// Until this runs, nothing is first-party and every credential check
+    /// fails closed. That is the safe direction — see
+    /// `fuigo-shell-base/tests/trust_fails_closed.rs`.
+    ///
+    /// These are the endpoints the user pointed Fuigo at, so `x.ai` becomes
+    /// first-party if and only if they configured it. Previously `*.x.ai` was
+    /// trusted by compilation and the configured endpoint was not.
+    fn install_trusted_api_origins(&self) {
+        let mut origins = vec![self.endpoints.fuigo_api_base_url.clone()];
+        if let Some(url) = &self.endpoints.models_base_url {
+            origins.push(url.clone());
+        }
+        if let Some(url) = &self.endpoints.cli_chat_proxy_base_url {
+            origins.push(url.clone());
+        }
+        crate::util::set_trusted_api_origins(origins);
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
     ///

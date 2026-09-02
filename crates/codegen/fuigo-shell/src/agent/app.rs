@@ -1339,7 +1339,7 @@ mod tests {
         FuigoAuth {
             key: key.into(),
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             refresh_token: Some(format!("rt-{key}")),
             create_time,
             expires_at: Some(create_time + chrono::Duration::minutes(15)),
@@ -1403,7 +1403,7 @@ mod tests {
     fn test_relay_config(addr: std::net::SocketAddr) -> crate::agent::relay::RelayConfig {
         let auth = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             ..FuigoAuth::test_default()
         };
         let cfg = crate::auth::FuigoComConfig {
@@ -1467,7 +1467,7 @@ mod tests {
         let session = FuigoAuth {
             expires_at: chrono::DateTime::from_timestamp(9_999_999_999, 0),
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             ..FuigoAuth::test_default()
         };
         let with_session = {
@@ -1501,6 +1501,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn eager_relay_connects_without_any_ipc_client() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
         let (addr, count) = spawn_mock_relay_server().await;
         let config = test_relay_config(addr);
         let cancel = CancellationToken::new();
@@ -1539,6 +1541,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn on_demand_relay_waits_for_headless_demand_signal() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
         let (addr, count) = spawn_mock_relay_server().await;
         let config = test_relay_config(addr);
         let cancel = CancellationToken::new();
@@ -1579,6 +1583,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn deferred_arm_connects_relay_when_auth_appears() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
         let (addr, count) = spawn_mock_relay_server().await;
         let cancel = CancellationToken::new();
         let (ws_to_agent_tx, _ws_to_agent_rx) = mpsc::unbounded_channel();
@@ -1618,7 +1624,7 @@ mod tests {
                 );
                 let eligible = FuigoAuth {
                     auth_mode: AuthMode::Oidc,
-                    oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+                    oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
                     ..FuigoAuth::test_default()
                 };
                 assert!(
@@ -1643,6 +1649,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn cold_mint_auth_write_arms_deferred_relay() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
         use crate::config::reloader::{ConfigReloader, ConfigUpdate, hash_auth_key};
         let (addr, _count) = spawn_mock_relay_server().await;
         let fuigo_com_config = crate::auth::FuigoComConfig {
@@ -1654,7 +1662,7 @@ mod tests {
         let scope = "https://test.example.com".to_string();
         let session = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             ..FuigoAuth::test_default()
         };
         let mut store = std::collections::BTreeMap::new();

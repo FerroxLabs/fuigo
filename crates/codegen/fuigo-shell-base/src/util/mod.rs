@@ -23,6 +23,84 @@ pub fn random_f64() -> f64 {
 pub fn probabilistic_sample(rate: f64) -> bool {
     random_f64() < rate
 }
+/// First-party API origins, derived from configuration at startup.
+///
+/// WHY THIS IS NOT A CONSTANT
+/// These predicates used to hardcode `x.ai` / `*.x.ai` as "first-party". That
+/// is coherent for the vendor this code was forked from and incoherent here:
+/// Fuigo's credential is a FluxRouter or user-supplied key, and
+/// `api.fluxrouter.ai` was *not* trusted while every `*.x.ai` host was. So the
+/// session bearer could be attached to a vendor host and never to the endpoint
+/// the user actually configured.
+///
+/// Trust now follows configuration. `x.ai` is trusted if — and only if — the
+/// user pointed Fuigo at it.
+///
+/// FAILS CLOSED
+/// Before [`set_trusted_api_origins`] runs, this is empty and every predicate
+/// below returns `false`. The worst case is that session-bearer auth does not
+/// engage until configuration is loaded; the alternative failure direction
+/// would be attaching a credential to an unvetted host.
+///
+/// It is a `OnceLock`, so a later caller cannot widen the trust set: the first
+/// write wins and subsequent writes are ignored.
+static TRUSTED_API_ORIGINS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Install the configured first-party origins. Called once during startup.
+/// Empty and blank entries are dropped so an unset endpoint cannot widen trust.
+pub fn set_trusted_api_origins<I: IntoIterator<Item = String>>(origins: I) {
+    let cleaned: Vec<String> = origins
+        .into_iter()
+        .map(|o| o.trim().to_owned())
+        .filter(|o| !o.is_empty())
+        .collect();
+    let _ = TRUSTED_API_ORIGINS.set(cleaned);
+}
+
+/// The configured first-party origins. Empty until [`set_trusted_api_origins`].
+pub fn trusted_api_origins() -> &'static [String] {
+    TRUSTED_API_ORIGINS.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// Whether `url` sits on one of the configured first-party origins.
+///
+/// Compares scheme + host + port, deliberately NOT path. An origin is a
+/// security boundary; a configured base of `https://api.example.com` must
+/// cover `/v1/chat/completions` under it. [`matches_trusted_base_url`] is
+/// path-aware by design (it pins one exact proxy route) and is wrong here:
+/// with a root base its path check rejects every subpath.
+///
+/// `Url::parse` normalises the host and resolves userinfo, so
+/// `https://good.example@attacker.example/` compares as `attacker.example`.
+fn matches_configured_origin(url: &str) -> bool {
+    let Ok(candidate) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    trusted_api_origins().iter().any(|base| {
+        reqwest::Url::parse(base).is_ok_and(|trusted| {
+            candidate.scheme() == trusted.scheme()
+                && candidate.host_str() == trusted.host_str()
+                && candidate.host_str().is_some()
+                && candidate.port_or_known_default() == trusted.port_or_known_default()
+        })
+    })
+}
+
+/// Host-only comparison against the configured origins, for the
+/// scheme-agnostic *refusal* path where a bare host may be all we have.
+fn host_matches_configured_origin(url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    trusted_api_origins().iter().any(|base| {
+        reqwest::Url::parse(base)
+            .ok()
+            .and_then(|b| b.host_str().map(str::to_owned))
+            .is_some_and(|h| h == host)
+    })
+}
+
 fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
     let Ok(candidate) = reqwest::Url::parse(candidate) else {
         return false;
@@ -74,7 +152,9 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     }
     false
 }
-/// True for Ferrox Labs-operated endpoints (`*.x.ai`, cli-chat-proxy, and optional non-production Ferrox Labs hosts when that feature is enabled).
+/// True for the CONFIGURED first-party API endpoints (see
+/// [`set_trusted_api_origins`]) plus the compiled cli-chat-proxy route.
+/// No vendor is privileged by compilation.
 /// `disable_api_key_auth` refuses keys only for these; other hosts are BYOK and exempt.
 /// Safe against invalid URLs and suffix attacks (`evil-x.ai.example`).
 ///
@@ -91,7 +171,7 @@ pub fn is_fuigo_api_bearer_url(url: &str) -> bool {
     }
     false
 }
-/// True for trusted first-party Ferrox Labs HTTPS routes, excluding arbitrary loopback URLs.
+/// True for configured first-party HTTPS routes, excluding arbitrary loopback URLs.
 pub fn is_trusted_fuigo_https_url(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
@@ -105,9 +185,7 @@ pub fn is_trusted_fuigo_https_url(url: &str) -> bool {
     if is_trusted_cli_chat_proxy_url(url) {
         return true;
     }
-    parsed
-        .host_str()
-        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
+    matches_configured_origin(url)
 }
 fn is_fuigo_api_url_impl(url: &str, require_https: bool) -> bool {
     if require_https {
@@ -116,10 +194,7 @@ fn is_fuigo_api_url_impl(url: &str, require_https: bool) -> bool {
     if is_cli_chat_proxy_url(url) {
         return true;
     }
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
+    host_matches_configured_origin(url)
 }
 fn is_loopback_host(parsed: &reqwest::Url) -> bool {
     match parsed.host() {
@@ -345,9 +420,18 @@ pub fn is_fuigo_process_strict(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The trust set is a OnceLock, so every test installs the SAME value and
+    /// the first writer wins. Coverage for the *uninitialised* case lives in
+    /// `tests/trust_fails_closed.rs`, which needs its own process.
+    const TEST_ORIGIN: &str = "https://api.fluxrouter.ai";
+    fn init_test_origins() {
+        set_trusted_api_origins([TEST_ORIGIN.to_string()]);
+    }
+
+    /// The compiled proxy route is empty after severance, so nothing matches it.
     #[test]
-    fn test_is_cli_chat_proxy_url_accepts_proxy_subpath() {
-        assert!(is_cli_chat_proxy_url(
+    fn test_is_cli_chat_proxy_url_has_no_compiled_route() {
+        assert!(!is_cli_chat_proxy_url(
             "https://cli-chat-proxy.grok.com/v1/chat/completions"
         ));
     }
@@ -367,40 +451,63 @@ mod tests {
             "https://cli-chat-proxy.grok.com/v11/chat/completions"
         ));
     }
+    /// Refusal path: scheme-agnostic, matched on host, so a credential is
+    /// refused even for a plaintext spelling of a configured origin.
     #[test]
-    fn test_is_fuigo_api_url() {
-        assert!(is_fuigo_api_url("https://api.x.ai/v1"));
-        assert!(is_fuigo_api_url("https://api.x.ai/v1/chat/completions"));
-        assert!(is_fuigo_api_url("https://x.ai"));
-        assert!(is_fuigo_api_url(
-            "https://cli-chat-proxy.grok.com/v1/chat/completions"
-        ));
+    fn test_is_fuigo_api_url_follows_configuration() {
+        init_test_origins();
+        assert!(is_fuigo_api_url("https://api.fluxrouter.ai/v1"));
+        assert!(is_fuigo_api_url("https://api.fluxrouter.ai/v1/chat/completions"));
+        // Scheme-agnostic on purpose: refusal must fail closed.
+        assert!(is_fuigo_api_url("http://api.fluxrouter.ai/v1"));
+
+        // THE REGRESSION THIS FILE EXISTS FOR: no vendor is trusted by
+        // compilation. x.ai is first-party only if configured, and it is not.
+        assert!(!is_fuigo_api_url("https://api.x.ai/v1"));
+        assert!(!is_fuigo_api_url("https://x.ai"));
+
         assert!(!is_fuigo_api_url("https://api.openai.com/v1"));
         assert!(!is_fuigo_api_url("https://api.anthropic.com/v1"));
         assert!(!is_fuigo_api_url("https://generativelanguage.googleapis.com"));
-        assert!(!is_fuigo_api_url("https://api.x.ai.evil.example/v1"));
-        assert!(!is_fuigo_api_url("https://evil-x.ai.attacker.com/v1"));
-        assert!(!is_fuigo_api_url("https://prefixx.ai/v1"));
+
+        // Suffix / prefix confusion against the CONFIGURED origin.
+        assert!(!is_fuigo_api_url("https://api.fluxrouter.ai.evil.example/v1"));
+        assert!(!is_fuigo_api_url("https://evil-api.fluxrouter.ai.attacker.com/v1"));
+        assert!(!is_fuigo_api_url("https://prefixfluxrouter.ai/v1"));
+
         assert!(!is_fuigo_api_url("not-a-url"));
         assert!(!is_fuigo_api_url(""));
-        assert!(is_fuigo_api_url("http://api.x.ai/v1"));
+        // Loopback stays accepted here (mock servers); the bearer variant refuses it.
         assert!(is_fuigo_api_url("http://localhost:11434/v1"));
     }
+    /// Attachment path: https only, no loopback, configured origins only.
     #[test]
-    fn test_is_fuigo_api_bearer_url() {
-        assert!(is_fuigo_api_bearer_url("https://api.x.ai/v1"));
-        assert!(!is_fuigo_api_bearer_url("http://api.x.ai/v1"));
+    fn test_is_fuigo_api_bearer_url_follows_configuration() {
+        init_test_origins();
+        assert!(is_fuigo_api_bearer_url("https://api.fluxrouter.ai/v1"));
+        // Host comparison is case-insensitive, as URL hosts are.
+        assert!(is_fuigo_api_bearer_url("https://API.FLUXROUTER.AI/v1"));
+
+        // Never over plaintext: a bearer must not cross an unencrypted hop.
+        assert!(!is_fuigo_api_bearer_url("http://api.fluxrouter.ai/v1"));
+
+        // Never to loopback: a co-located process could read the token.
         assert!(!is_fuigo_api_bearer_url("http://localhost:11434/v1"));
-        {
-            assert!(!is_fuigo_api_bearer_url("https://localhost:11434/v1"));
-            assert!(!is_fuigo_api_bearer_url("https://127.0.0.2:11434/v1"));
-            assert!(!is_fuigo_api_bearer_url("https://[::1]:11434/v1"));
-        }
-        assert!(is_fuigo_api_bearer_url("https://API.X.AI/v1"));
+        assert!(!is_fuigo_api_bearer_url("https://localhost:11434/v1"));
+        assert!(!is_fuigo_api_bearer_url("https://127.0.0.2:11434/v1"));
+        assert!(!is_fuigo_api_bearer_url("https://[::1]:11434/v1"));
+
+        // No vendor by default.
+        assert!(!is_fuigo_api_bearer_url("https://api.x.ai/v1"));
+
+        // userinfo confusion: the real host is attacker.example.
         assert!(!is_fuigo_api_bearer_url(
-            "https://api.x.ai@attacker.example/v1"
+            "https://api.fluxrouter.ai@attacker.example/v1"
         ));
-        assert!(!is_fuigo_api_bearer_url("https://х.ai/v1"));
+        // Homograph: Cyrillic \u{0445} is not ASCII `x`. Kept from the original
+        // suite because it guards the host comparison, not the vendor name.
+        assert!(!is_fuigo_api_bearer_url("https://\u{0445}.ai/v1"));
+        assert!(!is_fuigo_api_bearer_url("https://fluxr\u{043e}uter.ai/v1"));
     }
     #[test]
     fn test_truncate() {

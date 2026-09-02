@@ -2172,13 +2172,15 @@ fn make_trace_card_eligible(agent: &MvpAgent) {
 fn personal_fuigo_oauth_auth() -> crate::auth::FuigoAuth {
     crate::auth::FuigoAuth {
         auth_mode: crate::auth::AuthMode::Oidc,
-        oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
         ..crate::auth::FuigoAuth::test_default()
     }
 }
 #[tokio::test]
 #[serial_test::serial]
 async fn feedback_trace_offer_asks_personal_oauth_accounts() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
     use fuigo_test_support::EnvGuard;
     let _e1 = EnvGuard::unset("FUIGO_TELEMETRY_ENABLED");
     let _e2 = EnvGuard::unset("FUIGO_TELEMETRY_TRACE_UPLOAD");
@@ -5079,6 +5081,8 @@ fn supervisor_reaps_panicked_resident_actor() {
 #[tokio::test]
 #[serial_test::serial]
 async fn storage_mode_self_corrects_to_writeback_when_settings_arrive() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
     let _env = crate::env::EnvVarGuard::remove("FUIGO_STORAGE_MODE");
     let auth = crate::auth::FuigoAuth {
         auth_mode: crate::auth::AuthMode::Oidc,
@@ -5164,6 +5168,8 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
 /// The full `initialize` fires once-per-process FUIGO_HOME cleanup work that a unit test must not run against the developer's real home.
 #[test]
 fn gated_reconnect_tier_recheck_is_single_flight() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
     run_local_for_bridge_test(|| async {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -5195,7 +5201,7 @@ fn gated_reconnect_tier_recheck_is_single_flight() {
             key: "gated-user-key".into(),
             user_id: "user-gated".into(),
             auth_mode: crate::auth::AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_owned()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_owned()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             ..crate::auth::FuigoAuth::test_default()
         };
@@ -5321,7 +5327,7 @@ fn gated_reconnect_recheck_lifts_gate_clearing_paywall_flash() {
             key: jwt_with_tier(5),
             user_id: "user-flash".into(),
             auth_mode: crate::auth::AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_owned()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_owned()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             ..crate::auth::FuigoAuth::test_default()
         };
@@ -5397,10 +5403,12 @@ impl Drop for RestoreOtelGate {
 /// A mismatched identity stays provisionally open (unknown), like the OTEL gate's `rearm_on_switch`.
 #[tokio::test]
 async fn access_gate_does_not_leak_verdict_across_identities() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
     use crate::agent::config::AgentMode;
-    use crate::auth::{FuigoAuth, XAI_OAUTH2_ISSUER};
+    use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
     let auth_a = FuigoAuth {
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         user_id: "user-a".into(),
         ..FuigoAuth::test_default()
     };
@@ -5418,7 +5426,7 @@ async fn access_gate_does_not_leak_verdict_across_identities() {
     }
     *agent.allow_access_resolved_for.borrow_mut() = Some("user-a".to_string());
     let auth_b = FuigoAuth {
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         user_id: "user-b".into(),
         ..FuigoAuth::test_default()
     };
@@ -5434,8 +5442,10 @@ async fn access_gate_does_not_leak_verdict_across_identities() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn post_auth_settings_fuigo_upgrades_writeback_emits_and_opens_gate() {
+    crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+    crate::agent::config::Config::install_test_trusted_origins();
     use crate::agent::config::AgentMode;
-    use crate::auth::{FuigoAuth, XAI_OAUTH2_ISSUER};
+    use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
     let _restore = RestoreOtelGate;
     let _storage_env = crate::env::EnvVarGuard::remove("FUIGO_STORAGE_MODE");
     let server = fuigo_test_support::MockInferenceServer::start()
@@ -5446,7 +5456,7 @@ async fn post_auth_settings_fuigo_upgrades_writeback_emits_and_opens_gate() {
         "allow_access": true,
     }));
     let fuigo_auth = FuigoAuth {
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         ..FuigoAuth::test_default()
     };
     assert!(fuigo_auth.is_fuigo_auth(), "precondition: first-party Ferrox Labs auth");
@@ -5518,13 +5528,13 @@ async fn post_auth_settings_non_fuigo_keeps_local_but_still_emits() {
 #[serial_test::serial]
 async fn post_auth_settings_failure_resolves_gate_onto_local_policy() {
     use crate::agent::config::AgentMode;
-    use crate::auth::{FuigoAuth, XAI_OAUTH2_ISSUER};
+    use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
     let _restore = RestoreOtelGate;
     let server = fuigo_test_support::MockInferenceServer::start()
         .await
         .unwrap();
     let fuigo_auth = FuigoAuth {
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         ..FuigoAuth::test_default()
     };
     let (agent, _rx) = build_agent_with_auth_and_proxy(fuigo_auth, server.url(), AgentMode::Leader);
@@ -5547,13 +5557,13 @@ async fn post_auth_settings_failure_resolves_gate_onto_local_policy() {
 #[serial_test::serial]
 async fn same_credential_refresh_does_not_flap_resolved_gate() {
     use crate::agent::config::AgentMode;
-    use crate::auth::{FuigoAuth, XAI_OAUTH2_ISSUER};
+    use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
     let _restore = RestoreOtelGate;
     let server = fuigo_test_support::MockInferenceServer::start()
         .await
         .unwrap();
     let fuigo_auth = FuigoAuth {
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         ..FuigoAuth::test_default()
     };
     let (agent, _rx) =
@@ -5574,7 +5584,7 @@ async fn same_credential_refresh_does_not_flap_resolved_gate() {
 async fn settings_self_heal_refetches_after_token_rotation() {
     use crate::agent::config::AgentMode;
     use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
-    use crate::auth::{FuigoAuth, XAI_OAUTH2_ISSUER};
+    use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
     let _restore = RestoreOtelGate;
     let server = fuigo_test_support::MockInferenceServer::start_with_required_auth(
         vec![fuigo_test_support::MockModelEntry::new("fuigo-build")],
@@ -5589,7 +5599,7 @@ async fn settings_self_heal_refetches_after_token_rotation() {
         async fn refresh(&self, _r: crate::auth::manager::RefreshReason) -> RefreshOutcome {
             RefreshOutcome::Success(Box::new(FuigoAuth {
                 key: "rotated-key".into(),
-                oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+                oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
                 refresh_token: Some("rt".into()),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
                 ..FuigoAuth::test_default()
@@ -5598,7 +5608,7 @@ async fn settings_self_heal_refetches_after_token_rotation() {
     }
     let stale = FuigoAuth {
         key: "stale-key".into(),
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         refresh_token: Some("rt".into()),
         expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
         ..FuigoAuth::test_default()
@@ -5624,14 +5634,14 @@ async fn settings_self_heal_refetches_after_token_rotation() {
 #[serial_test::serial]
 async fn settings_not_cached_when_identity_logs_out_during_fetch() {
     use crate::agent::config::AgentMode;
-    use crate::auth::{FuigoAuth, XAI_OAUTH2_ISSUER};
+    use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
     let _restore = RestoreOtelGate;
     let server = fuigo_test_support::MockInferenceServer::start()
         .await
         .unwrap();
     server.set_settings(serde_json::json!({ "allow_access": true }));
     let fuigo_auth = FuigoAuth {
-        oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         ..FuigoAuth::test_default()
     };
     let (agent, _rx) =
