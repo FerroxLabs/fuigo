@@ -3894,7 +3894,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     let trimmed = ctx.auth_code_input.text().trim().to_string();
                     if !trimmed.is_empty() {
                         return InputOutcome::Action(if matches!(mode, AuthMode::ApiKey) {
-                            Action::SubmitApiKey(trimmed)
+                            Action::SubmitApiKey(crate::app::actions::SecretKey(trimmed))
                         } else {
                             Action::SubmitAuthCode(trimmed)
                         });

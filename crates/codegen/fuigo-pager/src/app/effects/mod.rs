@@ -2330,7 +2330,10 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({ "key": key });
+                    // `.0` is explicit on purpose: `SecretKey` deliberately does not
+                    // derive `Serialize`, so a key can only be serialised where
+                    // someone wrote the unwrap. This is the one place that should.
+                    let params = serde_json::json!({ "key": key.0 });
                     let req = acp::ExtRequest::new(
                         "fuigo/setApiKey",
                         serde_json::value::to_raw_value(&params)

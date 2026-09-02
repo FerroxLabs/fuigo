@@ -30,6 +30,68 @@ pub enum SwitchModelError {
 /// Synchronous, side-effect-free user intent.
 ///
 /// Produced by [`super::input`] from key/mouse events.
+/// An API key, wrapped so that `{:?}` cannot print it.
+///
+/// `Action` and `Effect` both `#[derive(Debug)]` and both carry a submitted
+/// key. Nothing on the dispatch path formats them today, but one
+/// `tracing::debug!(?action, ...)` added later would write a live credential
+/// into `~/.fuigo/logs`. A newtype makes that impossible rather than
+/// improbable, and costs one `.0` at the consumers.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretKey(pub String);
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Length is safe and occasionally useful; the bytes are not.
+        write!(f, "SecretKey(<redacted, {} chars>)", self.0.chars().count())
+    }
+}
+
+impl From<String> for SecretKey {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+#[cfg(test)]
+mod secret_key_tests {
+    use super::SecretKey;
+
+    /// The whole point: a `{:?}` on an action carrying a key must not print it.
+    #[test]
+    fn debug_never_prints_the_key() {
+        let k = SecretKey("sk-flux-REALSECRETVALUE0123".to_string());
+        let rendered = format!("{k:?}");
+        assert!(!rendered.contains("REALSECRETVALUE"), "{rendered}");
+        assert!(!rendered.contains("sk-flux"), "{rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    /// Including when nested in the action that actually carries it.
+    #[test]
+    fn debug_of_the_action_never_prints_the_key() {
+        let a = super::Action::SubmitApiKey(SecretKey("sk-SENSITIVE-XYZ-9999".into()));
+        let rendered = format!("{a:?}");
+        assert!(!rendered.contains("SENSITIVE"), "{rendered}");
+    }
+
+    #[test]
+    fn debug_of_the_effect_never_prints_the_key() {
+        let e = super::Effect::SubmitApiKey {
+            request_seq: 1,
+            key: SecretKey("sk-SENSITIVE-XYZ-9999".into()),
+        };
+        let rendered = format!("{e:?}");
+        assert!(!rendered.contains("SENSITIVE"), "{rendered}");
+    }
+
+    #[test]
+    fn the_value_is_still_reachable_for_the_one_caller_that_needs_it() {
+        let k = SecretKey("sk-abc".to_string());
+        assert_eq!(k.0, "sk-abc");
+    }
+}
+
 /// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -614,7 +676,7 @@ pub enum Action {
     /// Open the API-key entry screen from the first-run welcome menu.
     EnterApiKey,
     /// User submitted an API key typed or pasted into that screen.
-    SubmitApiKey(String),
+    SubmitApiKey(SecretKey),
     /// Apply the Nth credential discovered in the environment.
     ///
     /// Carries an INDEX, never the key. `Action` is `#[derive(Debug)]`, so a
@@ -1690,7 +1752,7 @@ pub enum Effect {
     /// Persist an API key through the agent (`fuigo/setApiKey`).
     /// The agent owns `auth.json`, so the key is never written from the TUI
     /// process — in leader mode they are not even the same process.
-    SubmitApiKey { request_seq: u64, key: String },
+    SubmitApiKey { request_seq: u64, key: SecretKey },
     /// Fetch MCP server list from the shell (fuigo/mcp/list).
     FetchMcpsList {
         agent_id: AgentId,

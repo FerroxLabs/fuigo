@@ -5,6 +5,26 @@ use crate::error::VoiceError;
 /// Default STT capture rate (Hz). Shared with the `__mic-capture` helper's argv default so parent and child agree when `--rate` is omitted.
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
+/// Default batch transcription model. The fast lane, because voice input is
+/// short and latency-sensitive; `flux-voice-accurate` is the other end.
+pub const DEFAULT_STT_MODEL: &str = "flux-voice-fast";
+
+/// Which speech-to-text transport to use.
+///
+/// These are different protocols, not two URLs. Streaming is a WebSocket with
+/// interim results; batch is one HTTP multipart POST after the utterance ends.
+/// FluxRouter offers batch and explicitly refuses `stream=true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SttMode {
+    /// WebSocket streaming with live partial transcripts.
+    Streaming,
+    /// Buffer the utterance, then one `POST /v1/audio/transcriptions`.
+    /// No live partial transcript.
+    #[default]
+    Batch,
+}
+
 /// Voice settings for the STT transport.
 ///
 /// Prefer **https** `api_base` (same shape as chat). [`Self::stt_ws_url`] derives
@@ -21,7 +41,19 @@ pub struct VoiceConfig {
     pub language: String,
     pub sample_rate: u32,
     pub stt_endpointing_ms: u32,
+    /// Only meaningful for [`SttMode::Streaming`]; batch has no interim
+    /// transcript to deliver.
     pub stt_interim_results: bool,
+    /// Which STT transport to use.
+    ///
+    /// An explicit switch rather than capability detection. Nothing in this
+    /// crate can probe what an endpoint speaks: `stt_ws_url` mechanically
+    /// derives `wss://` from any https base and never negotiates, so
+    /// "try streaming, fall back" would mean opening a socket to find out.
+    pub stt_mode: SttMode,
+    /// Transcription model for [`SttMode::Batch`], e.g. `flux-voice-fast`.
+    /// Ignored by the streaming transport, which has no model parameter.
+    pub stt_model: String,
 
     /// The pager stamps this request identity; `serde(skip)` keeps user config from setting it.
     #[serde(skip)]
@@ -48,6 +80,11 @@ impl Default for VoiceConfig {
             sample_rate: DEFAULT_SAMPLE_RATE,
             stt_endpointing_ms: 400,
             stt_interim_results: true,
+            // Batch by default: it is what the shipped endpoint (FluxRouter)
+            // actually supports. Streaming remains available for endpoints
+            // that speak the WebSocket protocol.
+            stt_mode: SttMode::Batch,
+            stt_model: DEFAULT_STT_MODEL.to_owned(),
             client_identifier: String::new(),
             user_agent: String::new(),
         }
