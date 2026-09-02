@@ -9,6 +9,8 @@
 //! - [`effects`] — Effect → async task spawning
 //! - [`acp_handler`] — ACP notification routing
 //! - [`event_loop`] — biased tokio::select! loop
+/// The unauthenticated welcome menu, shared by renderer and dispatcher.
+pub mod pending_menu;
 pub mod actions;
 pub mod agent;
 pub mod agent_view;

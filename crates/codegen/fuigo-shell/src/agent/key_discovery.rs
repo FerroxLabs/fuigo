@@ -24,6 +24,17 @@ pub struct Provider {
     pub key_prefix: Option<&'static str>,
     /// OpenAI-compatible base URL, for writing a `[model_providers]` entry.
     pub base_url: &'static str,
+    /// Whether this key can be applied through the single-credential path
+    /// (`setApiKey` -> `auth.json` + `FUIGO_API_KEY`).
+    ///
+    /// True ONLY for credentials meant for the configured endpoint. That path
+    /// is provider-blind: `extensions/auth.rs:72` stores whatever it is handed
+    /// and it is then sent as the bearer to `[endpoints].fuigo_api_base_url`.
+    /// Applying a third-party key that way would ship, say, an OpenAI secret
+    /// to FluxRouter. Third-party providers need a `[model_providers.<id>]`
+    /// entry plus `model_provider` inside a `[model.<key>]` table, which is
+    /// what arms the fail-closed guard.
+    pub applies_to_configured_endpoint: bool,
 }
 
 /// Providers checked at first run, most preferred first.
@@ -37,6 +48,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["FUIGO_API_KEY", "FUIGO_CODE_API_KEY", "FLUX_API_KEY"],
         key_prefix: Some("sk-"),
         base_url: "https://api.fluxrouter.ai/v1",
+        applies_to_configured_endpoint: true,
     },
     Provider {
         id: "anthropic",
@@ -44,6 +56,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["ANTHROPIC_API_KEY"],
         key_prefix: Some("sk-ant-"),
         base_url: "https://api.anthropic.com/v1",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "openai",
@@ -51,6 +64,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["OPENAI_API_KEY"],
         key_prefix: Some("sk-"),
         base_url: "https://api.openai.com/v1",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "google",
@@ -58,13 +72,19 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         key_prefix: Some("AIza"),
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "xai",
         label: "xAI (Grok)",
         env_vars: &["XAI_API_KEY", "GROK_API_KEY"],
         key_prefix: Some("xai-"),
+        // Reachable only when the egress guard is lifted
+        // (`FUIGO_ALLOW_UPSTREAM_HOSTS=1`): `fuigo-extra-ca/src/egress.rs`
+        // refuses to resolve `x.ai`. Listed so the provider is documented and
+        // configurable, never offered as a one-keypress row.
         base_url: "https://api.x.ai/v1",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "groq",
@@ -72,6 +92,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["GROQ_API_KEY"],
         key_prefix: Some("gsk_"),
         base_url: "https://api.groq.com/openai/v1",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "openrouter",
@@ -79,6 +100,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["OPENROUTER_API_KEY"],
         key_prefix: Some("sk-or-"),
         base_url: "https://openrouter.ai/api/v1",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "deepseek",
@@ -86,6 +108,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["DEEPSEEK_API_KEY"],
         key_prefix: None,
         base_url: "https://api.deepseek.com/v1",
+        applies_to_configured_endpoint: false,
     },
     Provider {
         id: "mistral",
@@ -93,6 +116,7 @@ pub const PROVIDERS: &[Provider] = &[
         env_vars: &["MISTRAL_API_KEY"],
         key_prefix: None,
         base_url: "https://api.mistral.ai/v1",
+        applies_to_configured_endpoint: false,
     },
 ];
 
@@ -189,6 +213,18 @@ where
     found
 }
 
+/// Keys that can be applied through the single-credential path right now.
+///
+/// This is the ONLY list a first-run menu may offer as one-keypress rows.
+/// Everything else needs provider configuration first; offering it would
+/// send that vendor's secret to the configured endpoint.
+pub fn discover_appliable() -> Vec<Discovered> {
+    discover()
+        .into_iter()
+        .filter(|d| d.provider.applies_to_configured_endpoint)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +296,33 @@ mod tests {
                 "accepted junk: {junk:?}"
             );
         }
+    }
+
+    /// The security boundary of this module: a third-party key must never be
+    /// offered as a one-keypress row, because the path that applies it is
+    /// provider-blind and would send that secret to the configured endpoint.
+    #[test]
+    fn only_configured_endpoint_keys_are_appliable() {
+        let appliable: Vec<_> = PROVIDERS
+            .iter()
+            .filter(|p| p.applies_to_configured_endpoint)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            appliable,
+            vec!["fluxrouter"],
+            "a provider became one-keypress appliable; that sends its key to \
+             [endpoints].fuigo_api_base_url. Confirm that is intended."
+        );
+    }
+
+    /// The egress guard refuses to resolve `x.ai`, so an xAI row would be a
+    /// dead end even before the credential question.
+    #[test]
+    fn xai_is_never_appliable_because_egress_blocks_it() {
+        let xai = PROVIDERS.iter().find(|p| p.id == "xai").expect("listed");
+        assert!(!xai.applies_to_configured_endpoint);
+        assert!(xai.base_url.contains("x.ai"));
     }
 
     #[test]

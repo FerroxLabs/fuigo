@@ -169,6 +169,7 @@ pub(crate) fn test_app() -> AppView {
         welcome_consent_hover_link: None,
         consent_answered: None,
         login_label: None,
+        detected_keys: Vec::new(),
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
         auth_code_input: LineEditor::default(),

@@ -615,6 +615,12 @@ pub enum Action {
     EnterApiKey,
     /// User submitted an API key typed or pasted into that screen.
     SubmitApiKey(String),
+    /// Apply the Nth credential discovered in the environment.
+    ///
+    /// Carries an INDEX, never the key. `Action` is `#[derive(Debug)]`, so a
+    /// secret in a variant is one stray `{:?}` away from a log file. The key
+    /// is re-read from the environment when this is handled.
+    UseDetectedKey(usize),
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
     /// Show the raw auth URL with mouse capture disabled for manual copy.

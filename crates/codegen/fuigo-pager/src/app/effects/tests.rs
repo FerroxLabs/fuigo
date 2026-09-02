@@ -2587,10 +2587,10 @@ fn format_session_info_api_key_without_env() {
     assert!(text.contains("Auth method: API key\n"), "{text}");
     assert!(!text.contains("FUIGO_API_KEY"), "{text}");
     assert!(!text.contains("Manage account and credits"), "{text}");
-    assert!(
-            text.contains("Run `fuigo login` to use your SuperGrok subscription instead."),
-            "{text}"
-        );
+    // The SuperGrok upsell was removed: Fuigo has no subscription to sell,
+    // and this line advertised a competitor's from inside the product.
+    assert!(!text.contains("SuperGrok"), "{text}");
+    assert!(!text.contains("subscription instead"), "{text}");
     assert!(!text.contains("grok.com"), "{text}");
 }
 #[test]
@@ -2599,10 +2599,10 @@ fn format_session_info_api_key_auth_suggests_fuigo_login() {
     let text = format_session_info(&info, None, false, true, true);
     assert!(text.contains("Auth method: API key (FUIGO_API_KEY)"), "{text}");
     assert!(!text.contains("Manage account and credits"), "{text}");
-    assert!(
-            text.contains("Run `fuigo login` to use your SuperGrok subscription instead."),
-            "{text}"
-        );
+    // The SuperGrok upsell was removed: Fuigo has no subscription to sell,
+    // and this line advertised a competitor's from inside the product.
+    assert!(!text.contains("SuperGrok"), "{text}");
+    assert!(!text.contains("subscription instead"), "{text}");
     assert!(!text.contains("Also present: FUIGO_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
     assert!(!text.contains("grok.com"), "{text}");

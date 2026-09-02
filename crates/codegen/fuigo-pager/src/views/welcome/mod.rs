@@ -612,6 +612,9 @@ pub struct WelcomeRenderParams<'a> {
     pub consent_state: &'a crate::app::consent::ConsentState,
     pub consent_hover_link: Option<usize>,
     pub login_label: Option<&'a str>,
+    /// Credentials discovered in the environment. Display-only: the masked
+    /// form is all that ever reaches a render buffer.
+    pub detected_keys: &'a [crate::app::pending_menu::DetectedKeyRow],
     pub auth_code_input: &'a str,
     pub auth_code_cursor_byte: usize,
     pub clipboard_delivery: Option<crate::clipboard::ClipboardDelivery>,
@@ -727,19 +730,52 @@ pub fn render_welcome(
             let login_text = params
                 .login_label
                 .map(|label| format!("Login with {}", label));
-            let mut menu: Vec<(&str, &str)> = vec![("k", "Enter API key")];
-            if let Some(text) = login_text.as_deref() {
-                menu.push(("l", text));
-            }
-            menu.push(("q", "Quit"));
-            let menu = menu;
+            // Built from `pending_menu_rows`, the same function the click
+            // dispatcher uses, so the two cannot disagree about what row N is.
+            use crate::app::pending_menu::{PendingMenuRow, pending_menu_rows, row_shortcut};
+            let rows = pending_menu_rows(params.detected_keys.len(), login_text.is_some());
+            // The masked key rides in the label because `render_menu` is a
+            // two-column widget (label left, shortcut right) used by four call
+            // sites; widening it for one screen is not worth the churn.
+            let detected_labels: Vec<String> = params
+                .detected_keys
+                .iter()
+                .map(|d| format!("Use {} from your environment  {}", d.env_var, d.masked))
+                .collect();
+            let shortcuts: Vec<String> = rows.iter().copied().map(row_shortcut).collect();
+            let menu: Vec<(&str, &str)> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    let label: &str = match row {
+                        PendingMenuRow::UseDetectedKey(k) => detected_labels.get(*k)?.as_str(),
+                        PendingMenuRow::EnterApiKey => {
+                            if params.detected_keys.is_empty() {
+                                "Enter API key"
+                            } else {
+                                "Enter API key manually"
+                            }
+                        }
+                        PendingMenuRow::Login => login_text.as_deref()?,
+                        PendingMenuRow::Quit => "Quit",
+                    };
+                    Some((shortcuts[i].as_str(), label))
+                })
+                .collect();
             // No error means first run, not a failure: say what is needed in
             // the neutral colour rather than leaving the screen unexplained.
             const NEEDS_KEY: &str = "Fuigo needs an API key to reach a model.";
+            const FOUND_KEY: &str =
+                "Fuigo needs an API key. Found one in your environment \u{2014} press 1 to use it.";
+            let needs_key = if params.detected_keys.is_empty() {
+                NEEDS_KEY
+            } else {
+                FOUND_KEY
+            };
             let msg = Some(
                 error
                     .as_deref()
-                    .map_or((NEEDS_KEY, theme.gray), |e| (e, theme.accent_error)),
+                    .map_or((needs_key, theme.gray), |e| (e, theme.accent_error)),
             );
             let info = PromptInfo {
                 model_name: params.model_name,
@@ -2887,6 +2923,69 @@ mod tests {
         assert!((0..area.width).any(|x| buffer[(x, 1)].bg == theme.text_primary));
     }
 
+    /// Render the pending welcome screen and return its text content.
+    fn render_pending_text(detected: &[crate::app::pending_menu::DetectedKeyRow]) -> String {
+        let auth_state = AuthState::Pending { error: None };
+        let trust_state = TrustState::Done;
+        let mut params = render_params(&auth_state, &trust_state, None);
+        params.detected_keys = detected;
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buffer = Buffer::empty(area);
+        let mut prompt = PromptWidget::default();
+        let mut picker = crate::views::picker::PickerState::default();
+        render_welcome(area, &mut buffer, &params, &mut prompt, &mut picker);
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn detected_row() -> crate::app::pending_menu::DetectedKeyRow {
+        crate::app::pending_menu::DetectedKeyRow {
+            provider_label: "FluxRouter".into(),
+            env_var: "FLUX_API_KEY".into(),
+            masked: "sk-B0g...eERw".into(),
+        }
+    }
+
+    /// With nothing detected the screen must be exactly what it was before.
+    #[test]
+    fn pending_menu_without_detection_is_unchanged() {
+        let text = render_pending_text(&[]);
+        assert!(text.contains("Enter API key"), "{text}");
+        assert!(text.contains("Quit"));
+        assert!(!text.contains("from your environment"));
+        assert!(text.contains("Fuigo needs an API key to reach a model."));
+    }
+
+    #[test]
+    fn detected_key_is_offered_as_a_numbered_row() {
+        let text = render_pending_text(&[detected_row()]);
+        assert!(text.contains("Use FLUX_API_KEY from your environment"), "{text}");
+        assert!(text.contains("sk-B0g...eERw"), "masked key must be shown");
+        assert!(text.contains("Enter API key manually"));
+        assert!(text.contains("press 1 to use it"));
+    }
+
+    /// The one thing this feature must never do.
+    #[test]
+    fn a_full_secret_never_reaches_the_render_buffer() {
+        // The row carries only the masked form, so even a renderer bug cannot
+        // paint the secret -- there is nothing to paint. This asserts the
+        // property end to end rather than trusting that.
+        const REAL_SECRET: &str = "sk-B0gKjPvHYSUPERSECRETMIDDLEeERw";
+        let text = render_pending_text(&[detected_row()]);
+        assert!(
+            !text.contains("SUPERSECRETMIDDLE"),
+            "a full key reached the render buffer"
+        );
+        assert!(!text.contains(REAL_SECRET));
+    }
+
     fn make_entry(id: &str, summary: &str, repo_name: &str) -> SessionPickerEntry {
         SessionPickerEntry {
             id: id.into(),
@@ -2921,6 +3020,7 @@ mod tests {
             consent_state: &ConsentState::Done,
             consent_hover_link: None,
             login_label: None,
+            detected_keys: &[],
             auth_code_input: "",
             auth_code_cursor_byte: 0,
             clipboard_delivery: None,
