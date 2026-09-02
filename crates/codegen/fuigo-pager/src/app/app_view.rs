@@ -1066,6 +1066,12 @@ pub struct AppView {
     pub account_email: Option<String>,
     /// Login button label from `AuthMethod.name` (e.g., "grok.com", "Acme Corp").
     pub login_label: Option<String>,
+    /// Credentials found in the environment at startup, for the first-run menu.
+    ///
+    /// Display-only — no key material. The secret is re-read from the
+    /// environment at dispatch time, so it never becomes resident in the root
+    /// view struct and cannot reach a log through a `{:?}` on an action.
+    pub detected_keys: Vec<crate::app::pending_menu::DetectedKeyRow>,
     /// The auth method ID to use for login.
     pub login_method_id: Option<acp::AuthMethodId>,
     /// Initial auth mode hint from method metadata.
@@ -1583,6 +1589,17 @@ impl AppView {
             consent_state: crate::app::consent::ConsentState::Done,
             account_email: None,
             login_label: None,
+            // Read once at construction. Only the masked form is kept, so no
+            // secret becomes resident here; `dispatch_use_detected_key`
+            // re-reads the environment when a row is actually chosen.
+            detected_keys: fuigo_shell::agent::key_discovery::discover_appliable()
+                .iter()
+                .map(|d| crate::app::pending_menu::DetectedKeyRow {
+                    provider_label: d.provider.label.to_owned(),
+                    env_var: d.env_var.to_owned(),
+                    masked: d.masked(),
+                })
+                .collect(),
             login_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
@@ -2531,6 +2548,8 @@ impl AppView {
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
+                    pending_detected_count: self.detected_keys.len(),
+                    login_available: self.login_label.is_some(),
                     menu_count: if zdr_blocked {
                         2
                     } else {
@@ -3155,6 +3174,10 @@ struct WelcomeInputCtx<'a> {
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
+    /// Credentials discovered in the environment, for the pending menu.
+    pending_detected_count: usize,
+    /// Whether an interactive login row is offered (an issuer is configured).
+    login_available: bool,
     prompt_rect: Option<&'a ratatui::layout::Rect>,
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
@@ -3822,6 +3845,25 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     }
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
+                // Digit rows first: `1`..`N` apply a discovered credential.
+                // These need explicit keys because arrow-key selection is
+                // gated to `AuthState::Done`, so this menu is otherwise
+                // mouse-only and a numbered row would be unreachable.
+                // Matched directly rather than through `key!`, which needs a
+                // literal; the digit is derived from the row index.
+                if let crossterm::event::KeyCode::Char(c) = key.code
+                    && key.modifiers.is_empty()
+                    && let Some(d) = c.to_digit(10)
+                    && d >= 1
+                {
+                    let i = (d - 1) as usize;
+                    if i < ctx
+                        .pending_detected_count
+                        .min(crate::app::pending_menu::MAX_DETECTED_ROWS)
+                    {
+                        return InputOutcome::Action(Action::UseDetectedKey(i));
+                    }
+                }
                 if key!('k').matches(key) || key!(Enter).matches(key) {
                     return InputOutcome::Action(Action::EnterApiKey);
                 }
@@ -3927,7 +3969,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         && mouse.row < rect.y + rect.height
                     {
                         if matches!(ctx.auth_state, AuthState::Pending { .. }) {
-                            return dispatch_pending_menu_action(i, ctx.menu_rects.len());
+                            return dispatch_pending_menu_action(
+                                i,
+                                ctx.pending_detected_count,
+                                ctx.login_available,
+                            );
                         }
                         if ctx.is_zdr_blocked {
                             return dispatch_zdr_menu_action(i);
@@ -4169,18 +4215,20 @@ fn handle_menu_nav(
 /// Dispatch an action for a welcome menu item when not yet authenticated.
 ///
 /// Item 0 is "Enter API key" and the LAST item is Quit. A "Login with ..." row
-/// sits between them only when an interactive provider is configured, so the
-/// menu is either 2 or 3 rows. `menu_len` comes from the rects the renderer
-/// actually produced, which keeps this in step with the menu by construction
-/// rather than by two places agreeing on a layout.
-fn dispatch_pending_menu_action(index: usize, menu_len: usize) -> InputOutcome {
-    if index + 1 == menu_len {
-        return InputOutcome::Action(Action::Quit);
-    }
-    match index {
-        0 => InputOutcome::Action(Action::EnterApiKey),
-        1 => InputOutcome::Action(Action::Login),
-        _ => InputOutcome::Unchanged,
+/// Built from `pending_menu_rows`, the same function the renderer uses. This
+/// previously hardcoded `0 => EnterApiKey, 1 => Login` and derived Quit from
+/// the rect count, which held only while the menu had two or three fixed
+/// rows -- adding one silently remapped every click to the wrong action.
+fn dispatch_pending_menu_action(index: usize, detected: usize, has_login: bool) -> InputOutcome {
+    use crate::app::pending_menu::{PendingMenuRow, pending_menu_rows};
+    match pending_menu_rows(detected, has_login).get(index) {
+        Some(PendingMenuRow::UseDetectedKey(i)) => {
+            InputOutcome::Action(Action::UseDetectedKey(*i))
+        }
+        Some(PendingMenuRow::EnterApiKey) => InputOutcome::Action(Action::EnterApiKey),
+        Some(PendingMenuRow::Login) => InputOutcome::Action(Action::Login),
+        Some(PendingMenuRow::Quit) => InputOutcome::Action(Action::Quit),
+        None => InputOutcome::Unchanged,
     }
 }
 /// Dispatch an action for a welcome menu item when ZDR-blocked.
@@ -4574,6 +4622,7 @@ impl AppView {
                             consent_state: &self.consent_state,
                             consent_hover_link: self.welcome_consent_hover_link,
                             login_label: self.login_label.as_deref(),
+                            detected_keys: &self.detected_keys,
                             auth_code_input: self.auth_code_input.text(),
                             auth_code_cursor_byte: self.auth_code_input.cursor_byte(),
                             clipboard_delivery: self.auth_clipboard_delivery,
