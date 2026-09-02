@@ -31,8 +31,7 @@ pub(crate) fn read_config_document_for_edit(path: &Path) -> Option<toml_edit::Do
 /// No-ops when the existing file is non-blank but unparseable, so a malformed config is never clobbered.
 /// Performs blocking I/O.
 pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io::Result<()> {
-    let path =
-        fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+    let path = fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
     set_hint_at(&path, key, value)
 }
 

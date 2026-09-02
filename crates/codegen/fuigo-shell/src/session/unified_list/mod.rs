@@ -841,7 +841,10 @@ mod tests {
         ));
         am.hot_swap(crate::auth::FuigoAuth {
             auth_mode: crate::auth::AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::fuigo_oauth2_issuer().to_owned()),
+            // A literal, not `fuigo_oauth2_issuer()`: that reads a binary-wide
+            // OnceLock, so this fixture's meaning depended on which test
+            // installed an issuer first.
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_owned()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             ..crate::auth::FuigoAuth::test_default()
         });
@@ -968,8 +971,7 @@ mod tests {
     fn conversations_lane_active_truth_table() {
         use crate::agent::chat_modes::FUIGO_CHAT_MODE_ENV;
         let _chat_off = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_MODE_ENV);
-        let _desktop_off =
-            fuigo_test_support::EnvGuard::unset("FUIGO_SESSION_LIST_CONVERSATIONS");
+        let _desktop_off = fuigo_test_support::EnvGuard::unset("FUIGO_SESSION_LIST_CONVERSATIONS");
         assert!(
             !conversations_lane_active(),
             "no env ⇒ lane off (Build-mode default)"

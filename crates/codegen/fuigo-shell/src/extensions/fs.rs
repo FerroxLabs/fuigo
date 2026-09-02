@@ -7,9 +7,9 @@ use crate::session::file_system::{
     self as fs, FsListParams, FsReadFileData, check_file_size_limits,
 };
 use agent_client_protocol as acp;
+use fuigo_workspace::file_system::FsReadEncoding;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use fuigo_workspace::file_system::FsReadEncoding;
 fn default_depth() -> usize {
     1
 }

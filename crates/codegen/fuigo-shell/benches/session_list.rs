@@ -28,12 +28,12 @@ use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
 use filetime::{FileTime, set_file_mtime};
-use tempfile::TempDir;
 use fuigo_fast_worktree::{ListFilter, WorktreeDb, WorktreeKind, WorktreeRecord, WorktreeStatus};
 use fuigo_shell::session::info::Info;
 use fuigo_shell::session::persistence::Summary;
 use fuigo_shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
 use fuigo_shell::session::unified_list::{ListReq, UnifiedListResult, build_unified_list};
+use tempfile::TempDir;
 
 const WORKSPACE_COUNT: usize = 3_000;
 // Bump whenever the shape of the workload changes, even if aggregate counts do not

@@ -6,8 +6,8 @@ pub mod leader {
     use std::io;
     use std::pin::Pin;
 
-    use futures::FutureExt as _;
     use fuigo_test_support::leader::{LeaderFixture, LeaderStdioClient};
+    use futures::FutureExt as _;
 
     #[allow(dead_code)]
     pub type TestBody<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
@@ -306,9 +306,7 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 }
 
 #[allow(dead_code)]
-pub async fn start_seeded_mock(
-    home: &std::path::Path,
-) -> fuigo_test_support::MockInferenceServer {
+pub async fn start_seeded_mock(home: &std::path::Path) -> fuigo_test_support::MockInferenceServer {
     let server = fuigo_test_support::MockInferenceServer::start()
         .await
         .expect("start mock server");

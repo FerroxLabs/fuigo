@@ -1,10 +1,10 @@
 //! ACP slash command advertising and resolution.
 use agent_client_protocol as acp;
-use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 use fuigo_tools::implementations::fuigo_build::LoopFireMode;
 use fuigo_tools::implementations::skills::skill::format_skill_name;
 use fuigo_tools::implementations::skills::types::SkillInfo;
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 pub(crate) struct BuiltinCommand {
     pub name: &'static str,
     pub description: &'static str,
@@ -1096,7 +1096,8 @@ pub(crate) async fn product_skill_infos(
                 );
                 return Some(entry.skills);
             }
-            *PRODUCT_SKILLS_NEGATIVE_CACHE.lock() = Some(product_skills_negative_stamp(&fuigo_auth));
+            *PRODUCT_SKILLS_NEGATIVE_CACHE.lock() =
+                Some(product_skills_negative_stamp(&fuigo_auth));
             tracing::warn!(
                 error = %err,
                 "product skills: catalog unavailable after retries — negative cache"

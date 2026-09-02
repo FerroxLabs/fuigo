@@ -918,7 +918,11 @@ mod tests {
         fs::create_dir_all(&project_fuigo).unwrap();
         fs::create_dir_all(&custom).unwrap();
 
-        let dirs = vec![project_claude.clone(), project_fuigo.clone(), custom.clone()];
+        let dirs = vec![
+            project_claude.clone(),
+            project_fuigo.clone(),
+            custom.clone(),
+        ];
         let plan = plan_skills_watch_targets(&dirs, &fuigo_home, Some(project));
 
         assert_eq!(

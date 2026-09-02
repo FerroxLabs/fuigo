@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::{self as acp, Agent as _};
-use serde_json::json;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use fuigo_acp_lib::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
 };
 use fuigo_shell::agent::config::Config as AgentConfig;
 use fuigo_shell::agent::mvp_agent::MvpAgent;
+use serde_json::json;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// Matches production's `MAX_BUFFER_SIZE` in `agent::app`.
 pub const DUPLEX_BUFFER_BYTES: usize = 8 * 1024 * 1024;

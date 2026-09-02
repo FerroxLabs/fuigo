@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
+use fuigo_auth::bearer_suffix;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use fuigo_auth::bearer_suffix;
 
 use super::is_fuigo_oauth2_issuer;
 

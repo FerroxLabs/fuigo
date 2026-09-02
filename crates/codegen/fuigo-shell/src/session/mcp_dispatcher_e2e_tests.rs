@@ -22,8 +22,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex as TokioMutex;
 use fuigo_mcp::servers::{McpClient, McpClientEvent, McpState};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::session::mcp_dispatcher::{
     McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SharedShutdownState,

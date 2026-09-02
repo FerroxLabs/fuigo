@@ -25,8 +25,10 @@ async fn out_of_band_stale_row_heals_on_focus_gained() {
         .expect("start mock content");
 
     // Mock-auth env, and pretend we're inside a neovim `:terminal` (sets the embedded-editor context the doubled-line fix gates on)
-    let overrides: Vec<(String, String)> =
-        vec![("NVIM".into(), "/tmp/fuigo-pty-harness-fake-nvim.sock".into())];
+    let overrides: Vec<(String, String)> = vec![(
+        "NVIM".into(),
+        "/tmp/fuigo-pty-harness-fake-nvim.sock".into(),
+    )];
     let env_refs: Vec<(&str, &str)> = overrides
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))

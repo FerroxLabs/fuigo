@@ -8,14 +8,14 @@ use super::{Empty, ExtResult, parse_params, to_ext_response, to_ext_response_par
 use crate::agent::MvpAgent;
 use crate::session::ExtMethodResult;
 use agent_client_protocol as acp;
-use serde::Deserialize;
-use std::path::PathBuf;
 use fuigo_workspace::session::git::{self, DiscardScope, GitDiffsData, check_diff_size_limits};
 use fuigo_workspace::workspace_ops::{
     GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCommitReq, GitCurrentCommitReq,
     GitDiffReq, GitDiscardReq, GitFilesReq, GitInfoReq, GitStageContentReq, GitStageReq,
     GitStashReq, GitStatusExtReq, GitStatusFormat, GitUnstageReq,
 };
+use serde::Deserialize;
+use std::path::PathBuf;
 fn default_head() -> String {
     "HEAD".to_string()
 }

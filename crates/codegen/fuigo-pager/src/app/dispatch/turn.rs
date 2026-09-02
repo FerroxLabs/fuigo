@@ -8,8 +8,8 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::{ActivePane, AgentView};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::app::cancel_latency::{CancelOrigin, TurnEnd};
-use std::time::Instant;
 use fuigo_telemetry::events::CancellationScope;
+use std::time::Instant;
 
 /// Map `[ui].cancel_subagents_on_turn_cancel` / in-memory agent preference to `cancel_subagents` for the cancel wire payload.
 /// `None` means prompt.

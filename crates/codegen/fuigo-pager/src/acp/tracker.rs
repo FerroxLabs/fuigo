@@ -21,13 +21,13 @@ use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::state::verb_group::verb_group_kind_changed;
 use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
+use fuigo_tools::types::output::{BashOutput, ToolOutput};
+use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
+use fuigo_tools::util::strip_redundant_session_cd;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
-use fuigo_tools::types::output::{BashOutput, ToolOutput};
-use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
-use fuigo_tools::util::strip_redundant_session_cd;
 /// Convert a UTC millisecond timestamp to local time.
 fn utc_ms_to_local(ms: i64) -> DateTime<Local> {
     chrono::Utc
@@ -180,8 +180,8 @@ impl WritingToolCall {
             Some(name) => {
                 use fuigo_tools::types::tool::ToolKind;
                 let copy =
-                    fuigo_tools::tool_taxonomy::writing_tool_kind(name).and_then(|kind| {
-                        match kind {
+                    fuigo_tools::tool_taxonomy::writing_tool_kind(name).and_then(
+                        |kind| match kind {
                             ToolKind::Write => Some("Writing file"),
                             ToolKind::Edit => Some("Writing edit"),
                             ToolKind::Execute => Some("Writing command"),
@@ -193,13 +193,12 @@ impl WritingToolCall {
                             }
                             ToolKind::AskUser => Some("Preparing question"),
                             _ => None,
-                        }
-                    });
+                        },
+                    );
                 match copy {
                     Some(copy) => format!("{copy}{ordinal}…"),
                     None => {
-                        let name =
-                            fuigo_workspace::permission::mcp_pretty_name_if_qualified(name);
+                        let name = fuigo_workspace::permission::mcp_pretty_name_if_qualified(name);
                         format!("Preparing {}{ordinal}…", clamp_activity_subject(&name))
                     }
                 }
@@ -1616,8 +1615,7 @@ fn user_message_hidden_from_scrollback(
         return true;
     }
     if let Some(pid) = meta.prompt_id.as_deref()
-        && fuigo_shell::session::PromptOrigin::from_prompt_id(pid)
-            .hide_user_echo_from_scrollback()
+        && fuigo_shell::session::PromptOrigin::from_prompt_id(pid).hide_user_echo_from_scrollback()
     {
         return true;
     }

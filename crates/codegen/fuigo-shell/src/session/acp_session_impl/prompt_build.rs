@@ -58,8 +58,8 @@ fn partition_rules_by_scope(
 #[cfg(test)]
 mod partition_rules_by_scope_tests {
     use super::partition_rules_by_scope;
-    use std::path::Path;
     use fuigo_agent::prompt::agents_md::AgentConfigFile;
+    use std::path::Path;
     fn file(path: &str) -> AgentConfigFile {
         AgentConfigFile {
             file_name: Path::new(path)

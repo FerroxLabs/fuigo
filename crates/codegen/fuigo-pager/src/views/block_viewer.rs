@@ -7,12 +7,12 @@
 //! Execute and edit viewers will be added in later phases.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use fuigo_workspace::permission::mcp_titleize_segment;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidget;
-use fuigo_workspace::permission::mcp_titleize_segment;
 
 use crate::clipboard::SystemClipboard;
 use crate::render::scrollbar::SCROLLBAR_TOTAL_COLS;

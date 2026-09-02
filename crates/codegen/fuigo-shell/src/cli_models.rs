@@ -107,11 +107,11 @@ fn parse_models_list_response(raw: &str) -> Result<acp::SessionModelState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::auth_method::{LEGACY_FUIGO_API_KEY_ENV_VAR, FUIGO_API_KEY_ENV_VAR};
+    use crate::agent::auth_method::{FUIGO_API_KEY_ENV_VAR, LEGACY_FUIGO_API_KEY_ENV_VAR};
     use crate::agent::config::Config;
     use crate::auth::{AuthMode, FuigoAuth};
-    use serial_test::serial;
     use fuigo_test_support::EnvGuard;
+    use serial_test::serial;
     /// Fuigo has no web-login origin, so `AuthStatus::resolve` falls back to
     /// naming the inference gateway -- the host the session credential is
     /// actually presented to.

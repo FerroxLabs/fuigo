@@ -2574,8 +2574,8 @@ fn fork_failure_force_idle_drops_a_live_cancel_anchor() {
 #[test]
 fn settled_cancel_emits_latency_from_arm_anchor_once() {
     use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
-    use std::time::{Duration, Instant};
     use fuigo_telemetry::events::CancellationScope;
+    use std::time::{Duration, Instant};
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);

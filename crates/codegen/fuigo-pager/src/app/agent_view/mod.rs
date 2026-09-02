@@ -1888,8 +1888,7 @@ fn translate_local_submit(
             if id == Some(super::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID) {
                 fuigo_telemetry::session_ctx::log_event(
                     fuigo_telemetry::events::CreditLimitUpsellClicked {
-                        surface:
-                            fuigo_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
+                        surface: fuigo_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
                         choice: fuigo_telemetry::events::CreditLimitChoice::RetryLastPrompt,
                     },
                 );
@@ -2193,8 +2192,7 @@ fn is_hash_key(key: &KeyEvent) -> bool {
 }
 /// Check `[features] remember_mode` in config.toml. Defaults to `false`.
 fn remember_mode_enabled() -> bool {
-    let path =
-        fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+    let path = fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
     let Some(doc) = crate::config_toml_edit::read_config_document_for_edit(&path) else {
         return false;
     };

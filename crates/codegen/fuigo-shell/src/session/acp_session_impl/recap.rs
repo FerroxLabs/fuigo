@@ -259,7 +259,12 @@ impl SessionActor {
         let x_fuigo_conv_id = format!("recap-{}", uuid::Uuid::new_v4());
         let x_fuigo_req_id = format!("fuigo-recap-{}", uuid::Uuid::new_v4());
         let request = self
-            .side_call_request(&setup, items, x_fuigo_conv_id.clone(), x_fuigo_req_id.clone())
+            .side_call_request(
+                &setup,
+                items,
+                x_fuigo_conv_id.clone(),
+                x_fuigo_req_id.clone(),
+            )
             .await;
         // The artifact records the exact model-facing items after trust projection; the canonical conversation state remains raw
         let chat_history_for_artifact = request.items.clone();

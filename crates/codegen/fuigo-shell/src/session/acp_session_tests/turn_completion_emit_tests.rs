@@ -121,7 +121,8 @@ async fn completion_and_cancel_arbitrate_during_cleanup() {
                 let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel();
                 let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 let lifecycle = std::rc::Rc::new(RecordingLifecycle::default());
-                let mut extensions = fuigo_agent_lifecycle::LocalExtensionRegistryBuilder::default();
+                let mut extensions =
+                    fuigo_agent_lifecycle::LocalExtensionRegistryBuilder::default();
                 extensions.turn_lifecycle_contributor(lifecycle.clone());
                 actor.extension_registry = extensions.build();
                 let actor = std::sync::Arc::new(actor);

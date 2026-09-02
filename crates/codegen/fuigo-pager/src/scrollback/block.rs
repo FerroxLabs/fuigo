@@ -1080,10 +1080,7 @@ impl RenderBlock {
     ///
     /// The hyperlinks are in the markdown renderer's coordinate space (pre-wrap line index, display-cell column range).
     /// The caller is responsible for mapping through word-wrapping and entry layout to reach screen coordinates.
-    pub fn with_hyperlinks<R>(
-        &self,
-        f: impl FnOnce(&[fuigo_markdown::HyperlinkTarget]) -> R,
-    ) -> R {
+    pub fn with_hyperlinks<R>(&self, f: impl FnOnce(&[fuigo_markdown::HyperlinkTarget]) -> R) -> R {
         match self {
             RenderBlock::AgentMessage(b) => b.content().with_hyperlinks(f),
             RenderBlock::Thinking(b) => b.content().with_hyperlinks(f),
@@ -1381,8 +1378,8 @@ mod searchable_text_tests {
     use crate::scrollback::blocks::SearchLineMatch;
     use crate::scrollback::blocks::tool::memory_search::{MemoryResult, MemorySearchToolCallBlock};
     use crate::scrollback::blocks::tool::{LifecycleEventBlock, WebSearchToolCallBlock};
-    use std::time::Duration;
     use fuigo_shell::session::ContextInfo;
+    use std::time::Duration;
 
     #[test]
     fn system_indexes_message_text() {

@@ -2932,9 +2932,7 @@ fn submit_question_answers_cancel_clears_local_modal_and_restores_prompt() {
     // This complements the inner `translate_local_submit_*` tests
     // It exercises the prompt.restore and cleanup_question_state contract that lives in `submit_question_answers` itself
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
 
     let mut app = fork_test_app();
     let id = AgentId(0);

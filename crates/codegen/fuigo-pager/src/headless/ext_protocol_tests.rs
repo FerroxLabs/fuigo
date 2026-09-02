@@ -551,8 +551,8 @@ fn ask_user_question_replies_cancelled() {
         }),
         serde_json::json!("not-an-object"),
     ] {
-        let resp =
-            ext_method_reply("fuigo/ask_user_question", params).expect("policy reply, not an error");
+        let resp = ext_method_reply("fuigo/ask_user_question", params)
+            .expect("policy reply, not an error");
         let parsed: AskUserQuestionExtResponse = serde_json::from_str(resp.0.get())
             .expect("wire reply must deserialize as the typed response");
         assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));

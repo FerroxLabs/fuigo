@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
 use fuigo_tools::implementations::skills::skill::extract_skill_body;
 use fuigo_tools::implementations::skills::types::{SkillInfo, SkillScope};
+use serde::Deserialize;
 
 use crate::auth::AuthManager;
 

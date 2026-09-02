@@ -16,10 +16,10 @@ use crate::views::queue_pane::QueuePane;
 use crate::views::subagent_catalog_pane::SubagentCatalogPane;
 use crate::views::tasks_pane::TasksPane;
 use crate::views::todo_pane::TodoPane;
+use fuigo_telemetry::events::{CancellationCompleted, CancellationScope};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
-use fuigo_telemetry::events::{CancellationCompleted, CancellationScope};
 impl AgentView {
     /// Always bumps [`Self::last_turn_summary_gen`] so a concurrent disk hydrate that captured an older generation cannot overwrite this write.
     pub(crate) fn set_last_turn_summary(&mut self, summary: Option<String>) {

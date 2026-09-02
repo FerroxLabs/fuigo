@@ -8,8 +8,8 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
 use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-use std::sync::atomic::{AtomicU64, Ordering};
 use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic counter for correlating async rewrite responses with the modal that requested them.
 /// It prevents stale results from populating a different note's review modal when the user closes and re-opens quickly.

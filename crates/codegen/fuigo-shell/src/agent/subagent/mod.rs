@@ -26,13 +26,9 @@ use crate::upload::trace::{
 };
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use agent_client_protocol as acp;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use fuigo_agent::config::{McpInheritance, ModelOverride, PermissionMode};
+use fuigo_hunk_tracker::HunkTrackerHandle;
 use fuigo_sampling_types::conversation::ConversationItem;
 use fuigo_session_events::types::CancellationCategory;
 use fuigo_subagent_resolution::ResumeSourceData;
@@ -40,7 +36,11 @@ use fuigo_tools::implementations::fuigo_build::monitor::types::MonitorEventBuffe
 use fuigo_tools::implementations::fuigo_build::task::types::*;
 use fuigo_tools::types::tool::ToolKind;
 use fuigo_workspace::file_system::AsyncFileSystem;
-use fuigo_hunk_tracker::HunkTrackerHandle;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 mod attempt_runner;
 mod spawn;
 pub(crate) use spawn::{
@@ -315,9 +315,8 @@ pub(crate) fn strip_ask_user_question_tool(tools: &mut Vec<fuigo_sampling_types:
     tools.retain(|tool| tool.name != "ask_user_question");
 }
 pub(crate) fn strip_workflow_tool(tools: &mut Vec<fuigo_sampling_types::ToolSpec>) {
-    tools.retain(|tool| {
-        !fuigo_tools::implementations::fuigo_build::is_workflow_tool_id(&tool.name)
-    });
+    tools
+        .retain(|tool| !fuigo_tools::implementations::fuigo_build::is_workflow_tool_id(&tool.name));
 }
 impl SubagentSpawnContext {
     /// Would installing a live bearer resolver strip this subagent's only credential?
@@ -1116,7 +1115,8 @@ async fn bootstrap_initial_context(
                         ));
                     }
                 };
-                let estimated_tokens = fuigo_chat_state::estimate_conversation_tokens(&conversation);
+                let estimated_tokens =
+                    fuigo_chat_state::estimate_conversation_tokens(&conversation);
                 let context_window = window.context_window;
                 if !window.fits(estimated_tokens) {
                     let limit = window.token_limit();
@@ -1424,10 +1424,8 @@ fn resolve_agent_definition(
         toggles: &ctx.subagent_toggle,
         allowed_types: ctx.allowed_subagent_types.as_deref(),
     };
-    let mut def = fuigo_subagent_resolution::discover_agent_definition(
-        subagent_type,
-        &resolution_context,
-    )?;
+    let mut def =
+        fuigo_subagent_resolution::discover_agent_definition(subagent_type, &resolution_context)?;
     ctx.apply_session_cli_overrides(&mut def);
     Some(def)
 }
@@ -1688,8 +1686,7 @@ fn resolve_subagent_permission_mode(
 /// Both arms MUST resolve this identically.
 fn resolve_subagent_source_repo(ctx: &SubagentSpawnContext) -> std::path::PathBuf {
     let source_cwd = parent_source_cwd(ctx);
-    fuigo_workspace::session::git::find_main_repo_root_from_path(&source_cwd)
-        .unwrap_or(source_cwd)
+    fuigo_workspace::session::git::find_main_repo_root_from_path(&source_cwd).unwrap_or(source_cwd)
 }
 enum SubagentWaitOutcome {
     Cancelled,
@@ -1753,9 +1750,7 @@ fn cancellation_error_message(
         _ => "Subagent turn was cancelled".to_string(),
     }
 }
-fn telemetry_owner_kind(
-    request: &SubagentRequest,
-) -> fuigo_telemetry::events::SubagentOwnerKind {
+fn telemetry_owner_kind(request: &SubagentRequest) -> fuigo_telemetry::events::SubagentOwnerKind {
     if request.owner.is_workflow() {
         fuigo_telemetry::events::SubagentOwnerKind::Workflow
     } else if request.from_scheduler_loop() {

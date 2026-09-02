@@ -3,12 +3,12 @@ use crate::auth::config::LEGACY_AUTH_SCOPE;
 use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig, parse_output};
 use crate::http::TransportFailureKind;
 use crate::util::fuigo_home;
+use fuigo_telemetry::events::{LoginFailed, LoginFailureKind};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::sync::{mpsc, oneshot};
-use fuigo_telemetry::events::{LoginFailed, LoginFailureKind};
 pub(crate) type StderrCallback = Box<dyn Fn(&str)>;
 /// Reject a cached credential that lacks `oidc_issuer`, has a mismatched issuer, or whose team principal violates the `force_login_team_uuid` pin.
 /// Interactive login then starts fresh instead of reusing a stale or wrong-team session.
@@ -624,7 +624,9 @@ pub(super) async fn run_auth_flow_steps(
         )
         .await;
     }
-    tracing::error!("auth: no OAuth2 issuer configured (neither enterprise OIDC nor FUIGO_OAUTH2_*)");
+    tracing::error!(
+        "auth: no OAuth2 issuer configured (neither enterprise OIDC nor FUIGO_OAUTH2_*)"
+    );
     // The old text said "Run `fuigo login` to authenticate" -- advice to run
     // the command that just failed. Fuigo ships with no issuer, so this is a
     // configuration state, not a transient failure, and the message has to say
@@ -678,7 +680,9 @@ pub(crate) async fn try_noninteractive_auth_no_mint(
 }
 /// Policy behind [`try_noninteractive_auth_no_mint`], with the `AuthManager`
 /// injected for tests.
-async fn try_noninteractive_auth_no_mint_with(auth_manager: &Arc<AuthManager>) -> Option<FuigoAuth> {
+async fn try_noninteractive_auth_no_mint_with(
+    auth_manager: &Arc<AuthManager>,
+) -> Option<FuigoAuth> {
     match tokio::time::timeout(
         crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
         try_ensure_fresh_auth_with(auth_manager),
@@ -850,8 +854,7 @@ pub async fn run_cli_login(
     ));
     crate::agent::init::update_telemetry_config(config, &auth_manager);
     let result = run_cli_login_steps(config, &auth_manager, oauth, device_auth).await;
-    fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN)
-        .await;
+    fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN).await;
     result
 }
 async fn run_cli_login_steps(
@@ -863,7 +866,9 @@ async fn run_cli_login_steps(
     let login_override = LoginTransportOverride::from_flags(oauth, device_auth);
     let authenticated = if cli_should_use_device(&config.fuigo_com_config, login_override).await {
         if config.fuigo_com_config.oauth2.is_none() {
-            anyhow::bail!("Sign-in is not available for this deployment. Set FUIGO_API_KEY instead.");
+            anyhow::bail!(
+                "Sign-in is not available for this deployment. Set FUIGO_API_KEY instead."
+            );
         }
         let (auth, did_auth) = run_auth_flow_interactive(
             auth_manager,
@@ -953,9 +958,7 @@ pub fn perform_logout(
         })),
     );
     if was_logged_in {
-        fuigo_telemetry::external::set_identity(
-            fuigo_telemetry::external::IdentityAttrs::default(),
-        );
+        fuigo_telemetry::external::set_identity(fuigo_telemetry::external::IdentityAttrs::default());
         fuigo_telemetry::external::flush();
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;

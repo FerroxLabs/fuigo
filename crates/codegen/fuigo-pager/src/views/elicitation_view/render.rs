@@ -1,12 +1,12 @@
 //! Rendering for the MCP elicitation card: header, a scrollable body viewport (form fields or the full URL), and action rows pinned at the bottom.
 //! Pinning keeps Accept/Decline reachable however long the body is.
 
+use fuigo_tools::mcp_elicitation::ElicitFieldKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-use fuigo_tools::mcp_elicitation::ElicitFieldKind;
 
 use crate::theme::Theme;
 

@@ -237,9 +237,9 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
 
 /// Handle `fuigo/mcp/elicit_complete`: dismiss the matched agent's URL-mode elicitation card that is still waiting on this `elicitation_id`.
 pub(super) fn handle_mcp_elicit_complete(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    let Ok(payload) = serde_json::from_str::<
-        fuigo_tools::mcp_elicitation::McpElicitCompletePayload,
-    >(notif.params.get()) else {
+    let Ok(payload) = serde_json::from_str::<fuigo_tools::mcp_elicitation::McpElicitCompletePayload>(
+        notif.params.get(),
+    ) else {
         return false;
     };
     let session_id = acp::SessionId::new(payload.session_id);

@@ -654,8 +654,8 @@ mod tests {
     fn command_failure_falls_back_to_declarative_sources() {
         for command in [
             "/nonexistent/fuigo-identity-binary", // command not found: sh exits 127
-            "exit 3",                            // nonzero exit
-            "echo not-json",                     // unparseable stdout
+            "exit 3",                             // nonzero exit
+            "echo not-json",                      // unparseable stdout
         ] {
             let resolved = resolve(FeedbackUserConfig {
                 name: vec!["decl-user".into()],

@@ -10,7 +10,8 @@ use fuigo_sampling_types::ConversationItem;
 /// Serializes `items` the way a main turn would, so auxiliary calls can be compared against the real wire shape.
 fn main_turn_input(items: Vec<ConversationItem>) -> Vec<serde_json::Value> {
     let request = fuigo_sampling_types::ConversationRequest {
-        items: fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(items).into_items(),
+        items: fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(items)
+            .into_items(),
         model: Some("test-model".to_string()),
         ..Default::default()
     };
@@ -71,7 +72,8 @@ fn assert_messages_rides_parent_prefix(
     label: &str,
 ) {
     let request = fuigo_sampling_types::ConversationRequest {
-        items: fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(parent).into_items(),
+        items: fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(parent)
+            .into_items(),
         model: Some("test".to_string()),
         reasoning_effort: Some(fuigo_sampling_types::ReasoningEffort::High),
         ..Default::default()
@@ -762,7 +764,8 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
             let mut saw_recap_request = false;
             while let Ok(msg) = persistence_rx.try_recv() {
                 if let PersistenceMsg::RecapRequest(artifact) = msg {
-                    let est = fuigo_chat_state::estimate_conversation_tokens(&artifact.chat_history);
+                    let est =
+                        fuigo_chat_state::estimate_conversation_tokens(&artifact.chat_history);
                     assert!(
                         est <= PROMPT_BUDGET,
                         "persisted recap request must be within budget: {est} > {PROMPT_BUDGET}"

@@ -21,11 +21,11 @@ use std::time::Duration;
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use tempfile::TempDir;
 use fuigo_config::encode_cwd_dirname;
 use fuigo_shell::session::storage::{
     ReplayEmission, ReplayLookupFallback, ReplayPathHint, stream_replay_updates_at_hinted,
 };
+use tempfile::TempDir;
 
 const DEFAULT_CWDS: usize = 180;
 const DEFAULT_PER_CWD: usize = 20;

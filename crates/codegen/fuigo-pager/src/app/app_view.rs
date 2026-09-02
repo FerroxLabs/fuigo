@@ -19,11 +19,11 @@ use crate::views::prompt_widget::PromptWidget;
 use crate::views::welcome::WelcomePromptFocus;
 use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use fuigo_acp_lib::AcpAgentTx;
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use fuigo_acp_lib::AcpAgentTx;
 /// State for the "New Worktree" popup dialog on the welcome screen.
 #[derive(Debug, Default)]
 pub struct NewWorktreeDialogState {
@@ -193,8 +193,7 @@ impl WorktreeMode {
     }
     /// Same as [`Self::resolve_from_hints`], for merged effective config (`toml::Value`).
     pub fn resolve_from_hints_value(hints: Option<&toml::Value>) -> (Self, Self) {
-        let (new_session, fork) =
-            fuigo_shell::util::config::WorktreeHintMode::resolve_pair(hints);
+        let (new_session, fork) = fuigo_shell::util::config::WorktreeHintMode::resolve_pair(hints);
         (new_session.into(), fork.into())
     }
     fn resolve_from_hint_strings(get_str: impl Fn(&str) -> Option<Self>) -> (Self, Self) {
@@ -1072,6 +1071,9 @@ pub struct AppView {
     /// environment at dispatch time, so it never becomes resident in the root
     /// view struct and cannot reach a log through a `{:?}` on an action.
     pub detected_keys: Vec<crate::app::pending_menu::DetectedKeyRow>,
+    /// The same rows' environment variable names, in menu order. Kept
+    /// separately so the input path can borrow them without the render rows.
+    pub detected_env_vars: Vec<String>,
     /// The auth method ID to use for login.
     pub login_method_id: Option<acp::AuthMethodId>,
     /// Initial auth mode hint from method metadata.
@@ -1230,10 +1232,7 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
 impl AppView {
     /// Finishes startup if this view still holds the obligation; does nothing after.
     pub(crate) fn finish_startup(&mut self, outcome: fuigo_telemetry::startup::StartupOutcome) {
-        fuigo_telemetry::startup::PendingStartup::finish_held(
-            &mut self.pending_startup,
-            outcome,
-        );
+        fuigo_telemetry::startup::PendingStartup::finish_held(&mut self.pending_startup, outcome);
     }
     /// Releases the obligation without recording; does nothing after finish.
     pub(crate) fn abandon_startup(&mut self) {
@@ -1592,6 +1591,10 @@ impl AppView {
             // Read once at construction. Only the masked form is kept, so no
             // secret becomes resident here; `dispatch_use_detected_key`
             // re-reads the environment when a row is actually chosen.
+            detected_env_vars: fuigo_shell::agent::key_discovery::discover_appliable()
+                .iter()
+                .map(|d| d.env_var.to_owned())
+                .collect(),
             detected_keys: fuigo_shell::agent::key_discovery::discover_appliable()
                 .iter()
                 .map(|d| crate::app::pending_menu::DetectedKeyRow {
@@ -2548,7 +2551,7 @@ impl AppView {
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
-                    pending_detected_count: self.detected_keys.len(),
+                    pending_detected_env_vars: &self.detected_env_vars,
                     login_available: self.login_label.is_some(),
                     menu_count: if zdr_blocked {
                         2
@@ -3174,8 +3177,9 @@ struct WelcomeInputCtx<'a> {
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
-    /// Credentials discovered in the environment, for the pending menu.
-    pending_detected_count: usize,
+    /// Environment variables holding discovered credentials, in menu order.
+    /// Names, never values -- these are painted on screen already.
+    pending_detected_env_vars: &'a [String],
     /// Whether an interactive login row is offered (an issuer is configured).
     login_available: bool,
     prompt_rect: Option<&'a ratatui::layout::Rect>,
@@ -3215,8 +3219,7 @@ struct WelcomeInputCtx<'a> {
     /// Mirrors the render's `session_picker_loading` param: the spinner-only picker still owns input (Esc must dismiss it, not hit the hidden menu).
     sp_loading: bool,
     sp_state: &'a mut crate::views::picker::PickerState,
-    sp_content_results:
-        &'a Option<Vec<fuigo_shell::extensions::session_search::SearchSessionHit>>,
+    sp_content_results: &'a Option<Vec<fuigo_shell::extensions::session_search::SearchSessionHit>>,
     sp_content_loading: bool,
     /// The query `sp_entries` were server-fetched with (see [`crate::views::session_picker::effective_filter_query`]).
     sp_entries_query: &'a Option<String>,
@@ -3858,10 +3861,14 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 {
                     let i = (d - 1) as usize;
                     if i < ctx
-                        .pending_detected_count
+                        .pending_detected_env_vars
+                        .len()
                         .min(crate::app::pending_menu::MAX_DETECTED_ROWS)
                     {
-                        return InputOutcome::Action(Action::UseDetectedKey(i));
+                        if let Some(row) = ctx.pending_detected_env_vars.get(i) {
+                            return InputOutcome::Action(Action::UseDetectedKey(row.clone()));
+                        }
+                        return InputOutcome::Unchanged;
                     }
                 }
                 if key!('k').matches(key) || key!(Enter).matches(key) {
@@ -3971,7 +3978,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         if matches!(ctx.auth_state, AuthState::Pending { .. }) {
                             return dispatch_pending_menu_action(
                                 i,
-                                ctx.pending_detected_count,
+                                ctx.pending_detected_env_vars,
                                 ctx.login_available,
                             );
                         }
@@ -4219,12 +4226,18 @@ fn handle_menu_nav(
 /// previously hardcoded `0 => EnterApiKey, 1 => Login` and derived Quit from
 /// the rect count, which held only while the menu had two or three fixed
 /// rows -- adding one silently remapped every click to the wrong action.
-fn dispatch_pending_menu_action(index: usize, detected: usize, has_login: bool) -> InputOutcome {
+fn dispatch_pending_menu_action(
+    index: usize,
+    detected_env_vars: &[String],
+    has_login: bool,
+) -> InputOutcome {
+    let detected = detected_env_vars.len();
     use crate::app::pending_menu::{PendingMenuRow, pending_menu_rows};
     match pending_menu_rows(detected, has_login).get(index) {
-        Some(PendingMenuRow::UseDetectedKey(i)) => {
-            InputOutcome::Action(Action::UseDetectedKey(*i))
-        }
+        Some(PendingMenuRow::UseDetectedKey(i)) => match detected_env_vars.get(*i) {
+            Some(env_var) => InputOutcome::Action(Action::UseDetectedKey(env_var.clone())),
+            None => InputOutcome::Unchanged,
+        },
         Some(PendingMenuRow::EnterApiKey) => InputOutcome::Action(Action::EnterApiKey),
         Some(PendingMenuRow::Login) => InputOutcome::Action(Action::Login),
         Some(PendingMenuRow::Quit) => InputOutcome::Action(Action::Quit),
@@ -4767,8 +4780,7 @@ impl AppView {
                             self.access_gate_shown_logged = true;
                             fuigo_telemetry::session_ctx::log_event(
                                 fuigo_telemetry::events::SuperGrokUpsellShown {
-                                    source:
-                                        fuigo_telemetry::events::SuperGrokUpsell::WelcomeScreen,
+                                    source: fuigo_telemetry::events::SuperGrokUpsell::WelcomeScreen,
                                     auth_method: self
                                         .login_method_id
                                         .as_ref()

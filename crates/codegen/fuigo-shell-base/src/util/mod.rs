@@ -70,33 +70,61 @@ pub fn trusted_api_origins() -> &'static [String] {
 /// path-aware by design (it pins one exact proxy route) and is wrong here:
 /// with a root base its path check rejects every subpath.
 ///
-/// `Url::parse` normalises the host and resolves userinfo, so
-/// `https://good.example@attacker.example/` compares as `attacker.example`.
+/// `Url::parse` resolves userinfo, so `https://good.example@attacker.example/`
+/// compares as `attacker.example`, and normalises case, IDN/punycode and the
+/// ideographic full stop. It does **not** normalise a trailing root dot, which
+/// [`normalized_host`] handles.
 fn matches_configured_origin(url: &str) -> bool {
     let Ok(candidate) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(candidate_host) = normalized_host(&candidate) else {
         return false;
     };
     trusted_api_origins().iter().any(|base| {
         reqwest::Url::parse(base).is_ok_and(|trusted| {
             candidate.scheme() == trusted.scheme()
-                && candidate.host_str() == trusted.host_str()
-                && candidate.host_str().is_some()
+                && normalized_host(&trusted).is_some_and(|h| h == candidate_host)
                 && candidate.port_or_known_default() == trusted.port_or_known_default()
         })
     })
 }
 
-/// Host-only comparison against the configured origins, for the
-/// scheme-agnostic *refusal* path where a bare host may be all we have.
+/// A host with the DNS root dot removed.
+///
+/// `https://host./v1` and `https://host/v1` reach the same server -- a trailing
+/// dot is a fully-qualified name -- but `Url::parse` keeps it in `host_str`,
+/// so a bare string comparison treats them as different origins. That is not
+/// cosmetic: `is_fuigo_api_url` gates `enforce_disable_api_key_auth`, the
+/// enterprise "force session auth" kill switch, so a trailing dot in a
+/// `base_url` would evade a policy documented to fail closed.
+fn normalized_host(url: &reqwest::Url) -> Option<String> {
+    url.host_str().map(|h| h.trim_end_matches('.').to_owned())
+}
+
+/// Host-only comparison against the configured origins.
+///
+/// Scheme-agnostic by design so that credential *refusal* cannot be dodged by
+/// spelling an origin `http://`. Note that `is_fuigo_api_url` also feeds
+/// `endpoint_is_first_party`, which *grants* a session bearer
+/// (`agent/auth_method.rs`, `ModelByok::Unknown`), so a cleartext spelling of a
+/// configured host is treated as first-party here. That is inherited
+/// behaviour, not new, but it is a real property: the strict, https-only,
+/// loopback-refusing check is [`is_fuigo_api_bearer_url`], and that is the one
+/// to use when deciding where a token may actually be sent.
 fn host_matches_configured_origin(url: &str) -> bool {
-    let Some(host) = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned))
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .as_ref()
+        .and_then(normalized_host)
     else {
         return false;
     };
     trusted_api_origins().iter().any(|base| {
         reqwest::Url::parse(base)
             .ok()
-            .and_then(|b| b.host_str().map(str::to_owned))
+            .as_ref()
+            .and_then(normalized_host)
             .is_some_and(|h| h == host)
     })
 }
@@ -457,7 +485,9 @@ mod tests {
     fn test_is_fuigo_api_url_follows_configuration() {
         init_test_origins();
         assert!(is_fuigo_api_url("https://api.fluxrouter.ai/v1"));
-        assert!(is_fuigo_api_url("https://api.fluxrouter.ai/v1/chat/completions"));
+        assert!(is_fuigo_api_url(
+            "https://api.fluxrouter.ai/v1/chat/completions"
+        ));
         // Scheme-agnostic on purpose: refusal must fail closed.
         assert!(is_fuigo_api_url("http://api.fluxrouter.ai/v1"));
 
@@ -468,11 +498,25 @@ mod tests {
 
         assert!(!is_fuigo_api_url("https://api.openai.com/v1"));
         assert!(!is_fuigo_api_url("https://api.anthropic.com/v1"));
-        assert!(!is_fuigo_api_url("https://generativelanguage.googleapis.com"));
+        assert!(!is_fuigo_api_url(
+            "https://generativelanguage.googleapis.com"
+        ));
+
+        // A trailing root dot is the SAME host: DNS resolves `h.` and `h`
+        // identically, and `is_fuigo_api_url` gates the enterprise
+        // `disable_api_key_auth` kill switch. Treating them as different
+        // origins would let a `base_url` evade a policy that is documented to
+        // fail closed.
+        assert!(is_fuigo_api_url("https://api.fluxrouter.ai./v1"));
+        assert!(is_fuigo_api_url("https://API.FLUXROUTER.AI./v1"));
 
         // Suffix / prefix confusion against the CONFIGURED origin.
-        assert!(!is_fuigo_api_url("https://api.fluxrouter.ai.evil.example/v1"));
-        assert!(!is_fuigo_api_url("https://evil-api.fluxrouter.ai.attacker.com/v1"));
+        assert!(!is_fuigo_api_url(
+            "https://api.fluxrouter.ai.evil.example/v1"
+        ));
+        assert!(!is_fuigo_api_url(
+            "https://evil-api.fluxrouter.ai.attacker.com/v1"
+        ));
         assert!(!is_fuigo_api_url("https://prefixfluxrouter.ai/v1"));
 
         assert!(!is_fuigo_api_url("not-a-url"));
@@ -499,6 +543,8 @@ mod tests {
 
         // No vendor by default.
         assert!(!is_fuigo_api_bearer_url("https://api.x.ai/v1"));
+
+        assert!(is_fuigo_api_bearer_url("https://api.fluxrouter.ai./v1"));
 
         // userinfo confusion: the real host is attacker.example.
         assert!(!is_fuigo_api_bearer_url(

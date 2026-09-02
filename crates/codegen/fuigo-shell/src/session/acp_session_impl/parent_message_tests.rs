@@ -1,6 +1,6 @@
 use super::*;
-use std::sync::Arc;
 use fuigo_tools::implementations::fuigo_build::task::types::ActiveAgentMessage;
+use std::sync::Arc;
 
 #[expect(
     clippy::unwrap_used,

@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol as acp;
+use fuigo_tool_types::{KillTaskOutput, TaskOutputOutput};
 use fuigo_tools::types::output::{
     ApplyPatchOutput, CodexGrepFilesOutput, ListDirOutput, MCPOutputDetails, ReadFileOutput,
     SearchReplaceEditContextInformation, SearchReplaceEditDetail, SearchReplaceOutput, ToolOutput,
 };
-use fuigo_tool_types::{KillTaskOutput, TaskOutputOutput};
 
 /// Rewrites real worktree paths to display paths in serialized output.
 ///
@@ -605,12 +605,12 @@ pub(crate) fn acp_tool_update(
         }
         ToolOutput::ExitPlanMode(exit) => {
             let message = match exit {
-                fuigo_tools::types::output::ExitPlanModeOutput::PlanReady {
-                    message, ..
-                } => message.clone(),
-                fuigo_tools::types::output::ExitPlanModeOutput::EmptyPlan {
-                    message, ..
-                } => message.clone(),
+                fuigo_tools::types::output::ExitPlanModeOutput::PlanReady { message, .. } => {
+                    message.clone()
+                }
+                fuigo_tools::types::output::ExitPlanModeOutput::EmptyPlan { message, .. } => {
+                    message.clone()
+                }
             };
             Some(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
@@ -752,8 +752,8 @@ fn build_apply_patch_edit_details(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use fuigo_tools::types::output::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_acp_tool_update_send_subagent_message_outcomes_are_terminal() {
@@ -832,9 +832,7 @@ mod tests {
     #[test]
     fn test_turn_end_plan_cleanup_preserves_semantics_and_priority() {
         use crate::tools::todo::plan_entry_from_todo_item;
-        use fuigo_tools::implementations::fuigo_build::todo::{
-            TodoItem, TodoPriority, TodoStatus,
-        };
+        use fuigo_tools::implementations::fuigo_build::todo::{TodoItem, TodoPriority, TodoStatus};
 
         // Simulate a mixed todo list at turn end.
         let items = [
@@ -901,16 +899,12 @@ mod tests {
     fn test_acp_plan_update_todo() {
         let output = ToolOutput::Todo(TodoWriteOutput::TodosUpdated(TodoWriteSuccess {
             summary_for_prompt: "tasks".to_string(),
-            todos: vec![
-                fuigo_tools::implementations::fuigo_build::todo::TodoItem {
-                    content: "Task 1".to_string(),
-                    priority:
-                        fuigo_tools::implementations::fuigo_build::todo::TodoPriority::Medium,
-                    status:
-                        fuigo_tools::implementations::fuigo_build::todo::TodoStatus::Completed,
-                    meta: None,
-                },
-            ],
+            todos: vec![fuigo_tools::implementations::fuigo_build::todo::TodoItem {
+                content: "Task 1".to_string(),
+                priority: fuigo_tools::implementations::fuigo_build::todo::TodoPriority::Medium,
+                status: fuigo_tools::implementations::fuigo_build::todo::TodoStatus::Completed,
+                meta: None,
+            }],
             state: fuigo_tools::implementations::fuigo_build::todo::TodoState::default(),
         }));
         let plan = acp_plan_update(&output).unwrap();
@@ -1224,7 +1218,8 @@ mod tests {
         )
         .unwrap();
         // Session directory paths use urlencoding::encode(&cwd)
-        let encoded_overlay = urlencoding::encode("/root/.fuigo/worktrees/project/ab-123-a-overlay");
+        let encoded_overlay =
+            urlencoding::encode("/root/.fuigo/worktrees/project/ab-123-a-overlay");
         let input = format!(
             "output-file: /root/.fuigo/sessions/{}/session-id/terminal/call.log",
             encoded_overlay

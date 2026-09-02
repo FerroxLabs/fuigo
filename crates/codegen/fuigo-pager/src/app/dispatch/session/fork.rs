@@ -104,9 +104,7 @@ pub(super) fn worktree_persist_options()
 /// Refuses with a toast if a question (ACP or local) is already on screen, so two questions never collide.
 fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };

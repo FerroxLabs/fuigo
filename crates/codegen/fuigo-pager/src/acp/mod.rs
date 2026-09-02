@@ -16,16 +16,17 @@ pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_b
 /// TUI dispatch, headless dispatch, and the session-load ACP barrier all share this list.
 /// A new method thus cannot be handled in one path and classified `Unrelated` in another.
 pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
-    matches!(method, "fuigo/session_notification" | "fuigo/session/update")
+    matches!(
+        method,
+        "fuigo/session_notification" | "fuigo/session/update"
+    )
 }
 
 use fuigo_telemetry::process_info::{
     Entrypoint, Interactivity, LeaderMode, ProcessIdentity, set_identity,
 };
 use fuigo_telemetry::startup;
-pub use fuigo_telemetry::startup::{
-    AgentKind, Owner, StartupOutcome, StartupPhase, StartupTimer,
-};
+pub use fuigo_telemetry::startup::{AgentKind, Owner, StartupOutcome, StartupPhase, StartupTimer};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -1019,7 +1020,7 @@ mod tests {
     /// It then either passes or fails on a meaningful new code path.
     #[test]
     fn startup_auth_fuigo_api_key_not_first_still_requires_login() {
-        use fuigo_shell::agent::auth_method::{FUIGO_COM_METHOD_ID, FUIGO_API_KEY_METHOD_ID};
+        use fuigo_shell::agent::auth_method::{FUIGO_API_KEY_METHOD_ID, FUIGO_COM_METHOD_ID};
 
         let methods = vec![
             make_auth_method(FUIGO_COM_METHOD_ID, "Fuigo", None),

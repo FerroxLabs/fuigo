@@ -199,7 +199,11 @@ mod tests {
 
     #[test]
     fn scheme_less_and_wss_bases() {
-        for base in ["api.example.com", "wss://api.example.com", "HTTPS://api.example.com"] {
+        for base in [
+            "api.example.com",
+            "wss://api.example.com",
+            "HTTPS://api.example.com",
+        ] {
             let cfg = VoiceConfig {
                 api_base: base.into(),
                 ..VoiceConfig::default()

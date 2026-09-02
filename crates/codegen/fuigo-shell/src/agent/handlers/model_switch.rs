@@ -8,8 +8,8 @@ use crate::agent::mvp_agent::{
 };
 use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
-use tokio::sync::oneshot;
 use fuigo_sampling_types::ReasoningEffort;
+use tokio::sync::oneshot;
 /// Apply a model switch to a session (no gate; `set_session_model` gates first).
 pub(crate) async fn apply(
     agent: &MvpAgent,
@@ -173,17 +173,15 @@ pub(crate) async fn apply(
                     error = ?e,
                     "set_session_model: zero-turn harness rebuild failed; aborting model switch"
                 );
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::ModelSwitched {
-                        session_id: session_id.0.to_string(),
-                        previous_model_id: previous_model_id.to_string(),
-                        new_model_id: model_id.0.to_string(),
-                        success: false,
-                        error_code: Some(config::MODEL_SWITCH_REBUILD_FAILED.to_string()),
-                        required_agent_type: Some(required_agent_type.clone()),
-                        current_agent_type: None,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::ModelSwitched {
+                    session_id: session_id.0.to_string(),
+                    previous_model_id: previous_model_id.to_string(),
+                    new_model_id: model_id.0.to_string(),
+                    success: false,
+                    error_code: Some(config::MODEL_SWITCH_REBUILD_FAILED.to_string()),
+                    required_agent_type: Some(required_agent_type.clone()),
+                    current_agent_type: None,
+                });
                 return Err(e);
             }
         }

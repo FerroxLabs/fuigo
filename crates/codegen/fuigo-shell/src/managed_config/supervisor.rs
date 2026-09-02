@@ -506,10 +506,7 @@ pub async fn ensure_managed_policy_present(
     fuigo_telemetry::startup::enter(fuigo_telemetry::startup::StartupPhase::ManagedPolicy);
     let has_deployment_key = store::resolve_deployment_key().is_some();
     let signed_in_team = store::team_principal_signed_in();
-    fuigo_telemetry::startup::set_auth_mode(policy::auth_mode(
-        has_deployment_key,
-        &signed_in_team,
-    ));
+    fuigo_telemetry::startup::set_auth_mode(policy::auth_mode(has_deployment_key, &signed_in_team));
     // A parked refresh applies here, pre-sandbox, before staleness is judged; it gates
     // itself (fetch-disabled or unverifiable discards, missing principal self-refuses).
     store::apply_staged_managed_config();

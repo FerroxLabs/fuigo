@@ -2,11 +2,11 @@
 //! Mutations go through `refresh_chain` or `update`; lock and enrichment helpers live in submodules.
 
 use chrono::{Duration, Utc};
+use fuigo_auth::bearer_suffix;
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
-use fuigo_auth::bearer_suffix;
 
 use tokio_util::sync::CancellationToken;
 
@@ -1289,11 +1289,7 @@ impl AuthManager {
             DiskAuthState::FileMissing
             | DiskAuthState::EntryMissing
             | DiskAuthState::Unreadable => {
-                fuigo_telemetry::unified_log::warn(
-                    "auth disk state: entry lost",
-                    None,
-                    Some(ctx),
-                );
+                fuigo_telemetry::unified_log::warn("auth disk state: entry lost", None, Some(ctx));
             }
         }
     }

@@ -156,9 +156,7 @@ fn refresh_sources(
     for source in sources {
         if let Some(filter) = source_url_or_path {
             let identity = match &source.kind {
-                fuigo_plugin_marketplace::SourceKind::Local { path } => {
-                    path.display().to_string()
-                }
+                fuigo_plugin_marketplace::SourceKind::Local { path } => path.display().to_string(),
                 fuigo_plugin_marketplace::SourceKind::Git { url, .. } => url.clone(),
             };
             if identity != filter {
@@ -201,8 +199,8 @@ async fn handle_update(
     source_url_or_path: &str,
     plugin_relative_path: &str,
 ) -> fuigo_hooks_plugins_types::ActionOutcome {
-    use fuigo_plugin_marketplace::installer;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
+    use fuigo_plugin_marketplace::installer;
 
     let sources = load_filtered_marketplace_sources();
 
@@ -355,8 +353,8 @@ async fn handle_install(
     source_url_or_path: &str,
     plugin_relative_path: &str,
 ) -> fuigo_hooks_plugins_types::ActionOutcome {
-    use fuigo_plugin_marketplace::installer;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
+    use fuigo_plugin_marketplace::installer;
 
     let sources = load_filtered_marketplace_sources();
 
@@ -488,8 +486,7 @@ async fn handle_install(
         };
 
         let plugin_path =
-            match fuigo_plugin_marketplace::MarketplaceRelativePath::parse(plugin_relative_path)
-            {
+            match fuigo_plugin_marketplace::MarketplaceRelativePath::parse(plugin_relative_path) {
                 Ok(path) => path,
                 Err(e) => {
                     return ActionOutcome {
@@ -581,8 +578,8 @@ async fn handle_uninstall(
     source_url_or_path: &str,
     plugin_relative_path: &str,
 ) -> fuigo_hooks_plugins_types::ActionOutcome {
-    use fuigo_plugin_marketplace::installer;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
+    use fuigo_plugin_marketplace::installer;
 
     let mut registry = fuigo_agent::plugins::install_registry::InstallRegistry::load();
 
@@ -1026,7 +1023,9 @@ fn add_marketplace_source(
 
 /// Remove a marketplace source from `~/.fuigo/config.toml` and uninstall all
 /// plugins that were installed from it.
-async fn handle_remove_source(source_url_or_path: &str) -> fuigo_hooks_plugins_types::ActionOutcome {
+async fn handle_remove_source(
+    source_url_or_path: &str,
+) -> fuigo_hooks_plugins_types::ActionOutcome {
     let src = source_url_or_path.to_string();
     // Lock, then run the blocking FS work off the reactor
     let _save_guard = crate::util::config::lock_config_writes().await;

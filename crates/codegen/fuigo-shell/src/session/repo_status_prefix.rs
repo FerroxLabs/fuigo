@@ -356,9 +356,7 @@ mod tests {
         );
         assert_eq!(
             git.legacy_status(),
-            fuigo_agent::prompt::user_message::normalize_git_status(
-                " M src/main.rs\n?? new.txt\n"
-            )
+            fuigo_agent::prompt::user_message::normalize_git_status(" M src/main.rs\n?? new.txt\n")
         );
 
         let empty = RepoStatusSnapshot {

@@ -94,11 +94,7 @@ async fn client_hooks_fire_without_file_registry() {
                 actor.hook_registry.borrow().is_none(),
                 "fixture must have no file registry for this invariant"
             );
-            install_client_hook(
-                &actor,
-                fuigo_hooks::event::HookEventName::Stop,
-                &["cb_0"],
-            );
+            install_client_hook(&actor, fuigo_hooks::event::HookEventName::Stop, &["cb_0"]);
 
             actor.fire_hook(
                 fuigo_hooks::event::HookEventName::Stop,
@@ -133,12 +129,11 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
     local
         .run_until(async {
             let (actor, gateway_rx, _persistence_rx) = test_actor().await;
-            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
-                fuigo_tools::registry::types::ToolConfig::for_tool::<
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![fuigo_tools::registry::types::ToolConfig::for_tool::<
                     fuigo_tools::implementations::use_tool::UseTool,
-                >(),
-            ])
-            .await;
+                >()])
+                .await;
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
             client_hooks.insert(
@@ -1007,11 +1002,7 @@ async fn run_stop_gate_keep_working_and_cap() {
             let decision = actor.run_stop_gate("prompt-1", 0).await;
             assert!(matches!(decision, StopGateDecision::AllowStop));
 
-            install_client_hook(
-                &actor,
-                fuigo_hooks::event::HookEventName::Stop,
-                &["cb_0"],
-            );
+            install_client_hook(&actor, fuigo_hooks::event::HookEventName::Stop, &["cb_0"]);
 
             spawn_deny_responder(gateway_rx, "keep working");
 

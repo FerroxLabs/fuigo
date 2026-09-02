@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use agent_client_protocol as acp;
-use parking_lot::Mutex;
 use fuigo_workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
+use parking_lot::Mutex;
 
 // Decision-side (scan/decide/prompt/store) lives in `fuigo-workspace` (client crate)
 // Only the helpers used by this consume-side module are imported; callers should use the workspace API for explicit trust decisions
@@ -1029,9 +1029,9 @@ mod tests {
 
     #[test]
     fn filter_untrusted_project_lsp_drops_only_project() {
-        use std::collections::BTreeMap;
         use fuigo_tools::implementations::lsp::config::LspServerConfig;
         use fuigo_tools::types::config_source::ConfigSource;
+        use std::collections::BTreeMap;
 
         fn sourced() -> BTreeMap<String, (LspServerConfig, ConfigSource)> {
             let mut m = BTreeMap::new();
@@ -1085,7 +1085,11 @@ mod tests {
         let tmp = repo_tmp();
         let fuigo = tmp.path().join(".fuigo");
         std::fs::create_dir_all(&fuigo).unwrap();
-        std::fs::write(fuigo.join("lsp.json"), r#"{"projlsp": {"command": "true"}}"#).unwrap();
+        std::fs::write(
+            fuigo.join("lsp.json"),
+            r#"{"projlsp": {"command": "true"}}"#,
+        )
+        .unwrap();
 
         let sourced = load_servers_with_plugins_sourced(tmp.path(), &[], &[], &[], &[]);
         let (_, source) = sourced.get("projlsp").expect("project server present");
@@ -1104,7 +1108,11 @@ mod tests {
         let tmp = repo_tmp();
         let fuigo = tmp.path().join(".fuigo");
         std::fs::create_dir_all(&fuigo).unwrap();
-        std::fs::write(fuigo.join("lsp.json"), r#"{"projlsp": {"command": "true"}}"#).unwrap();
+        std::fs::write(
+            fuigo.join("lsp.json"),
+            r#"{"projlsp": {"command": "true"}}"#,
+        )
+        .unwrap();
 
         let sourced = load_servers_with_plugins_sourced(tmp.path(), &[], &[], &[], &[]);
         assert!(

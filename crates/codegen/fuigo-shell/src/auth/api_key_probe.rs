@@ -119,7 +119,11 @@ fn classify_probe_response(status: u16, body: &[u8]) -> ApiKeyProbeVerdict {
 /// Fails open on a timeout or transport error after retries; the raw key is never logged.
 ///
 /// `api_base_url` must be the endpoint the env key is actually sent to (`endpoints.fuigo_api_base_url`), not a hardcoded public default.
-async fn probe_fuigo_api_key(key: &str, api_base_url: &str, timeout: Duration) -> ApiKeyProbeVerdict {
+async fn probe_fuigo_api_key(
+    key: &str,
+    api_base_url: &str,
+    timeout: Duration,
+) -> ApiKeyProbeVerdict {
     let url = api_key_info_url(api_base_url);
     probe_fuigo_api_key_at_url(key, &url, timeout).await
 }

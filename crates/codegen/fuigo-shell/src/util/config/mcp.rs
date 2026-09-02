@@ -1,12 +1,12 @@
 use agent_client_protocol as acp;
 use anyhow::Result;
+use fuigo_agent::prompt::skills::SkillsConfig;
+use fuigo_tools::types::compat::{CompatConfig, CompatConfigToml};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
-use fuigo_agent::prompt::skills::SkillsConfig;
-use fuigo_tools::types::compat::{CompatConfig, CompatConfigToml};
 
 pub use fuigo_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
 // MCP server config value types moved to `fuigo-config-types`; the re-export keeps `crate::util::config::*` paths working

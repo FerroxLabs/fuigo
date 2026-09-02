@@ -1,6 +1,6 @@
+use fuigo_workspace::permission::mcp_titleize_segment;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
-use fuigo_workspace::permission::mcp_titleize_segment;
 
 use super::TOOL_HEADER_RANGE;
 use crate::appearance::AppearanceConfig;

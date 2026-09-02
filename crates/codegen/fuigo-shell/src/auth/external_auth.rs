@@ -89,7 +89,10 @@ pub(crate) async fn run_external_refresh(command: &str) -> Option<FuigoAuth> {
 }
 
 /// Run external auth provider, carrying forward `/user`-derived fields from previous auth.
-pub(crate) async fn refresh_with_command(command: &str, prev_auth: &FuigoAuth) -> Option<FuigoAuth> {
+pub(crate) async fn refresh_with_command(
+    command: &str,
+    prev_auth: &FuigoAuth,
+) -> Option<FuigoAuth> {
     let mut auth = run_external_refresh(command).await?;
     auth.carry_user_profile_from(prev_auth);
     Some(auth)

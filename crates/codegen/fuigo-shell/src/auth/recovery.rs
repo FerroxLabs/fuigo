@@ -602,7 +602,9 @@ mod tests {
     }
 
     /// Run one recovery against a counting refresher; return the outcome and how many times the authority was consulted.
-    async fn recover_with_ok_refresher(m: &Arc<AuthManager>) -> (Result<FuigoAuth, AuthError>, u32) {
+    async fn recover_with_ok_refresher(
+        m: &Arc<AuthManager>,
+    ) -> (Result<FuigoAuth, AuthError>, u32) {
         let calls = Arc::new(AtomicU32::new(0));
         m.set_refresher(Arc::new(OkRefresher {
             calls: calls.clone(),

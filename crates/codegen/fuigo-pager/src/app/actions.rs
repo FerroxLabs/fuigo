@@ -677,12 +677,21 @@ pub enum Action {
     EnterApiKey,
     /// User submitted an API key typed or pasted into that screen.
     SubmitApiKey(SecretKey),
-    /// Apply the Nth credential discovered in the environment.
+    /// Apply the credential found in the named environment variable.
     ///
-    /// Carries an INDEX, never the key. `Action` is `#[derive(Debug)]`, so a
-    /// secret in a variant is one stray `{:?}` away from a log file. The key
-    /// is re-read from the environment when this is handled.
-    UseDetectedKey(usize),
+    /// Carries the VARIABLE NAME, never the key. `Action` is
+    /// `#[derive(Debug)]`, so a secret in a variant is one stray `{:?}` away
+    /// from a log file; a variable name is already display-safe -- the menu
+    /// paints it.
+    ///
+    /// A name rather than an index on purpose. The key is re-read from the
+    /// environment at dispatch, so an index would be a positional reference
+    /// into a list that could have changed since it was rendered: with more
+    /// than one appliable provider, a row labelled A could apply B's secret.
+    /// That is the exact hazard this feature was scoped to avoid, so the
+    /// reference is made unambiguous instead of relying on the list being
+    /// short.
+    UseDetectedKey(String),
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
     /// Show the raw auth URL with mouse capture disabled for manual copy.

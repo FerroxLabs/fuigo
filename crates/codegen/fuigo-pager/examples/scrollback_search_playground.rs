@@ -12,6 +12,11 @@ use std::time::Duration;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use fuigo_pager::scrollback::{
+    RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackSearchState, ScrollbackState,
+};
+use fuigo_pager::theme::Theme;
+use fuigo_pager::views::picker::render_search_bar_with_viewport;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -20,11 +25,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
-use fuigo_pager::scrollback::{
-    RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackSearchState, ScrollbackState,
-};
-use fuigo_pager::theme::Theme;
-use fuigo_pager::views::picker::render_search_bar_with_viewport;
 
 struct App {
     scrollback: ScrollbackState,

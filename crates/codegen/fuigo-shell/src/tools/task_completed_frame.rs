@@ -2,9 +2,9 @@
 //! That holds both when this build sends one and when replay reaches one an earlier build wrote.
 //! Bounding the output field alone does not bound the line: the wrapper and the JSON encoding go on top of it.
 
+use fuigo_tools::types::TaskSnapshot;
 use serde_json::Value;
 use serde_json::value::RawValue;
-use fuigo_tools::types::TaskSnapshot;
 
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 

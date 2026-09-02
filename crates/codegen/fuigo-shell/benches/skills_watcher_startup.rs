@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use fuigo_shell::config::watcher::SkillsFileWatcher;
 use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
 use tempfile::TempDir;
-use fuigo_shell::config::watcher::SkillsFileWatcher;
 
 /// Default directory count under `.claude/worktrees/` (override with `FUIGO_SKILLS_WATCHER_BENCH_DIRS`).
 const DEFAULT_WORKTREE_DIRS: usize = 6_000;
