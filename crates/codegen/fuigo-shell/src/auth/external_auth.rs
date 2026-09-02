@@ -121,6 +121,7 @@ mod tests {
 
     #[test]
     fn parse_output_issuer_claim_enables_fuigo_auth() {
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
         let ok = |stdout: &str| std::process::Output {
             status: std::process::Command::new("true").status().unwrap(),
             stdout: stdout.as_bytes().to_vec(),

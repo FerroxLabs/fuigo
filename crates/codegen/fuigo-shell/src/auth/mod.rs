@@ -31,9 +31,12 @@ pub(crate) use auth_provider::{
 #[cfg(test)]
 pub(crate) use auth_provider::{test_backdate_provider_mint, test_counting_provider};
 pub(crate) use config::LEGACY_AUTH_SCOPE;
+#[cfg(test)]
+pub(crate) use config::{set_test_oauth2_issuer, test_config_with_oauth2};
 pub use config::{
+    UNCONFIGURED_AUTH_SCOPE,
     ForceLoginTeam, FuigoComConfig, OAuth2ProviderConfig, OidcAuthConfig, PreferredAuthMethod,
-    XAI_OAUTH2_ISSUER, is_fuigo_oauth2_issuer, fuigo_oauth2_issuer,
+    GROK_OAUTH2_ISSUER, is_fuigo_oauth2_issuer, fuigo_oauth2_issuer,
 };
 pub(crate) use config::{
     force_login_team_from_env, force_login_team_from_requirements, resolve_force_login_team,

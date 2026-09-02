@@ -518,6 +518,7 @@ async fn aux_model_with_auth_provider_never_reroutes() {
 /// The session bearer resolver must never be stamped onto a third-party sampler: the sampler substitutes the resolver's bearer at request time.
 #[test]
 fn session_resolver_is_not_stamped_onto_third_party_samplers() {
+    crate::agent::config::Config::install_test_trusted_origins();
     #[derive(Debug)]
     struct SessionResolver;
     impl fuigo_sampler::BearerResolver for SessionResolver {
@@ -789,6 +790,7 @@ fn shell_environment_policy_known_keys_track_the_policy_struct() {
 }
 #[test]
 fn web_search_disable_api_key_auth_swaps_first_party_key_for_session() {
+    crate::agent::config::Config::install_test_trusted_origins();
     let endpoints = EndpointsConfig::default();
     let mut models = IndexMap::new();
     models.insert(
@@ -1174,6 +1176,7 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
 }
 #[test]
 fn sampling_config_scopes_no_inline_citations_include() {
+    crate::agent::config::Config::install_test_trusted_origins();
     for (supports_search, backend, base_url, expected) in [
         (true, ApiBackend::Responses, A_FIRST_PARTY_URL, true),
         (true, ApiBackend::Responses, "https://api.x.ai/v1", true),
@@ -1525,6 +1528,7 @@ fn api_key_creds(base_url: &str) -> ResolvedCredentials {
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
 #[test]
 fn enforce_disable_api_key_auth_blocks_first_party_only() {
+    crate::agent::config::Config::install_test_trusted_origins();
     use fuigo_chat_state::AuthType;
     let mut creds = api_key_creds("https://api.x.ai/v1");
     enforce_disable_api_key_auth(&mut creds, false, Some("session-jwt"));
@@ -1556,6 +1560,7 @@ fn enforce_disable_api_key_auth_blocks_first_party_only() {
 /// (`try_resolve_model_credentials` loads global config, so this exercises its resolve and enforce core.)
 #[test]
 fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
+    crate::agent::config::Config::install_test_trusted_origins();
     use fuigo_chat_state::AuthType;
     let entry = test_model_entry(
         "m",
