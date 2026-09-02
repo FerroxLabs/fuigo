@@ -1177,7 +1177,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::EnterApiKey => dispatch_enter_api_key(app),
-        Action::SubmitApiKey(key) => dispatch_submit_api_key(app, key),
+        Action::SubmitApiKey(key) => dispatch_submit_api_key(app, key.0),
         Action::UseDetectedKey(index) => dispatch_use_detected_key(app, index),
         Action::CopyAuthUrl => {
             dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)

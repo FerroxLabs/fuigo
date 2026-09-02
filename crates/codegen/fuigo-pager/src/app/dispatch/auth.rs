@@ -361,7 +361,10 @@ pub(super) fn dispatch_submit_api_key(app: &mut AppView, key: String) -> Vec<Eff
     if key.is_empty() {
         return vec![];
     }
-    vec![Effect::SubmitApiKey { request_seq, key }]
+    vec![Effect::SubmitApiKey {
+        request_seq,
+        key: crate::app::actions::SecretKey(key),
+    }]
 }
 
 /// User submitted a manually-pasted auth token in loopback mode.

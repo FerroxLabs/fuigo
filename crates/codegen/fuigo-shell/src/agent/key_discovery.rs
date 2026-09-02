@@ -215,6 +215,14 @@ where
 
 /// Keys that can be applied through the single-credential path right now.
 ///
+/// In practice this yields at most **one** row, and only ever `FLUX_API_KEY`.
+/// `FUIGO_API_KEY` and `FUIGO_CODE_API_KEY` are listed first for the
+/// FluxRouter provider, but when either is set the shell adopts it
+/// automatically (`auth/flow.rs:932,981`), `AuthState` becomes `Done`, and the
+/// first-run menu that consumes this never draws. They can therefore appear in
+/// `discover()` -- which is a truthful report of the environment -- but never
+/// as a row a user is asked to choose.
+///
 /// This is the ONLY list a first-run menu may offer as one-keypress rows.
 /// Everything else needs provider configuration first; offering it would
 /// send that vendor's secret to the configured endpoint.
