@@ -373,10 +373,10 @@ pub struct TracingHandle {
 /// }
 /// ```
 pub fn init_tracing() -> TracingHandle {
+    use fuigo_telemetry::debug_log::RMCP_SSE_NOISE_TARGET;
     use tracing_subscriber::{
         EnvFilter, Layer as _, filter::LevelFilter, fmt, layer::SubscriberExt as _,
     };
-    use fuigo_telemetry::debug_log::RMCP_SSE_NOISE_TARGET;
     let (make_writer, rx) = TracingChannelMakeWriter::new();
     let payload_level = "off";
     let directives = format!(
@@ -409,15 +409,13 @@ pub fn init_tracing() -> TracingHandle {
         .with(hooks_log_layer)
         .with(otel_layer);
     fuigo_telemetry::debug_log::install_firehose(registry, "tui");
-    fuigo_telemetry::external::init(
-        fuigo_shell::agent::config::resolve_external_otel_config(
-            fuigo_telemetry::external::config::ExternalClientInfo {
-                service_version: fuigo_version::full_version().to_owned(),
-                client_version: fuigo_version::VERSION.to_owned(),
-                app_entrypoint: "tui".to_owned(),
-            },
-        ),
-    );
+    fuigo_telemetry::external::init(fuigo_shell::agent::config::resolve_external_otel_config(
+        fuigo_telemetry::external::config::ExternalClientInfo {
+            service_version: fuigo_version::full_version().to_owned(),
+            client_version: fuigo_version::VERSION.to_owned(),
+            app_entrypoint: "tui".to_owned(),
+        },
+    ));
     TracingHandle { rx }
 }
 #[cfg(test)]

@@ -562,7 +562,8 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
         .map(|c| {
             let file_type =
                 instruction_file_type(&c.file_path, &fuigo_home, imported, &extra_rule_prefixes);
-            let scope = instruction_scope(&c.file_path, &fuigo_home, &vendor_homes, &workspace_root);
+            let scope =
+                instruction_scope(&c.file_path, &fuigo_home, &vendor_homes, &workspace_root);
             let size = c.content.len();
             let vendor = derive_vendor(&c.file_path).map(String::from);
             InstructionFile {
@@ -837,9 +838,7 @@ async fn list_skills(
         .collect()
 }
 
-fn slash_name_counts(
-    skills: &[fuigo_agent::prompt::skills::SkillInfo],
-) -> HashMap<String, usize> {
+fn slash_name_counts(skills: &[fuigo_agent::prompt::skills::SkillInfo]) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for skill in skills.iter().filter(|s| s.user_invocable && s.enabled) {
         *counts.entry(skill.name.to_lowercase()).or_default() += 1;
@@ -1776,7 +1775,10 @@ mod tests {
             );
         }
 
-        for path in ["/repo/.fuigo/rules/team.md", r"C:\repo\.fuigo\rules\team.md"] {
+        for path in [
+            "/repo/.fuigo/rules/team.md",
+            r"C:\repo\.fuigo\rules\team.md",
+        ] {
             assert_eq!(
                 instruction_file_type(path, Path::new("/home/user/.fuigo"), false, &[]),
                 "rules"
@@ -2237,7 +2239,11 @@ mod tests {
             ConfigSource::Server { .. }
         ));
 
-        let s = skill_fixture("e", "/home/u/.fuigo/bundled/e/SKILL.md", SkillScope::Bundled);
+        let s = skill_fixture(
+            "e",
+            "/home/u/.fuigo/bundled/e/SKILL.md",
+            SkillScope::Bundled,
+        );
         assert!(matches!(
             skill_entry_source(&s),
             ConfigSource::Bundled { .. }

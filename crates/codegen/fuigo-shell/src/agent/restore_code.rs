@@ -1,8 +1,6 @@
 //! Wraps [`fuigo_workspace::session::git::build_restore_decision`] into the JSON shape `LoadSession` emits on `_meta.codeRestore`.
+use fuigo_workspace::session::git::{CheckoutSessionOutcome, RestoreKind, build_restore_decision};
 use serde_json::Value;
-use fuigo_workspace::session::git::{
-    CheckoutSessionOutcome, RestoreKind, build_restore_decision,
-};
 /// Builds the `codeRestore` JSON meta, or `None` when there was neither a checkout nor an applied archive.
 /// The shared [`build_restore_decision`] makes the decision; this function only reshapes it into the wire JSON used by the non-worktree path.
 pub(crate) fn build_code_restore_meta(

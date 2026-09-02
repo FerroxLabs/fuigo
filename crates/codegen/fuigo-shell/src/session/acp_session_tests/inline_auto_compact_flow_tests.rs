@@ -2,10 +2,10 @@ use super::support::*;
 use super::*;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
-use tokio::sync::mpsc;
 use fuigo_paths::AbsPathBuf;
 use fuigo_workspace::file_system::MockFs;
 use fuigo_workspace::permission::PermissionHandle;
+use tokio::sync::mpsc;
 #[derive(Debug)]
 struct DummyTerminal;
 #[async_trait::async_trait]

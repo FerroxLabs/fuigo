@@ -1743,19 +1743,15 @@ impl SessionActor {
                                     None,
                                     Some(error_type_label.as_str()),
                                 );
-                                event_writer.emit(
-                                    fuigo_session_events::Event::McpServerFailed {
-                                        server_name: server_name.clone(),
-                                        transport: Some(transport_str.to_string()),
-                                        target: server_target_map
-                                            .get(server_name.as_str())
-                                            .cloned(),
-                                        error_type: error_cat,
-                                        error_message: e.to_string(),
-                                        duration_ms: Some(elapsed.as_millis() as u64),
-                                        timeout_sec: Some(timeout_sec),
-                                    },
-                                );
+                                event_writer.emit(fuigo_session_events::Event::McpServerFailed {
+                                    server_name: server_name.clone(),
+                                    transport: Some(transport_str.to_string()),
+                                    target: server_target_map.get(server_name.as_str()).cloned(),
+                                    error_type: error_cat,
+                                    error_message: e.to_string(),
+                                    duration_ms: Some(elapsed.as_millis() as u64),
+                                    timeout_sec: Some(timeout_sec),
+                                });
                                 servers_failed += 1;
                                 failed_server_names.push(server_name.clone());
                                 if needs_auth {
@@ -1768,11 +1764,8 @@ impl SessionActor {
                                 // Keeping the two disjoint means a server that later authenticates is not left stuck Unavailable with zero tools
                                 // Stash the real cause for the model-facing MCP reminder rather than a bare "connection failed"
                                 let detail = (!needs_auth).then(|| {
-                                    fuigo_tools::util::truncate_str_with_marker(
-                                        &e.to_string(),
-                                        200,
-                                    )
-                                    .into_owned()
+                                    fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)
+                                        .into_owned()
                                 });
                                 if !needs_auth && e.is_connect_failure() {
                                     // Disk-only spawn can't observe connectivity; the unreachable-retry schedule starts here

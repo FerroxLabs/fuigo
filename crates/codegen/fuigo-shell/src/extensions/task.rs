@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
-use serde::{Deserialize, Serialize};
 use fuigo_tools::types::{KillOutcome, KillSource, TaskSnapshot};
+use serde::{Deserialize, Serialize};
 
 use fuigo_tools::implementations::fuigo_build::task::types::{
     SubagentCancelOutcome, SubagentInspection, SubagentProvenance, SubagentSnapshot,

@@ -10,18 +10,18 @@ use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use unicode_width::UnicodeWidthStr;
 use fuigo_agent::config::{AgentDefinition, AgentScope, BuiltinAgentName};
 use fuigo_shell::agent::config::AgentSelectionConfig;
 use fuigo_tools::implementations::skills::discovery::extract_first_paragraph;
 use fuigo_tools::registry::types::ToolServerConfig;
 use fuigo_tools::types::template_renderer::TemplateRenderer;
 use fuigo_tools::types::tool::ToolKind;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use unicode_width::UnicodeWidthStr;
 /// Which tab is active in the agents modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentsTab {
@@ -509,7 +509,10 @@ pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetai
         }
     }
     let dirs = [
-        (ConfigFileScope::Project, cwd.join(".fuigo").join("personas")),
+        (
+            ConfigFileScope::Project,
+            cwd.join(".fuigo").join("personas"),
+        ),
         (ConfigFileScope::User, fuigo_home.join("personas")),
     ];
     for (scope, dir) in dirs {
@@ -3374,9 +3377,7 @@ mod tests {
         assert!(description_text.starts_with("1234567890"));
     }
     /// Fixture: a one-plugin registry whose `agents/` dir holds `reviewer.md`.
-    fn plugin_registry_with_reviewer(
-        plugin_root: &Path,
-    ) -> fuigo_agent::plugins::PluginRegistry {
+    fn plugin_registry_with_reviewer(plugin_root: &Path) -> fuigo_agent::plugins::PluginRegistry {
         use fuigo_agent::plugins::discovery::PluginId;
         use fuigo_agent::plugins::{
             DiscoveredPlugin, PluginManifest, PluginOrigin, PluginRegistry, PluginScope,

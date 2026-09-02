@@ -5,12 +5,12 @@
 //! Structure mirrors `queue_edit.rs`.
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use fuigo_ratatui_textarea::{TextArea, TextAreaState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::StatefulWidgetRef;
 use unicode_width::UnicodeWidthStr;
-use fuigo_ratatui_textarea::{TextArea, TextAreaState};
 
 use crate::key;
 use crate::scrollback::block::RenderBlock;

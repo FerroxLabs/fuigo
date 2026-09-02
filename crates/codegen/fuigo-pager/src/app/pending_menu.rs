@@ -28,10 +28,10 @@ pub struct DetectedKeyRow {
 /// A row of the pending menu, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingMenuRow {
-    /// Apply a credential discovered in the environment. The payload is an
-    /// index into `key_discovery::discover_appliable()`, deliberately not the
-    /// key itself: `Action` and `Effect` are `#[derive(Debug)]`, so a secret
-    /// in a variant is one stray `{:?}` away from a log file.
+    /// Apply a credential discovered in the environment. The payload is the
+    /// row's position in the menu; the dispatcher turns it into the variable
+    /// NAME before building an action, so nothing positional survives past
+    /// the click.
     UseDetectedKey(usize),
     /// Type a key by hand.
     EnterApiKey,
@@ -132,6 +132,25 @@ mod tests {
             .count();
         assert_eq!(detected, MAX_DETECTED_ROWS);
         assert!(rows.len() <= MAX_DETECTED_ROWS + 3);
+    }
+
+    /// A row must reference its credential by NAME once it leaves the menu.
+    /// With a positional reference and a list re-derived from a live `std::env`
+    /// read, a row labelled provider A could apply provider B's secret if the
+    /// environment changed between render and keypress.
+    #[test]
+    fn a_row_resolves_to_the_variable_it_was_painted_with() {
+        let painted = ["FLUX_API_KEY".to_string(), "OTHER_KEY".to_string()];
+        let rows = pending_menu_rows(painted.len(), true);
+        for (i, row) in rows.iter().enumerate() {
+            if let PendingMenuRow::UseDetectedKey(k) = row {
+                assert_eq!(
+                    painted.get(*k).map(String::as_str),
+                    Some(painted[i].as_str()),
+                    "row {i} would apply the wrong variable"
+                );
+            }
+        }
     }
 
     /// The regression the audit caught: clicking row *i* must invoke the row

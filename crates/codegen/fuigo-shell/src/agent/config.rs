@@ -6,12 +6,6 @@ use crate::auth::{AuthManager, FuigoComConfig, OidcAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellToolsetConfig};
 use agent_client_protocol as acp;
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::num::NonZeroU64;
-use std::path::PathBuf;
-use std::sync::Arc;
 use fuigo_agent::prompt::skills::SkillsConfig;
 use fuigo_sampler::{AuthScheme, SamplerConfig};
 use fuigo_sampling_types::{
@@ -22,6 +16,12 @@ use fuigo_sampling_types::{
 use fuigo_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
 };
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+use std::path::PathBuf;
+use std::sync::Arc;
 /// Determines behavior like relay sync enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
@@ -926,9 +926,7 @@ impl PluginsConfig {
             }
         }
     }
-    pub(crate) fn to_discovery_config(
-        &self,
-    ) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
+    pub(crate) fn to_discovery_config(&self) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
         fuigo_agent::plugins::discovery::DiscoveryConfig {
             cli_plugin_dirs: self.cli_plugin_dirs.clone(),
             config_paths: self.paths.iter().map(std::path::PathBuf::from).collect(),
@@ -1752,8 +1750,7 @@ impl Default for Config {
             subagents_limit_behavior: Default::default(),
             workflow_max_concurrent_agents:
                 crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
-            media_gen_batch_limits: fuigo_tools::media_gen_limits::MediaGenBatchLimits::default(
-            ),
+            media_gen_batch_limits: fuigo_tools::media_gen_limits::MediaGenBatchLimits::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
@@ -2137,8 +2134,12 @@ impl Config {
     /// that installs origins: `fuigo-shell-base/tests/trust_fails_closed.rs`,
     /// which runs in its own process and installs nothing.
     ///
-    /// Idempotent: the store is a `OnceLock` and every caller passes the same
-    /// value, so ordering does not matter.
+    /// Ordering-independent ONLY because this is the single install point for
+    /// the whole test binary. The store is a process-wide `OnceLock`, so a
+    /// second call site passing a different set would make results depend on
+    /// the test schedule rather than on the code. If you need different
+    /// origins for a test, that test needs its own process (see
+    /// `fuigo-shell-base/tests/trust_fails_closed.rs`), not a second install.
     #[cfg(test)]
     pub(crate) fn install_test_trusted_origins() {
         crate::util::set_trusted_api_origins([

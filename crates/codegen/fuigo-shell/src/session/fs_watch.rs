@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol as acp;
-use tokio::sync::mpsc;
-use tokio::time::sleep_until;
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use fuigo_fsnotify::{FsEvent, FsEventKind};
-use fuigo_workspace::file_system::{CodebaseIndexManager, FileIndex, WalkOptions};
 use fuigo_hunk_tracker::HunkTrackerHandle;
+use fuigo_workspace::file_system::{CodebaseIndexManager, FileIndex, WalkOptions};
+use tokio::sync::mpsc;
+use tokio::time::sleep_until;
 
 use crate::session::acp_session::SessionActor;
 use crate::session::persistence::PersistenceMsg;
@@ -161,8 +161,12 @@ fn parse_diff_name_status_line(
     let path = parts.next()?;
 
     match status.chars().next()? {
-        'A' => Some(fuigo_codebase_graph::FileEvent::created(repo_root.join(path))),
-        'D' => Some(fuigo_codebase_graph::FileEvent::removed(repo_root.join(path))),
+        'A' => Some(fuigo_codebase_graph::FileEvent::created(
+            repo_root.join(path),
+        )),
+        'D' => Some(fuigo_codebase_graph::FileEvent::removed(
+            repo_root.join(path),
+        )),
         'R' | 'C' => {
             let new_path = parts.next()?;
             Some(fuigo_codebase_graph::FileEvent::renamed(
@@ -568,8 +572,7 @@ impl FsWatchPlan {
         });
 
         let hunk = (caps.hunk_tracking && deps.hunk_tracking_enabled).then(|| {
-            let git_root =
-                fuigo_workspace::session::git::find_git_root_from_path(&deps.cwd).ok();
+            let git_root = fuigo_workspace::session::git::find_git_root_from_path(&deps.cwd).ok();
             HunkTracking {
                 handle: deps.hunk_tracker,
                 cwd: deps.cwd.clone(),
@@ -976,8 +979,8 @@ pub(crate) fn spawn(plan: FsWatchPlan) -> FsWatchHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use fuigo_workspace::file_system::FileIndexDelta;
+    use std::path::PathBuf;
 
     #[test]
     fn fs_event_to_delta_create() {

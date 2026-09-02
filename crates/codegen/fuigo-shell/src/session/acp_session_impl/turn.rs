@@ -2,12 +2,12 @@
 use super::*;
 use crate::session::InputAuthority;
 use crate::util::dual_clock::DualClock;
-use tracing::Instrument;
 use fuigo_tools::implementations::fuigo_build::LoopFireMode;
 use fuigo_tools::implementations::fuigo_build::task::types::{
     SubagentEvent, SubagentMarkUsageNotAppliedRequest, SubagentWaitPromptDrainedRequest,
 };
 use fuigo_tools::types::tool::ToolKind;
+use tracing::Instrument;
 /// Synthetic tool the model calls to return its schema-constrained final answer on backends that can't constrain output natively (Messages API).
 /// The loop intercepts it; it never executes as a real tool.
 const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
@@ -1236,13 +1236,15 @@ impl SessionActor {
         let turn_tool_count = self.events.tool_count_this_turn();
         let bridge_outcome = turn_result_to_hook_outcome(&result);
         self.observability_bridge
-            .emit(fuigo_tool_protocol::session_event::SessionEvent::TurnEnded {
-                turn_number: current_prompt_index as u64,
-                outcome: bridge_outcome,
-                duration_ms: turn_duration_ms,
-                tool_call_count: turn_tool_count,
-                model_id: turn_model_id.clone(),
-            })
+            .emit(
+                fuigo_tool_protocol::session_event::SessionEvent::TurnEnded {
+                    turn_number: current_prompt_index as u64,
+                    outcome: bridge_outcome,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id.clone(),
+                },
+            )
             .await;
         match &result {
             Ok(TurnOutcome::Completed { stop, .. }) => {
@@ -1273,16 +1275,14 @@ impl SessionActor {
                     cancellation_context: None,
                 })
                 .await;
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::TurnCompleted {
-                        outcome: fuigo_telemetry::events::Outcome::Completed,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: None,
-                        error_category: None,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::TurnCompleted {
+                    outcome: fuigo_telemetry::events::Outcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: None,
+                    error_category: None,
+                });
             }
             Ok(TurnOutcome::StationarityEnded { .. }) => {
                 self.emit_turn_ended(
@@ -1303,18 +1303,16 @@ impl SessionActor {
                     cancellation_context: None,
                 })
                 .await;
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::TurnCompleted {
-                        outcome: fuigo_telemetry::events::Outcome::Completed,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: Some(
-                            crate::session::commands::ACTION_STATIONARITY_CATEGORY.to_string(),
-                        ),
-                        error_category: None,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::TurnCompleted {
+                    outcome: fuigo_telemetry::events::Outcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: Some(
+                        crate::session::commands::ACTION_STATIONARITY_CATEGORY.to_string(),
+                    ),
+                    error_category: None,
+                });
             }
             Ok(TurnOutcome::Cancelled { category, context }) => {
                 let context_json = context.as_ref().and_then(|c| serde_json::to_value(c).ok());
@@ -1340,17 +1338,15 @@ impl SessionActor {
                     cancellation_context: context_json,
                 })
                 .await;
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::TurnCompleted {
-                        outcome: fuigo_telemetry::events::Outcome::Cancelled,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: category
-                            .map(|c| crate::session::commands::meta_category_str(c).to_string()),
-                        error_category: None,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::TurnCompleted {
+                    outcome: fuigo_telemetry::events::Outcome::Cancelled,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: category
+                        .map(|c| crate::session::commands::meta_category_str(c).to_string()),
+                    error_category: None,
+                });
             }
             Ok(TurnOutcome::MaxTurnsReached { limit }) => {
                 tracing::info!(limit, "turn ended: max_turns reached");
@@ -1376,18 +1372,16 @@ impl SessionActor {
                     })),
                 })
                 .await;
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::TurnCompleted {
-                        outcome: fuigo_telemetry::events::Outcome::Cancelled,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: Some(
-                            crate::session::commands::MAX_TURNS_REACHED_CATEGORY.to_string(),
-                        ),
-                        error_category: None,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::TurnCompleted {
+                    outcome: fuigo_telemetry::events::Outcome::Cancelled,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: Some(
+                        crate::session::commands::MAX_TURNS_REACHED_CATEGORY.to_string(),
+                    ),
+                    error_category: None,
+                });
             }
             Err(err) => {
                 self.emit_turn_ended(crate::session::events::TurnOutcomeLabel::Error, None, None);
@@ -1411,16 +1405,14 @@ impl SessionActor {
                         duration_ms: Some(turn_duration_ms),
                     },
                 );
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::TurnCompleted {
-                        outcome: fuigo_telemetry::events::Outcome::Error,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: None,
-                        error_category: Some(error_category),
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::TurnCompleted {
+                    outcome: fuigo_telemetry::events::Outcome::Error,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: None,
+                    error_category: Some(error_category),
+                });
                 self.report_turn_end(
                     prompt_id,
                     TurnEnd::Failed {
@@ -3042,8 +3034,7 @@ impl SessionActor {
             let fallback_text = response.fallback_text();
             let stop_reason = response.stop_reason;
             let response_is_empty = response.is_empty();
-            let turn_refused =
-                stop_reason == Some(fuigo_sampling_types::StopReason::ContentFilter);
+            let turn_refused = stop_reason == Some(fuigo_sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
             match length_salvage_streak.on_sample(
@@ -3348,11 +3339,9 @@ impl SessionActor {
                 is_true_noop,
             );
             if is_true_noop {
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::ShellTrueNoop {
-                        tool_name: step_tool_name.clone(),
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::ShellTrueNoop {
+                    tool_name: step_tool_name.clone(),
+                });
             }
             let tool_call_responses: Vec<ToolCallResponse> = tool_calls
                 .into_iter()
@@ -3859,15 +3848,15 @@ mod structured_output_validation_tests {
 #[cfg(test)]
 mod last_sample_span_tests {
     use super::{TurnSpanTotals, record_failed_sample_on_turn_span};
+    use fuigo_sampling_types::conversation::{
+        ConversationItem, ConversationResponse, StopReason, TokenUsage, ToolCall,
+    };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
     use tracing_subscriber::util::SubscriberInitExt;
-    use fuigo_sampling_types::conversation::{
-        ConversationItem, ConversationResponse, StopReason, TokenUsage, ToolCall,
-    };
     /// Last-write value per field, the view the OTel bridge exports.
     #[derive(Default)]
     struct Fields {

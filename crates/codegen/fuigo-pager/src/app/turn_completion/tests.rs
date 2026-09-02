@@ -734,9 +734,7 @@ fn saving_unrelated_row_keeps_hold_and_reopens_card() {
 #[test]
 fn deferred_card_reopens_when_other_question_closes() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
 
     let mut agent = running_viewer("p1");
     stash_in_flight(&mut agent);
@@ -798,9 +796,7 @@ fn deferred_card_reopens_when_other_question_closes() {
 #[test]
 fn deferred_card_reopens_when_feedback_report_closes() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
 
     let mut agent = running_viewer("p1");
     stash_in_flight(&mut agent);

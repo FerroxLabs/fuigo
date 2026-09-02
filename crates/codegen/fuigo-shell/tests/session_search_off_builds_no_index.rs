@@ -2,9 +2,7 @@
 
 use agent_client_protocol as acp;
 use fuigo_shell::session::info::Info;
-use fuigo_shell::session::storage::search::{
-    IndexDecision, SessionSearchRequest, execute_search,
-};
+use fuigo_shell::session::storage::search::{IndexDecision, SessionSearchRequest, execute_search};
 use fuigo_shell::session::storage::{JsonlStorageAdapter, StorageAdapter};
 use fuigo_test_support::EnvGuard;
 

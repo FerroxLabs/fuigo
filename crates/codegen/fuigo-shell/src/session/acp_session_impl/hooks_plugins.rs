@@ -678,13 +678,12 @@ impl SessionActor {
         if let Some(ref pr) = plugin_registry_snapshot {
             for plugin in pr.active_plugins() {
                 if let Some(ref hooks_path) = plugin.hooks_path {
-                    let (specs, warnings) =
-                        fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
-                            hooks_path,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
+                    let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
+                        hooks_path,
+                        &plugin.name,
+                        &plugin.root_str(),
+                        &plugin.data_dir_str(),
+                    );
                     for w in &warnings {
                         tracing::warn!("{w}");
                     }
@@ -855,13 +854,12 @@ impl SessionActor {
             for plugin in new_registry.active_plugins() {
                 // File-based hooks
                 if let Some(ref hooks_path) = plugin.hooks_path {
-                    let (specs, warnings) =
-                        fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
-                            hooks_path,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
+                    let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
+                        hooks_path,
+                        &plugin.name,
+                        &plugin.root_str(),
+                        &plugin.data_dir_str(),
+                    );
                     for w in &warnings {
                         tracing::warn!("{w}");
                     }

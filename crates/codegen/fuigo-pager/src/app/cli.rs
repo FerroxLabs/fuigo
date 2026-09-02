@@ -1006,10 +1006,7 @@ impl PagerArgs {
         }
         match self.resume_target() {
             ResumeTarget::SessionId(id) => {
-                fuigo_shell::session::persistence::resumed_session_sandbox_profile(
-                    Some(&id),
-                    cwd,
-                )
+                fuigo_shell::session::persistence::resumed_session_sandbox_profile(Some(&id), cwd)
             }
             ResumeTarget::MostRecentForCwd => {
                 fuigo_shell::session::persistence::resolve_recent_session_sandbox_profile(
@@ -1138,7 +1135,9 @@ mod tests {
     #[test]
     fn resume_target_classifies_flags() {
         assert_eq!(
-            PagerArgs::try_parse_from(["fuigo"]).unwrap().resume_target(),
+            PagerArgs::try_parse_from(["fuigo"])
+                .unwrap()
+                .resume_target(),
             ResumeTarget::None
         );
         assert_eq!(
@@ -1353,7 +1352,8 @@ mod tests {
                 },
             }))
         ));
-        let kill = PagerArgs::try_parse_from(["fuigo", "leader", "kill"]).expect("fuigo leader kill");
+        let kill =
+            PagerArgs::try_parse_from(["fuigo", "leader", "kill"]).expect("fuigo leader kill");
         assert!(matches!(
             kill.command,
             Some(Command::Leader(LeaderMgmtArgs {
@@ -1398,7 +1398,8 @@ mod tests {
     }
     #[test]
     fn initial_prompt_trims_and_ignores_whitespace_only() {
-        let args = PagerArgs::try_parse_from(["fuigo", "  spaced  "]).expect("padded prompt parses");
+        let args =
+            PagerArgs::try_parse_from(["fuigo", "  spaced  "]).expect("padded prompt parses");
         assert_eq!(args.initial_prompt(), Some("spaced"));
         let blank = PagerArgs::try_parse_from(["fuigo", "   "]).expect("blank prompt parses");
         assert_eq!(blank.initial_prompt(), None);
@@ -1465,16 +1466,16 @@ mod tests {
         let long = PagerArgs::try_parse_from(["fuigo", "--reasoning-effort", "high"])
             .expect("--reasoning-effort parses");
         assert_eq!(long.reasoning_effort.as_deref(), Some("high"));
-        let alias =
-            PagerArgs::try_parse_from(["fuigo", "--effort", "high"]).expect("--effort alias parses");
+        let alias = PagerArgs::try_parse_from(["fuigo", "--effort", "high"])
+            .expect("--effort alias parses");
         assert_eq!(alias.reasoning_effort.as_deref(), Some("high"));
     }
     #[test]
     fn reasoning_effort_accepts_max_and_remapped_ids() {
         let max = PagerArgs::try_parse_from(["fuigo", "--effort", "max"]).expect("max parses");
         assert_eq!(max.reasoning_effort.as_deref(), Some("max"));
-        let deep =
-            PagerArgs::try_parse_from(["fuigo", "--reasoning-effort", "deep"]).expect("deep parses");
+        let deep = PagerArgs::try_parse_from(["fuigo", "--reasoning-effort", "deep"])
+            .expect("deep parses");
         assert_eq!(deep.reasoning_effort.as_deref(), Some("deep"));
     }
     #[test]

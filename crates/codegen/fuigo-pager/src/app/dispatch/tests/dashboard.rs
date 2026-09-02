@@ -4478,9 +4478,9 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use fuigo_telemetry::events::AnnouncementCtaSurface;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use fuigo_telemetry::events::AnnouncementCtaSurface;
     let registry = ActionRegistry::defaults();
     let mut agents: indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView> =
         indexmap::IndexMap::new();

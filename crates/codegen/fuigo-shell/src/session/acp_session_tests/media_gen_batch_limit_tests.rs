@@ -190,8 +190,7 @@ async fn over_cap_report_classifies_modest_vs_egregious() {
                 "max+1 is modest first-K, not a 2x resample"
             );
 
-            let spam: Vec<fuigo_sampling_types::ToolCall> = (0..DEFAULT_MAX_PARALLEL_IMAGE_GEN
-                * 2)
+            let spam: Vec<fuigo_sampling_types::ToolCall> = (0..DEFAULT_MAX_PARALLEL_IMAGE_GEN * 2)
                 .map(|i| fuigo_sampling_types::ToolCall {
                     id: format!("spam_{i}").into(),
                     name: "image_gen".into(),

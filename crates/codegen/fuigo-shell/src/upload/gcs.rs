@@ -19,11 +19,11 @@ use crate::auth::AuthManager;
 use crate::auth::credential_provider::{
     ShellAuthCredentialProvider, StorageClientAttributionBridge,
 };
-use std::sync::Arc;
+use fuigo_auth::AuthCredentialProvider;
 use fuigo_file_utils::gcs::StorageConfig;
 use fuigo_file_utils::storage_client::Auth401AttributionCallback;
 use fuigo_file_utils::{TraceExportConfig, UploadMethod};
-use fuigo_auth::AuthCredentialProvider;
+use std::sync::Arc;
 /// See the module docs for why this exists.
 ///
 /// `auth_manager == None` is supported (for tests, direct-mode upload, and a few sites without an `AuthManager` in scope).

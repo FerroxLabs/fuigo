@@ -291,7 +291,10 @@ fn push_interactive_login(
         // With no provider configured the list is now empty, which the pager
         // already handles: it shows the welcome menu, where "Enter API key" is
         // the first row.
-        methods.push(fuigo_com_auth_method(login_label, has_auth_provider_command));
+        methods.push(fuigo_com_auth_method(
+            login_label,
+            has_auth_provider_command,
+        ));
     }
 }
 
@@ -456,9 +459,12 @@ pub(crate) fn fuigo_com_auth_method(
         None
     };
     acp::AuthMethod::Agent(
-        acp::AuthMethodAgent::new(acp::AuthMethodId::new(FUIGO_COM_METHOD_ID), name.to_string())
-            .description(Some(format!("Sign in with {name}")))
-            .meta(meta),
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(FUIGO_COM_METHOD_ID),
+            name.to_string(),
+        )
+        .description(Some(format!("Sign in with {name}")))
+        .meta(meta),
     )
 }
 
@@ -722,7 +728,10 @@ mod tests {
         };
         let built = build_auth_methods(inputs);
 
-        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::FuigoApiKey));
+        assert_eq!(
+            first_kind(&built.methods),
+            Some(AuthMethodKind::FuigoApiKey)
+        );
         assert!(
             built
                 .methods
@@ -860,7 +869,10 @@ mod tests {
             has_external_api_key,
             ..default_inputs()
         });
-        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::FuigoApiKey));
+        assert_eq!(
+            first_kind(&built.methods),
+            Some(AuthMethodKind::FuigoApiKey)
+        );
     }
 
     /// Admin kill switch (`disable_api_key_auth`): the predicate must return false even when credentials are available everywhere.

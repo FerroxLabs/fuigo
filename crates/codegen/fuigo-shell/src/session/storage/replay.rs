@@ -249,11 +249,16 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     fuigo_home: &std::path::Path,
     mut f: F,
 ) -> std::io::Result<ReplayEmission> {
-    stream_replay_updates_at_hinted(session_id, fuigo_home, ReplayPathHint::default(), |update| {
-        if let ReplayedUpdate::Acp(update, _) = update {
-            f(update);
-        }
-    })
+    stream_replay_updates_at_hinted(
+        session_id,
+        fuigo_home,
+        ReplayPathHint::default(),
+        |update| {
+            if let ReplayedUpdate::Acp(update, _) = update {
+                f(update);
+            }
+        },
+    )
 }
 
 /// Whether replaying `session_id`'s persisted transcript would emit at least one ACP update ([`ReplayEmission::Emitted`]), without applying anything.

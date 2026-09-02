@@ -170,6 +170,7 @@ pub(crate) fn test_app() -> AppView {
         consent_answered: None,
         login_label: None,
         detected_keys: Vec::new(),
+        detected_env_vars: Vec::new(),
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
         auth_code_input: LineEditor::default(),
@@ -5980,9 +5981,7 @@ fn install_question_overlay(
     n_questions: usize,
 ) {
     use crate::views::question_view::QuestionViewState;
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
     let questions: Vec<Question> = (0..n_questions)
         .map(|i| Question {
             question: format!("Q{i}?"),

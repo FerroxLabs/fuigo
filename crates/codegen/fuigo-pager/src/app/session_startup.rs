@@ -338,8 +338,7 @@ pub const LOCAL_WORKSPACE_HOME_DENIED: &str =
 pub const LOCAL_WORKSPACE_HITL_HINT: &str = "Permission prompts for local workspace tools apply to your machine. \
      Local workspace replaces the chat sandbox.";
 #[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_ACK_REQUIRED: &str =
-    "local-workspace requires interactive confirm, FUIGO_CHAT_LOCAL_WORKSPACE_ACK=1, or an ack file";
+pub const LOCAL_WORKSPACE_ACK_REQUIRED: &str = "local-workspace requires interactive confirm, FUIGO_CHAT_LOCAL_WORKSPACE_ACK=1, or an ack file";
 /// Declared advertised tool ids for attach FS-only check (comma-separated).
 #[cfg(feature = "local-workspace")]
 pub const FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV: &str =
@@ -2440,8 +2439,7 @@ mod tests {
             FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
             "workspace.fs_list",
         );
-        let _allow =
-            fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
+        let _allow = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
         let home = tempfile::tempdir().unwrap();
         let home_str = home.path().to_str().unwrap();
         let _home = fuigo_test_support::EnvGuard::set("HOME", home_str);
@@ -2495,8 +2493,7 @@ mod tests {
     fn local_workspace_non_tty_requires_ack() {
         let _ack = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV);
         let home = tempfile::tempdir().unwrap();
-        let _home =
-            fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
+        let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
         let cfg = LocalWorkspaceConfig {
             mode: LocalWorkspaceMode::Attach,
             cwd: Some(std::path::PathBuf::from("/tmp/repo")),
@@ -2512,8 +2509,7 @@ mod tests {
     #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
     #[test]
     fn validate_local_workspace_cwd_denies_root() {
-        let _allow =
-            fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
+        let _allow = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
         let err = validate_local_workspace_cwd(std::path::Path::new("/")).unwrap_err();
         assert!(err.to_string().contains("ALLOW_HOME"), "{err}");
     }

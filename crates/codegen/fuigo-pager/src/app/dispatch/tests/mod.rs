@@ -164,6 +164,7 @@ fn test_app() -> AppView {
         consent_answered: None,
         login_label: None,
         detected_keys: Vec::new(),
+        detected_env_vars: Vec::new(),
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
         auth_code_input: Default::default(),
@@ -960,8 +961,7 @@ fn enqueue_permission_with_enable_always_approve(
     });
     response_rx
 }
-const POLICY_WARNING: &str =
-    fuigo_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
+const POLICY_WARNING: &str = fuigo_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
 fn agent_toast(app: &AppView) -> Option<String> {
     app.agents[&AgentId(0)]
         .toast

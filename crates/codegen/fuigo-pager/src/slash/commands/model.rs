@@ -175,8 +175,8 @@ fn build_effort_items(models: &ModelState, model_id: &acp::ModelId) -> Vec<ArgIt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use fuigo_shell::sampling::types::ReasoningEffort;
+    use std::sync::Arc;
 
     fn model_with_reasoning(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));

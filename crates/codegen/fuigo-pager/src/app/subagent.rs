@@ -19,11 +19,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::Deserialize;
 use fuigo_shell::session::storage::{
     ReplayEmission, ReplayLookupFallback, ReplayPathHint, ReplayedUpdate, replay_would_emit,
     stream_replay_updates_at_hinted,
 };
+use serde::Deserialize;
 
 /// Enriched subagent tracking info, keyed by `child_session_id` in `AgentView::subagent_sessions`.
 #[derive(Debug, Clone)]

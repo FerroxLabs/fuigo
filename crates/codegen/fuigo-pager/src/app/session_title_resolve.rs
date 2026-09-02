@@ -125,13 +125,10 @@ pub(crate) fn presandbox_resume_target(
     if fuigo_shell::session::resolve_local_session_any_cwd(arg).is_some() {
         return Ok(PinnedResumeTarget::Id(arg.to_string()));
     }
-    let summaries =
-        fuigo_shell::session::persistence::local_summaries_for_cwd_sync(cwd, selection)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to list local sessions while resolving --resume {arg:?}: {e}"
-                )
-            })?;
+    let summaries = fuigo_shell::session::persistence::local_summaries_for_cwd_sync(cwd, selection)
+        .map_err(|e| {
+            anyhow::anyhow!("failed to list local sessions while resolving --resume {arg:?}: {e}")
+        })?;
     Ok(select_by_title(arg, &summaries)?
         .map(|s| PinnedResumeTarget::Title {
             id: s.info.id.to_string(),

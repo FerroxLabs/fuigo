@@ -4384,9 +4384,7 @@ async fn manual_auth_emits_only_for_user_facing_source() {
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::ServerRejectedNoRecovery));
-    use fuigo_telemetry::events::{
-        AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface,
-    };
+    use fuigo_telemetry::events::{AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface};
     assert_eq!(
         turn.manual_auth_last_emit(),
         Some(ManualAuth {

@@ -1,10 +1,10 @@
 //! `fuigo/plugins/*` extension handlers, backing the pager's hooks/plugins modal.
 
 use agent_client_protocol as acp;
-use serde::Deserialize;
 use fuigo_hooks_plugins_types::{
     HookStatus, McpStatus, PluginInfo, PluginOrigin, PluginScope, PluginsListResponse,
 };
+use serde::Deserialize;
 
 use crate::agent::MvpAgent;
 
@@ -237,7 +237,10 @@ mod tests {
                 git_url: Some("https://example.com/mp.git".to_string()),
             })
         );
-        assert_eq!(info.marketplace_source.as_deref(), Some("Ferrox Labs Official"));
+        assert_eq!(
+            info.marketplace_source.as_deref(),
+            Some("Ferrox Labs Official")
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::session::repo_changes::TraceExportConfig;
+use fuigo_workspace::permission::PermissionEvent;
 use futures::FutureExt as _;
 use tokio::sync::oneshot;
-use fuigo_workspace::permission::PermissionEvent;
 /// Request to upload a trace for a synthetic auto-wake turn.
 ///
 /// The notification bridge sends it for bash task completions; the subagent coordinator sends it for subagent completions.

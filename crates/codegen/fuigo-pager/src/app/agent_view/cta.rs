@@ -540,12 +540,10 @@ impl AgentView {
             } => (plugin_relative_path.clone(), name.clone(), true),
             _ => return,
         };
-        fuigo_telemetry::session_ctx::log_event(
-            fuigo_telemetry::events::PluginCtaConnectClicked {
-                plugin_name: name.clone(),
-                is_retry,
-            },
-        );
+        fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::PluginCtaConnectClicked {
+            plugin_name: name.clone(),
+            is_retry,
+        });
         let Some(session_id) = self.session.session_id.clone() else {
             return;
         };

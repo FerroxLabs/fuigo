@@ -6,13 +6,13 @@
 
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use fuigo_session_events::EventWriter;
 use fuigo_tools::implementations::fuigo_build::task::backend::{ChannelBackend, SubagentBackend};
 use fuigo_tools::implementations::fuigo_build::task::types::{
     SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
 };
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // Shared per-role model override and spawn-and-retry-once fail-open wrapper
 
@@ -503,8 +503,8 @@ fn record_fail_closed(
 mod tests {
     use super::*;
     use crate::session::goal_role_tools::tests::{assert_no_tool_placeholders, summary_with};
-    use std::sync::{Arc, Mutex};
     use fuigo_tools::types::tool::ToolKind;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn planner_template_default_render_has_no_placeholders() {
@@ -1368,10 +1368,10 @@ mod tests {
 
     #[tokio::test]
     async fn planner_cancellation_pauses_as_aborted_without_retry() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use fuigo_tools::implementations::fuigo_build::task::types::{
             SubagentEvent, SubagentResult,
         };
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let plan_file = tmp_plan_file("cancel-aborted");
         let spawns = Arc::new(AtomicUsize::new(0));
         let spawns_coord = spawns.clone();

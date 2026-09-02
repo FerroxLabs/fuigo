@@ -83,18 +83,16 @@ impl SessionActor {
             )
         });
         let effects = bridge.apply_pending_skill_update().await;
-        let skill_text = effects
-            .as_ref()
-            .and_then(|update| {
-                if is_cursor
-                    && update.kind
-                        == fuigo_tools::types::skill_discovery_tracker::SkillUpdateKind::BaselineChange
-                {
-                    None
-                } else {
-                    update.system_reminder.as_deref()
-                }
-            });
+        let skill_text = effects.as_ref().and_then(|update| {
+            if is_cursor
+                && update.kind
+                    == fuigo_tools::types::skill_discovery_tracker::SkillUpdateKind::BaselineChange
+            {
+                None
+            } else {
+                update.system_reminder.as_deref()
+            }
+        });
         if let Some(body) = crate::session::workflow::listing::merge_listing_sections(
             skill_text,
             self.workflow_listing_for_prompt().as_deref(),
@@ -618,7 +616,8 @@ impl SessionActor {
             .filter(|td| !backend_search_active || td.function.name != "web_search")
             .collect();
         let tool_definitions_count = tool_defs.len();
-        let tool_definitions_tokens = fuigo_chat_state::estimate_tool_definitions_tokens(&tool_defs);
+        let tool_definitions_tokens =
+            fuigo_chat_state::estimate_tool_definitions_tokens(&tool_defs);
         let message_count = self.chat_state_handle.get_conversation_len().await;
         let message_tokens = self.chat_state_handle.get_estimated_messages_tokens().await;
         let usage_categories = self.usage_categories().await;

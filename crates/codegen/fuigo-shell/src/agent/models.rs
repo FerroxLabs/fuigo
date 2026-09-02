@@ -13,8 +13,8 @@ use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_confi
 use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig};
 use crate::remote::{FetchModelsResult, ModelSource, active_model_source};
 use crate::sampling::SamplerConfig as SamplingConfig;
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use fuigo_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 // ── Auth method for model fetching ──────────────────────────────────────────
 

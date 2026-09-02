@@ -401,7 +401,10 @@ fn upsell_non_max_upgrade_url_is_flux_billing() {
         .as_deref()
         .unwrap();
     assert!(url.contains("fluxrouter.ai"), "got: {url}");
-    assert!(!url.contains("grok.com"), "must not send users to grok.com: {url}");
+    assert!(
+        !url.contains("grok.com"),
+        "must not send users to grok.com: {url}"
+    );
 }
 
 #[test]

@@ -1735,9 +1735,7 @@ fn render_with_filter_active_and_small_viewport_clamps_scroll() {
         height: 12,
     };
     let mut buf = Buffer::empty(area);
-    fuigo_pager::views::settings_modal::render_settings_modal(
-        &mut buf, area, &mut s, false, None,
-    );
+    fuigo_pager::views::settings_modal::render_settings_modal(&mut buf, area, &mut s, false, None);
     let visible = s.filtered_indices().len();
     assert!(
         s.scroll_offset <= visible.saturating_sub(1).max(0),
@@ -1766,9 +1764,7 @@ fn render_no_matches_placeholder_includes_query() {
         height: 30,
     };
     let mut buf = Buffer::empty(area);
-    fuigo_pager::views::settings_modal::render_settings_modal(
-        &mut buf, area, &mut s, false, None,
-    );
+    fuigo_pager::views::settings_modal::render_settings_modal(&mut buf, area, &mut s, false, None);
     // Scan all cells for the substring "No matches" and "xyzzy".
     let mut all_text = String::new();
     for y in 0..area.height {
@@ -2001,9 +1997,7 @@ fn defaults_round_trip_through_registry() {
     fuigo_pager::appearance::cache::set_follow_up_behavior(
         fuigo_pager::appearance::FollowUpBehavior::Queue,
     );
-    fuigo_pager::appearance::cache::set_scroll_mode(
-        fuigo_pager::appearance::ScrollMode::Auto,
-    );
+    fuigo_pager::appearance::cache::set_scroll_mode(fuigo_pager::appearance::ScrollMode::Auto);
     fuigo_pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
     fuigo_pager::appearance::cache::set_scroll_lines(3);
@@ -3640,9 +3634,9 @@ fn pr11_permission_mode_kind_is_always_approve_projection() {
 /// (The description column already had the dimmest fg before the overlay's blend was applied.)
 #[test]
 fn reset_overlay_dims_all_rows_except_target() {
+    use fuigo_pager::views::settings_modal::ResetConfirmOverlay;
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
-    use fuigo_pager::views::settings_modal::ResetConfirmOverlay;
     // Set up a state with at least 3 rows visible AND navigate to a specific target (NOT the initially-selected row)
     // That lets us assert dim-vs-full-intensity for both target and non-target rows
     let mut s = make_state();
@@ -4076,8 +4070,8 @@ fn vim_l_h_keys_toggle_expansion() {
 /// The confirmation overlay renders the prompt text inline at the top of the content area (the dialog used to be invisible).
 #[test]
 fn reset_confirm_overlay_renders_prompt_with_setting_label_and_default() {
-    use ratatui::buffer::Buffer;
     use fuigo_pager::views::settings_modal::ResetConfirmOverlay;
+    use ratatui::buffer::Buffer;
     let mut s = make_state();
     let area = Rect {
         x: 0,

@@ -4,14 +4,14 @@
 //! Users review each discovered item, toggle which to import, and confirm. Only checked items are written to `.fuigo/config.toml`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use fuigo_shell::claude_import::{ImportPlan, ImportableItem, PathKind, find_project_root};
+use fuigo_workspace::permission::types::RuleAction;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use std::path::PathBuf;
-use fuigo_shell::claude_import::{ImportPlan, ImportableItem, PathKind, find_project_root};
-use fuigo_workspace::permission::types::RuleAction;
 
 use crate::theme::Theme;
 use crate::views::modal_window::{

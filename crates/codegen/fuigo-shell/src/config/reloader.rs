@@ -815,10 +815,7 @@ mod tests {
     fn parse_skills_config_empty() {
         let config = toml::Value::Table(toml::map::Map::new());
         let skills = parse_skills_config(&config);
-        assert_eq!(
-            skills,
-            fuigo_agent::prompt::skills::SkillsConfig::default()
-        );
+        assert_eq!(skills, fuigo_agent::prompt::skills::SkillsConfig::default());
     }
 
     #[test]

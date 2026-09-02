@@ -7,10 +7,10 @@ pub(crate) mod config_model_override_parse;
 mod ext_parsers;
 pub mod feedback_client;
 pub mod folder_trust;
-/// Provider credentials already present in the environment, for first run.
-pub mod key_discovery;
 pub(crate) mod handlers;
 pub mod init;
+/// Provider credentials already present in the environment, for first run.
+pub mod key_discovery;
 pub mod model_providers;
 pub mod models;
 pub mod mvp_agent;

@@ -84,8 +84,8 @@ fn make_test_config_full_raw() -> (
         session_cmd_tx,
         task_completion_reservations:
             fuigo_tools::reminders::task_completion::TaskCompletionReservations::default(),
-        task_wake_suppressed:
-            fuigo_tools::reminders::task_completion::TaskWakeSuppressed::default(),
+        task_wake_suppressed: fuigo_tools::reminders::task_completion::TaskWakeSuppressed::default(
+        ),
         synthetic_trace_tx: Arc::new(std::sync::Mutex::new(None)),
         task_output_tool_name: Arc::new(std::sync::OnceLock::new()),
         read_tool_name: Arc::new(std::sync::OnceLock::new()),
@@ -362,7 +362,8 @@ async fn task_completed_notification_stamps_will_wake() {
     ));
     let mut persisted = false;
     while let Ok(message) = persistence_rx.try_recv() {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(update)) = message
+        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(update)) =
+            message
             && matches!(
                 &update.update,
                 crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
@@ -407,7 +408,8 @@ async fn stalled_admission_is_bounded_and_task_completion_still_emits() {
     );
     let mut persisted_completion = false;
     while let Ok(message) = persistence_rx.try_recv() {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(update)) = message
+        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(update)) =
+            message
             && matches!(
                 &update.update,
                 crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
@@ -642,7 +644,8 @@ async fn declined_quiet_monitor_wake_queues_canonical_deferred_completion() {
     assert!(cmd_rx.try_recv().is_err());
     let mut persisted_completion = false;
     while let Ok(message) = persistence_rx.try_recv() {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(update)) = message
+        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(update)) =
+            message
             && matches!(
                 &update.update,
                 crate::extensions::notification::SessionUpdate::TaskCompleted { .. }

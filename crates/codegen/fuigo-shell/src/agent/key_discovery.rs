@@ -370,7 +370,12 @@ mod real {
     #[ignore = "reads the developer's real environment"]
     fn report_what_is_actually_present() {
         for d in super::discover() {
-            println!("  {:<14} {:<20} {}", d.provider.label, d.env_var, d.masked());
+            println!(
+                "  {:<14} {:<20} {}",
+                d.provider.label,
+                d.env_var,
+                d.masked()
+            );
         }
     }
 }

@@ -260,12 +260,25 @@ impl FuigoComConfig {
             // fallback; removing that turned the invariant into a panic on a
             // fresh install.
             //
-            // Returning a distinct sentinel keeps the 18 call sites working
-            // and is safe by construction: a real scope is `issuer::client_id`
-            // and no issuer is spelled `unconfigured`, so a lookup under this
-            // key cannot collide with a stored credential and simply misses.
-            // Nothing stores under it either -- `run_cli_login` refuses before
-            // it gets that far when no issuer is configured.
+            // A distinct sentinel keeps the 18 call sites working and cannot
+            // collide with a real `issuer::client_id` scope, since no issuer is
+            // spelled `unconfigured`.
+            //
+            // It IS used as a storage key, not only a lookup key. `AuthManager`
+            // derives `self.scope` from this (`manager.rs:298`) and inserts
+            // under it (`manager.rs:872,930,1150`). Two paths reach that with
+            // no provider configured, both of which persist BEFORE the "no
+            // OAuth2 issuer" bail in `flow.rs`: `auth_provider_command`
+            // (`flow.rs:550,722`) and the devbox mint (`flow.rs:564,731`).
+            //
+            // That is self-consistent -- the same key is used to read and to
+            // write -- so nothing breaks today. The consequence to know about:
+            // a user who later configures an issuer leaves that credential,
+            // refresh token included, orphaned under this scope in auth.json.
+            // `prune_stale_inherited_scopes` only prunes LEGACY_SCOPE entries.
+            //
+            // The API-key path is unaffected: `store_api_key` uses the fixed
+            // `API_KEY_SCOPE` (`auth/storage.rs:364`), not this.
             UNCONFIGURED_AUTH_SCOPE.to_owned()
         }
     }
@@ -274,13 +287,48 @@ impl FuigoComConfig {
 /// real `issuer::client_id` scope. See [`FuigoComConfig::auth_scope`].
 pub const UNCONFIGURED_AUTH_SCOPE: &str = "unconfigured::no-oauth-provider";
 
+/// The local-dev accounts-app provider, when `FUIGO_LOCAL_AUTH=1`.
+///
+/// Removing the compiled-in vendor default also removed the only way this
+/// variable did anything: `from_env` never consulted it, so local-dev login
+/// silently began requiring `FUIGO_OAUTH2_ISSUER` + `FUIGO_OAUTH2_CLIENT_ID`
+/// as well. It is a developer convenience pointing at localhost, so it is safe
+/// to keep as a fallback -- it names no vendor.
+fn local_dev_oauth2() -> Option<OAuth2ProviderConfig> {
+    if !use_local_auth() {
+        return None;
+    }
+    Some(OAuth2ProviderConfig {
+        issuer: FUIGO_OAUTH2_LOCAL_ISSUER.to_owned(),
+        client_id: std::env::var("FUIGO_OAUTH2_CLIENT_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "fuigo-local-dev".to_owned()),
+        scopes: default_oauth2_scopes(),
+        principal_type: None,
+        principal_id: None,
+        referrer: None,
+    })
+}
+
 impl OAuth2ProviderConfig {
     pub fn is_team_principal(&self) -> bool {
         self.principal_type.as_deref() == Some(TEAM_PRINCIPAL_TYPE)
     }
     pub fn from_env() -> Option<Self> {
-        let issuer = std::env::var("FUIGO_OAUTH2_ISSUER").ok()?;
-        let client_id = std::env::var("FUIGO_OAUTH2_CLIENT_ID").ok()?;
+        // `std::env::var` returns Ok("") for a set-but-empty variable, so a
+        // bare `.ok()?` accepted `FUIGO_OAUTH2_ISSUER=` and built a provider
+        // with an empty issuer. That skipped the explicit "nothing to log in
+        // to" error and died later inside OIDC discovery on a relative URL --
+        // exactly the confusing failure that error exists to replace.
+        let non_empty = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+        };
+        let issuer = non_empty("FUIGO_OAUTH2_ISSUER")?;
+        let client_id = non_empty("FUIGO_OAUTH2_CLIENT_ID")?;
         let principal_type = std::env::var("FUIGO_OAUTH2_PRINCIPAL_TYPE").ok();
         let principal_id = std::env::var("FUIGO_OAUTH2_PRINCIPAL_ID").ok();
         let default_scopes = match principal_type.as_deref() {
@@ -331,7 +379,7 @@ impl Default for FuigoComConfig {
         let oauth2 = if oidc.is_some() {
             None
         } else {
-            OAuth2ProviderConfig::from_env()
+            OAuth2ProviderConfig::from_env().or_else(local_dev_oauth2)
         };
         Self {
             fuigo_ws_origin: std::env::var("FUIGO_WS_ORIGIN")

@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
+use fuigo_hunk_tracker::{
+    FileContentEntry, FileContentStatus, FileContentView, Hunk, HunkTrackerHandle,
+};
 use fuigo_workspace::workspace_ops::{
     FileContentEntryWire, FileContentStatusWire, FileContentViewWire, HunkActionKind,
     HunkActionReq, HunkAllActionReq, HunkFileActionReq, HunkGetAllFileContentsReq,
     HunkGetSessionSummaryReq, HunkSingleActionReq, HunkTurnActionReq,
-};
-use fuigo_hunk_tracker::{
-    FileContentEntry, FileContentStatus, FileContentView, Hunk, HunkTrackerHandle,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -538,12 +538,12 @@ pub async fn handle(
 mod tests {
     use super::{GetAllFileContentsResponse, GetHunksResponse, compute_file_summaries};
     use chrono::Utc;
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-    use std::sync::Arc;
     use fuigo_hunk_tracker::{
         FileContentStatus, FileContentView, Hunk, HunkId, HunkLineInfo, HunkSource,
     };
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn make_hunk(
         id: &str,

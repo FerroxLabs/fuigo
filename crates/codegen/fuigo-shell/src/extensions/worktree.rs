@@ -407,10 +407,7 @@ pub async fn handle(
         }
         "fuigo/git/worktree/db/stats" => {
             let result = ops
-                .dispatch(
-                    &fuigo_workspace::workspace_ops::WorktreeDbStatsReq {},
-                    None,
-                )
+                .dispatch(&fuigo_workspace::workspace_ops::WorktreeDbStatsReq {}, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_response(Ok(result))
@@ -427,10 +424,7 @@ pub async fn handle(
         }
         "fuigo/git/worktree/db/path" => {
             let result = ops
-                .dispatch(
-                    &fuigo_workspace::workspace_ops::WorktreeDbPathReq {},
-                    None,
-                )
+                .dispatch(&fuigo_workspace::workspace_ops::WorktreeDbPathReq {}, None)
                 .await
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_response(Ok(result))

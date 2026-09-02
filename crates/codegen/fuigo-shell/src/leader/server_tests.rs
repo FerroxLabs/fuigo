@@ -1996,7 +1996,8 @@ fn inject_yolo_notification_adds_client_identifier() {
         pv(r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#);
 
     assert!(inject_client_identity_into_yolo_notification(
-        &mut json, "fuigo-tui"
+        &mut json,
+        "fuigo-tui"
     ));
     assert_eq!(json["params"]["clientIdentifier"], "fuigo-tui");
     assert_eq!(json["params"]["yolo_mode"], true);
@@ -2008,7 +2009,8 @@ fn inject_yolo_notification_skips_non_yolo_methods() {
     let before = json.clone();
 
     assert!(!inject_client_identity_into_yolo_notification(
-        &mut json, "fuigo-tui"
+        &mut json,
+        "fuigo-tui"
     ));
     assert_eq!(json, before);
 }

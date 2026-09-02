@@ -1042,7 +1042,10 @@ mod fuigo_event_id_stamping_tests {
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     ) -> String {
         loop {
-            match prx.try_recv().expect("an Ferrox Labs line must be persisted") {
+            match prx
+                .try_recv()
+                .expect("an Ferrox Labs line must be persisted")
+            {
                 PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(notif)) => {
                     return notif
                         .meta

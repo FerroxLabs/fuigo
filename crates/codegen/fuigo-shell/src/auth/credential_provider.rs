@@ -1,11 +1,11 @@
 use crate::auth::AuthManager;
 use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::util::fuigo_auth_credentials::FuigoAuthCredentials;
-use reqwest::RequestBuilder;
-use std::sync::Arc;
 use fuigo_auth::{
     AuthCredentialProvider, CredentialSnapshot, HttpAuth, StaticAuthCredentialProvider,
 };
+use reqwest::RequestBuilder;
+use std::sync::Arc;
 /// `api_key.id` for the active credential: hash the stable API key, never the OIDC bearer (which rotates).
 /// `None` for non-API-key auth.
 fn api_key_id_for(auth: Option<&crate::auth::FuigoAuth>) -> Option<String> {
@@ -217,7 +217,9 @@ impl StorageClientAttributionBridge {
         }
     }
 }
-impl fuigo_file_utils::storage_client::Auth401AttributionCallback for StorageClientAttributionBridge {
+impl fuigo_file_utils::storage_client::Auth401AttributionCallback
+    for StorageClientAttributionBridge
+{
     fn record_401(&self, operation: &str, sent_bearer_prefix: Option<&str>) {
         crate::auth::attribution::record_consumer_401(
             self.auth_manager.as_ref(),
@@ -282,7 +284,8 @@ impl std::fmt::Debug for OtelAuthCredentialProvider {
 }
 impl HttpAuth for OtelAuthCredentialProvider {
     fn apply(&self, builder: RequestBuilder, base_url: &str) -> RequestBuilder {
-        if self.deployment_key.load().is_none() && !ActiveAuthBackend::default().is_fuigo_authority()
+        if self.deployment_key.load().is_none()
+            && !ActiveAuthBackend::default().is_fuigo_authority()
         {
             return builder;
         }
@@ -328,7 +331,8 @@ impl OtelAuthCredentialProvider {
 #[async_trait::async_trait]
 impl AuthCredentialProvider for OtelAuthCredentialProvider {
     fn snapshot(&self) -> CredentialSnapshot {
-        if self.deployment_key.load().is_none() && !ActiveAuthBackend::default().is_fuigo_authority()
+        if self.deployment_key.load().is_none()
+            && !ActiveAuthBackend::default().is_fuigo_authority()
         {
             return CredentialSnapshot::default();
         }
@@ -428,8 +432,8 @@ mod tests {
     use crate::auth::FuigoComConfig;
     use crate::auth::manager::AuthManager;
     use chrono::{Duration as ChronoDuration, Utc};
-    use std::sync::Mutex;
     use fuigo_auth::AuthCredentialProvider;
+    use std::sync::Mutex;
     /// Serializes tests that pin `FUIGO_AUTH_EARLY_INVALIDATION_SECS`, since env vars are process-global and parallel tests would race.
     static EARLY_INVALIDATION_LOCK: Mutex<()> = Mutex::new(());
     /// RAII guard: pins `FUIGO_AUTH_EARLY_INVALIDATION_SECS` to the production default (300s) while held, restoring the previous value on drop.
@@ -638,9 +642,13 @@ mod tests {
         // compiled-in vendor, so derive the allowed URL from the live trust
         // set rather than naming a host. Reading it back keeps this
         // deterministic no matter which test populated the OnceLock first.
-        fuigo_shell_base::util::set_trusted_api_origins([
-            "https://api.fluxrouter.ai/v1".to_string()
-        ]);
+        // MUST use the shared helper. The store is a process-wide OnceLock,
+        // so installing a different set here would race the one in
+        // `config.rs` -- whichever test ran first would win, and several
+        // config tests that use `api.x.ai` as their first-party fixture would
+        // fail or pass depending on the schedule. A "matches baseline" result
+        // is only meaningful if it is schedule-independent.
+        crate::agent::config::Config::install_test_trusted_origins();
         let first_party = fuigo_shell_base::util::trusted_api_origins()
             .first()
             .expect("a trusted origin must be installed")

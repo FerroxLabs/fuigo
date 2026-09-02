@@ -1,8 +1,8 @@
 //! The deployment-config fetch/response contract: the credential source and its errors, response parsing, and envelope picking.
 //! Also holds fetched-envelope verification and the apply outcome the sync orchestration consumes.
 
-use serde::{Deserialize, Serialize};
 use fuigo_config::signed_policy::now_unix;
+use serde::{Deserialize, Serialize};
 
 /// Which credential a config fetch used; serde: recorded in the staged refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

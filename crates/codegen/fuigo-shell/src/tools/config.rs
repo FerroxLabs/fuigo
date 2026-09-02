@@ -1,8 +1,8 @@
 use crate::models;
-use serde::{Deserialize, Serialize};
 use fuigo_sampler::SamplerConfig;
 use fuigo_tools::implementations::fuigo_build;
 use fuigo_tools::registry::types::ToolConfig;
+use serde::{Deserialize, Serialize};
 
 /// The tool-server binary defaults to a 5-minute foreground ceiling (`DEFAULT_MAX_TIMEOUT_MS`).
 /// Production opts *up* to 10h by sending this explicitly, overridable via config.toml.

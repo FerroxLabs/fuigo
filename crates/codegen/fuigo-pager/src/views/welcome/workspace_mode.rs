@@ -818,8 +818,7 @@ mod apply_tests {
         let _ack = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV);
         // Isolate the ack file from the developer machine
         let home = tempfile::tempdir().unwrap();
-        let _home =
-            fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
+        let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
         set_active_local_workspace(None).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let out = prepare_welcome_workspace_for_new_session(

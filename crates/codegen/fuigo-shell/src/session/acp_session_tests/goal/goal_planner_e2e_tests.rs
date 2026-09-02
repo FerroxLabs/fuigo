@@ -3,11 +3,11 @@
 
 use super::support::*;
 use super::*;
+use fuigo_tools::implementations::fuigo_build::task::types::{SubagentEvent, SubagentResult};
 use serial_test::serial;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
 use tempfile::TempDir;
-use fuigo_tools::implementations::fuigo_build::task::types::{SubagentEvent, SubagentResult};
 
 /// Pull the planner's plan-file path from the prompt by its backtick-quoted `.md` token.
 /// Rewording the surrounding sentence therefore can't silently break the fake, which would otherwise write nothing and fail far from the cause.

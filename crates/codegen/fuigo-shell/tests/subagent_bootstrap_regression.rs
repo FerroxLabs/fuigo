@@ -9,9 +9,9 @@ mod acp_harness;
 mod perf_harness;
 #[path = "subagent_sweep_support/mod.rs"]
 mod support;
+use fuigo_shell::waterfall;
 use support::*;
 use tempfile::TempDir;
-use fuigo_shell::waterfall;
 
 #[test]
 #[ignore = "perf regression tier; drives real subagent bursts; run with --ignored --nocapture"]

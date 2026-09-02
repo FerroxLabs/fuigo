@@ -306,7 +306,9 @@ mod tests {
 
     #[test]
     fn optional_header_inserted_when_present_skipped_when_empty() {
-        let mut req = "wss://api.example.com/v1/stt".into_client_request().unwrap();
+        let mut req = "wss://api.example.com/v1/stt"
+            .into_client_request()
+            .unwrap();
         insert_optional_header(&mut req, "x-fuigo-client-identifier", "fuigo-shell");
         insert_optional_header(&mut req, "User-Agent", "");
         assert_eq!(
@@ -321,7 +323,9 @@ mod tests {
 
     #[test]
     fn optional_header_skips_invalid_value_without_panic() {
-        let mut req = "wss://api.example.com/v1/stt".into_client_request().unwrap();
+        let mut req = "wss://api.example.com/v1/stt"
+            .into_client_request()
+            .unwrap();
         // A control char is not a valid header value; it must be dropped silently, never panic or fail the (already-authorized) handshake
         insert_optional_header(&mut req, "User-Agent", "bad\nvalue");
         assert!(

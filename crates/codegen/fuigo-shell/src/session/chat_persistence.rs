@@ -1,8 +1,8 @@
 use std::io;
 
-use tokio::sync::{mpsc, oneshot};
 use fuigo_chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError};
 use fuigo_sampling_types::ConversationItem;
+use tokio::sync::{mpsc, oneshot};
 
 use super::persistence::PersistenceMsg;
 

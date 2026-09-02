@@ -72,9 +72,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             let (gateway_tx, _) = mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
             let cwd = fuigo_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
-            let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(
-                cwd.to_path_buf(),
-            ));
+            let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
             let terminal = Arc::new(DummyTerminal {});
             let (hunk_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let hunk_tracker_handle = fuigo_hunk_tracker::HunkTrackerActor::spawn(

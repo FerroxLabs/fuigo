@@ -27,12 +27,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol as acp;
-use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as TokioMutex;
-use tokio::sync::mpsc::UnboundedReceiver;
 use fuigo_mcp::servers::{
     McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name, mcp_transport_str,
 };
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::extensions::mcp::{MANAGED_GATEWAY_ENTRY_PREFIX, McpServerSource};
 
@@ -964,8 +964,8 @@ mod tests {
     /// A `TransportClosed` carrying the registered client's identity must remove it from `owned_clients`.
     #[tokio::test]
     async fn dispatcher_drops_dead_clients_on_transport_closed() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let mcp_state = StdArc::new(TokioMutex::new(McpState::new(vec![])));
         // Pre-populate with a stub client so we have something to remove.
@@ -1059,8 +1059,8 @@ mod tests {
     /// Closed ids accumulate across the window.
     #[tokio::test]
     async fn window_accumulates_all_closed_ids_and_evicts_current_client() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let old_client = StdArc::new(McpClient::stub("demo-mcp"));
         let current = StdArc::new(McpClient::stub("demo-mcp"));
@@ -1116,8 +1116,8 @@ mod tests {
     /// It must NOT evict the replacement registered under the same name, and must be reported stale.
     #[tokio::test]
     async fn stale_transport_closed_does_not_evict_replacement_client() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let old_client = StdArc::new(McpClient::stub("demo-mcp"));
         let old_id = old_client.client_id();
@@ -1400,8 +1400,8 @@ mod tests {
     /// The replacement stays registered, no status is pushed, and no restart is scheduled (even though the server is stdio-configured).
     #[tokio::test(start_paused = true, flavor = "current_thread")]
     async fn run_dispatcher_stale_transport_closed_is_fully_inert() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let old_client = StdArc::new(McpClient::stub("svr"));
         let replacement = StdArc::new(McpClient::stub("svr"));

@@ -119,11 +119,11 @@ async fn classifier_refresh_clears_stale_transcript() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            use std::sync::Mutex;
             use fuigo_workspace::permission::{
                 ClassifierContext, ClassifierOutcome, ClassifierTurn, ClassifierVerdict,
                 PermissionClassifier,
             };
+            use std::sync::Mutex;
 
             struct CapturingClassifier(Arc<Mutex<Vec<ClassifierContext>>>);
             impl PermissionClassifier for CapturingClassifier {

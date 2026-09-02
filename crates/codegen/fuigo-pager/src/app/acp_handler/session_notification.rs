@@ -1021,7 +1021,9 @@ pub(super) fn handle_session_notification_with_origin(
                 use crate::views::extensions_modal::TabDataState;
                 modal.seed_plugin_groups_once(&plugins);
                 modal.plugins_data =
-                    TabDataState::Loaded(fuigo_hooks_plugins_types::PluginsListResponse { plugins });
+                    TabDataState::Loaded(fuigo_hooks_plugins_types::PluginsListResponse {
+                        plugins,
+                    });
                 if !matches!(modal.skills_data, TabDataState::Loading) {
                     modal.skills_data = TabDataState::Loading;
                     plugins_changed_needs_skills_refetch = true;
@@ -1039,9 +1041,7 @@ pub(super) fn handle_session_notification_with_origin(
             match title_is_manual {
                 Some(true) => {
                     if let Some(clean) =
-                        fuigo_shell::session::persistence::sanitize_and_cap_title(
-                            &session_summary,
-                        )
+                        fuigo_shell::session::persistence::sanitize_and_cap_title(&session_summary)
                     {
                         agent.display_name = Some(clean.clone());
                         agent.generated_session_title = Some(clean);
@@ -1211,7 +1211,9 @@ pub(super) fn handle_session_notification_with_origin(
             });
             true
         }
-        update @ FuigoSessionUpdate::WorkflowUpdated { .. } => ingest_workflow_update(agent, update),
+        update @ FuigoSessionUpdate::WorkflowUpdated { .. } => {
+            ingest_workflow_update(agent, update)
+        }
         FuigoSessionUpdate::GoalUpdated {
             goal_id,
             objective,
@@ -1417,8 +1419,10 @@ pub(super) fn handle_child_session_notification(
             {
                 info.tokens_used = Some(tokens_after);
                 if let Some(cw) = info.context_window_tokens.filter(|&cw| cw > 0) {
-                    info.context_usage_pct =
-                        Some(fuigo_token_estimation::usage_percentage_u8(tokens_after, cw));
+                    info.context_usage_pct = Some(fuigo_token_estimation::usage_percentage_u8(
+                        tokens_after,
+                        cw,
+                    ));
                 }
             }
             changed
@@ -1630,17 +1634,15 @@ pub(super) fn apply_retry_state(
             session.set_retry_activity(None);
             session.rate_limited = *rate_limited;
             if *rate_limited {
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::RateLimitHit {
-                        model_id: session
-                            .models
-                            .current
-                            .as_ref()
-                            .map(|m| m.0.to_string())
-                            .unwrap_or_default(),
-                        attempts: *attempts,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::RateLimitHit {
+                    model_id: session
+                        .models
+                        .current
+                        .as_ref()
+                        .map(|m| m.0.to_string())
+                        .unwrap_or_default(),
+                    attempts: *attempts,
+                });
             }
             is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
             let is_free_usage = *rate_limited

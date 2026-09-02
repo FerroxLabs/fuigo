@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
-use serial_test::serial;
 use fuigo_test_support::EnvGuard;
+use serial_test::serial;
 
 use super::{OaiCompatClient, Summary, default_model_id, new_with_explicit_dir};
 use crate::session::info::Info;

@@ -1434,7 +1434,10 @@ fn render_welcome_authenticating(
                 ))
                 .alignment(Alignment::Center),
                 Line::from(vec![
-                    Span::styled("One key reaches every model  ", Style::default().fg(theme.gray)),
+                    Span::styled(
+                        "One key reaches every model  ",
+                        Style::default().fg(theme.gray),
+                    ),
                     Span::styled("fluxrouter.ai", Style::default().fg(theme.accent_user)),
                 ])
                 .alignment(Alignment::Center),
@@ -2965,7 +2968,10 @@ mod tests {
     #[test]
     fn detected_key_is_offered_as_a_numbered_row() {
         let text = render_pending_text(&[detected_row()]);
-        assert!(text.contains("Use FLUX_API_KEY from your environment"), "{text}");
+        assert!(
+            text.contains("Use FLUX_API_KEY from your environment"),
+            "{text}"
+        );
         assert!(text.contains("sk-B0g...eERw"), "masked key must be shown");
         assert!(text.contains("Enter API key manually"));
         assert!(text.contains("press 1 to use it"));

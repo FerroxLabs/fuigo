@@ -126,7 +126,9 @@ fn hook_group_sort_key<'a>(source_dir: &'a str, meta: &HookSourceMeta) -> HookGr
     }
 }
 
-fn is_official_marketplace_source(source: &fuigo_hooks_plugins_types::MarketplaceScanResult) -> bool {
+fn is_official_marketplace_source(
+    source: &fuigo_hooks_plugins_types::MarketplaceScanResult,
+) -> bool {
     source.source_name == fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME
         || fuigo_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
 }
@@ -5115,7 +5117,10 @@ mod tests {
         assert!(StatusFilter::Disabled.matches(false));
     }
 
-    fn make_plugin_with_enabled(name: &str, enabled: bool) -> fuigo_hooks_plugins_types::PluginInfo {
+    fn make_plugin_with_enabled(
+        name: &str,
+        enabled: bool,
+    ) -> fuigo_hooks_plugins_types::PluginInfo {
         let mut p = make_plugin(name);
         p.enabled = enabled;
         p
@@ -7270,20 +7275,16 @@ mod tests {
     fn skills_groups_then_az_by_label() {
         let mut project_z = make_skill("zzz-proj", "project skill");
         project_z.scope = fuigo_tools::implementations::skills::types::SkillScope::Local;
-        project_z.config_source = Some(
-            fuigo_tools::types::config_source::ConfigSource::Project {
-                path: std::path::PathBuf::from("/repo/.fuigo/skills/zzz"),
-            },
-        );
+        project_z.config_source = Some(fuigo_tools::types::config_source::ConfigSource::Project {
+            path: std::path::PathBuf::from("/repo/.fuigo/skills/zzz"),
+        });
         project_z.display_name = Some("zeta-proj".into());
 
         let mut project_a = make_skill("aaa-proj", "other project");
         project_a.scope = fuigo_tools::implementations::skills::types::SkillScope::Repo;
-        project_a.config_source = Some(
-            fuigo_tools::types::config_source::ConfigSource::Project {
-                path: std::path::PathBuf::from("/repo/.fuigo/skills/aaa"),
-            },
-        );
+        project_a.config_source = Some(fuigo_tools::types::config_source::ConfigSource::Project {
+            path: std::path::PathBuf::from("/repo/.fuigo/skills/aaa"),
+        });
         project_a.display_name = Some("alpha-proj".into());
 
         let mut user_a = make_skill("user-alpha", "user a");

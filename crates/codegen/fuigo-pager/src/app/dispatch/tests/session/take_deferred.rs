@@ -2,8 +2,8 @@ use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::app::agent::DeferredModelSwitch;
 use crate::app::dispatch::session::lifecycle::{DeferredSwitchOutcome, take_deferred_model_switch};
 use agent_client_protocol as acp;
-use std::sync::Arc;
 use fuigo_shell::sampling::types::ReasoningEffort;
+use std::sync::Arc;
 
 fn model_with_support(id: &str, supports: bool) -> (acp::ModelId, acp::ModelInfo) {
     let id = acp::ModelId::new(Arc::from(id));

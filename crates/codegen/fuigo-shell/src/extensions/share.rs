@@ -256,8 +256,9 @@ mod tests {
         };
         mgr.hot_swap(non_fuigo);
 
-        let err = require_fuigo_auth_for_share(&mgr)
-            .expect_err("non-Ferrox Labs accounts (API key, External, enterprise IdP) must be rejected");
+        let err = require_fuigo_auth_for_share(&mgr).expect_err(
+            "non-Ferrox Labs accounts (API key, External, enterprise IdP) must be rejected",
+        );
 
         // Test the *exact* actionable data string for the non-Ferrox Labs path (distinct from the generic "Authentication required to share session" path)
         let serialized =

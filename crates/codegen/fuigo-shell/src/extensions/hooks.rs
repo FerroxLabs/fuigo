@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use agent_client_protocol as acp;
-use serde::Deserialize;
 use fuigo_hooks::event::{HookEventEnvelope, HookEventName};
 use fuigo_hooks::matcher::HookMatcher;
 use fuigo_hooks_plugins_types::{HookEvent, HookHandlerType, HookInfo};
+use serde::Deserialize;
 
 use crate::agent::MvpAgent;
 
@@ -221,9 +221,7 @@ fn parse_hook_group(event: HookEventName, value: &serde_json::Value) -> Option<C
         .map(|s| std::time::Duration::from_secs_f64(s.min(MAX_HOOK_TIMEOUT_SECS)));
     let matcher = match group.matcher.as_deref() {
         None | Some("") | Some("*") => None,
-        Some(pattern)
-            if event.traits().matcher == fuigo_hooks::event::MatcherPolicy::Ignored =>
-        {
+        Some(pattern) if event.traits().matcher == fuigo_hooks::event::MatcherPolicy::Ignored => {
             tracing::warn!(%event, pattern, "matcher on a {event} hook group is ignored (this event always fires)");
             None
         }
@@ -271,9 +269,9 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use fuigo_hooks::config::HookSpec;
     use fuigo_hooks::event::HookEventName;
+    use std::path::PathBuf;
 
     fn make_spec(
         command_raw: Option<&str>,

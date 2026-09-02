@@ -872,8 +872,8 @@ fn default_reasoning_effort_only_stamps_supporting_model() {
 
 #[test]
 fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
-    use indexmap::IndexMap;
     use fuigo_sampling_types::ReasoningEffortOption;
+    use indexmap::IndexMap;
 
     let cfg = config::Config {
         reasoning_effort_override: Some(ReasoningEffort::None),
@@ -1790,8 +1790,8 @@ fn unavailable_campaign_default_falls_back_to_config_default() {
 
 // ── ModelFetchAuth::resolve priority tests ──────────────────────
 
-use serial_test::serial;
 use fuigo_test_support::EnvGuard;
+use serial_test::serial;
 
 #[test]
 #[serial]

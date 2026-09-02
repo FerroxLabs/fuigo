@@ -7,8 +7,8 @@ use crate::views::prompt_widget::StashedPrompt;
 use crate::views::question_view::QuestionViewState;
 use agent_client_protocol as acp;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::sync::Arc;
 use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+use std::sync::Arc;
 
 const SHIFT_TAB: [(KeyCode, KeyModifiers); 3] = [
     (KeyCode::BackTab, KeyModifiers::NONE),

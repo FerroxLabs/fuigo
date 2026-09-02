@@ -2,8 +2,8 @@
 //! Apply never forgets the set (siblings in the same batch still see it).
 //! Complete drops only the finished ids.
 
-use fuigo_tools::types::output::{ToolOutput as ToolsToolOutput, ToolRunResult};
 use fuigo_tool_types::{TaskOutputOutput, TaskOutputResult};
+use fuigo_tools::types::output::{ToolOutput as ToolsToolOutput, ToolRunResult};
 
 use crate::tools::tool_context::BlockingWaitState;
 

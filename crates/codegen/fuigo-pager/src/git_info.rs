@@ -1,11 +1,11 @@
 //! Git branch/worktree info: cached queries shared across views.
 
+use fuigo_telemetry::region;
+use fuigo_telemetry::region::Parent;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use fuigo_telemetry::region;
-use fuigo_telemetry::region::Parent;
 
 use crate::host::HostOs;
 use crate::terminal::{TerminalName, terminal_context};

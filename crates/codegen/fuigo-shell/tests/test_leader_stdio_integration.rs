@@ -5,8 +5,6 @@
 
 use std::time::Duration;
 
-use tempfile::TempDir;
-use tokio::net::UnixStream;
 use fuigo_shell::cpu_profile::ControlErrorCode;
 use fuigo_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, ControlPayload, LeaderClient,
@@ -14,6 +12,8 @@ use fuigo_shell::leader::{
     protocol::{ClientMessage, ServerMessage, read_message, write_message},
     spawn_leader_server,
 };
+use tempfile::TempDir;
+use tokio::net::UnixStream;
 
 /// Pipe character used for ID namespacing (must match server.rs)
 const ID_NAMESPACE_SEP: char = '|';
@@ -1963,11 +1963,11 @@ async fn test_code_status_ext_request_forwarded_to_agent() {
 /// The high-level client blocks in `connect()` until `LeaderReady`, so it cannot observe the intermediate `Registered { ready: false }` state.
 #[tokio::test]
 async fn test_raw_registration_handshake_not_ready_then_ready() {
+    use fuigo_shell::leader::run_leader_server;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2110,11 +2110,11 @@ async fn test_raw_registration_handshake_not_ready_then_ready() {
 /// Callers can send `initialize` immediately: TUI and headless clients must not see `leader_starting` errors even when auth/prefetch are slow.
 #[tokio::test]
 async fn test_connect_waits_for_leader_ready() {
+    use fuigo_shell::leader::run_leader_server;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2222,11 +2222,11 @@ async fn test_connect_waits_for_leader_ready() {
 /// Uses `leader_version_override` so the test bypasses the `"unknown"` constant that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
 #[tokio::test]
 async fn test_version_mismatch_notification_sent_to_client() {
+    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2295,11 +2295,11 @@ async fn test_version_mismatch_notification_sent_to_client() {
 
 #[tokio::test]
 async fn test_no_version_mismatch_notification_when_versions_match() {
+    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2530,11 +2530,11 @@ async fn test_relaunch_for_update_declines_when_not_newer() {
 /// An in-flight turn isn't cut off the instant a relaunch is requested.
 #[tokio::test]
 async fn test_relaunch_for_update_waits_for_busy_then_exits() {
-    use std::sync::atomic::Ordering;
     use fuigo_shell::leader::{
         ClientCapabilities, ClientMode, ControlCommand, ControlPayload, LeaderClient,
         ShutdownReason,
     };
+    use std::sync::atomic::Ordering;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2715,11 +2715,11 @@ async fn test_leader_code_nav_isolation_end_to_end() {
 #[tokio::test]
 async fn test_lock_released_before_connect_prevents_deadlock() {
     use fs2::FileExt;
+    use fuigo_shell::leader::run_leader_server;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");

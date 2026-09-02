@@ -61,11 +61,11 @@ mod tests {
     use super::{
         DrainedToolSuccess, drain_tool_layer_extracted_images, split_tool_layer_for_harness,
     };
-    use std::path::PathBuf;
     use fuigo_tools::types::output::{
         FileContent, MCPOutput, ReadFileOutput, SearchToolOutput, ToolOutput, ToolRunResult,
     };
     use fuigo_tools::util::base64_images::{ExtractedImage, IMAGE_CONTENT_PLACEHOLDER};
+    use std::path::PathBuf;
 
     fn img(data: &str, mime: &str) -> ExtractedImage {
         ExtractedImage {

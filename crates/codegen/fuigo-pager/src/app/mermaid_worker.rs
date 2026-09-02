@@ -39,11 +39,11 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use indexmap::IndexMap;
 use fuigo_mermaid::{
     MermaidTheme, RenderLimits, RenderParams, RenderedDiagram, SubprocessError, default_engine,
     render_checked, run_with_timeout,
 };
+use indexmap::IndexMap;
 
 use crate::app::agent_view::AgentView;
 use crate::scrollback::blocks::mermaid_content::{

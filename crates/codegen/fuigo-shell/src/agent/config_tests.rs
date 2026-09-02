@@ -35,8 +35,8 @@ const A_CLI_CHAT_PROXY_URL: &str = "http://localhost:18080/v1";
 /// which is documented to fail closed, and loosening that deserves its own
 /// change rather than riding along with a rename.
 const A_FIRST_PARTY_URL: &str = "https://api.x.ai/v1";
-use serial_test::serial;
 use fuigo_test_support::EnvGuard;
+use serial_test::serial;
 #[test]
 fn main_cli_tools_override_preserves_profile_injection_policy() {
     let overrides = CliAgentOverrides {
@@ -1228,8 +1228,7 @@ fn default_models_dual_endpoint_routing() {
         }
         let session_creds = resolve_credentials(&entry, Some("tok"));
         assert_eq!(
-            session_creds.base_url,
-            endpoints.fuigo_api_base_url,
+            session_creds.base_url, endpoints.fuigo_api_base_url,
             "{model_id}: every credential kind reaches the one gateway"
         );
         let api_key_creds = ResolvedCredentials {
@@ -1390,7 +1389,7 @@ fn resolve_credentials_empty_env_key_falls_through_to_session() {
 #[test]
 #[serial]
 fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
-    use crate::agent::auth_method::{LEGACY_FUIGO_API_KEY_ENV_VAR, FUIGO_API_KEY_ENV_VAR};
+    use crate::agent::auth_method::{FUIGO_API_KEY_ENV_VAR, LEGACY_FUIGO_API_KEY_ENV_VAR};
     use fuigo_chat_state::AuthType;
     use fuigo_test_support::EnvGuard;
     let sentinel = "fuigo-global-sentinel-key";
@@ -1481,13 +1480,7 @@ fn resolve_credentials_env_key_byok_keeps_api_key_auth_with_session() {
 }
 #[test]
 fn proxy_messages_models_use_bearer_auth_scheme() {
-    let mut model = test_model_entry(
-        "grok-4.5",
-        A_CLI_CHAT_PROXY_URL,
-        None,
-        None,
-        None,
-    );
+    let mut model = test_model_entry("grok-4.5", A_CLI_CHAT_PROXY_URL, None, None, None);
     model.info.api_backend = ApiBackend::Messages;
     let config = sampling_config_for_model(
         &model,
@@ -5058,7 +5051,10 @@ agent_type = "cursor"
 "#;
     let raw: toml::Value = toml::from_str(toml_str).unwrap();
     let cfg = Config::new_from_toml_cfg(&raw).unwrap();
-    assert_eq!(cfg.goal.planner_model.as_ref().unwrap().model, "fuigo-build");
+    assert_eq!(
+        cfg.goal.planner_model.as_ref().unwrap().model,
+        "fuigo-build"
+    );
     assert_eq!(
         cfg.goal.strategist_model.as_ref().unwrap().agent_type,
         "cursor"

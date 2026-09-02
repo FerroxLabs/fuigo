@@ -1,11 +1,11 @@
 use super::support::*;
 use super::*;
-use fuigo_tools::reminders::task_completion::consumed_completion_ids;
-use fuigo_tools::types::output::{BashOutput, TextOutput, ToolOutput};
 use fuigo_tool_types::{
     KillTaskOutput, KillTaskResult, MultiTaskOutputResult, SubagentCompletedOutput,
     TaskOutputOutput, TaskOutputResult,
 };
+use fuigo_tools::reminders::task_completion::consumed_completion_ids;
+use fuigo_tools::types::output::{BashOutput, TextOutput, ToolOutput};
 fn input_with_origin(prompt_id: &str, origin: crate::session::PromptOrigin) -> InputItem {
     input_with_origin_rx(prompt_id, origin).0
 }

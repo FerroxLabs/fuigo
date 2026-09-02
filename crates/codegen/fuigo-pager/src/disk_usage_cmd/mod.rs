@@ -9,12 +9,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
 use fuigo_fast_worktree::{
     ListFilter, RegistryOpen, SqliteFailureKind, WORKTREE_POOL_DIR, WORKTREES_DIR, WorktreeDb,
     WorktreeKind, WorktreeRecord, WorktreeStatus, classify_sqlite_error, discover_worktrees,
     managed_worktree_roots, path_under_worktree_roots, resolve_fuigo_home,
 };
+use serde::Serialize;
 
 use crate::fs_size::{
     BucketSize, Measure, Volume, WalkIssues, modified_at, physical_buckets, physical_dir_size,

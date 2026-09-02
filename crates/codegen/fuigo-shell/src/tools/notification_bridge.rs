@@ -4,15 +4,15 @@ use crate::session::commands::{NotificationPriority, NotificationSource};
 use crate::session::persistence::{DurableAppendError, PersistenceHandle, PersistenceMsg};
 use crate::tools::task_completed_frame;
 use agent_client_protocol::{self as acp, Client as _};
+use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
+use fuigo_hunk_tracker::HunkTrackerHandle;
+use fuigo_tools::notification::types::{ToolNotification, ToolNotificationHandle};
+use fuigo_tools::types::output::{BashOutput, ToolOutput};
+use fuigo_workspace::session::file_state::FileStateTracker;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
-use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use fuigo_tools::notification::types::{ToolNotification, ToolNotificationHandle};
-use fuigo_tools::types::output::{BashOutput, ToolOutput};
-use fuigo_workspace::session::file_state::FileStateTracker;
-use fuigo_hunk_tracker::HunkTrackerHandle;
 const TASK_WAKE_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 pub(crate) struct NotificationBridgeConfig {
     /// ACP gateway for sending streaming updates to TUI
@@ -355,8 +355,7 @@ async fn handle_notification(
         }
         ToolNotification::SubagentCompleted(_) => {}
         ToolNotification::TaskCompleted(task_snapshot) => {
-            let is_monitor =
-                task_snapshot.kind == fuigo_tools::computer::types::TaskKind::Monitor;
+            let is_monitor = task_snapshot.kind == fuigo_tools::computer::types::TaskKind::Monitor;
             let task_id = task_snapshot.task_id.clone();
             let goal_loop_active = config
                 .goal_loop_active

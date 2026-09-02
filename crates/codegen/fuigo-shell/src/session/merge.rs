@@ -212,9 +212,7 @@ pub(crate) async fn fetch_lanes(
             return Vec::new();
         }
         cwd.map(|c| {
-            fuigo_workspace::session::git::resolve_normalized_remote_urls(std::path::Path::new(
-                c,
-            ))
+            fuigo_workspace::session::git::resolve_normalized_remote_urls(std::path::Path::new(c))
         })
         .unwrap_or_default()
     };

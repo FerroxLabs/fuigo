@@ -9,8 +9,6 @@
 //! - [`effects`] — Effect → async task spawning
 //! - [`acp_handler`] — ACP notification routing
 //! - [`event_loop`] — biased tokio::select! loop
-/// The unauthenticated welcome menu, shared by renderer and dispatcher.
-pub mod pending_menu;
 pub mod actions;
 pub mod agent;
 pub mod agent_view;
@@ -19,6 +17,8 @@ pub mod bundle;
 pub(crate) mod cancel_latency;
 pub mod cli;
 pub mod consent;
+/// The unauthenticated welcome menu, shared by renderer and dispatcher.
+pub mod pending_menu;
 pub use crate::link_opener;
 use fuigo_telemetry::region;
 use fuigo_telemetry::region::Parent;
@@ -80,6 +80,7 @@ pub use foreign_sessions::ForeignScanCoordinator;
 pub(crate) use foreign_sessions::{
     badge_for_picker_source, foreign_tool_display_label, is_foreign_picker_source,
 };
+use fuigo_shell::util::config;
 use ratatui::backend::CrosstermBackend;
 pub use startup_failure::StartupFailure;
 use std::io::{self, IsTerminal, Write};
@@ -87,7 +88,6 @@ use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 pub(crate) use turn_completion::CANCELLATION_CATEGORY_KEY;
-use fuigo_shell::util::config;
 /// Tracks the extra Kitty keyboard layer pushed while the `/gboom` game is open (see [`push_gboom_keyboard_flags`]).
 /// Kept separate from the base layer (`terminal::kitty_keyboard`) so teardown pops both, in LIFO order.
 static GBOOM_KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
@@ -596,9 +596,8 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = fuigo_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let fuigo_com_config = match fuigo_shell::agent::config::Config::new_from_toml_cfg(
-        &raw_config,
-    ) {
+    let fuigo_com_config = match fuigo_shell::agent::config::Config::new_from_toml_cfg(&raw_config)
+    {
         Ok(c) => c.fuigo_com_config,
         Err(e) => {
             tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
@@ -625,9 +624,7 @@ pub async fn run(
     .unwrap_or(None);
     let had_prefetch = match refreshed_auth {
         Some(auth) => fuigo_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth)),
-        None => {
-            fuigo_shell::agent::models::startup_prefetch::begin(Some(fuigo_com_config.clone()))
-        }
+        None => fuigo_shell::agent::models::startup_prefetch::begin(Some(fuigo_com_config.clone())),
     };
     fuigo_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
@@ -917,15 +914,13 @@ pub async fn run(
     } else {
         crate::acp::AgentKind::Embedded
     };
-    fuigo_telemetry::external::init(
-        fuigo_shell::agent::config::resolve_external_otel_config(
-            fuigo_telemetry::external::config::ExternalClientInfo {
-                service_version: fuigo_version::full_version().to_owned(),
-                client_version: fuigo_version::VERSION.to_owned(),
-                app_entrypoint: "tui".to_owned(),
-            },
-        ),
-    );
+    fuigo_telemetry::external::init(fuigo_shell::agent::config::resolve_external_otel_config(
+        fuigo_telemetry::external::config::ExternalClientInfo {
+            service_version: fuigo_version::full_version().to_owned(),
+            client_version: fuigo_version::VERSION.to_owned(),
+            app_entrypoint: "tui".to_owned(),
+        },
+    ));
     if args.log_sampling {
         unsafe { std::env::set_var("FUIGO_LOG_SAMPLING", "1") };
     }
@@ -1391,9 +1386,7 @@ fn init_terminal(
             })?;
         }
         if mode.is_fullscreen() {
-            fuigo_shell::util::with_locked_stderr(|stderr| {
-                execute!(stderr, EnterAlternateScreen)
-            })?;
+            fuigo_shell::util::with_locked_stderr(|stderr| execute!(stderr, EnterAlternateScreen))?;
         }
         #[cfg(windows)]
         if want_minimal {
@@ -2262,8 +2255,8 @@ mod tests {
     }
     #[test]
     fn cli_session_id_with_resume_and_fork_ok() {
-        let args =
-            try_parse_pager(&["fuigo-pager", "-s", "a", "--resume", "b", "--fork-session"]).unwrap();
+        let args = try_parse_pager(&["fuigo-pager", "-s", "a", "--resume", "b", "--fork-session"])
+            .unwrap();
         assert!(args.session_startup_intent().is_ok());
     }
     #[test]
