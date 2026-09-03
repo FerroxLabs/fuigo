@@ -492,9 +492,7 @@ fn current_dir_or_exit() -> PathBuf {
 fn scope_target(scope: McpScope) -> PathBuf {
     match scope {
         McpScope::User => fuigo_shell::util::config::user_config_path(),
-        McpScope::Project => {
-            fuigo_shell::util::config::project_config_path(&current_dir_or_exit())
-        }
+        McpScope::Project => fuigo_shell::util::config::project_config_path(&current_dir_or_exit()),
     }
 }
 

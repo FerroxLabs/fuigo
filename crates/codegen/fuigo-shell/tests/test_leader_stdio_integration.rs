@@ -5,8 +5,6 @@
 
 use std::time::Duration;
 
-use tempfile::TempDir;
-use tokio::net::UnixStream;
 use fuigo_shell::cpu_profile::ControlErrorCode;
 use fuigo_shell::leader::{
     ClientCapabilities, ClientMode, ControlCommand, ControlPayload, LeaderClient,
@@ -14,6 +12,8 @@ use fuigo_shell::leader::{
     protocol::{ClientMessage, ServerMessage, read_message, write_message},
     spawn_leader_server,
 };
+use tempfile::TempDir;
+use tokio::net::UnixStream;
 
 /// Pipe character used for ID namespacing (must match server.rs)
 const ID_NAMESPACE_SEP: char = '|';
@@ -1238,7 +1238,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     //
     // Order matters: `model_switch::apply` fires the broadcast BEFORE the response, so it arrives at each subscriber's recv() first
     let broadcast = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"{}","update":{{"sessionUpdate":"model_changed","model_id":"grok-4","reasoning_effort":"high"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"{}","update":{{"sessionUpdate":"model_changed","model_id":"grok-4","reasoning_effort":"high"}}}}}}"#,
         shared_sid
     );
     response_tx.send(broadcast.clone()).unwrap();
@@ -1259,7 +1259,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
         .expect("timeout waiting for broadcast on invoker")
         .expect("invoker channel closed");
     let inv1: serde_json::Value = serde_json::from_str(&invoker_msg1).unwrap();
-    assert_eq!(inv1["method"], "x.ai/session_notification");
+    assert_eq!(inv1["method"], "fuigo/session_notification");
     assert_eq!(inv1["params"]["sessionId"], shared_sid);
     assert_eq!(inv1["params"]["update"]["sessionUpdate"], "model_changed");
     assert_eq!(inv1["params"]["update"]["model_id"], "grok-4");
@@ -1287,7 +1287,7 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
         )
         .expect("follower channel closed");
     let f: serde_json::Value = serde_json::from_str(&follower_msg).unwrap();
-    assert_eq!(f["method"], "x.ai/session_notification");
+    assert_eq!(f["method"], "fuigo/session_notification");
     assert_eq!(f["params"]["sessionId"], shared_sid);
     assert_eq!(f["params"]["update"]["sessionUpdate"], "model_changed");
     assert_eq!(f["params"]["update"]["model_id"], "grok-4");
@@ -1520,13 +1520,13 @@ async fn test_extension_method_roundtrip() {
     .unwrap();
 
     // Send an extension method call (e.g., fuzzy search open)
-    let ext_call = r#"{"jsonrpc":"2.0","id":50,"method":"_x.ai/search/fuzzy/open","params":{"sessionId":"sess-123","hidden":false}}"#;
+    let ext_call = r#"{"jsonrpc":"2.0","id":50,"method":"_fuigo/search/fuzzy/open","params":{"sessionId":"sess-123","hidden":false}}"#;
     client.send(ext_call.to_string()).unwrap();
 
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    assert_eq!(json["method"], "_x.ai/search/fuzzy/open");
+    assert_eq!(json["method"], "_fuigo/search/fuzzy/open");
     let namespaced_id = json["id"].as_str().unwrap();
     assert!(namespaced_id.contains(ID_NAMESPACE_SEP));
     assert!(namespaced_id.ends_with("|50"));
@@ -1697,7 +1697,7 @@ async fn test_session_ownership_cleanup_on_disconnect() {
     // Also verifies the eviction was actually sent
     let eviction = acp_rx.recv().await.unwrap();
     let eviction_json: serde_json::Value = serde_json::from_str(&eviction).unwrap();
-    assert_eq!(eviction_json["method"], "_x.ai/internal/evict_sessions");
+    assert_eq!(eviction_json["method"], "_fuigo/internal/evict_sessions");
 
     // Connect a NEW client; the server should still be running
     let mut client2 = LeaderClient::connect(
@@ -1724,7 +1724,7 @@ async fn test_session_ownership_cleanup_on_disconnect() {
 
     // client2 should NOT receive the dead-session notification.
     // Send a second notification without a sessionId; this one SHOULD arrive via fallback routing, proving client2 is alive and connected
-    let probe = r#"{"jsonrpc":"2.0","method":"x.ai/probe","params":{"ping":true}}"#;
+    let probe = r#"{"jsonrpc":"2.0","method":"fuigo/probe","params":{"ping":true}}"#;
     response_tx.send(probe.to_string()).unwrap();
 
     let recv = tokio::time::timeout(Duration::from_secs(2), client2.recv())
@@ -1915,7 +1915,7 @@ async fn test_code_nav_capability_injected_into_session_load() {
     cancel.cancel();
 }
 
-/// Verify that an `x.ai/code/status` extension request is forwarded to the agent with the correct method, sessionId, and cwd in the params.
+/// Verify that an `fuigo/code/status` extension request is forwarded to the agent with the correct method, sessionId, and cwd in the params.
 /// This tests the routing boundary between leader and agent for code-nav extension requests without requiring a live agent.
 #[tokio::test]
 async fn test_code_status_ext_request_forwarded_to_agent() {
@@ -1934,15 +1934,15 @@ async fn test_code_status_ext_request_forwarded_to_agent() {
     .await
     .unwrap();
 
-    // Send x.ai/code/status with a sessionId; the leader must forward it to the agent
-    let status_req = r#"{"jsonrpc":"2.0","id":42,"method":"extensions/ext","params":{"method":"x.ai/code/status","params":{"sessionId":"sess-web-1","cwd":"/repo"}}}"#;
+    // Send fuigo/code/status with a sessionId; the leader must forward it to the agent
+    let status_req = r#"{"jsonrpc":"2.0","id":42,"method":"extensions/ext","params":{"method":"fuigo/code/status","params":{"sessionId":"sess-web-1","cwd":"/repo"}}}"#;
     web_client.send(status_req.to_string()).unwrap();
 
     let forwarded = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
 
     assert_eq!(json["method"], "extensions/ext");
-    assert_eq!(json["params"]["method"], "x.ai/code/status");
+    assert_eq!(json["params"]["method"], "fuigo/code/status");
     assert_eq!(json["params"]["params"]["sessionId"], "sess-web-1");
     assert_eq!(json["params"]["params"]["cwd"], "/repo");
 
@@ -1963,11 +1963,11 @@ async fn test_code_status_ext_request_forwarded_to_agent() {
 /// The high-level client blocks in `connect()` until `LeaderReady`, so it cannot observe the intermediate `Registered { ready: false }` state.
 #[tokio::test]
 async fn test_raw_registration_handshake_not_ready_then_ready() {
+    use fuigo_shell::leader::run_leader_server;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2110,11 +2110,11 @@ async fn test_raw_registration_handshake_not_ready_then_ready() {
 /// Callers can send `initialize` immediately: TUI and headless clients must not see `leader_starting` errors even when auth/prefetch are slow.
 #[tokio::test]
 async fn test_connect_waits_for_leader_ready() {
+    use fuigo_shell::leader::run_leader_server;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2218,15 +2218,15 @@ async fn test_connect_waits_for_leader_ready() {
 
 // ── Version mismatch notification ────────────────────────────────────
 
-/// A connected client receives `x.ai/leader/version_mismatch` when its `client_version` differs from the leader's version.
+/// A connected client receives `fuigo/leader/version_mismatch` when its `client_version` differs from the leader's version.
 /// Uses `leader_version_override` so the test bypasses the `"unknown"` constant that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
 #[tokio::test]
 async fn test_version_mismatch_notification_sent_to_client() {
+    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2285,7 +2285,7 @@ async fn test_version_mismatch_notification_sent_to_client() {
         .expect("channel closed");
 
     let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
-    assert_eq!(json["method"], "x.ai/leader/version_mismatch");
+    assert_eq!(json["method"], "fuigo/leader/version_mismatch");
     assert_eq!(json["params"]["clientVersion"], "test-client-0.1.157");
     assert_eq!(json["params"]["leaderVersion"], "test-leader-0.1.150");
 
@@ -2295,11 +2295,11 @@ async fn test_version_mismatch_notification_sent_to_client() {
 
 #[tokio::test]
 async fn test_no_version_mismatch_notification_when_versions_match() {
+    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2530,11 +2530,11 @@ async fn test_relaunch_for_update_declines_when_not_newer() {
 /// An in-flight turn isn't cut off the instant a relaunch is requested.
 #[tokio::test]
 async fn test_relaunch_for_update_waits_for_busy_then_exits() {
-    use std::sync::atomic::Ordering;
     use fuigo_shell::leader::{
         ClientCapabilities, ClientMode, ControlCommand, ControlPayload, LeaderClient,
         ShutdownReason,
     };
+    use std::sync::atomic::Ordering;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -2691,13 +2691,13 @@ async fn test_leader_code_nav_isolation_end_to_end() {
         serde_json::json!(false)
     );
 
-    // Web client sends x.ai/code/status
-    let status_with_session = r#"{"jsonrpc":"2.0","id":10,"method":"extensions/ext","params":{"method":"x.ai/code/status","params":{"sessionId":"web-session","cwd":"/repo"}}}"#;
+    // Web client sends fuigo/code/status
+    let status_with_session = r#"{"jsonrpc":"2.0","id":10,"method":"extensions/ext","params":{"method":"fuigo/code/status","params":{"sessionId":"web-session","cwd":"/repo"}}}"#;
     web_client.send(status_with_session.to_string()).unwrap();
 
     let status_fwd = acp_rx.recv().await.unwrap();
     let status_json: serde_json::Value = serde_json::from_str(&status_fwd).unwrap();
-    assert_eq!(status_json["params"]["method"], "x.ai/code/status");
+    assert_eq!(status_json["params"]["method"], "fuigo/code/status");
     assert_eq!(status_json["params"]["params"]["sessionId"], "web-session");
 
     web_client.cancel();
@@ -2715,11 +2715,11 @@ async fn test_leader_code_nav_isolation_end_to_end() {
 #[tokio::test]
 async fn test_lock_released_before_connect_prevents_deadlock() {
     use fs2::FileExt;
+    use fuigo_shell::leader::run_leader_server;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
-    use fuigo_shell::leader::run_leader_server;
 
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("leader.sock");
@@ -3008,7 +3008,7 @@ async fn test_hung_agent_leaves_transport_healthy_and_forwards_cancel() {
     assert_eq!(cancel_json["method"], "session/cancel");
 
     // Unrelated traffic still round-trips on the same connection.
-    let probe = r#"{"jsonrpc":"2.0","method":"x.ai/probe","params":{"ping":true}}"#;
+    let probe = r#"{"jsonrpc":"2.0","method":"fuigo/probe","params":{"ping":true}}"#;
     response_tx.send(probe.to_string()).unwrap();
     let recv = tokio::time::timeout(Duration::from_secs(2), client.recv())
         .await
@@ -3069,7 +3069,7 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     // The eviction notification on the agent channel is the deterministic signal that the server processed the disconnect
     let evict = acp_rx.recv().await.unwrap();
     let evict_json: serde_json::Value = serde_json::from_str(&evict).unwrap();
-    assert_eq!(evict_json["method"], "_x.ai/internal/evict_sessions");
+    assert_eq!(evict_json["method"], "_fuigo/internal/evict_sessions");
 
     // The agent completes the turn anyway: durable terminal notification plus the RPC response addressed to the dead client
     response_tx

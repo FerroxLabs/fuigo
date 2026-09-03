@@ -2,6 +2,8 @@ use super::{
     build_context_window, emit_loop, live_turn, split_normalized_remote, strip_trailing_separator,
 };
 use crate::extensions::notification::PromptUsageModel;
+use fuigo_acp_lib::AcpClientMessage;
+use fuigo_workspace::session::git::normalize_repo_url;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -10,8 +12,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
-use fuigo_acp_lib::AcpClientMessage;
-use fuigo_workspace::session::git::normalize_repo_url;
 
 #[test]
 fn session_usage_splits_fresh_input_from_the_cache_buckets() {
@@ -184,7 +184,7 @@ async fn client_that_cannot_draw_the_row_never_builds_one() {
                 .expect("the emitter task panicked");
             assert!(
                 painted.try_recv().is_err(),
-                "the wake before x.ai/statusLine built a payload as well"
+                "the wake before fuigo/statusLine built a payload as well"
             );
         })
         .await;

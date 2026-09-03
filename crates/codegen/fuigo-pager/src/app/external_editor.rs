@@ -498,6 +498,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         app.voice_cmd_tx = Some(tx);
         app.voice_state = crate::app::app_view::VoiceState::Recording {
+            session: 1,
             hold: false,
             target: crate::app::app_view::VoiceTarget::Agent(id),
             interim: None,

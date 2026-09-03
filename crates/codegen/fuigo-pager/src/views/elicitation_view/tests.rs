@@ -1,9 +1,9 @@
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use serde_json::json;
 use fuigo_tools::mcp_elicitation::{
     ElicitFieldKind, McpElicitExtRequest, McpElicitExtResponse, McpElicitModeFields,
 };
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use serde_json::json;
 
 use super::render::form_value_column;
 use super::state::check_elicit_url;

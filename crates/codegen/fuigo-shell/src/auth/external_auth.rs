@@ -89,7 +89,10 @@ pub(crate) async fn run_external_refresh(command: &str) -> Option<FuigoAuth> {
 }
 
 /// Run external auth provider, carrying forward `/user`-derived fields from previous auth.
-pub(crate) async fn refresh_with_command(command: &str, prev_auth: &FuigoAuth) -> Option<FuigoAuth> {
+pub(crate) async fn refresh_with_command(
+    command: &str,
+    prev_auth: &FuigoAuth,
+) -> Option<FuigoAuth> {
     let mut auth = run_external_refresh(command).await?;
     auth.carry_user_profile_from(prev_auth);
     Some(auth)
@@ -121,6 +124,7 @@ mod tests {
 
     #[test]
     fn parse_output_issuer_claim_enables_fuigo_auth() {
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
         let ok = |stdout: &str| std::process::Output {
             status: std::process::Command::new("true").status().unwrap(),
             stdout: stdout.as_bytes().to_vec(),

@@ -120,15 +120,21 @@ fn has_usable_token_covers_memory_and_disk() {
     );
 }
 #[test]
-fn auth_scope_uses_oauth2_when_present() {
+fn auth_scope_is_the_unconfigured_sentinel_by_default() {
+    // Fuigo ships with no OAuth provider, so the shipped default has no real
+    // scope. This previously asserted a compiled-in xAI issuer and an
+    // obfuscated xAI client id, which is exactly what was removed.
     let cfg = FuigoComConfig::default();
+    assert_eq!(cfg.auth_scope(), crate::auth::UNCONFIGURED_AUTH_SCOPE);
+}
+
+#[test]
+fn auth_scope_uses_oauth2_when_configured() {
+    let cfg = crate::auth::test_config_with_oauth2();
+    let oauth2 = cfg.oauth2.as_ref().expect("configured");
     assert_eq!(
         cfg.auth_scope(),
-        format!(
-            "{}::{}",
-            crate::auth::config::XAI_OAUTH2_ISSUER,
-            obfstr::obfstr!("b1a00492-073a-47ea-816f-4c329264a828"),
-        )
+        format!("{}::{}", oauth2.issuer, oauth2.client_id)
     );
 }
 #[test]
@@ -3182,7 +3188,7 @@ fn oidc_session_for_team(principal_id: &str) -> FuigoAuth {
         auth_mode: AuthMode::Oidc,
         refresh_token: Some("rt".into()),
         expires_at: Some(Utc::now() + Duration::hours(1)),
-        oidc_issuer: Some(crate::auth::config::XAI_OAUTH2_ISSUER.to_string()),
+        oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
         oidc_client_id: Some("client".into()),
         ..FuigoAuth::test_default()
     }
@@ -4378,9 +4384,7 @@ async fn manual_auth_emits_only_for_user_facing_source() {
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::ServerRejectedNoRecovery));
-    use fuigo_telemetry::events::{
-        AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface,
-    };
+    use fuigo_telemetry::events::{AuthTokenKind, ManualAuth, ManualAuthReason, ManualAuthSurface};
     assert_eq!(
         turn.manual_auth_last_emit(),
         Some(ManualAuth {

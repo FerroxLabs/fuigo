@@ -39,9 +39,7 @@ impl SessionActor {
         &self,
         bridge: &fuigo_tools::bridge::ToolBridge,
     ) -> Result<(), String> {
-        use fuigo_tools::implementations::memory::{
-            MEMORY_GET_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
-        };
+        use fuigo_tools::implementations::memory::{MEMORY_GET_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME};
 
         bridge
             .register_mcp_tools(
@@ -712,7 +710,9 @@ impl SessionActor {
             self.chat_state_handle.get_conversation(),
         );
         let chat_history =
-            fuigo_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation);
+            fuigo_chat_state::compaction_utils::prepare_conversation_for_summarization(
+                conversation,
+            );
         MemoryFlushSnapshot {
             counts,
             chat_history,

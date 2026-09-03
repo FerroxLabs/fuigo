@@ -50,7 +50,7 @@ pub struct QueueEntryWire {
     pub position: usize,
 }
 
-/// Broadcast payload for the `x.ai/queue/changed` notification.
+/// Broadcast payload for the `fuigo/queue/changed` notification.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueChanged {

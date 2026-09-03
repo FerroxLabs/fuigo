@@ -2,10 +2,10 @@ use super::support::*;
 use super::*;
 use crate::extensions::prompt_meta::PromptBlockMeta;
 use crate::session::{InputAuthority, InputPolicy};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use fuigo_test_support::sse::responses_api_script_exact;
 use fuigo_test_support::{MockInferenceServer, ScriptedResponse};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 #[derive(Default)]
 struct PolicyRecorder(std::cell::Cell<Option<InputAuthority>>);
@@ -101,7 +101,7 @@ fn spawn_gateway_drain(
                     let _ = args.response_tx.send(Ok(()));
                 }
                 fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
-                    if args.request.method.as_ref() == "x.ai/hooks/event" =>
+                    if args.request.method.as_ref() == "fuigo/hooks/event" =>
                 {
                     let _ = hook_tx.send(());
                 }
@@ -646,12 +646,11 @@ async fn parent_skill_lookup_matches_advertised_gated_collision_and_skill_only_l
             let skill_dir = tempfile::tempdir().unwrap();
             let skill_path = skill_dir.path().join("SKILL.md");
             std::fs::write(&skill_path, "flush skill body for $ARGUMENTS").unwrap();
-            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
-                fuigo_tools::registry::types::ToolConfig::for_tool::<
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![fuigo_tools::registry::types::ToolConfig::for_tool::<
                     fuigo_tools::implementations::opencode::OpenCodeSkillTool,
-                >(),
-            ])
-            .await;
+                >()])
+                .await;
             actor
                 .tool_bridge_handle()
                 .seed_skill_discovery(

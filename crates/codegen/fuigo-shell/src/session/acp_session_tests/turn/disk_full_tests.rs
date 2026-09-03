@@ -1,12 +1,12 @@
 use super::support::*;
 use super::*;
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
 use fuigo_test_support::sse::{
     responses_api_reasoning_then_tool_call_events, responses_api_script_exact,
 };
 use fuigo_test_support::{MockInferenceServer, ScriptedResponse};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// `SessionActor` turn futures overflow the default test thread stack.
 fn block_on_session(f: impl FnOnce() + Send + 'static) {
@@ -44,7 +44,7 @@ fn capture_hook_events(
                     let _ = args.response_tx.send(Ok(()));
                 }
                 fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
-                    if args.request.method.as_ref() == "x.ai/hooks/event" =>
+                    if args.request.method.as_ref() == "fuigo/hooks/event" =>
                 {
                     sink.borrow_mut()
                         .push(serde_json::from_str(args.request.params.get()).unwrap());

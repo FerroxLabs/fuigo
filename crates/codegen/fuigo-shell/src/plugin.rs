@@ -1678,7 +1678,9 @@ mod tests {
     fn name_ambiguous_error_lists_candidates_and_pin_hint() {
         let err = MarketplaceInstallError::NameAmbiguous {
             name: "sentry".into(),
-            candidates: vec!["Ferrox Labs Official (pin: sentry@fuigo-org/plugin-marketplace)".into()],
+            candidates: vec![
+                "Ferrox Labs Official (pin: sentry@fuigo-org/plugin-marketplace)".into(),
+            ],
         };
         let msg = err.to_string();
         assert!(
@@ -1816,7 +1818,10 @@ mod tests {
     fn plan_install_qualifier_ambiguous_lists_source_names() {
         let sources = [
             git_source("Mirror A", OFFICIAL_URL),
-            git_source("Mirror B", "git@github.com:fuigo-org/plugin-marketplace.git"),
+            git_source(
+                "Mirror B",
+                "git@github.com:fuigo-org/plugin-marketplace.git",
+            ),
         ];
         let err = plan_install(
             &sources,

@@ -1,7 +1,7 @@
 //! `/recap` (alias `/summarize`): summarize the session so far ("where was I").
 //!
 //! Returns `CommandResult::Action(Action::SendRecap { auto: false })`.
-//! The dispatch layer fires it as the ACP ext method `x.ai/recap`, which bypasses the prompt queue.
+//! The dispatch layer fires it as the ACP ext method `fuigo/recap`, which bypasses the prompt queue.
 //! The recap arrives asynchronously as a scrollback line and is never added to the model conversation.
 
 use crate::app::actions::Action;

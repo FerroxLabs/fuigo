@@ -302,7 +302,7 @@ pub(crate) async fn run_device_code_login_channels(
     };
 
     // TUI: push the URL through the channel BEFORE opening the browser
-    // That way `x.ai/auth/get_url` isn't blocked on a slow or hanging browser launch (e.g. SSH/headless).
+    // That way `fuigo/auth/get_url` isn't blocked on a slow or hanging browser launch (e.g. SSH/headless).
     // When the issuer omits `verification_uri_complete`, embed the code so the welcome screen can still show it (anti-phishing)
     let display_uri = match device_code.verification_uri_complete.as_deref() {
         Some(uri) => uri.to_owned(),

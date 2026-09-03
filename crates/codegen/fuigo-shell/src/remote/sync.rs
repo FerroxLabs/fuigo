@@ -16,8 +16,8 @@
 use crate::remote::BackendClient;
 use crate::session::export::{ExportedMessage, ExportedMetadata};
 use agent_client_protocol as acp;
-use tokio::sync::mpsc;
 use fuigo_telemetry::id::agent_id;
+use tokio::sync::mpsc;
 
 /// Max buffered notifications before triggering an emergency flush.
 /// Sized to keep memory under ~50MB even with large notifications.

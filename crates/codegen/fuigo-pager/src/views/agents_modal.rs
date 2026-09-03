@@ -10,18 +10,18 @@ use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use unicode_width::UnicodeWidthStr;
 use fuigo_agent::config::{AgentDefinition, AgentScope, BuiltinAgentName};
 use fuigo_shell::agent::config::AgentSelectionConfig;
 use fuigo_tools::implementations::skills::discovery::extract_first_paragraph;
 use fuigo_tools::registry::types::ToolServerConfig;
 use fuigo_tools::types::template_renderer::TemplateRenderer;
 use fuigo_tools::types::tool::ToolKind;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use unicode_width::UnicodeWidthStr;
 /// Which tab is active in the agents modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentsTab {
@@ -509,7 +509,10 @@ pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetai
         }
     }
     let dirs = [
-        (ConfigFileScope::Project, cwd.join(".fuigo").join("personas")),
+        (
+            ConfigFileScope::Project,
+            cwd.join(".fuigo").join("personas"),
+        ),
         (ConfigFileScope::User, fuigo_home.join("personas")),
     ];
     for (scope, dir) in dirs {
@@ -741,17 +744,61 @@ fn refresh_default_agent(state: &mut AgentsModalState) {
     let model_agent_type = state.model_agent_type.as_deref();
     state.default_agent = resolve_default_agent_name(&state.cwd, model_agent_type);
 }
+/// Read `config.toml`, hand the parsed document to `edit`, and write the result
+/// back — the whole cycle under `fuigo_config::fs_atomic`'s `config.toml.lock`,
+/// so a concurrent writer that also takes that lock cannot read the same
+/// original and rename its own document over this change. Writers that do not
+/// take the lock still can; `lock_config_for_write` lists which ones do.
+///
+/// The write is a temp-file-plus-rename rather than the in-place `fs::write`
+/// these functions used to do, so a crash cannot leave the config truncated.
+/// The existing file's mode is carried onto the replacement (`rename` swaps the
+/// inode); a config created here is `0600`, because `config.toml` supports
+/// `[model.<key>].api_key`.
+fn edit_user_config(
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+) -> Result<(), String> {
+    let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+    edit_config_at(&config_path, edit)
+}
+
+/// Core of [`edit_user_config`]; takes the path so tests can use a temp dir.
+fn edit_config_at(
+    config_path: &std::path::Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
+        let Some(mut doc) = crate::config_toml_edit::read_config_document_for_edit(config_path)
+        else {
+            return Err("Could not read or parse config.toml".to_string());
+        };
+        edit(&mut doc)?;
+        fuigo_config::fs_atomic::write_atomically(
+            config_path,
+            &doc.to_string(),
+            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
+        )
+        .map_err(|e| format!("Failed to write config.toml: {e}"))
+    })
+    .map_err(|e| format!("Could not lock config.toml: {e}"))?
+}
+
 /// Set or clear the default agent via `[agent] name` in config.toml.
 ///
 /// Pass `Some(name)` to set, `None` to clear (remove the key).
 pub fn set_default_agent(name: Option<&str>) -> Result<(), String> {
-    let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Some(mut doc) = crate::config_toml_edit::read_config_document_for_edit(&config_path) else {
-        return Err("Could not read or parse config.toml".to_string());
-    };
+    edit_user_config(|doc| set_default_agent_in(doc, name))
+}
+
+/// The document edit [`set_default_agent`] performs, split out so the
+/// read-lock-write plumbing is shared and this half is directly testable.
+fn set_default_agent_in(
+    doc: &mut toml_edit::DocumentMut,
+    name: Option<&str>,
+) -> Result<(), String> {
     if let Some(agent_name) = name {
         if !doc.contains_key("agent") {
             doc["agent"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -763,19 +810,20 @@ pub fn set_default_agent(name: Option<&str>) -> Result<(), String> {
     } else if let Some(agent_table) = doc.get_mut("agent").and_then(|v| v.as_table_mut()) {
         agent_table.remove("name");
     }
-    std::fs::write(&config_path, doc.to_string())
-        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
     Ok(())
 }
+
 /// Toggle an agent's enabled state via `[subagents.toggle]` in config.toml.
 pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
-    let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Some(mut doc) = crate::config_toml_edit::read_config_document_for_edit(&config_path) else {
-        return Err("Could not read or parse config.toml".to_string());
-    };
+    edit_user_config(|doc| toggle_agent_in(doc, name, enabled))
+}
+
+/// The document edit [`toggle_agent`] performs.
+fn toggle_agent_in(
+    doc: &mut toml_edit::DocumentMut,
+    name: &str,
+    enabled: bool,
+) -> Result<(), String> {
     if !doc.contains_key("subagents") {
         doc["subagents"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
@@ -789,8 +837,6 @@ pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
         .as_table_mut()
         .ok_or("subagents.toggle is not a table")?;
     toggle_table[name] = toml_edit::value(enabled);
-    std::fs::write(&config_path, doc.to_string())
-        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
     Ok(())
 }
 /// Format detail lines for an expanded agent entry.
@@ -2578,6 +2624,74 @@ pub fn handle_agents_mouse(state: &mut AgentsModalState, mouse: &MouseEvent) -> 
 mod tests {
     use super::*;
     use fuigo_shell::agent::config::DEFAULT_AGENT_TYPE;
+
+    /// A default-agent change and eight toggles racing each other must ALL land.
+    /// Both go through `edit_config_at`, which holds `config.toml.lock` across
+    /// its read and its rename; without that they would all read the same
+    /// original and the last rename would keep one change.
+    #[test]
+    fn concurrent_config_edits_do_not_lose_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
+        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
+        let names: Vec<String> = (0..8).map(|n| format!("agent-{n}")).collect();
+
+        std::thread::scope(|scope| {
+            {
+                let path = path.clone();
+                scope.spawn(move || {
+                    edit_config_at(&path, |doc| set_default_agent_in(doc, Some("chosen"))).unwrap();
+                });
+            }
+            for name in &names {
+                let path = path.clone();
+                scope.spawn(move || {
+                    edit_config_at(&path, |doc| toggle_agent_in(doc, name, false)).unwrap();
+                });
+            }
+        });
+
+        let doc = crate::config_toml_edit::read_config_document_for_edit(&path).expect("reparse");
+        assert_eq!(
+            doc.get("agent")
+                .and_then(|a| a.get("name"))
+                .and_then(|v| v.as_str()),
+            Some("chosen"),
+            "the default-agent change was lost"
+        );
+        for name in &names {
+            assert_eq!(
+                doc.get("subagents")
+                    .and_then(|s| s.get("toggle"))
+                    .and_then(|t| t.get(name))
+                    .and_then(|v| v.as_bool()),
+                Some(false),
+                "{name}'s toggle was lost"
+            );
+        }
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("theme"),
+            "the pre-existing table must survive too"
+        );
+    }
+
+    /// `rename` swaps the inode, so a `chmod 600 config.toml` has to be
+    /// re-applied to the replacement or an agent toggle would loosen it.
+    #[cfg(unix)]
+    #[test]
+    fn editing_the_config_preserves_an_existing_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
+        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        edit_config_at(&path, |doc| set_default_agent_in(doc, Some("chosen"))).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
     #[test]
     fn agents_tab_next_cycles() {
         assert_eq!(AgentsTab::Agents.next(), AgentsTab::Personas);
@@ -3374,9 +3488,7 @@ mod tests {
         assert!(description_text.starts_with("1234567890"));
     }
     /// Fixture: a one-plugin registry whose `agents/` dir holds `reviewer.md`.
-    fn plugin_registry_with_reviewer(
-        plugin_root: &Path,
-    ) -> fuigo_agent::plugins::PluginRegistry {
+    fn plugin_registry_with_reviewer(plugin_root: &Path) -> fuigo_agent::plugins::PluginRegistry {
         use fuigo_agent::plugins::discovery::PluginId;
         use fuigo_agent::plugins::{
             DiscoveredPlugin, PluginManifest, PluginOrigin, PluginRegistry, PluginScope,

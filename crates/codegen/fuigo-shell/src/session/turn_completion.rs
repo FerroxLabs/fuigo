@@ -1,7 +1,7 @@
 //! Pure construction of the two turn-terminal signals.
 //!
-//! `TurnCompleted` is the persisted and replayed twin of the fire-and-forget `x.ai/session/prompt_complete` notification.
-//! It rides the `_x.ai/session/update` rail so a viewer that re-attaches mid-turn finalizes the turn from replay instead of stranding on "Waiting…".
+//! `TurnCompleted` is the persisted and replayed twin of the fire-and-forget `fuigo/session/prompt_complete` notification.
+//! It rides the `_fuigo/session/update` rail so a viewer that re-attaches mid-turn finalizes the turn from replay instead of stranding on "Waiting…".
 //! Both builders live here and derive their fields from [`crate::sampling::error::prompt_complete_fields`], so the two signals never disagree.
 
 use crate::extensions::notification::SessionUpdate;
@@ -32,7 +32,7 @@ pub(crate) fn build_turn_completed(
     }
 }
 
-/// Base `x.ai/session/prompt_complete` payload shared by every producer (live prompt, chat bridge, gateway remote turn).
+/// Base `fuigo/session/prompt_complete` payload shared by every producer (live prompt, chat bridge, gateway remote turn).
 /// It carries the terminal fields from [`crate::sampling::error::prompt_complete_fields`] plus the optional typed `errorKind` stamp.
 /// Producers append their rail-specific fields (`turnId`, cancel meta).
 pub(crate) fn prompt_complete_payload(

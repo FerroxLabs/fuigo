@@ -76,7 +76,7 @@ mod inbound_summary_persist_scrub_tests {
     use super::*;
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;
     use crate::session::persistence::MAX_TITLE_SCALARS;
-    /// Drive inbound `_x.ai/session/update` through `handle_fuigo_session_notification`.
+    /// Drive inbound `_fuigo/session/update` through `handle_fuigo_session_notification`.
     /// Removing the `scrub_inbound_session_summary` call site makes this test fail.
     #[tokio::test]
     async fn persist_path_scrubs_title_and_drops_manual_meta() {
@@ -379,7 +379,7 @@ impl SessionActor {
                     self.notifications
                         .gateway
                         .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/session_notification",
+                            "fuigo/session_notification",
                             params.into(),
                         ));
                 }
@@ -503,7 +503,7 @@ impl SessionActor {
             self.notifications
                 .gateway
                 .forward_fire_and_forget(acp::ExtNotification::new(
-                    "x.ai/session_notification",
+                    "fuigo/session_notification",
                     params.into(),
                 ));
         }
@@ -1021,7 +1021,7 @@ impl SessionActor {
             .ok();
         if let Some(params) = params {
             let ext_notification =
-                acp::ExtNotification::new("x.ai/session_notification", params.into());
+                acp::ExtNotification::new("fuigo/session_notification", params.into());
             self.notifications
                 .gateway
                 .forward_fire_and_forget(ext_notification);
@@ -1042,7 +1042,10 @@ mod fuigo_event_id_stamping_tests {
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     ) -> String {
         loop {
-            match prx.try_recv().expect("an Ferrox Labs line must be persisted") {
+            match prx
+                .try_recv()
+                .expect("an Ferrox Labs line must be persisted")
+            {
                 PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(notif)) => {
                     return notif
                         .meta

@@ -26,13 +26,13 @@ use crate::cpu_profile::{
     ShutdownStopDisposition,
 };
 use agent_client_protocol::AGENT_METHOD_NAMES;
+use fuigo_computer_hub_sdk::{AuthCredential, AuthIdentity, AuthProvider};
+use fuigo_workspace::WorkspaceHandle;
 use kanal::{AsyncReceiver, AsyncSender};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
-use fuigo_computer_hub_sdk::{AuthCredential, AuthIdentity, AuthProvider};
-use fuigo_workspace::WorkspaceHandle;
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Separator for namespacing request IDs.
 /// The pipe is valid in JSON strings (no escaping needed) and unlikely to appear in typical JSON-RPC IDs (usually numbers or UUIDs).
@@ -321,7 +321,7 @@ fn is_session_attach_request(json: &serde_json::Value) -> bool {
         .and_then(|m| m.as_str())
         .is_some_and(|m| m == "session/load" || m == "session/resume")
 }
-/// Extract the leader unicast target `ClientId` from a notification's `params._meta["x.ai/leaderClientId"]`.
+/// Extract the leader unicast target `ClientId` from a notification's `params._meta["fuigo/leaderClientId"]`.
 ///
 /// The agent stamps this onto every `session/load` replay notification, echoing the id the leader injected into the load request.
 /// The replay then routes back to ONLY the loading client instead of broadcasting to all subscribers.
@@ -330,12 +330,12 @@ fn extract_target_client_id(json: &serde_json::Value) -> Option<ClientId> {
     let params = json.get("params")?;
     params
         .get("_meta")
-        .and_then(|m| m.get("x.ai/leaderClientId"))
+        .and_then(|m| m.get("fuigo/leaderClientId"))
         .or_else(|| {
             params
                 .get("params")
                 .and_then(|inner| inner.get("_meta"))
-                .and_then(|m| m.get("x.ai/leaderClientId"))
+                .and_then(|m| m.get("fuigo/leaderClientId"))
         })
         .and_then(|v| v.as_u64())
         .map(ClientId)
@@ -361,37 +361,37 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
 /// Whether a payload is a machine-wide notification (no `sessionId`) that must be **broadcast to every client**.
 /// These never fall through to the last-active-client fallback:
 ///
-/// - `x.ai/sessions/changed`: the session roster changed; every open dashboard must stay in sync.
-/// - `x.ai/models/update`: the model catalog changed.
+/// - `fuigo/sessions/changed`: the session roster changed; every open dashboard must stay in sync.
+/// - `fuigo/models/update`: the model catalog changed.
 ///   (Triggers: config.toml `[model.*]`/`[models]` hot-reload, a `models_cache.json` external write, an auth change, a response-header etag refresh.)
 ///   Every connected client's model picker must refresh, not just the most recently active one.
-/// - `x.ai/mcp/servers_updated`: the MCP catalog resolved or changed (managed connectors fetched in the background after `initialize`).
+/// - `fuigo/mcp/servers_updated`: the MCP catalog resolved or changed (managed connectors fetched in the background after `initialize`).
 ///   It is deliberately session-agnostic on the wire (no `sessionId`, see `extensions::mcp::notify_servers_updated`).
 ///   The push fires seconds after `initialize` returns.
 ///   The last-active-client fallback routinely delivered it to the wrong client (or dropped it) in multi-client leaders.
 ///   Managed connectors then "disappeared" from every other client's `/mcp` view.
 ///   Broadcast is safe: the pager handler only debounce-refetches `mcp/list` for agents with an open extensions modal.
-/// - `x.ai/announcements/update`: the announcements list changed (startup one-shot or the periodic settings refresh).
+/// - `fuigo/announcements/update`: the announcements list changed (startup one-shot or the periodic settings refresh).
 ///   It is session-agnostic; every client renders its own banner, so last-active-client fallback would leave every other client's banner stale.
 ///   Broadcast is safe: the pager handler is idempotent and drops stale generations via its `gen` gate.
-///   (`x.ai/settings/update` stays non-broadcast: it carries auth/gate state.)
+///   (`fuigo/settings/update` stays non-broadcast: it carries auth/gate state.)
 ///
 /// Matched via [`method_of`], NOT the raw top-level `method`.
-/// Agent ext notifications arrive `_`-prefixed on the wire (`_x.ai/sessions/changed`), so a raw compare would miss the production form.
+/// Agent ext notifications arrive `_`-prefixed on the wire (`_fuigo/sessions/changed`), so a raw compare would miss the production form.
 fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
         Some(
-            "x.ai/sessions/changed"
-                | "x.ai/models/update"
-                | "x.ai/mcp/servers_updated"
-                | "x.ai/announcements/update"
+            "fuigo/sessions/changed"
+                | "fuigo/models/update"
+                | "fuigo/mcp/servers_updated"
+                | "fuigo/announcements/update"
         )
     )
 }
 /// The namespaced method a leader payload carries, normalizing the two ext wire forms the gateway produces:
-///   - direct:  `{"method":"x.ai/foo", ...}`                                 -> `x.ai/foo`
-///   - wrapped: `{"method":"_x.ai/foo","params":{"method":"x.ai/foo",...}}`  -> `x.ai/foo`
+///   - direct:  `{"method":"fuigo/foo", ...}`                                 -> `fuigo/foo`
+///   - wrapped: `{"method":"_fuigo/foo","params":{"method":"fuigo/foo",...}}`  -> `fuigo/foo`
 ///
 /// Gateway-forwarded ext methods/notifications (`ext_method` / `ext_notification`) arrive WRAPPED.
 /// Examples: `ask_user_question`, `exit_plan_mode`, `scheduled_task_inject_prompt`, `session_notification`.
@@ -424,7 +424,7 @@ fn interaction_inner_params(json: &serde_json::Value) -> Option<&serde_json::Val
         Some(params)
     }
 }
-/// Whether a payload is the `x.ai/scheduled_task_inject_prompt` notification.
+/// Whether a payload is the `fuigo/scheduled_task_inject_prompt` notification.
 ///
 /// This notification tells the receiving client to enqueue AND drive a scheduled (`/loop`) cron prompt.
 /// Ordinary `sessionId`-bearing notifications fan out to every subscriber so each renders an identical stream.
@@ -433,7 +433,7 @@ fn interaction_inner_params(json: &serde_json::Value) -> Option<&serde_json::Val
 /// That duplicates the turn (phantom `#N` queue entries, competing drivers, stuck turns).
 /// The other clients render the resulting turn from the broadcast `session/update` deltas, exactly like any other turn the driver runs.
 fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
-    method_of(json) == Some("x.ai/scheduled_task_inject_prompt")
+    method_of(json) == Some("fuigo/scheduled_task_inject_prompt")
 }
 /// Whether a payload is a blocking *interaction* reverse-request: a tool permission, `ask_user_question`, or plan-approval.
 /// Unlike other reverse-requests (driver-only), these are **shared**.
@@ -444,9 +444,9 @@ fn is_interaction_request(json: &serde_json::Value) -> bool {
         method_of(json),
         Some(
             "session/request_permission"
-                | "x.ai/ask_user_question"
-                | "x.ai/exit_plan_mode"
-                | "x.ai/mcp/elicit",
+                | "fuigo/ask_user_question"
+                | "fuigo/exit_plan_mode"
+                | "fuigo/mcp/elicit",
         )
     )
 }
@@ -471,11 +471,11 @@ fn extract_interaction_tool_call_id(json: &serde_json::Value) -> Option<String> 
         .map(String::from)
 }
 /// If a payload is the `InteractionResolved` broadcast, return its `tool_call_id`.
-/// That broadcast is an `x.ai/session_notification` whose `update.sessionUpdate == "interaction_resolved"`.
+/// That broadcast is an `fuigo/session_notification` whose `update.sessionUpdate == "interaction_resolved"`.
 /// The leader evicts the cached interaction request with it (first-answer-wins).
 /// Tolerant of the gateway wrapper and camel/snake spelling for the inner field.
 fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option<String> {
-    if method_of(json) != Some("x.ai/session_notification") {
+    if method_of(json) != Some("fuigo/session_notification") {
         return None;
     }
     let update = interaction_inner_params(json)?.get("update")?;
@@ -491,7 +491,7 @@ fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option
 /// Extract session_id from a prompt-complete notification.
 fn extract_session_id_from_prompt_complete(json: &serde_json::Value) -> Option<String> {
     let method = json.get("method")?.as_str()?;
-    if method != "x.ai/session/prompt_complete" {
+    if method != "fuigo/session/prompt_complete" {
         return None;
     }
     json.get("params")?
@@ -670,9 +670,9 @@ fn inject_session_request_context(
                     serde_json::json!(client_type),
                 );
             }
-            if !meta_obj.contains_key("x.ai/leaderClientId") {
+            if !meta_obj.contains_key("fuigo/leaderClientId") {
                 meta_obj.insert(
-                    "x.ai/leaderClientId".to_string(),
+                    "fuigo/leaderClientId".to_string(),
                     serde_json::json!(client_id.0),
                 );
             }
@@ -749,23 +749,23 @@ fn inject_client_identity_into_initialize(
     }
     (mutated, true)
 }
-/// Extract yolo_mode change from x.ai/yolo_mode_changed notification.
+/// Extract yolo_mode change from fuigo/yolo_mode_changed notification.
 fn extract_yolo_mode_change(json: &serde_json::Value) -> Option<bool> {
     let method = json.get("method")?.as_str()?;
-    if method != "x.ai/yolo_mode_changed" {
+    if method != "fuigo/yolo_mode_changed" {
         return None;
     }
     let params = json.get("params")?;
     params.get("yolo_mode").and_then(|v| v.as_bool())
 }
-/// Extract the auto-mode intent from an `x.ai/yolo_mode_changed` notification.
+/// Extract the auto-mode intent from an `fuigo/yolo_mode_changed` notification.
 /// The leader keeps `ClientCapabilities.auto_mode` fresh the same way it tracks `yolo_mode`.
 /// Without this, a stale connect-time `auto_mode` capability would be injected into later `session/new` requests.
 /// That would re-enable Auto after the user opted out.
 /// Returns `None` when the notification doesn't change auto state.
 fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
     let method = json.get("method")?.as_str()?;
-    if method != "x.ai/yolo_mode_changed" {
+    if method != "fuigo/yolo_mode_changed" {
         return None;
     }
     let params = json.get("params")?;
@@ -795,7 +795,7 @@ fn inject_client_identity_into_yolo_notification(
     let is_yolo = json
         .get("method")
         .and_then(|m| m.as_str())
-        .is_some_and(|m| m == "x.ai/yolo_mode_changed");
+        .is_some_and(|m| m == "fuigo/yolo_mode_changed");
     if !is_yolo {
         return false;
     }
@@ -1414,7 +1414,7 @@ fn make_version_mismatch_notification(
     Some(
         serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "x.ai/leader/version_mismatch",
+            "method": "fuigo/leader/version_mismatch",
             "params": {
                 "clientVersion": client_version,
                 "leaderVersion": leader_version,

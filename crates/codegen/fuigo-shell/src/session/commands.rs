@@ -425,14 +425,15 @@ pub enum SessionCommand {
         request: RewindRequest,
         respond_to: oneshot::Sender<anyhow::Result<RewindResponse>>,
     },
-    /// Out-of-band history repair (`x.ai/session/repair`): fix tool-pairing violations that would otherwise 400 on every request.
+    /// Out-of-band history repair (`fuigo/session/repair`): fix tool-pairing violations that would otherwise 400 on every request.
     /// The violations: orphaned or displaced `ToolResult`s, duplicates, and unanswered calls.
     /// `dry_run` only reports.
     /// Refused while a turn is in flight.
     RepairHistory {
         dry_run: bool,
-        respond_to:
-            oneshot::Sender<anyhow::Result<fuigo_chat_state::compaction_utils::HistoryRepairReport>>,
+        respond_to: oneshot::Sender<
+            anyhow::Result<fuigo_chat_state::compaction_utils::HistoryRepairReport>,
+        >,
     },
     GetRewindPoints {
         respond_to: oneshot::Sender<RewindPointsResponse>,
@@ -509,7 +510,7 @@ pub enum SessionCommand {
         elapsed_ms: Option<u64>,
         processed: oneshot::Sender<()>,
     },
-    /// Update MCP servers for an existing session (used during reconnect or mid-session via the `x.ai/session/update_mcp_servers` extension method).
+    /// Update MCP servers for an existing session (used during reconnect or mid-session via the `fuigo/session/update_mcp_servers` extension method).
     /// This replaces the current MCP server configuration and triggers re-initialization.
     ///
     /// The caller is notified via `respond_to` once MCP re-initialization completes (or immediately if configs are unchanged).
@@ -636,10 +637,9 @@ pub enum SessionCommand {
         action: fuigo_hooks_plugins_types::PluginsAction,
         respond_to: oneshot::Sender<fuigo_hooks_plugins_types::ActionOutcome>,
     },
-    /// This session's plugin registry, as served by `x.ai/plugins/list`.
+    /// This session's plugin registry, as served by `fuigo/plugins/list`.
     PluginsList {
-        respond_to:
-            oneshot::Sender<Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>>,
+        respond_to: oneshot::Sender<Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>>,
     },
     /// Inject a notification (monitor event or bash task completion) into the session's notification queue.
     /// Notifications wait for an idle session and are batched by `maybe_drain_notifications`.
@@ -691,7 +691,7 @@ pub enum SessionCommand {
         owner: Option<String>,
     },
     /// Replace the text of a queued (not-yet-running) prompt in place (server-side LWW).
-    /// Last write wins via the actor's serialized mailbox; the rebroadcast of `x.ai/queue/changed` is the truth signal for every attached client.
+    /// Last write wins via the actor's serialized mailbox; the rebroadcast of `fuigo/queue/changed` is the truth signal for every attached client.
     /// The original `owner` attribution is preserved; `editor` is recorded as the most recent editor (for future "alice edited this" UX).
     /// A missing id, or an id that names the currently-running turn, is a benign no-op.
     EditQueuedPrompt {
@@ -715,7 +715,7 @@ pub enum SessionCommand {
     /// Versioned and idempotent like [`RemoveQueuedPrompt`].
     /// A benign no-op when no turn is running, the id names the running turn, the id is stale or already drained, or `owner` doesn't match.
     /// On a no-op the prompt stays queued and runs normally.
-    /// The rebroadcast of `x.ai/queue/changed` is the truth signal for every attached client.
+    /// The rebroadcast of `fuigo/queue/changed` is the truth signal for every attached client.
     InterjectQueuedPrompt {
         id: String,
         expected_version: u64,
@@ -808,7 +808,7 @@ pub enum SessionCommand {
     /// Fire-and-forget: no response channel needed since the command just pushes to a Mutex.
     Interject {
         text: String,
-        /// Client-minted id echoed back on the broadcast `x.ai/session/interjection` so the originating pager can dedup its optimistic local block.
+        /// Client-minted id echoed back on the broadcast `fuigo/session/interjection` so the originating pager can dedup its optimistic local block.
         /// `None` from older clients.
         id: Option<String>,
         /// Pasted images attached to the interjection.
@@ -835,8 +835,7 @@ pub enum SessionCommand {
     /// Routed through the session actor (like `TakeTurnMessages`) so the drain is ordered ahead of any subsequent turn's harness recording.
     /// Each `Vec` is one turn's synthetic `task` pairs, uploaded as its own sibling `turn_{N}` artifact.
     TakeHarnessTraceTurns {
-        respond_to:
-            oneshot::Sender<Vec<Vec<fuigo_sampling_types::conversation::ConversationItem>>>,
+        respond_to: oneshot::Sender<Vec<Vec<fuigo_sampling_types::conversation::ConversationItem>>>,
     },
     /// Take and clear the session actor's out-of-band streaming-turn capture.
     ///

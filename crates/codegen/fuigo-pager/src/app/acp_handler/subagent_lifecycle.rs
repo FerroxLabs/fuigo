@@ -140,7 +140,7 @@ pub(super) fn gate_subagent_lifecycle(
                 child_session_id = lifecycle.child_session_id,
                 transition = %lifecycle.transition,
                 event_id,
-                "x.ai/session lifecycle update DROPPED as a duplicate"
+                "fuigo/session lifecycle update DROPPED as a duplicate"
             );
             LifecycleDelivery::DropDuplicate
         }
@@ -180,7 +180,7 @@ pub(super) fn defer_subagent_finish(
         child_session_id,
         transition = %SubagentLifecycle::Finished,
         event_id,
-        "x.ai/session lifecycle update DEFERRED until spawn"
+        "fuigo/session lifecycle update DEFERRED until spawn"
     );
     LifecycleDelivery::AwaitSpawn
 }
@@ -205,7 +205,7 @@ pub(super) fn redispatched_subagent_finish(
 ) -> Option<acp::ExtNotification> {
     serde_json::value::to_raw_value(&payload)
         .ok()
-        .map(|params| acp::ExtNotification::new("x.ai/session/update", params.into()))
+        .map(|params| acp::ExtNotification::new("fuigo/session/update", params.into()))
 }
 
 fn strip_deferred_finish_output(notification: &mut SessionNotification) {

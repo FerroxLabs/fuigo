@@ -165,13 +165,13 @@ fn splice_token_into_line(results: &mut [RankedSuggestion], text: &str, range: (
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/suggest" => handle_suggest(agent, args).await,
-        "x.ai/suggestPrompt" => handle_suggest_prompt(agent, args).await,
+        "fuigo/suggest" => handle_suggest(agent, args).await,
+        "fuigo/suggestPrompt" => handle_suggest_prompt(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }
 
-/// Request/response for `x.ai/suggestPrompt`: predict the user's likely next prompt after a completed turn (tab-autocomplete ghost text).
+/// Request/response for `fuigo/suggestPrompt`: predict the user's likely next prompt after a completed turn (tab-autocomplete ghost text).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SuggestPromptRequest {

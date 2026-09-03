@@ -2,9 +2,9 @@
 
 use super::support::*;
 use super::*;
+use fuigo_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
 use std::sync::Arc;
 use std::time::Duration;
-use fuigo_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
 
 #[derive(Clone, Copy)]
 pub(super) enum SessionKind {
@@ -36,7 +36,7 @@ pub(super) fn drain_gateway(
                     let _ = args.response_tx.send(Ok(()));
                 }
                 fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
-                    if args.request.method.as_ref() == "x.ai/session_notification" =>
+                    if args.request.method.as_ref() == "fuigo/session_notification" =>
                 {
                     if let Ok(SessionNotification {
                         update: SessionUpdate::RetryState(rs),

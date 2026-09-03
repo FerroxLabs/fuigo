@@ -494,7 +494,7 @@ impl FeedbackManager {
 
     /// Force-generate a feedback request for local testing, bypassing all heuristics, sampling, cooldown, and enabled checks.
     ///
-    /// Engineers developing clients can call this via the `x.ai/debug/trigger_feedback` ACP extension method.
+    /// Engineers developing clients can call this via the `fuigo/debug/trigger_feedback` ACP extension method.
     /// It exercises the full feedback notification and response flow without needing a real session that meets tier criteria.
     ///
     /// When a `feedback_client` is configured, the request is also recorded via the feedback API, exactly like a real trigger.
@@ -1265,8 +1265,8 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_with_upload_queue_drains() {
         use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
-        use std::sync::Arc;
         use fuigo_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
+        use std::sync::Arc;
 
         struct MockResolver;
         impl TraceExportSource for MockResolver {
@@ -1515,9 +1515,9 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown_empty_queue_uses_short_drain_budget() {
         use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
+        use fuigo_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
         use std::sync::Arc;
         use std::time::Instant;
-        use fuigo_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
 
         struct MockResolver;
         impl TraceExportSource for MockResolver {
@@ -1559,9 +1559,9 @@ mod tests {
     async fn test_shutdown_nonempty_queue_clamps_drain_and_leaves_durable_pair() {
         use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
         use axum::{Router, body::Body, http::StatusCode, response::IntoResponse, routing::post};
+        use fuigo_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
         use std::sync::Arc;
         use std::time::Instant;
-        use fuigo_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
 
         async fn slow_handler(_body: Body) -> impl IntoResponse {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -1856,8 +1856,7 @@ mod author_identity_tests {
     async fn env_var_identity_reaches_the_wire_end_to_end() {
         let _email =
             fuigo_test_support::env::EnvGuard::set("FUIGO_TEST_WORK_EMAIL", "ada@corp.example");
-        let _name =
-            fuigo_test_support::env::EnvGuard::set("FUIGO_TEST_WORK_NAME", "Ada Lovelace");
+        let _name = fuigo_test_support::env::EnvGuard::set("FUIGO_TEST_WORK_NAME", "Ada Lovelace");
 
         // The loader expands `$VAR` at load, exactly as a trusted config tier ships it.
         let mut value = toml::from_str::<toml::Value>(

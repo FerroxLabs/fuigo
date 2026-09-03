@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use fuigo_workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

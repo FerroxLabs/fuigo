@@ -4,7 +4,7 @@
 //! On a qualifying tier it does a best-effort JWT refresh and returns an `UnblockResult`.
 //! The agent then re-fetches settings and lifts the gate itself.
 //!
-//! The pager drives the polling via `x.ai/auth/check_subscription`.
+//! The pager drives the polling via `fuigo/auth/check_subscription`.
 //! The callers are the 5s paywall chain, the free-tier watch, the refocus check, and the gate deferral that verifies before showing the paywall.
 //! See the pager's `app::subscription` module.
 use crate::auth::AuthManager;
@@ -62,7 +62,7 @@ async fn fetch_user_info(
         Err(_) => Err("transport"),
     }
 }
-/// Called by the pager every 5s while the paywall is shown (`x.ai/auth/check_subscription`).
+/// Called by the pager every 5s while the paywall is shown (`fuigo/auth/check_subscription`).
 ///
 /// Queries `/user?include=subscription` for the live tier.
 /// On a qualifying tier it does a best-effort JWT refresh and returns `Some(UnblockResult)`.

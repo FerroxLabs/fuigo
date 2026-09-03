@@ -80,7 +80,7 @@ pub(crate) fn handle_mcp_elicit(
     is_active
 }
 
-/// Handle `x.ai/ask_user_question` ext-method.
+/// Handle `fuigo/ask_user_question` ext-method.
 ///
 /// Parses the typed request, creates a `QuestionViewState` with the `response_tx` stashed, and opens the question overlay.
 /// The pager does NOT respond immediately; the response is sent later when the user submits, cancels, or is replaced by another question.
@@ -239,7 +239,7 @@ pub(crate) fn handle_ask_user_question(
     is_active
 }
 
-/// Handle an `x.ai/exit_plan_mode` ext_method request.
+/// Handle an `fuigo/exit_plan_mode` ext_method request.
 ///
 /// Creates a `PlanApprovalViewState` overlay for interactive approval.
 ///

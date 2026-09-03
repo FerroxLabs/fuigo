@@ -1,4 +1,4 @@
-//! `x.ai/interject` extension handler.
+//! `fuigo/interject` extension handler.
 //!
 //! Queues a mid-turn interjection into the active session's pending interjection buffer.
 //! The session actor drains it at the next safe point in `process_conversation_turn`.
@@ -36,7 +36,7 @@ fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::I
     (text_override, crate::session::image_blocks(content))
 }
 
-/// Handle `x.ai/interject`: queue a mid-turn user interjection.
+/// Handle `fuigo/interject`: queue a mid-turn user interjection.
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: InterjectRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();

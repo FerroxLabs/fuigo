@@ -8,10 +8,10 @@ use crate::bundle::{self, BundleManifest};
 use crate::remote::{FetchedBundle, fetch_bundle};
 use agent_client_protocol as acp;
 use anyhow::Context;
+use fuigo_tools::implementations::skills::discovery::extract_first_paragraph;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
-use fuigo_tools::implementations::skills::discovery::extract_first_paragraph;
 /// Default freshness window for the proactive bundle sync. Bypassed by `force`.
 pub(crate) const BUNDLE_SYNC_TTL: Duration = Duration::from_secs(60 * 60);
 /// Error message returned when no auth source is available for a bundle sync.
@@ -101,15 +101,15 @@ pub struct EntryGetResult {
 }
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/bundle/sync" => {
+        "fuigo/bundle/sync" => {
             let req: BundleSyncRequest = parse_params(args)?;
             to_ext_response(sync_bundle(agent, req).await)
         }
-        "x.ai/bundle/status" => {
+        "fuigo/bundle/status" => {
             let _req: BundleStatusRequest = parse_params(args)?;
             to_ext_response(status_bundle())
         }
-        "x.ai/bundle/entry/get" => {
+        "fuigo/bundle/entry/get" => {
             let req: EntryGetRequest = parse_params(args)?;
             to_ext_response(get_entry(&req.kind, &req.name))
         }

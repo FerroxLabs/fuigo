@@ -70,11 +70,11 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             print_sessions_grouped(&sessions);
         }
         SessionsCommand::Search { query, limit } => {
-            use std::collections::HashSet;
             use fuigo_shell::session::merge::REMOTE_TIMEOUT;
             use fuigo_shell::session::storage::search::{
                 IndexDecision, SessionSearchRequest, execute_search,
             };
+            use std::collections::HashSet;
 
             // Search is the only subcommand that reads the index, so it is the only one to start one
             let search = fuigo_shell::session::storage::search::start_if_enabled(agent_config);

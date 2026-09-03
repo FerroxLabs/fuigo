@@ -82,7 +82,7 @@ pub(super) const CTA_INSTALLED_DISMISS_MS: u64 = 4000;
 pub(super) const CLIPBOARD_PROBE_TIMEOUT_SECS: u64 = 10;
 /// Picker search debounce ([`Effect::DebounceSessionSearch`]): long enough to coalesce a typing burst, short enough to feel live.
 pub(super) const SESSION_SEARCH_DEBOUNCE_MS: u64 = 250;
-/// Run the `x.ai/mcp/list` read after a CTA install and map it into a `TaskResult::PluginCtaMcpsLoaded`.
+/// Run the `fuigo/mcp/list` read after a CTA install and map it into a `TaskResult::PluginCtaMcpsLoaded`.
 /// The read is uncached, which also nudges the shell to retry auth-required servers.
 /// Shared by the immediate fetch and the delayed re-probe.
 pub(super) async fn fetch_plugin_cta_mcps(
@@ -96,7 +96,7 @@ pub(super) async fn fetch_plugin_cta_mcps(
         "cache": false,
     });
     let req = acp::ExtRequest::new(
-        "x.ai/mcp/list",
+        "fuigo/mcp/list",
         serde_json::value::to_raw_value(&params)
             .expect("serialize mcp/list params")
             .into(),
@@ -232,7 +232,7 @@ pub(super) fn parse_session_load_restore_meta(
         .and_then(|v| serde_json::from_value(v).ok());
     (code_restored, restore_summary, restore_degree)
 }
-/// CANONICAL wire parser for `LoadSessionResponse._meta["x.ai/runningPromptId"]`.
+/// CANONICAL wire parser for `LoadSessionResponse._meta["fuigo/runningPromptId"]`.
 ///
 /// Returns the session's in-flight running prompt id when the session was loaded MID-turn (some other client is driving), otherwise `None`.
 /// The loader adopts this id so subsequent live `session/update` deltas pass the `current_prompt_id` gate (see `app/acp_handler.rs`).
@@ -241,7 +241,7 @@ pub(crate) fn parse_session_load_running_prompt_id(
     resp_meta: Option<&acp::Meta>,
 ) -> Option<String> {
     resp_meta
-        .and_then(|m| m.get("x.ai/runningPromptId"))
+        .and_then(|m| m.get("fuigo/runningPromptId"))
         .and_then(|v| v.as_str())
         .map(String::from)
 }
@@ -313,14 +313,14 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
 /// | true  | true      | true     | `fuigo-build-plan`              | omitted (shell gate) |
 ///
 /// When [`Self::chat_mode`] is set (gateway light-frontend / `--chat`), Build `agentProfile` injection is omitted.
-/// `_meta["x.ai/session"].kind` is stamped `"chat"` so the shell takes the `require_gateway` / thin profile.
+/// `_meta["fuigo/session"].kind` is stamped `"chat"` so the shell takes the `require_gateway` / thin profile.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionFlags {
     pub plan_mode: bool,
     pub subagents: bool,
     pub ask_user: bool,
     /// Restore code state on resume (`--restore-code`).
-    /// Injected as `x.ai/restore_code` into `LoadSession` meta, or passed
+    /// Injected as `fuigo/restore_code` into `LoadSession` meta, or passed
     /// as `restoreCode` in the `resume_session` ACP payload for worktrees.
     pub restore_code: Option<bool>,
     pub agent_override: Option<serde_json::Value>,
@@ -368,7 +368,7 @@ impl SessionFlags {
     /// An absent key is not the same as off; see the emit-site comment below.
     /// `--no-ask-user` always forces `askUserQuestion: false` into the meta, even when paired with `FUIGO_AGENT`.
     /// The env var chooses the *agent*, but the tool-strip is independent.
-    /// Chat mode additionally stamps `x.ai/session.kind`.
+    /// Chat mode additionally stamps `fuigo/session.kind`.
     pub(crate) fn to_meta(&self) -> Option<acp::Meta> {
         let mut meta = serde_json::Map::new();
         if self.chat_mode {
@@ -386,7 +386,7 @@ impl SessionFlags {
             meta.insert("agentProfile".into(), serde_json::json!(profile));
         }
         if self.chat_mode {
-            meta.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
+            meta.insert("fuigo/session".into(), serde_json::json!({ "kind": "chat" }));
             #[cfg(feature = "local-workspace")]
             if let Some(ref lw) = self.local_workspace {
                 stamp_local_workspace_meta(&mut meta, lw);
@@ -408,11 +408,11 @@ impl SessionFlags {
 }
 /// Workspace-bind `_meta` keys **always** forbidden on chat create/load.
 ///
-/// `x.ai/cloud_existing_workspace` is intentionally omitted: scrub keeps it only when `x.ai/local_workspace.mode == "attach"`.
+/// `fuigo/cloud_existing_workspace` is intentionally omitted: scrub keeps it only when `fuigo/local_workspace.mode == "attach"`.
 #[allow(dead_code)]
 pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
     "envId",
-    "x.ai/cloud_server_id",
+    "fuigo/cloud_server_id",
 ];
 /// FS-only tool ids for local existing workspace (chat attach/own).
 #[cfg(feature = "local-workspace")]
@@ -425,17 +425,17 @@ pub(super) const LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS: &[&str] = &[
     "workspace.put_files",
     "workspace.get_files",
 ];
-/// Stamp `_meta["x.ai/session"].kind = "chat"` and strip Build `agentProfile`.
+/// Stamp `_meta["fuigo/session"].kind = "chat"` and strip Build `agentProfile`.
 pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
     let obj = meta.get_or_insert_with(acp::Meta::new);
-    obj.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
+    obj.insert("fuigo/session".into(), serde_json::json!({ "kind": "chat" }));
     obj.remove("agentProfile");
 }
 /// Stamp the chat and local-workspace intent.
-/// Attach also stamps `x.ai/cloud_existing_workspace`.
+/// Attach also stamps `fuigo/cloud_existing_workspace`.
 /// Own leaves `server_id` unset; the shell supervisor mints one before the handshake.
 ///
-/// Never stamps `envId` or `x.ai/cloud_server_id`.
+/// Never stamps `envId` or `fuigo/cloud_server_id`.
 #[cfg(feature = "local-workspace")]
 pub(super) fn stamp_local_workspace_meta(
     meta: &mut serde_json::Map<String, serde_json::Value>,
@@ -455,14 +455,14 @@ pub(super) fn stamp_local_workspace_meta(
         local
             .insert("cwd".into(), serde_json::json!(cwd.to_string_lossy().into_owned()));
     }
-    meta.insert("x.ai/local_workspace".into(), serde_json::Value::Object(local));
+    meta.insert("fuigo/local_workspace".into(), serde_json::Value::Object(local));
     tracing::info!(
         target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
         event = "acp_meta_stamped",
         mode,
         server_id = cfg.server_id.as_deref(),
         cwd = cfg.cwd.as_ref().map(|p| p.display().to_string()),
-        "stamped x.ai/local_workspace onto session meta"
+        "stamped fuigo/local_workspace onto session meta"
     );
     if cfg.mode == LocalWorkspaceMode::Attach && let Some(ref sid) = cfg.server_id {
         let mut existing = serde_json::Map::new();
@@ -475,7 +475,7 @@ pub(super) fn stamp_local_workspace_meta(
                 );
         }
         meta.insert(
-            "x.ai/cloud_existing_workspace".into(),
+            "fuigo/cloud_existing_workspace".into(),
             serde_json::Value::Object(existing),
         );
     }
@@ -508,9 +508,9 @@ pub(super) fn finalize_chat_session_meta(
 }
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
 ///
-/// Narrow scrub exception: keep `x.ai/cloud_existing_workspace` when local intent is **attach**.
+/// Narrow scrub exception: keep `fuigo/cloud_existing_workspace` when local intent is **attach**.
 /// Own stamps intent only (shell mints `server_id`).
-/// Never keep `envId` or Direct hub `x.ai/cloud_server_id`.
+/// Never keep `envId` or Direct hub `fuigo/cloud_server_id`.
 pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     let Some(obj) = meta.as_mut() else {
         return;
@@ -521,15 +521,15 @@ pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     #[cfg(feature = "local-workspace")]
     {
         let allow_existing_attach = obj
-            .get("x.ai/local_workspace")
+            .get("fuigo/local_workspace")
             .and_then(|v| v.get("mode"))
             .and_then(|m| m.as_str()) == Some("attach");
         if !allow_existing_attach {
-            obj.remove("x.ai/cloud_existing_workspace");
+            obj.remove("fuigo/cloud_existing_workspace");
         }
     }
     {
-        obj.remove("x.ai/cloud_existing_workspace");
+        obj.remove("fuigo/cloud_existing_workspace");
     }
 }
 /// Fail closed on operator attestation outside the FS-only allowlist.
@@ -647,7 +647,7 @@ pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
     }
     (turn_count, tool_call_count)
 }
-/// Degraded conversations lane on `x.ai/session/list`, parsed from the response's `_meta["x.ai/partial"]` envelope.
+/// Degraded conversations lane on `fuigo/session/list`, parsed from the response's `_meta["fuigo/partial"]` envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationsPartial {
     NoOauth,
@@ -663,12 +663,12 @@ impl ConversationsPartial {
         }
     }
 }
-/// Read `_meta["x.ai/partial"]` from a session-list payload.
+/// Read `_meta["fuigo/partial"]` from a session-list payload.
 /// `None` when the conversations lane completed (or was skipped); unknown reasons degrade to [`ConversationsPartial::Error`].
 pub(super) fn parse_session_list_partial(
     payload: &serde_json::Value,
 ) -> Option<ConversationsPartial> {
-    let partial = payload.get("_meta")?.get("x.ai/partial")?;
+    let partial = payload.get("_meta")?.get("fuigo/partial")?;
     if partial.get("conversations").and_then(|v| v.as_bool()) != Some(true) {
         return None;
     }
@@ -680,11 +680,11 @@ pub(super) fn parse_session_list_partial(
         },
     )
 }
-/// Reads `_meta["x.ai/listScope"]` from a session-list payload.
+/// Reads `_meta["fuigo/listScope"]` from a session-list payload.
 pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
     match payload
         .get("_meta")
-        .and_then(|m| m.get("x.ai/listScope"))
+        .and_then(|m| m.get("fuigo/listScope"))
         .and_then(|v| v.as_str())
     {
         Some("repo") => ListScope::Repo,
@@ -692,7 +692,7 @@ pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope
         _ => ListScope::Cwd,
     }
 }
-/// Parse the `x.ai/session/list` response payload (the unwrapped `{ "sessions": [...] }` object) into [`SessionPickerEntry`] rows.
+/// Parse the `fuigo/session/list` response payload (the unwrapped `{ "sessions": [...] }` object) into [`SessionPickerEntry`] rows.
 ///
 /// Shared by the resume picker ([`Effect::FetchSessionList`]) and the dashboard's non-leader idle-session fallback ([`Effect::FetchDashboardSessions`]).
 /// Sharing one parser keeps both label sets identical.
@@ -728,7 +728,7 @@ pub(super) fn parse_session_picker_entries(
                 .map(String::from);
             let is_conversation = v
                 .get("_meta")
-                .and_then(|m| m.get("x.ai/session"))
+                .and_then(|m| m.get("fuigo/session"))
                 .and_then(|s| s.get("kind"))
                 .and_then(|k| k.as_str()) == Some("chat");
             let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v
@@ -895,7 +895,7 @@ pub(super) fn session_picker_entry_to_roster(
 }
 pub(super) async fn send_logout(tx: &AcpAgentTx) {
     let req = acp::ExtRequest::new(
-        "x.ai/auth/logout",
+        "fuigo/auth/logout",
         serde_json::value::to_raw_value(&serde_json::json!({}))
             .expect("serialize auth/logout params")
             .into(),
@@ -904,12 +904,12 @@ pub(super) async fn send_logout(tx: &AcpAgentTx) {
         tracing::warn!(error = %e, "logout failed");
     }
 }
-/// Best-effort `x.ai/auth/cancel`: stops the shell's device/loopback wait so a later login is single-flight.
+/// Best-effort `fuigo/auth/cancel`: stops the shell's device/loopback wait so a later login is single-flight.
 /// Errors are ignored; the UI already left `Authenticating`.
 /// `request_seq` scopes the cancel to the abandoned attempt.
 pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskResult {
     let req = acp::ExtRequest::new(
-        "x.ai/auth/cancel",
+        "fuigo/auth/cancel",
         serde_json::value::to_raw_value(
                 &serde_json::json!({ "request_seq": request_seq }),
             )
@@ -926,7 +926,7 @@ pub(super) async fn send_check_subscription(
     verify: Option<u64>,
 ) -> TaskResult {
     let req = acp::ExtRequest::new(
-        "x.ai/auth/check_subscription",
+        "fuigo/auth/check_subscription",
         serde_json::value::to_raw_value(&serde_json::json!({}))
             .expect("serialize check_subscription params")
             .into(),
@@ -966,7 +966,7 @@ pub(super) async fn send_credit_limit_recheck(
     agent_id: AgentId,
 ) -> TaskResult {
     let req = acp::ExtRequest::new(
-        "x.ai/auth/check_subscription",
+        "fuigo/auth/check_subscription",
         serde_json::value::to_raw_value(&serde_json::json!({}))
             .expect("serialize check_subscription params")
             .into(),
@@ -1442,7 +1442,7 @@ pub(crate) async fn persist_setting(
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
 /// 1. Persist `ui.permission_mode` to disk.
-/// 2. Fire ACP `x.ai/yolo_mode_changed` (gated on disk success for `WithRollback`; always for `BestEffort`).
+/// 2. Fire ACP `fuigo/yolo_mode_changed` (gated on disk success for `WithRollback`; always for `BestEffort`).
 /// 3. Return the matching `TaskResult`.
 pub(crate) async fn persist_permission_mode_and_notify(
     canonical: &'static str,
@@ -1466,7 +1466,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
             "permission_mode": config_str,
         });
         let notification = acp::ExtNotification::new(
-            "x.ai/yolo_mode_changed",
+            "fuigo/yolo_mode_changed",
             serde_json::value::to_raw_value(&params)
                 .expect("serialize yolo_mode_changed params")
                 .into(),
@@ -1477,7 +1477,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
     }
     route_permission_mode_result(disk_outcome, persist, config_str)
 }
-/// Whether to fire the ACP `x.ai/yolo_mode_changed` notification.
+/// Whether to fire the ACP `fuigo/yolo_mode_changed` notification.
 /// `WithRollback` suppresses on disk failure (the agent must not see the optimistic value); `BestEffort` always fires.
 pub(super) fn should_send_yolo_acp_notification(
     disk_outcome: &Result<(), String>,
@@ -1494,7 +1494,7 @@ pub(super) fn marketplace_outcome_succeeded(
 ) -> bool {
     outcome.status == fuigo_hooks_plugins_types::OutcomeStatus::Success
 }
-/// Extract the typed kill outcome from an `x.ai/task/kill` ext response.
+/// Extract the typed kill outcome from an `fuigo/task/kill` ext response.
 ///
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`, so the outcome lives at `result.outcome` (`{"result":{"taskId":..,"outcome":"not_found"}}`).
 /// Deserializes through the same wire DTOs the agent serializes so the contract stays typed end-to-end.
@@ -1511,7 +1511,7 @@ pub(super) fn parse_kill_outcome(
         .and_then(|envelope| envelope.result)
         .map(|payload| payload.outcome)
 }
-/// Map an `x.ai/subagent/cancel` response (payload under `result`) to a kill outcome.
+/// Map an `fuigo/subagent/cancel` response (payload under `result`) to a kill outcome.
 /// Prefers the typed `outcome`; falls back to the legacy `cancelled` bool for an older shell or an unknown future `kind`.
 /// An error/unparseable body is `RpcFailed` (the subagent may still be running, so leave the row alone).
 pub(super) fn parse_subagent_kill_outcome(resp: &str) -> SubagentKillOutcome {
@@ -1671,14 +1671,14 @@ pub(super) fn has_prepaid_credits(
 ) -> bool {
     balance.and_then(|b| b.prepaid_balance_cents).map(i64::abs).is_some_and(|c| c > 0)
 }
-/// Fetch the user's auto top-up rule via the `x.ai/auto-topup-rule` extension.
+/// Fetch the user's auto top-up rule via the `fuigo/auto-topup-rule` extension.
 /// A transport failure yields [`AutoTopupFetch::Unchanged`] so the caller keeps any cached rule rather than treating the blip as "no auto top-up".
 pub(super) async fn fetch_auto_topup_info(
     tx: &fuigo_acp_lib::AcpAgentTx,
 ) -> crate::views::credit_bar::AutoTopupFetch {
     use crate::views::credit_bar::AutoTopupFetch;
     let req = acp::ExtRequest::new(
-        "x.ai/auto-topup-rule",
+        "fuigo/auto-topup-rule",
         serde_json::value::to_raw_value(&serde_json::json!({}))
             .expect("serialize auto-topup params")
             .into(),
@@ -1691,7 +1691,7 @@ pub(super) async fn fetch_auto_topup_info(
     let result = wrapper.get("result").unwrap_or(&wrapper);
     parse_auto_topup_response(result)
 }
-/// Map an `x.ai/auto-topup-rule` payload to an [`AutoTopupFetch`].
+/// Map an `fuigo/auto-topup-rule` payload to an [`AutoTopupFetch`].
 /// A body that fails to deserialize is a fetch error (`Unchanged`, keep the cached rule), not a definitive "no rule".
 /// A malformed response therefore can't silently flip the credits warning.
 pub(super) fn parse_auto_topup_response(

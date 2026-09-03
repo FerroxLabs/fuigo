@@ -2225,7 +2225,7 @@ impl WorkspaceHandle {
     }
     /// Run one poll tick for an active fuzzy search.
     /// Returns the next batch of results (paths absolutized against the search root) or a signal to keep polling / stop.
-    /// Drives the `x.ai/search/fuzzy/status` notification loop.
+    /// Drives the `fuigo/search/fuzzy/status` notification loop.
     pub async fn fuzzy_poll(
         &self,
         search_id: &str,
@@ -2298,7 +2298,7 @@ impl WorkspaceHandle {
             sink(method, params);
         }
     }
-    /// Drive the `x.ai/search/fuzzy/status` stream for an active search.
+    /// Drive the `fuigo/search/fuzzy/status` stream for an active search.
     /// Poll until done / closed / superseded, emitting each new result batch to the client through the ext-notification sink.
     /// Co-located with the manager so it polls in-process in both local and proxy mode.
     pub async fn run_fuzzy_notifications(
@@ -2348,13 +2348,13 @@ impl WorkspaceHandle {
                     "targetClientId": serde_json::to_value(&target_client_id).unwrap_or_default(),
                 });
             }
-            self.emit_client_ext("x.ai/search/fuzzy/status".to_string(), params);
+            self.emit_client_ext("fuigo/search/fuzzy/status".to_string(), params);
             if data.done {
                 break;
             }
         }
     }
-    /// Run a streaming content (ripgrep) search rooted at `cwd`, emitting each batch as `x.ai/search/content/status` via the client sink.
+    /// Run a streaming content (ripgrep) search rooted at `cwd`, emitting each batch as `fuigo/search/content/status` via the client sink.
     /// Returns the final result. Co-located with the sink so it streams in both modes.
     pub async fn run_content_search(
         &self,
@@ -2372,7 +2372,7 @@ impl WorkspaceHandle {
                 "done": batch.done,
                 "truncated": batch.truncated,
             });
-            handle.emit_client_ext("x.ai/search/content/status".to_string(), params);
+            handle.emit_client_ext("fuigo/search/content/status".to_string(), params);
         })
         .await
         .map_err(|e| WorkspaceError::HubError(e.to_string()))
@@ -4035,7 +4035,7 @@ pub(crate) async fn stream_hash_and_range(
 /// The workspace registers its tools on the server so external clients can reach them.
 /// Sessions are bound dynamically by clients calling `bind_server`.
 ///
-/// `confine_fs_to_workspace_root` confines `x.ai/fs/*` resolution to the root.
+/// `confine_fs_to_workspace_root` confines `fuigo/fs/*` resolution to the root.
 /// The standalone workspace server defaults it on (it always backs a remote sandbox; override via `FUIGO_WORKSPACE_CONFINE_FS_TO_ROOT`).
 /// The CLI leader passes `false`.
 ///

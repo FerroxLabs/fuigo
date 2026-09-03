@@ -8,9 +8,9 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind};
+use fuigo_shell::util::config::{ConsentAnswer, ConsentGate};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use fuigo_shell::util::config::{ConsentAnswer, ConsentGate};
 
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;

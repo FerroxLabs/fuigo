@@ -116,7 +116,7 @@ impl Harness {
             while let Some(msg) = gateway.recv().await {
                 match msg {
                     fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                        if args.request.method.as_ref() == "x.ai/hooks/event" {
+                        if args.request.method.as_ref() == "fuigo/hooks/event" {
                             sink.borrow_mut()
                                 .push(serde_json::from_str(args.request.params.get()).unwrap());
                         }
@@ -230,7 +230,7 @@ impl Harness {
         let mut events = Vec::new();
         while let Ok(msg) = gateway.try_recv() {
             if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg
-                && args.request.method.as_ref() == "x.ai/hooks/event"
+                && args.request.method.as_ref() == "fuigo/hooks/event"
             {
                 events.push(serde_json::from_str(args.request.params.get()).unwrap());
             }

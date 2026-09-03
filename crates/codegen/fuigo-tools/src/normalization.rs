@@ -19,7 +19,7 @@ pub fn tool_identity_of(metadata: &dyn ToolMetadata) -> ToolIdentity {
         read_only: metadata.is_read_only(),
     }
 }
-/// Resolve `wire_name` in `toolset` and merge the canonical `x.ai/tool` object
+/// Resolve `wire_name` in `toolset` and merge the canonical `fuigo/tool` object
 /// into `existing` (see [`CanonicalToolMeta::merge_into`]). Returns `existing`
 /// unchanged when the tool is unknown (uninitialized MCP, backend-hosted), so
 /// markers like `bash_mode`/`backend` are never clobbered. This is the harness
@@ -51,7 +51,7 @@ pub fn norm_offset_i64(offset: Option<i64>) -> Option<u64> {
     }
 }
 /// Project a tool's **typed** input into the harness-independent `input` dict of
-/// the `x.ai/tool` `_meta` object. Equivalent tools across toolsets emit the
+/// the `fuigo/tool` `_meta` object. Equivalent tools across toolsets emit the
 /// same keys with the same meaning (a harness may add an extra key).
 ///
 /// Returns `None` for tools with no stable cross-harness shape (MCP / dynamic /

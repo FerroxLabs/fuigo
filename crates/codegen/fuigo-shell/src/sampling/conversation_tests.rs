@@ -126,9 +126,7 @@ fn fork_filter_keeps_turn_with_reasoning_between_user_and_assistant() {
     let mut items = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("q"),
-        ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item(
-            "thinking",
-        )),
+        ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item("thinking")),
         ConversationItem::assistant("a"),
     ];
     fork_filter_chat(&mut items);
@@ -169,9 +167,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
         ConversationItem::tool_result("tc1", "out1"),
         ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item("mid")),
         ConversationItem::tool_result("tc2", "out2"),
-        ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item(
-            "reflect",
-        )),
+        ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item("reflect")),
         ConversationItem::assistant("final"),
     ];
     fork_filter_chat(&mut items);
@@ -194,9 +190,7 @@ fn fork_filter_drops_trailing_incomplete_goal_turn_after_reasoning() {
     let mut items = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("q"),
-        ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item(
-            "thinking",
-        )),
+        ConversationItem::Reasoning(fuigo_sampling_types::synthesized_reasoning_item("thinking")),
         ConversationItem::assistant("a"),
         ConversationItem::user("/goal do the thing"),
     ];

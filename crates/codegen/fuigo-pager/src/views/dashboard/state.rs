@@ -4340,6 +4340,21 @@ pub fn write_persisted_to_path(
     path: &std::path::Path,
     p: &PersistedDashboard,
 ) -> std::io::Result<()> {
+    // This writes `config.toml`, the same file `/provider`, `set_hint_at`, the
+    // agents modal and the shell's settings path all edit, so it takes the same
+    // lock they do. An advisory lock only serialises the writers that take it;
+    // one holdout would reintroduce exactly the lost update the lock exists to
+    // prevent.
+    fuigo_config::fs_atomic::locked_read_modify_write(path, || {
+        write_persisted_to_path_locked(path, p)
+    })?
+}
+
+/// Body of [`write_persisted_to_path`]; the caller holds the config write lock.
+fn write_persisted_to_path_locked(
+    path: &std::path::Path,
+    p: &PersistedDashboard,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

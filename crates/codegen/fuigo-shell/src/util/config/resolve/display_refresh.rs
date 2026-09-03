@@ -1,9 +1,9 @@
 //! Display-refresh probe and auto-cadence policy resolve, plus pure cadence derivation.
 
 use crate::util::config::RemoteSettings;
+use fuigo_config_types::DisplayRefreshSettings;
 use serde::Deserialize;
 use toml::Value as TomlValue;
-use fuigo_config_types::DisplayRefreshSettings;
 
 pub const ENV_DISPLAY_REFRESH_PROBE_ENABLED: &str = "FUIGO_DISPLAY_REFRESH_PROBE_ENABLED";
 pub const ENV_DISPLAY_REFRESH_AUTO_CADENCE: &str = "FUIGO_DISPLAY_REFRESH_AUTO_CADENCE";

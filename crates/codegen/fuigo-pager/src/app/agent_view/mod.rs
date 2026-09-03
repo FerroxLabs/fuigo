@@ -213,7 +213,7 @@ impl McpInitProgress {
     /// Whether the progress indicator should be visible in the UI.
     ///
     /// - `total > 0` (real servers): always visible until
-    ///   `x.ai/mcp_initialized` clears the progress.
+    ///   `fuigo/mcp_initialized` clears the progress.
     /// - `total == 0` (seed / 0-server): visible for at most
     ///   [`SEED_EXPIRE`] seconds, then auto-expires as
     ///   defense-in-depth against the shell failing to send
@@ -781,7 +781,7 @@ pub struct PluginCtaState {
     pub dismissed: std::collections::HashSet<String>,
 }
 /// Follow-up suggestion chips for the latest assistant response
-/// (`x.ai/follow_ups`). Streaming-only: never persisted, does not survive a
+/// (`fuigo/follow_ups`). Streaming-only: never persisted, does not survive a
 /// session reload. Keyed by the assistant `response_id` (the newest-wins key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FollowUps {
@@ -1065,7 +1065,7 @@ pub struct AgentView {
     /// during an open question isn't reported as worked time.
     pub turn_paused_wall: std::time::Duration,
     /// IDs of interjections this client sent and already rendered locally
-    /// (optimistic echo). The shell broadcasts `x.ai/session/interjection` to
+    /// (optimistic echo). The shell broadcasts `fuigo/session/interjection` to
     /// every attached pane; when our own broadcast echoes back carrying an id
     /// in this set, `handle_interjection` drops it (we already showed it) and
     /// removes the id. Other panes (which lack the id) render it. This is the
@@ -1454,7 +1454,7 @@ pub struct AgentView {
     /// and the cheatsheet, neither of which can see `draw`'s arguments.
     pub(crate) overlay_can_cycle: bool,
     /// MCP server init progress. Set when the shell starts connecting
-    /// MCP servers, cleared when `x.ai/mcp_initialized` arrives.
+    /// MCP servers, cleared when `fuigo/mcp_initialized` arrives.
     /// Shown in the turn status line while the agent is idle.
     pub(crate) mcp_init_progress: Option<McpInitProgress>,
     /// Last synced ACP command generation. When this differs from
@@ -1537,7 +1537,7 @@ pub struct AgentView {
     /// lands on a tick; borrowed during render so streaming redraws don't
     /// rescan/allocate the prompt every frame.
     pub(crate) timeline_hover_preview: Option<(usize, String)>,
-    /// Running agent definition for this session (`x.ai/session/info` `agentName`).
+    /// Running agent definition for this session (`fuigo/session/info` `agentName`).
     pub session_agent_name: Option<String>,
     /// Map of child session IDs to subagent metadata. Populated on
     /// `SubagentSpawned` notifications, used for permission routing
@@ -1565,7 +1565,7 @@ pub struct AgentView {
     /// it to describe the runtime a fire will get. `None` until that response
     /// lands (or against a shell that predates the key), where readers fall
     /// back to `AppView::scheduler_background_loops_seed`. Deliberately NOT
-    /// refreshed by `x.ai/settings/update`: the fire side is pinned for the
+    /// refreshed by `fuigo/settings/update`: the fire side is pinned for the
     /// session's lifetime, so a live mirror would drift out of agreement.
     pub scheduler_background_loops: Option<bool>,
     /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
@@ -1655,7 +1655,7 @@ pub struct AgentView {
     /// complete. Kind-only: the payload is re-derived from the widget on
     /// reissue so the freshly attached image chip travels with it.
     pub(crate) deferred_send: Option<AgentDeferredSend>,
-    /// Armed when an `x.ai/session/prompt_complete` broadcast arrives for the
+    /// Armed when an `fuigo/session/prompt_complete` broadcast arrives for the
     /// turn THIS client drives while it is still awaiting that turn's
     /// `session/prompt` RPC response. The RPC normally lands milliseconds
     /// later and disarms this; if it never does (lost in leader response
@@ -1693,17 +1693,17 @@ pub struct AgentView {
     pub(crate) follow_without_jump_prompt_id: Option<String>,
     /// Ids of THIS client's server-queue rows that are still optimistic
     /// echoes: the `session/prompt` RPC is in flight and no
-    /// `x.ai/queue/changed` broadcast has confirmed the row yet. Inserted by
+    /// `fuigo/queue/changed` broadcast has confirmed the row yet. Inserted by
     /// the echo push, drained when a broadcast lists the id (queued or
     /// running) or the RPC resolves without the row landing.
     pub(crate) optimistic_queue_ids: std::collections::HashSet<String>,
     /// A queue-row send-now the user fired while the row was still an
-    /// optimistic echo. Firing `x.ai/queue/interject` then would race the
+    /// optimistic echo. Firing `fuigo/queue/interject` then would race the
     /// row's own in-flight `session/prompt` and silently no-op shell-side
     /// (a rapid double-Enter on a queued bash command could "disappear": the
     /// interject overtook the row, the no-op dropped the send-now, and the
     /// armed cancel expectation hid the still-queued row).
-    /// Parked here and fired from the confirming `x.ai/queue/changed`
+    /// Parked here and fired from the confirming `fuigo/queue/changed`
     /// broadcast with the row's authoritative version.
     pub(crate) send_now_awaiting_confirm: Option<String>,
     /// User blocks painted at send-now dispatch, keyed by prompt id; the
@@ -1716,7 +1716,7 @@ pub struct AgentView {
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,
     /// Follow-up suggestion chips for the latest assistant response
-    /// (`x.ai/follow_ups`). `None` when no chips are shown. Set by
+    /// (`fuigo/follow_ups`). `None` when no chips are shown. Set by
     /// [`AgentView::apply_follow_ups`]; cleared at each turn start.
     pub(crate) follow_ups: Option<FollowUps>,
     /// `promptId` (turn identity) of the currently-shown `follow_ups`, when the
@@ -1750,7 +1750,7 @@ pub struct AgentView {
     /// The ordering key for newest-wins: a fresh id takes the next value (the
     /// new high-water), so every previously-seen id is strictly lower.
     pub(crate) follow_up_next_gen: u64,
-    /// Stamped `x.ai/follow_ups` that arrived for a turn that is NOT yet the
+    /// Stamped `fuigo/follow_ups` that arrived for a turn that is NOT yet the
     /// currently-adopted one, keyed by `promptId`. Ext notifications and
     /// `session/update` travel on separate channels, so a turn's follow_ups can
     /// land BEFORE the `session/update` that adopts it. Rather than drop such a
@@ -1888,8 +1888,7 @@ fn translate_local_submit(
             if id == Some(super::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID) {
                 fuigo_telemetry::session_ctx::log_event(
                     fuigo_telemetry::events::CreditLimitUpsellClicked {
-                        surface:
-                            fuigo_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
+                        surface: fuigo_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
                         choice: fuigo_telemetry::events::CreditLimitChoice::RetryLastPrompt,
                     },
                 );
@@ -2193,8 +2192,7 @@ fn is_hash_key(key: &KeyEvent) -> bool {
 }
 /// Check `[features] remember_mode` in config.toml. Defaults to `false`.
 fn remember_mode_enabled() -> bool {
-    let path =
-        fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+    let path = fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
     let Some(doc) = crate::config_toml_edit::read_config_document_for_edit(&path) else {
         return false;
     };
@@ -3259,7 +3257,7 @@ pub(crate) mod test_fixtures {
         );
         assert_eq!(agent.follow_ups.as_ref().unwrap().suggestions, vec!["a"]);
     }
-    /// After adopting a NEW turn, a buffer-replayed `x.ai/follow_ups`
+    /// After adopting a NEW turn, a buffer-replayed `fuigo/follow_ups`
     /// for a PRIOR turn's response_id must NOT revive stale chips: its
     /// `promptId` is not the active turn and it is already in the seen ring.
     #[test]
@@ -3280,7 +3278,7 @@ pub(crate) mod test_fixtures {
         assert!(agent.apply_follow_ups_with_prompt("resp-2".into(), Some("p2"), vec!["b".into()]));
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-2");
     }
-    /// Stamped path: a LATE FIRST-TIME (never-seen) `x.ai/follow_ups`
+    /// Stamped path: a LATE FIRST-TIME (never-seen) `fuigo/follow_ups`
     /// for a PRIOR turn, arriving while a newer turn is active, must NOT
     /// render. Before the fix it slipped through the "strictly newer" branch
     /// (never recorded in `follow_up_seen`, so the seen-reject didn't catch it).
@@ -3336,7 +3334,7 @@ pub(crate) mod test_fixtures {
     /// distinguished from the new turn's first follow_ups, so it follows the
     /// legacy newest-wins (renders). This path is not reachable for current
     /// shells (which always stamp `promptId`) or for buffer-replays (suppressed
-    /// upstream by the `_meta["x.ai/replayed"]` gate); it is pinned here so the
+    /// upstream by the `_meta["fuigo/replayed"]` gate); it is pinned here so the
     /// stamped-path fix above is understood to be the deterministic guard.
     #[test]
     fn apply_follow_ups_none_prompt_first_time_follows_legacy_newest_wins() {
@@ -3348,7 +3346,7 @@ pub(crate) mod test_fixtures {
         );
         assert_eq!(agent.follow_ups.as_ref().unwrap().response_id, "resp-x");
     }
-    /// Buffer-before-adoption: a stamped `x.ai/follow_ups` for a turn that
+    /// Buffer-before-adoption: a stamped `fuigo/follow_ups` for a turn that
     /// is NOT yet current (its `session/update` adoption raced behind the ext
     /// channel) must be BUFFERED, not dropped, and then RENDER when that turn
     /// becomes current and is flushed.

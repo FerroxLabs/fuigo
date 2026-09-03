@@ -1,14 +1,14 @@
 use super::*;
 use serde::Deserialize;
 
-/// Handle `x.ai/models/update`: the model list changed (etag-triggered refresh).
+/// Handle `fuigo/models/update`: the model list changed (etag-triggered refresh).
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
         let new_models = ModelState::from(Some(model_state));
         tracing::info!(
             count = new_models.available.len(),
-            "models updated via x.ai/models/update"
+            "models updated via fuigo/models/update"
         );
 
         app.models.update_catalog(new_models.available.clone());
@@ -38,15 +38,15 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
         }
         true
     } else {
-        tracing::warn!("Failed to parse x.ai/models/update");
+        tracing::warn!("Failed to parse fuigo/models/update");
         false
     }
 }
 
-/// Handle `x.ai/settings/update`: remote settings refreshed on `/new`.
+/// Handle `fuigo/settings/update`: remote settings refreshed on `/new`.
 pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(update) = serde_json::from_str::<PagerSettingsUpdate>(notif.params.get()) else {
-        tracing::warn!("Failed to parse x.ai/settings/update");
+        tracing::warn!("Failed to parse fuigo/settings/update");
         return false;
     };
 
@@ -149,7 +149,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
                 .as_deref()
                 .is_some_and(fuigo_shell::tier::is_restricted_tier_name)
         {
-            app.voice_reset();
+            app.voice_cancel_all_dictation();
             app.voice_ui_active = false;
             app.apply_voice_mode_enabled(false);
         }
@@ -157,7 +157,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     if let Some(remote_v) = update.voice_mode_enabled {
         let v = crate::app::resolve_voice_mode_live(Some(remote_v), app.is_api_key_auth);
         if !v {
-            app.voice_reset();
+            app.voice_cancel_all_dictation();
             app.voice_ui_active = false;
         }
         app.apply_voice_mode_enabled(v);
@@ -324,7 +324,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             resolve_slash_command_tags(tags_config, remote_tags.as_ref());
     }
 
-    tracing::info!("settings updated via x.ai/settings/update");
+    tracing::info!("settings updated via fuigo/settings/update");
     true
 }
 
@@ -359,7 +359,7 @@ pub(super) fn apply_soft_default_permission_mode(
 }
 
 /// Tell live sessions to leave Auto on the mid-session kill-switch.
-/// Fires the `x.ai/yolo_mode_changed` notification the agent maps to `SetAutoMode { enabled: false }`, fire-and-forget over the shared ACP channel.
+/// Fires the `fuigo/yolo_mode_changed` notification the agent maps to `SetAutoMode { enabled: false }`, fire-and-forget over the shared ACP channel.
 /// The notification is CLIENT-scoped (the agent applies it to every session of the sending client), so one send covers all affected sessions.
 /// `yolo_mode` is deliberately OMITTED: the agent skips the yolo branch when the key is absent.
 /// A sibling tab's always-approve is thus preserved; only auto is cleared.
@@ -372,7 +372,7 @@ pub(super) fn notify_sessions_leave_auto(app: &AppView, session_ids: &[acp::Sess
         "permission_mode": "ask",
     });
     let notification = acp::ExtNotification::new(
-        "x.ai/yolo_mode_changed",
+        "fuigo/yolo_mode_changed",
         serde_json::value::to_raw_value(&params)
             .expect("serialize yolo_mode_changed params")
             .into(),
@@ -385,11 +385,11 @@ pub(super) fn notify_sessions_leave_auto(app: &AppView, session_ids: &[acp::Sess
     let _ = app.acp_tx.send(args.into());
 }
 
-/// Handle `x.ai/sessions/changed`: the leader broadcasts roster upserts/removals to all clients (FleetView dashboard).
+/// Handle `fuigo/sessions/changed`: the leader broadcasts roster upserts/removals to all clients (FleetView dashboard).
 pub(super) fn handle_sessions_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(changed) = serde_json::from_str::<crate::app::roster::RosterChanged>(notif.params.get())
     else {
-        tracing::warn!("Failed to parse x.ai/sessions/changed");
+        tracing::warn!("Failed to parse fuigo/sessions/changed");
         return false;
     };
     let mut affected = false;
@@ -484,7 +484,7 @@ pub(super) fn pick_random_announcement(
     announcements.get(idx).cloned()
 }
 
-/// Deserialization type for the `x.ai/settings/update` notification payload.
+/// Deserialization type for the `fuigo/settings/update` notification payload.
 ///
 /// Deliberately separate from `SettingsUpdateNotification` in `fuigo-shell/src/agent/mvp_agent.rs`.
 /// The shell side derives `Serialize` and owns the canonical field set from `RemoteSettings`.
@@ -515,7 +515,7 @@ pub(super) struct PagerSettingsUpdate {
     #[serde(default, deserialize_with = "deserialize_settings_update_tags")]
     slash_command_tags: Option<Option<std::collections::BTreeMap<String, String>>>,
     // `announcements` is deliberately NOT consumed here
-    // Every shell writer of remote_settings also emits gen-ordered `x.ai/announcements/update` (emit_announcements_if_changed)
+    // Every shell writer of remote_settings also emits gen-ordered `fuigo/announcements/update` (emit_announcements_if_changed)
     // A gen-less apply on this path could clobber a newer push
     // Single ingest path: handle_announcements_update
     /// Remote campaigns snapshot.

@@ -98,7 +98,7 @@ use tokio_util::sync::CancellationToken;
 use fuigo_paths::AbsPathBuf;
 use fuigo_workspace::session::git::GitDiscoveryResult;
 use fuigo_hunk_tracker::HunkTrackerActor;
-/// Hard-error message for legacy Direct hub-bind sessions (`x.ai/cloud_server_id`).
+/// Hard-error message for legacy Direct hub-bind sessions (`fuigo/cloud_server_id`).
 pub(crate) const DIRECT_HUB_CLOUD_REMOVED_MSG: &str = "Direct hub cloud removed; use Gateway (envId or existing-workspace attach)";
 /// Reject session `_meta` that still requests Direct hub bind.
 ///
@@ -106,13 +106,13 @@ pub(crate) const DIRECT_HUB_CLOUD_REMOVED_MSG: &str = "Direct hub cloud removed;
 pub(crate) fn reject_direct_hub_cloud_meta(
     session_meta: Option<&acp::Meta>,
 ) -> Result<(), acp::Error> {
-    if session_meta.and_then(|m| m.get("x.ai/cloud_server_id")).is_some() {
+    if session_meta.and_then(|m| m.get("fuigo/cloud_server_id")).is_some() {
         return Err(acp::Error::invalid_params().data(DIRECT_HUB_CLOUD_REMOVED_MSG));
     }
     Ok(())
 }
 /// Marks a notification's meta field with `isReplay: true` for replayed session updates.
-/// If `persist_data` is provided, it will be included in the meta under `x.ai/persist`.
+/// If `persist_data` is provided, it will be included in the meta under `fuigo/persist`.
 /// Extract the numeric `tier` claim from a JWT access token (no signature
 /// verification). Maps the `prod_auth.SubscriptionTier` proto enum values
 /// to display-style strings that `normalize_tier` in the telemetry crate
@@ -182,7 +182,7 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
 }
 /// ACP `_meta` key for the intent to run a chat session on a local workspace (pager stamps it on chat create).
 #[cfg(feature = "local-workspace")]
-const LOCAL_WORKSPACE_META_KEY: &str = "x.ai/local_workspace";
+const LOCAL_WORKSPACE_META_KEY: &str = "fuigo/local_workspace";
 /// True when `_meta` carries a valid local-workspace intent object (`mode` is `"own"` or `"attach"`).
 #[cfg(feature = "local-workspace")]
 fn local_workspace_intent_present(meta: Option<&acp::Meta>) -> bool {
@@ -287,13 +287,13 @@ impl BridgeAttach {
         !matches!(self, Self::NotAttached)
     }
 }
-/// Parse `_meta["x.ai/session"].kind` into [`SessionKind`]; absent, unknown, or malformed maps to `Build`.
+/// Parse `_meta["fuigo/session"].kind` into [`SessionKind`]; absent, unknown, or malformed maps to `Build`.
 fn parse_session_kind(
     meta: Option<&acp::Meta>,
 ) -> crate::session::unified_list::SessionKind {
     use crate::session::unified_list::SessionKind;
     use serde::Deserialize;
-    meta.and_then(|m| m.get("x.ai/session"))
+    meta.and_then(|m| m.get("fuigo/session"))
         .and_then(|s| s.get("kind"))
         .and_then(|k| SessionKind::deserialize(k).ok())
         .unwrap_or(SessionKind::Build)
@@ -368,7 +368,7 @@ fn chat_new_session_model_state(
 /// `session/new` / `session/load` `_meta` key carrying per-session plugin roots.
 pub(crate) const SESSION_PLUGIN_DIRS_META_KEY: &str = "pluginDirs";
 /// `initialize` response `_meta` key advertising [`SESSION_PLUGIN_DIRS_META_KEY`] support.
-pub(crate) const SESSION_PLUGIN_DIRS_CAPABILITY_KEY: &str = "x.ai/pluginDirs";
+pub(crate) const SESSION_PLUGIN_DIRS_CAPABILITY_KEY: &str = "fuigo/pluginDirs";
 /// Per-session plugin roots from `session/new` / `session/load` `_meta.pluginDirs`.
 /// They load at CliOverride scope (always trusted) into this session's registry only.
 /// Paths must be absolute (the SDKs resolve before sending); anything else is warned and skipped.
@@ -450,7 +450,7 @@ fn parse_no_replay(meta: Option<&acp::Meta>) -> bool {
     meta.and_then(|m| m.get("noReplay")).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 /// Insert `key`/`value` into a notification's `_meta`, creating the map if absent.
-/// Used to stamp `x.ai/leaderClientId` onto replay notifications so the leader can unicast them to the loading client only.
+/// Used to stamp `fuigo/leaderClientId` onto replay notifications so the leader can unicast them to the loading client only.
 /// See `forward_raw_replay_line`.
 fn stamp_meta_value(meta: &mut Option<acp::Meta>, key: &str, value: &serde_json::Value) {
     meta.get_or_insert_with(acp::Meta::new).insert(key.to_string(), value.clone());
@@ -463,7 +463,7 @@ fn mark_as_replay(
     let obj = meta.get_or_insert_with(acp::Meta::new);
     obj.insert("isReplay".to_string(), is_replay);
     if let Some(persist) = persist_data {
-        obj.insert("x.ai/persist".to_string(), persist.clone());
+        obj.insert("fuigo/persist".to_string(), persist.clone());
     }
 }
 /// Resolve a session's REQUESTED auto flag from `_meta`.
@@ -578,7 +578,7 @@ pub(crate) fn build_prompt_response_meta(
     };
     serde_json::to_value(meta).expect("PromptResponseMeta is always serializable")
 }
-/// Typed payload for the `x.ai/settings/update` notification sent to pager clients after remote settings are refreshed on `/new`.
+/// Typed payload for the `fuigo/settings/update` notification sent to pager clients after remote settings are refreshed on `/new`.
 ///
 /// Keeping this as a `#[derive(Serialize)]` struct gives compile-time contract safety between the shell and the pager deserializer.
 #[derive(serde::Serialize)]
@@ -665,12 +665,12 @@ fn announcements_refresh_interval() -> std::time::Duration {
 /// Reason why a client is not eligible to use codebase indexing.
 ///
 /// Returned by [`MvpAgent::code_nav_eligibility`] when one of the policy gates fails.
-/// Used in `x.ai/code/status` responses and to generate clear error messages on code-nav requests from ineligible clients.
+/// Used in `fuigo/code/status` responses and to generate clear error messages on code-nav requests from ineligible clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodeNavEligibility {
     /// Client type is not web (web-only for initial rollout).
     ClientNotWeb,
-    /// Client did not advertise `x.ai/codeNavigation.enabled`.
+    /// Client did not advertise `fuigo/codeNavigation.enabled`.
     CapabilityNotAdvertised,
     /// `codebase_indexing` feature is disabled in config (or excluded by glob).
     DisabledByConfig,
@@ -743,7 +743,7 @@ pub struct MvpAgent {
     /// grok.com chat-product catalog (`/rest/modes`) for chat sessions; distinct from `models_manager` (the build `/v1/models` catalog).
     pub(crate) chat_modes: crate::agent::chat_modes::ChatModesManager,
     /// Single-flight guard for interactive login (device poll / loopback wait).
-    /// Owns the active attempt's cancel token and its code/url channels; a new `authenticate` or `x.ai/auth/cancel` cancels the prior attempt.
+    /// Owns the active attempt's cancel token and its code/url channels; a new `authenticate` or `fuigo/auth/cancel` cancels the prior attempt.
     pub(crate) interactive_auth: crate::auth::single_flight::AuthSingleFlight,
     /// Client type. LEADER-SAFE(init-once): set once during `initialize` from `_meta.clientIdentifier` (injected by the IPC server in leader mode).
     ///
@@ -754,11 +754,11 @@ pub struct MvpAgent {
     /// This is considered acceptable because `client_type` is used only for non-safety-critical telemetry and experiment filtering.
     /// Fully per-session attribution would require threading `clientIdentifier` from `_meta` through every session handler.
     client_type: RefCell<ClientType>,
-    /// Whether the current client advertised `x.ai/codeNavigation.enabled`.
+    /// Whether the current client advertised `fuigo/codeNavigation.enabled`.
     /// Updated on every `initialize()` call, with the same last-client-wins rule as `client_type`.
     /// Using `Cell<bool>` (not `RefCell`) so `.get()` is a plain copy with no borrow that could be held across an await point.
     code_nav_enabled: std::cell::Cell<bool>,
-    /// Whether the current client advertised `x.ai/folderTrust.interactive` (it can render the interactive folder-trust prompt).
+    /// Whether the current client advertised `fuigo/folderTrust.interactive` (it can render the interactive folder-trust prompt).
     /// Set on every `initialize()` (last-client-wins, like `code_nav_enabled`).
     /// Gates the DORMANT agent-to-client trust round-trip in `new_session`/`load_session`.
     /// `Cell<bool>` so `.get()` is a borrow-free copy across await points.
@@ -921,7 +921,7 @@ pub struct MvpAgent {
     /// Last value handed out by `next_announcements_gen` (single-threaded LocalSet, so a plain `Cell` suffices).
     /// LEADER-SAFE(shared): one agent-wide push stream.
     announcements_gen: std::cell::Cell<u64>,
-    /// Announcements list last actually emitted via `x.ai/announcements/update` (expiry-filtered), the diff baseline for `emit_announcements`.
+    /// Announcements list last actually emitted via `fuigo/announcements/update` (expiry-filtered), the diff baseline for `emit_announcements`.
     /// Owned by the emit gate: full-settings refreshes move `remote_settings` without touching this.
     /// So their changes still get pushed on the next gate call.
     /// LEADER-SAFE(shared): one agent-wide push stream.
@@ -1182,7 +1182,7 @@ struct AuthRequestMeta {
     #[serde(default)]
     force_interactive: bool,
     /// Pager auth `request_seq` for this attempt.
-    /// Scopes `x.ai/auth/cancel` so a delayed cancel cannot tear down a successor login.
+    /// Scopes `fuigo/auth/cancel` so a delayed cancel cannot tear down a successor login.
     #[serde(default)]
     request_seq: Option<u64>,
 }
@@ -1314,7 +1314,7 @@ impl MvpAgent {
         )
     }
 }
-/// Parse the client-advertised `x.ai/hunkTracker.mode` string.
+/// Parse the client-advertised `fuigo/hunkTracker.mode` string.
 /// Case-insensitive and trimmed.
 /// Absent, blank, `off`, or `disabled` yields `None`; unknown yields `AllDirty`.
 fn resolve_hunk_tracking_mode(
@@ -1522,7 +1522,7 @@ impl MvpAgent {
                             .gateway
                             .forward_with_completion(
                                 acp::ExtNotification::new(
-                                    "x.ai/task_completed",
+                                    "fuigo/task_completed",
                                     params.into_inner().into(),
                                 ),
                             ),
@@ -1611,7 +1611,7 @@ impl MvpAgent {
             self.retry_subscription_check().await;
         }
     }
-    /// Single-shot subscription check called by the pager's "Check subscription" button (`x.ai/auth/check_subscription`).
+    /// Single-shot subscription check called by the pager's "Check subscription" button (`fuigo/auth/check_subscription`).
     /// The pager calls this every 5s while the paywall is shown, acting as the poller.
     ///
     /// Queries `/user?include=subscription` for the live tier from the subscription API.
@@ -1984,7 +1984,7 @@ impl MvpAgent {
             tracing::warn!(error = %e, "auto worktree gc failed");
         }
     }
-    /// Fire-and-forget `x.ai/settings/update` from the current remote snapshot.
+    /// Fire-and-forget `fuigo/settings/update` from the current remote snapshot.
     pub(super) fn emit_settings_update_notification(&self) {
         let payload = {
             let cfg = self.cfg.borrow();
@@ -2023,7 +2023,7 @@ impl MvpAgent {
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
             self.gateway
                 .forward_fire_and_forget(
-                    acp::ExtNotification::new("x.ai/settings/update", params.into()),
+                    acp::ExtNotification::new("fuigo/settings/update", params.into()),
                 );
         }
     }

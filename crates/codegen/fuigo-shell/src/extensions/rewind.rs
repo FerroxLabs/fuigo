@@ -1,4 +1,4 @@
-//! `x.ai/rewind/*` extension handlers.
+//! `fuigo/rewind/*` extension handlers.
 //!
 //! - `rewind/execute`: rewind a session to a target prompt index, optionally forcing past in-flight prompts and choosing a `RewindMode`.
 //! - `rewind/points`: list the prompt indices that can be rewound to.
@@ -16,8 +16,8 @@ use tokio::sync::oneshot;
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     tracing::info!("handling rewind request: {}", args.method);
     match args.method.as_ref() {
-        "x.ai/rewind/execute" => handle_execute(agent, args).await,
-        "x.ai/rewind/points" => handle_points(agent, args).await,
+        "fuigo/rewind/execute" => handle_execute(agent, args).await,
+        "fuigo/rewind/points" => handle_points(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }

@@ -17,8 +17,8 @@ fn load_filtered_marketplace_sources() -> Vec<fuigo_plugin_marketplace::Marketpl
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/marketplace/list" => handle_list().await,
-        "x.ai/marketplace/action" => handle_action(agent, args).await,
+        "fuigo/marketplace/list" => handle_list().await,
+        "fuigo/marketplace/action" => handle_action(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -156,9 +156,7 @@ fn refresh_sources(
     for source in sources {
         if let Some(filter) = source_url_or_path {
             let identity = match &source.kind {
-                fuigo_plugin_marketplace::SourceKind::Local { path } => {
-                    path.display().to_string()
-                }
+                fuigo_plugin_marketplace::SourceKind::Local { path } => path.display().to_string(),
                 fuigo_plugin_marketplace::SourceKind::Git { url, .. } => url.clone(),
             };
             if identity != filter {
@@ -201,8 +199,8 @@ async fn handle_update(
     source_url_or_path: &str,
     plugin_relative_path: &str,
 ) -> fuigo_hooks_plugins_types::ActionOutcome {
-    use fuigo_plugin_marketplace::installer;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
+    use fuigo_plugin_marketplace::installer;
 
     let sources = load_filtered_marketplace_sources();
 
@@ -355,8 +353,8 @@ async fn handle_install(
     source_url_or_path: &str,
     plugin_relative_path: &str,
 ) -> fuigo_hooks_plugins_types::ActionOutcome {
-    use fuigo_plugin_marketplace::installer;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
+    use fuigo_plugin_marketplace::installer;
 
     let sources = load_filtered_marketplace_sources();
 
@@ -488,8 +486,7 @@ async fn handle_install(
         };
 
         let plugin_path =
-            match fuigo_plugin_marketplace::MarketplaceRelativePath::parse(plugin_relative_path)
-            {
+            match fuigo_plugin_marketplace::MarketplaceRelativePath::parse(plugin_relative_path) {
                 Ok(path) => path,
                 Err(e) => {
                     return ActionOutcome {
@@ -581,8 +578,8 @@ async fn handle_uninstall(
     source_url_or_path: &str,
     plugin_relative_path: &str,
 ) -> fuigo_hooks_plugins_types::ActionOutcome {
-    use fuigo_plugin_marketplace::installer;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
+    use fuigo_plugin_marketplace::installer;
 
     let mut registry = fuigo_agent::plugins::install_registry::InstallRegistry::load();
 
@@ -946,6 +943,12 @@ async fn handle_add_source(url: &str) -> fuigo_hooks_plugins_types::ActionOutcom
 /// Append a `[[marketplace.sources]]` entry, optionally setting the official flag, in one atomic `toml_edit` write.
 /// The single write means a crash can't leave a source without its flag.
 /// Idempotent on the normalized git URL or local path; preserves comments.
+///
+/// Takes `fuigo_config::fs_atomic`'s `config.toml.lock` across the read and the rename, so a writer in
+/// another process that also takes it can't read the same original and rename its own document over this one.
+/// That is a different lock from `.config-init.lock`, which the callers hold for their own first-run
+/// auto-registration semantics and which no other config writer takes. Neither is nested inside the other's
+/// scope here: this is the only place in this path that takes the file lock.
 fn add_marketplace_source(
     config_path: &std::path::Path,
     name: &str,
@@ -955,6 +958,18 @@ fn add_marketplace_source(
     if let Some(parent) = config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
+        add_marketplace_source_locked(config_path, name, source, set_official_flag)
+    })?
+}
+
+/// Body of [`add_marketplace_source`]; the caller holds the `config.toml` write lock.
+fn add_marketplace_source_locked(
+    config_path: &std::path::Path,
+    name: &str,
+    source: &crate::plugin::MarketplaceAddInput,
+    set_official_flag: bool,
+) -> std::io::Result<()> {
     let existing = crate::util::config::read_to_string_or_empty(config_path)?;
     let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|e| {
         std::io::Error::new(
@@ -1026,7 +1041,9 @@ fn add_marketplace_source(
 
 /// Remove a marketplace source from `~/.fuigo/config.toml` and uninstall all
 /// plugins that were installed from it.
-async fn handle_remove_source(source_url_or_path: &str) -> fuigo_hooks_plugins_types::ActionOutcome {
+async fn handle_remove_source(
+    source_url_or_path: &str,
+) -> fuigo_hooks_plugins_types::ActionOutcome {
     let src = source_url_or_path.to_string();
     // Lock, then run the blocking FS work off the reactor
     let _save_guard = crate::util::config::lock_config_writes().await;
@@ -1041,8 +1058,47 @@ async fn handle_remove_source(source_url_or_path: &str) -> fuigo_hooks_plugins_t
     }
 }
 
+/// Drop `source_url_or_path`'s `[[marketplace.sources]]` block from `config.toml`, setting the official
+/// flag in the SAME write when the source is the official one, so a crash can't drop the flag and re-add
+/// the source next startup.
+///
+/// Reads and renames under `fuigo_config::fs_atomic`'s `config.toml.lock`, so a concurrent writer that also
+/// takes that lock cannot read the same original and rename its own document over this removal. This is the
+/// only place in the removal path that takes that lock — the later flag write for the JSON-store-only branch
+/// takes it separately — so it is never nested inside itself.
+///
+/// `Ok(true)` when the block was found and removed; `Ok(false)` when the source is not in `config.toml` at all.
+/// `Err` carries the message to show.
+fn remove_source_from_config(
+    config_path: &std::path::Path,
+    source_url_or_path: &str,
+    is_official: bool,
+) -> Result<bool, String> {
+    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
+        let content = crate::util::config::read_to_string_or_empty(config_path)
+            .map_err(|e| format!("Failed to read config: {e}"))?;
+        let Some(removed) =
+            crate::plugin::remove_toml_marketplace_block(&content, source_url_or_path)
+        else {
+            return Ok(false);
+        };
+        let final_content = if is_official {
+            set_official_flag_in_toml(&removed)
+                .map_err(|e| format!("Failed to update config: {e}"))?
+        } else {
+            removed
+        };
+        crate::util::config::atomic_write_string(config_path, &final_content)
+            .map_err(|e| format!("Failed to write config: {e}"))?;
+        Ok(true)
+    })
+    .map_err(|e| format!("Failed to lock config: {e}"))?
+}
+
 /// Sync body of [`handle_remove_source`], run on a blocking thread.
-/// Holds the flock for the whole read-modify-write so a concurrent auto-register can't re-add the source mid-removal.
+/// Holds `.config-init.lock` for the whole call so a concurrent auto-register can't re-add the source mid-removal.
+/// The config read-modify-write inside is additionally serialized against every other config writer that takes
+/// `fuigo_config::fs_atomic`'s `config.toml.lock`; see [`remove_source_from_config`].
 fn remove_source_locked(source_url_or_path: &str) -> fuigo_hooks_plugins_types::ActionOutcome {
     use crate::plugin;
     use fuigo_hooks_plugins_types::{ActionOutcome, OutcomeStatus};
@@ -1050,49 +1106,24 @@ fn remove_source_locked(source_url_or_path: &str) -> fuigo_hooks_plugins_types::
     let fuigo_home = fuigo_config::fuigo_home();
     let _flock = acquire_init_lock(&fuigo_home).ok();
 
-    let uninstalled = plugin::uninstall_marketplace_source_plugins(source_url_or_path);
-
-    // Remove the source and (if official) set the flag in ONE atomic write so a crash can't drop the flag and re-add the source next startup
+    // Config removal first, uninstall second. Uninstalling up front deleted the
+    // plugins even when the config write then failed or the source was not
+    // found, leaving a still-configured source with nothing on disk -- which the
+    // next sync would simply reinstall.
     let config_path = fuigo_home.join("config.toml");
     let is_official = fuigo_plugin_marketplace::is_official_source_url(source_url_or_path);
-    let mut removed_from_config = false;
-    let content = match crate::util::config::read_to_string_or_empty(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return ActionOutcome {
-                status: OutcomeStatus::InternalError,
-                message: format!("Failed to read config: {e}"),
-                requires_reload: false,
-                requires_restart: false,
-            };
-        }
-    };
-    if let Some(removed) = plugin::remove_toml_marketplace_block(&content, source_url_or_path) {
-        let final_content = if is_official {
-            match set_official_flag_in_toml(&removed) {
-                Ok(c) => c,
-                Err(e) => {
-                    return ActionOutcome {
-                        status: OutcomeStatus::InternalError,
-                        message: format!("Failed to update config: {e}"),
-                        requires_reload: false,
-                        requires_restart: false,
-                    };
-                }
+    let removed_from_config =
+        match remove_source_from_config(&config_path, source_url_or_path, is_official) {
+            Ok(removed) => removed,
+            Err(message) => {
+                return ActionOutcome {
+                    status: OutcomeStatus::InternalError,
+                    message,
+                    requires_reload: false,
+                    requires_restart: false,
+                };
             }
-        } else {
-            removed
         };
-        if let Err(e) = crate::util::config::atomic_write_string(&config_path, &final_content) {
-            return ActionOutcome {
-                status: OutcomeStatus::InternalError,
-                message: format!("Failed to write config: {e}"),
-                requires_reload: false,
-                requires_restart: false,
-            };
-        }
-        removed_from_config = true;
-    }
 
     if !removed_from_config && !plugin::try_remove_source_from_json_files(source_url_or_path) {
         return ActionOutcome {
@@ -1102,6 +1133,9 @@ fn remove_source_locked(source_url_or_path: &str) -> fuigo_hooks_plugins_types::
             requires_restart: false,
         };
     }
+
+    // The source is gone from config, so removing what it installed is now safe.
+    let uninstalled = plugin::uninstall_marketplace_source_plugins(source_url_or_path);
 
     // JSON-store-only removal: set the flag separately (the config.toml path already set it atomically above)
     if is_official
@@ -1155,13 +1189,18 @@ fn set_marketplace_bool_flag_in_toml(content: &str, key: &str) -> std::io::Resul
     Ok(doc.to_string())
 }
 
+/// Set `[marketplace] <key> = true`, reading and renaming under
+/// `fuigo_config::fs_atomic`'s `config.toml.lock` so a concurrent writer that
+/// also takes that lock cannot drop the flag by renaming its own document over it.
 fn set_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> std::io::Result<()> {
     if let Some(parent) = config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let existing = crate::util::config::read_to_string_or_empty(config_path)?;
-    let updated = set_marketplace_bool_flag_in_toml(&existing, key)?;
-    crate::util::config::atomic_write_string(config_path, &updated)
+    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
+        let existing = crate::util::config::read_to_string_or_empty(config_path)?;
+        let updated = set_marketplace_bool_flag_in_toml(&existing, key)?;
+        crate::util::config::atomic_write_string(config_path, &updated)
+    })?
 }
 
 fn read_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> bool {

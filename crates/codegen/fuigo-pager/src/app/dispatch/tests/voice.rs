@@ -63,6 +63,7 @@ fn voice_final_appends_to_prompt_with_single_space() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(id),
         interim: None,
     };
@@ -72,6 +73,7 @@ fn voice_final_appends_to_prompt_with_single_space() {
     let redraw = crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "world".into(),
         },
     );
@@ -86,6 +88,7 @@ fn voice_final_preserves_mid_text_cursor() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: Some("partial".into()),
@@ -97,6 +100,7 @@ fn voice_final_preserves_mid_text_cursor() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "again".into(),
         },
     );
@@ -113,12 +117,14 @@ fn voice_final_into_empty_prompt_has_no_leading_space() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(id),
         interim: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "hi there".into(),
         },
     );
@@ -132,6 +138,7 @@ fn voice_final_replaces_whitespace_only_draft() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(id),
         interim: None,
     };
@@ -140,7 +147,10 @@ fn voice_final_replaces_whitespace_only_draft() {
     p.set_cursor(0);
     crate::voice::handle_voice_event(
         &mut app,
-        fuigo_voice::VoiceEvent::UtteranceFinal { text: "hi".into() },
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
+            text: "hi".into(),
+        },
     );
     let p = &app.agents.get(&id).unwrap().prompt;
     assert_eq!(p.text(), "hi");
@@ -152,6 +162,7 @@ fn voice_final_preserves_trailing_newline() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(id),
         interim: None,
     };
@@ -163,6 +174,7 @@ fn voice_final_preserves_trailing_newline() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "line two".into(),
         },
     );
@@ -256,6 +268,7 @@ fn voice_keybinding_on_paid_tier_not_gated() {
 fn voice_interim_sets_then_error_clears_state() {
     let mut app = test_app_with_agent();
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(AgentId(0)),
         interim: None,
@@ -263,6 +276,7 @@ fn voice_interim_sets_then_error_clears_state() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::InterimTranscript {
+            session: 1,
             text: "partial".into(),
         },
     );
@@ -271,6 +285,7 @@ fn voice_interim_sets_then_error_clears_state() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::Error {
+            session: 1,
             message: "boom".into(),
             hint: None,
         },
@@ -288,6 +303,7 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
     // Hint follows the bound target (like finals), not the active view.
     app.active_view = ActiveView::AgentDashboard;
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: None,
@@ -295,6 +311,7 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::Error {
+            session: 1,
             message: "no speech detected".into(),
             hint: Some("allow terminal mic access in system settings".into()),
         },
@@ -315,8 +332,41 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
         "scrollback should carry short message + long hint, got {text:?}"
     );
 
+    // A message that is already a sentence must not gain a second full stop.
+    // The real one is "No speech was detected. Voice stopped.", which rendered
+    // as "Voice stopped.." to the user.
+    app.voice_state = VoiceState::Recording {
+        session: 1,
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::Error {
+            session: 1,
+            message: "No speech was detected. Voice stopped.".into(),
+            hint: Some("check the input device".into()),
+        },
+    );
+    let agent = app.agents.get(&id).unwrap();
+    let text = match agent
+        .scrollback
+        .get(agent.scrollback.len() - 1)
+        .map(|e| &e.block)
+    {
+        Some(crate::scrollback::block::RenderBlock::System(b)) => b.text.as_str(),
+        other => panic!("expected system hint block, got {other:?}"),
+    };
+    assert!(!text.contains(".."), "doubled full stop in {text:?}");
+    assert!(
+        text.contains("Voice stopped. check the input device"),
+        "{text:?}"
+    );
+
     // No hint while still bound: toast only, no scrollback growth
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: None,
@@ -325,6 +375,7 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::Error {
+            session: 1,
             message: "boom".into(),
             hint: None,
         },
@@ -339,6 +390,7 @@ fn voice_error_hint_dropped_for_dashboard_dispatch() {
     app.active_view = ActiveView::AgentDashboard;
     ensure_dashboard_state(&mut app);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardDispatch,
         interim: None,
@@ -347,6 +399,7 @@ fn voice_error_hint_dropped_for_dashboard_dispatch() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::Error {
+            session: 1,
             message: "no speech detected".into(),
             hint: Some("allow terminal mic access in system settings".into()),
         },
@@ -370,6 +423,7 @@ fn voice_interim_ignored_after_stop() {
     let redraw = crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::InterimTranscript {
+            session: 1,
             text: "late".into(),
         },
     );
@@ -386,6 +440,7 @@ fn voice_interim_kept_on_stop_then_cleared_by_final() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: Some("partial".into()),
@@ -402,6 +457,7 @@ fn voice_interim_kept_on_stop_then_cleared_by_final() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "partial".into(),
         },
     );
@@ -425,14 +481,14 @@ fn voice_toggle_starts_and_stops() {
     assert!(app.voice_listening());
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttPress)
+        Ok(fuigo_voice::VoiceCommand::PttPress { .. })
     ));
 
     dispatch(Action::VoiceToggle, &mut app);
     assert!(!app.voice_listening());
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 
@@ -475,7 +531,7 @@ fn voice_toggle_starts_without_voice_mode_prereq() {
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttPress)
+        Ok(fuigo_voice::VoiceCommand::PttPress { .. })
     ));
 }
 
@@ -500,7 +556,7 @@ fn voice_mode_enable_starts_recording_and_stays_on() {
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttPress)
+        Ok(fuigo_voice::VoiceCommand::PttPress { .. })
     ));
 
     // `EnableVoiceMode` is start-only (not a toggle): running it again while already recording is idempotent, no stop, no second PttPress
@@ -587,6 +643,7 @@ fn voice_toggle_can_always_stop_even_with_flag_disabled() {
     // Recording was started while the flag was on, then it flipped off.
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(AgentId(0)),
         interim: None,
@@ -601,7 +658,7 @@ fn voice_toggle_can_always_stop_even_with_flag_disabled() {
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 
@@ -614,6 +671,7 @@ fn voice_stop_stops_and_drops_pending_cold_start() {
     app.voice_cmd_tx = Some(tx);
     // A live recording started by a Ctrl+Space hold-press
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: true,
         target: VoiceTarget::Agent(AgentId(0)),
         interim: None,
@@ -625,7 +683,7 @@ fn voice_stop_stops_and_drops_pending_cold_start() {
     assert!(!app.voice_state.hold());
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 
@@ -658,6 +716,7 @@ fn voice_stt_language_change_recycles_pipeline() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(AgentId(0)),
         interim: Some("hola".to_string()),
@@ -674,6 +733,17 @@ fn voice_stt_language_change_recycles_pipeline() {
     assert!(
         !app.voice_listening(),
         "recycling the pipeline must end the in-flight session (no lingering hot mic)"
+    );
+    // The release comes first, then the shutdown. This test previously asserted
+    // that `Shutdown` was the *only* command, which held only because the sender
+    // was taken out of the `AppView` before `voice_reset` ran -- so the reset had
+    // nothing to send to and the microphone was never actually released.
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
+        ),
+        "the in-flight session must be released before the pipeline is torn down"
     );
     assert!(matches!(
         rx.try_recv(),
@@ -778,6 +848,7 @@ fn voice_submit_includes_interim() {
     app.voice_cmd_tx = Some(tx);
     app.agents.get_mut(&id).unwrap().prompt.set_text("hello");
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: Some("world".into()),
@@ -791,7 +862,7 @@ fn voice_submit_includes_interim() {
     assert!(!app.voice_listening());
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 
@@ -800,6 +871,7 @@ fn voice_submit_interim_only() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: Some("ghost only".into()),
@@ -819,6 +891,7 @@ fn voice_submit_follow_up_keeps_chip_literal() {
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: Some("dictated".into()),
@@ -831,4 +904,476 @@ fn voice_submit_follow_up_keeps_chip_literal() {
     assert_eq!(text, "chip text");
     assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "draft dictated");
     assert!(!app.voice_listening());
+}
+
+// --- Session identity: where a transcript goes when the user has moved on ----
+
+/// The bug session ids exist for: dictate into agent A, re-press while looking
+/// at agent B, and A's transcript arrives after the switch. Routing by "whatever
+/// is bound now" spliced A's words into B's prompt.
+#[test]
+fn a_detached_transcript_lands_in_the_box_it_was_dictated_into() {
+    let mut app = test_app_with_two_agents();
+    let (a, b) = (AgentId(0), AgentId(1));
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(a), false);
+    let first = app.voice_state.session().expect("recording has a session");
+    // The user re-presses, now bound to B. A's recording is still uploading.
+    app.voice_begin_recording(VoiceTarget::Agent(b), false);
+    let second = app.voice_state.session().expect("recording has a session");
+    assert_ne!(first, second, "each press mints a new session");
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: first,
+            text: "words for A".into(),
+        },
+    );
+
+    assert_eq!(app.agents.get(&a).unwrap().prompt.text(), "words for A");
+    assert_eq!(
+        app.agents.get(&b).unwrap().prompt.text(),
+        "",
+        "the newer target must not receive the older session's dictation"
+    );
+}
+
+/// A hard teardown is a cancel. Dictation the user cancelled must not reappear
+/// in a prompt box once its upload finishes.
+#[test]
+fn a_transcript_from_a_hard_reset_session_is_dropped() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let session = app.voice_state.session().unwrap();
+    app.voice_reset();
+
+    let redraw = crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session,
+            text: "cancelled".into(),
+        },
+    );
+    assert!(!redraw);
+    assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "");
+}
+
+/// The hot-mic hazard: an older session's failure must not tear down the
+/// recording the user has since started.
+#[test]
+fn a_stale_error_does_not_reset_a_live_recording() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let stale = app.voice_state.session().unwrap();
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let live = app.voice_state.session().unwrap();
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::Error {
+            session: stale,
+            message: "upload failed".into(),
+            hint: None,
+        },
+    );
+
+    assert!(
+        app.voice_listening(),
+        "the live recording must survive an older session's failure"
+    );
+    assert_eq!(app.voice_state.session(), Some(live));
+}
+
+/// The current session's own failure still tears the dictation down: a dead mic
+/// or a refused endpoint should not leave a listening UI behind.
+#[test]
+fn the_current_sessions_error_still_resets() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let session = app.voice_state.session().unwrap();
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::Error {
+            session,
+            message: "No speech was detected. Voice stopped.".into(),
+            hint: None,
+        },
+    );
+    assert!(!app.voice_listening());
+    assert!(matches!(app.voice_state, VoiceState::Idle));
+}
+
+/// A superseded session that then fails is news the user is owed -- those words
+/// are gone -- but it is not a teardown.
+#[test]
+fn a_detached_session_failure_is_reported_without_a_reset() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let stale = app.voice_state.session().unwrap();
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+
+    let redraw = crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::Error {
+            session: stale,
+            message: "An earlier dictation was dropped".into(),
+            hint: None,
+        },
+    );
+    assert!(redraw, "the user must be told");
+    assert!(app.voice_listening(), "but nothing is torn down");
+    assert!(
+        !app.voice_detached.iter().any(|(s, _)| *s == stale),
+        "a resolved session is forgotten"
+    );
+}
+
+/// An interim for a session that is no longer on screen would overwrite the
+/// overlay of the recording being made now.
+#[test]
+fn a_stale_interim_is_dropped() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        session: 9,
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: Some("live".into()),
+    };
+    let redraw = crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::InterimTranscript {
+            session: 8,
+            text: "stale".into(),
+        },
+    );
+    assert!(!redraw);
+    assert_eq!(app.voice_interim(), Some("live"));
+}
+
+/// Delivering text does not end the turn; `SessionEnded` does. A final that is
+/// suppressed as a duplicate would otherwise leave the session hanging, and a
+/// correction arriving after the first final would have no owner.
+#[test]
+fn the_session_ends_on_session_ended_not_on_a_final() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Stopping {
+        session: 3,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 3,
+            text: "once".into(),
+        },
+    );
+    assert!(
+        matches!(app.voice_state, VoiceState::Stopping { .. }),
+        "the text landed, but the pipeline has not said the turn is over"
+    );
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::SessionEnded { session: 3 },
+    );
+    assert!(matches!(app.voice_state, VoiceState::Idle));
+
+    // Past the end, a stray event for that session has no claim on anything.
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 3,
+            text: "twice".into(),
+        },
+    );
+    assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "once");
+}
+
+/// Streaming emits a final per `speech_final` pause and keeps the mic open, so
+/// a final while `Recording` must not end the session.
+#[test]
+fn a_final_while_recording_keeps_the_session_live() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        session: 4,
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 4,
+            text: "first".into(),
+        },
+    );
+    assert!(app.voice_listening());
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 4,
+            text: "second".into(),
+        },
+    );
+    assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "first second");
+}
+
+// --- Enter during a batch dictation: who owns the key ------------------------
+
+/// The interception's reason for existing: with an empty composer no view turns
+/// Enter into a send, so without this the key would do nothing at all while the
+/// microphone stayed open.
+#[test]
+fn enter_during_a_batch_recording_stops_it_and_is_consumed() {
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+
+    let out = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+
+    assert!(matches!(out, InputOutcome::Changed));
+    assert!(!app.voice_listening(), "the recording is ended");
+    assert!(
+        matches!(app.voice_state, VoiceState::Stopping { .. }),
+        "and kept, so the transcript still has somewhere to land: {:?}",
+        app.voice_state
+    );
+}
+
+/// A blocking card sits *over* a visible prompt without being a modal, so the
+/// weaker "is the box on screen" check let the interception steal its Enter and
+/// leave it unanswerable. The dictation is worth less than the ability to answer.
+#[test]
+fn enter_belongs_to_an_open_blocking_card_not_to_the_dictation() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    app.agents.get_mut(&id).unwrap().plan_approval_view =
+        Some(crate::app::agent_view::test_fixtures::make_plan_approval_view_state());
+
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+
+    assert!(
+        app.voice_listening(),
+        "the interception must not fire while something inline owns Enter"
+    );
+}
+
+/// Same rule for a pane that is not the prompt: Enter there is the pane's.
+#[test]
+fn enter_outside_the_prompt_pane_does_not_stop_the_dictation() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .set_active_pane(crate::views::agent::ActivePane::Scrollback, false);
+
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+
+    assert!(app.voice_listening());
+}
+
+/// The interception tells the user "press Enter again to send". Doing exactly
+/// that, before the upload finishes, used to destroy the dictation: the second
+/// Enter reached the submit funnel, which keyed its soft-stop on
+/// `voice_listening()` -- false in `Stopping` -- and hard-reset instead, so the
+/// arriving final belonged to no one and was dropped without a toast.
+#[test]
+fn following_the_press_enter_again_advice_does_not_lose_the_dictation() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+    app.agents.get_mut(&id).unwrap().prompt.set_text("fix the");
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let session = app.voice_state.session().expect("recording");
+
+    // First Enter: the interception stops the capture and says to press again.
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(matches!(app.voice_state, VoiceState::Stopping { .. }));
+
+    // Second Enter, while the upload is still in flight: this submits.
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+
+    // The transcript arrives afterwards and must still have somewhere to go.
+    let redraw = crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session,
+            text: "the build".into(),
+        },
+    );
+    assert!(redraw, "the dictation must be delivered, not dropped");
+    assert!(
+        app.agents
+            .get(&id)
+            .unwrap()
+            .prompt
+            .text()
+            .contains("the build"),
+        "the words the user spoke must land in the box they dictated into, got {:?}",
+        app.agents.get(&id).unwrap().prompt.text()
+    );
+}
+
+/// A routine failure on the *current* session must not destroy transcripts that
+/// other sessions are still uploading.
+///
+/// The sequence is ordinary: dictate into A, re-press, then say nothing — the
+/// no-speech watchdog fires for the new session. An earlier revision cleared the
+/// whole detached ledger on any error teardown, so A's words vanished silently.
+#[test]
+fn a_current_session_failure_does_not_cancel_other_sessions_transcripts() {
+    let mut app = test_app_with_two_agents();
+    let (a, b) = (AgentId(0), AgentId(1));
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(a), false);
+    let first = app.voice_state.session().unwrap();
+    app.voice_begin_recording(VoiceTarget::Agent(b), false);
+    let second = app.voice_state.session().unwrap();
+
+    // The new session hits the no-speech watchdog.
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::Error {
+            session: second,
+            message: "No speech was detected. Voice stopped.".into(),
+            hint: None,
+        },
+    );
+    assert!(matches!(app.voice_state, VoiceState::Idle));
+
+    // The first session's upload finishes afterwards. Those words were spoken.
+    crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: first,
+            text: "words for A".into(),
+        },
+    );
+    assert_eq!(
+        app.agents.get(&a).unwrap().prompt.text(),
+        "words for A",
+        "an unrelated session's failure must not discard this transcript"
+    );
+}
+
+/// Turning voice off entirely is different: nothing is left to deliver with, so
+/// every pending transcript is abandoned rather than surfacing later.
+#[test]
+fn cancelling_dictation_wholesale_drops_detached_sessions() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let first = app.voice_state.session().unwrap();
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    app.voice_cancel_all_dictation();
+
+    let redraw = crate::voice::handle_voice_event(
+        &mut app,
+        fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: first,
+            text: "abandoned".into(),
+        },
+    );
+    assert!(!redraw);
+    assert_eq!(app.agents.get(&id).unwrap().prompt.text(), "");
+}
+
+/// Esc is the way out of a transcription that never lands: Enter is swallowed
+/// while one is pending, so without this the composer would be unsendable and
+/// uncancellable for as long as the upload hangs.
+#[test]
+fn esc_abandons_a_pending_transcription() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    app.voice_cmd_tx = Some(tx);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+    app.voice_begin_recording(VoiceTarget::Agent(id), false);
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(matches!(app.voice_state, VoiceState::Stopping { .. }));
+
+    let _ = app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+    assert!(
+        matches!(app.voice_state, VoiceState::Idle),
+        "Esc must release the composer, got {:?}",
+        app.voice_state
+    );
 }

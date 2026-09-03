@@ -1,9 +1,9 @@
 use agent_client_protocol as acp;
-use indexmap::IndexMap;
 use fuigo_shell::sampling::types::{
     ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
     parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
 };
+use indexmap::IndexMap;
 
 use crate::slash::commands::effort_levels::legacy_effort_options;
 

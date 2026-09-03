@@ -3177,9 +3177,10 @@ mod extensions_modal_confirmation_tests {
         mcp.picker_state.selected = 0;
 
         let mut plugins = ExtensionsModalState::new(ExtensionsTab::Plugins);
-        plugins.plugins_data = TabDataState::Loaded(fuigo_hooks_plugins_types::PluginsListResponse {
-            plugins: vec![plugin_info("my-plugin")],
-        });
+        plugins.plugins_data =
+            TabDataState::Loaded(fuigo_hooks_plugins_types::PluginsListResponse {
+                plugins: vec![plugin_info("my-plugin")],
+            });
         plugins.entry_data_indices = vec![Some(0)];
         plugins.entry_group_keys = vec![None];
         plugins.picker_state.selected = 0;
@@ -3265,9 +3266,11 @@ mod extensions_modal_confirmation_tests {
                 modal: hooks,
                 button: ButtonAction::RemoveSelectedHook,
                 message_sub: format!("Remove hook source \"{hook_label}\"?"),
-                expected: ConfirmationAction::Hooks(fuigo_hooks_plugins_types::HooksAction::Remove {
-                    path: source.into(),
-                }),
+                expected: ConfirmationAction::Hooks(
+                    fuigo_hooks_plugins_types::HooksAction::Remove {
+                        path: source.into(),
+                    },
+                ),
                 row: 0,
             },
         ]

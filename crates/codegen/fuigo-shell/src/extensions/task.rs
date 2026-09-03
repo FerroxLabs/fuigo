@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
-use serde::{Deserialize, Serialize};
 use fuigo_tools::types::{KillOutcome, KillSource, TaskSnapshot};
+use serde::{Deserialize, Serialize};
 
 use fuigo_tools::implementations::fuigo_build::task::types::{
     SubagentCancelOutcome, SubagentInspection, SubagentProvenance, SubagentSnapshot,
@@ -12,7 +12,7 @@ use crate::session::ExtMethodResult;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
-/// Wire DTO for the `x.ai/task/kill` ext request.
+/// Wire DTO for the `fuigo/task/kill` ext request.
 ///
 /// `pub` (with both serde directions) so ACP clients (fuigo-pager) build the request from the same type the agent parses.
 /// That keeps the wire contract typed end-to-end instead of duplicated `json!` literals.
@@ -27,7 +27,7 @@ pub struct KillTaskRequest {
     pub source: TaskKillSource,
 }
 
-/// Client-facing kill reason on `x.ai/task/kill`. Older clients omit it.
+/// Client-facing kill reason on `fuigo/task/kill`. Older clients omit it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskKillSource {
@@ -45,7 +45,7 @@ impl From<TaskKillSource> for KillSource {
     }
 }
 
-/// Wire DTO for the `x.ai/task/kill` ext response payload (nested under `result` in the `ExtMethodResult` envelope).
+/// Wire DTO for the `fuigo/task/kill` ext response payload (nested under `result` in the `ExtMethodResult` envelope).
 ///
 /// `pub` (with both serde directions) so ACP clients deserialize the typed outcome instead of probing raw JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +67,7 @@ struct ListTasksResponse {
     tasks: Vec<TaskSnapshot>,
 }
 
-/// Wire DTO for the `x.ai/subagent/cancel` ext request.
+/// Wire DTO for the `fuigo/subagent/cancel` ext request.
 ///
 /// `pub` (with both serde directions) so ACP clients (fuigo-pager) build the request from the same type the agent parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +111,7 @@ impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
     }
 }
 
-/// Wire DTO for the `x.ai/subagent/cancel` response payload (under `result` in the `ExtMethodResult` envelope).
+/// Wire DTO for the `fuigo/subagent/cancel` response payload (under `result` in the `ExtMethodResult` envelope).
 /// `pub` with both serde directions so clients read it typed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -362,7 +362,7 @@ fn respond<T: Serialize>(result: Result<T, impl std::fmt::Display>) -> ExtResult
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/task/kill" => {
+        "fuigo/task/kill" => {
             let req: KillTaskRequest = parse(args)?;
             let result = agent
                 .kill_background_task(&req.session_id, &req.task_id, req.source.into())
@@ -373,7 +373,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 });
             respond(result)
         }
-        "x.ai/task/list" => {
+        "fuigo/task/list" => {
             let req: ListTasksRequest = parse(args)?;
             let result = agent
                 .list_tasks(&req.session_id)
@@ -402,10 +402,10 @@ struct DeleteScheduledTaskResponse {
     deleted: bool,
 }
 
-/// Handle `x.ai/scheduler/*` extension methods.
+/// Handle `fuigo/scheduler/*` extension methods.
 pub(crate) async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/scheduler/delete" => {
+        "fuigo/scheduler/delete" => {
             let req: DeleteScheduledTaskRequest = parse(args)?;
             let result = agent
                 .delete_scheduled_task(&req.session_id, &req.task_id)
@@ -420,10 +420,10 @@ pub(crate) async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -
     }
 }
 
-/// Handle `x.ai/subagent/*` extension methods.
+/// Handle `fuigo/subagent/*` extension methods.
 pub(crate) async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/subagent/cancel" => {
+        "fuigo/subagent/cancel" => {
             let req: CancelSubagentRequest = parse(args)?;
             tracing::info!(subagent_id = %req.subagent_id, "Cancelling subagent via ext method");
             let outcome =
@@ -434,7 +434,7 @@ pub(crate) async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) ->
                 outcome: Some(outcome),
             }))
         }
-        "x.ai/subagent/get" => {
+        "fuigo/subagent/get" => {
             let req: GetSubagentRequest = parse(args)?;
             let block = req.block.unwrap_or(false);
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
@@ -466,7 +466,7 @@ pub(crate) async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) ->
                 }),
             }))
         }
-        "x.ai/subagent/list_running" => {
+        "fuigo/subagent/list_running" => {
             let req: ListRunningSubagentsRequest = parse(args)?;
             let subagents = agent
                 .list_running_subagents(&req.session_id)
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(json["forkParentPromptId"], "prompt-5");
     }
 
-    // ── x.ai/subagent/cancel outcome wire DTO ──────────────────────────
+    // ── fuigo/subagent/cancel outcome wire DTO ──────────────────────────
 
     #[test]
     fn subagent_cancel_outcome_dto_maps_from_coordinator_outcome() {

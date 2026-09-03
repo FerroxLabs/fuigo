@@ -13,7 +13,7 @@ const RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/consent/record" => handle_record(agent, args).await,
+        "fuigo/consent/record" => handle_record(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }

@@ -94,11 +94,7 @@ async fn client_hooks_fire_without_file_registry() {
                 actor.hook_registry.borrow().is_none(),
                 "fixture must have no file registry for this invariant"
             );
-            install_client_hook(
-                &actor,
-                fuigo_hooks::event::HookEventName::Stop,
-                &["cb_0"],
-            );
+            install_client_hook(&actor, fuigo_hooks::event::HookEventName::Stop, &["cb_0"]);
 
             actor.fire_hook(
                 fuigo_hooks::event::HookEventName::Stop,
@@ -116,9 +112,9 @@ async fn client_hooks_fire_without_file_registry() {
                 .try_recv()
                 .expect("client hook must fire with no file registry");
             let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
-                panic!("expected an x.ai/hooks/event ext notification");
+                panic!("expected an fuigo/hooks/event ext notification");
             };
-            assert_eq!(args.request.method.as_ref(), "x.ai/hooks/event");
+            assert_eq!(args.request.method.as_ref(), "fuigo/hooks/event");
             let params: serde_json::Value =
                 serde_json::from_str(args.request.params.get()).unwrap();
             assert_eq!(params["hookCallbackId"], "cb_0");
@@ -133,12 +129,11 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
     local
         .run_until(async {
             let (actor, gateway_rx, _persistence_rx) = test_actor().await;
-            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
-                fuigo_tools::registry::types::ToolConfig::for_tool::<
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![fuigo_tools::registry::types::ToolConfig::for_tool::<
                     fuigo_tools::implementations::use_tool::UseTool,
-                >(),
-            ])
-            .await;
+                >()])
+                .await;
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
             client_hooks.insert(
@@ -382,7 +377,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
             let mut failure_events = Vec::new();
             while let Ok(msg) = gateway_rx.try_recv() {
                 if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg
-                    && args.request.method.as_ref() == "x.ai/hooks/event"
+                    && args.request.method.as_ref() == "fuigo/hooks/event"
                 {
                     let params: serde_json::Value =
                         serde_json::from_str(args.request.params.get()).unwrap();
@@ -403,7 +398,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
                         fuigo_acp_lib::AcpClientMessage::ExtMethod(args) => {
-                            if args.request.method.as_ref() == "x.ai/hooks/run" {
+                            if args.request.method.as_ref() == "fuigo/hooks/run" {
                                 let params: serde_json::Value =
                                     serde_json::from_str(args.request.params.get()).unwrap();
                                 if let Some(name) = params["hookEventName"].as_str() {
@@ -417,7 +412,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                             let _ = args.response_tx.send(Ok(acp::ExtResponse::new(empty)));
                         }
                         fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                            if args.request.method.as_ref() == "x.ai/hooks/event" {
+                            if args.request.method.as_ref() == "fuigo/hooks/event" {
                                 let params: serde_json::Value =
                                     serde_json::from_str(args.request.params.get()).unwrap();
                                 if let Some(name) = params["hookEventName"].as_str() {
@@ -542,7 +537,7 @@ async fn mcp_error_result_fires_only_failure_and_delivers_original_output() {
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
                         fuigo_acp_lib::AcpClientMessage::ExtMethod(args) => {
-                            if args.request.method.as_ref() == "x.ai/hooks/run" {
+                            if args.request.method.as_ref() == "fuigo/hooks/run" {
                                 let params: serde_json::Value =
                                     serde_json::from_str(args.request.params.get()).unwrap();
                                 if let Some(name) = params["hookEventName"].as_str() {
@@ -556,7 +551,7 @@ async fn mcp_error_result_fires_only_failure_and_delivers_original_output() {
                             let _ = args.response_tx.send(Ok(acp::ExtResponse::new(empty)));
                         }
                         fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                            if args.request.method.as_ref() == "x.ai/hooks/event" {
+                            if args.request.method.as_ref() == "fuigo/hooks/event" {
                                 let params: serde_json::Value =
                                     serde_json::from_str(args.request.params.get()).unwrap();
                                 if let Some(name) = params["hookEventName"].as_str() {
@@ -1007,11 +1002,7 @@ async fn run_stop_gate_keep_working_and_cap() {
             let decision = actor.run_stop_gate("prompt-1", 0).await;
             assert!(matches!(decision, StopGateDecision::AllowStop));
 
-            install_client_hook(
-                &actor,
-                fuigo_hooks::event::HookEventName::Stop,
-                &["cb_0"],
-            );
+            install_client_hook(&actor, fuigo_hooks::event::HookEventName::Stop, &["cb_0"]);
 
             spawn_deny_responder(gateway_rx, "keep working");
 
@@ -1100,7 +1091,7 @@ async fn file_force_stop_skips_client_gate_but_notifies() {
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
                         fuigo_acp_lib::AcpClientMessage::ExtMethod(args) => {
-                            if args.request.method.as_ref() == "x.ai/hooks/run" {
+                            if args.request.method.as_ref() == "fuigo/hooks/run" {
                                 runs.set(runs.get() + 1);
                             }
                             let empty: Arc<serde_json::value::RawValue> =
@@ -1110,7 +1101,7 @@ async fn file_force_stop_skips_client_gate_but_notifies() {
                             let _ = args.response_tx.send(Ok(acp::ExtResponse::new(empty)));
                         }
                         fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                            if args.request.method.as_ref() == "x.ai/hooks/event" {
+                            if args.request.method.as_ref() == "fuigo/hooks/event" {
                                 observes.set(observes.get() + 1);
                             }
                         }

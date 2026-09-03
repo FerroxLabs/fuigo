@@ -27,9 +27,7 @@ fn prefetch_never_starts_while_policy_repair_is_pending() {
         std::fs::write(home.path().join("auth.json"), auth.to_string())
             .expect("write team auth.json");
 
-        startup_prefetch::begin_before_policy_gate(
-            &fuigo_shell::agent::config::Config::default(),
-        );
+        startup_prefetch::begin_before_policy_gate(&fuigo_shell::agent::config::Config::default());
 
         assert!(
             !startup_prefetch::inflight_for_tests(),

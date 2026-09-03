@@ -391,15 +391,13 @@ impl PendingDump {
             "heap_profile: threshold_crossed"
         );
 
-        fuigo_telemetry::session_ctx::log_event(
-            fuigo_telemetry::events::HeapThresholdCrossed {
-                threshold_bytes: threshold,
-                resident_bytes: stats.resident,
-                allocated_bytes: stats.allocated,
-                // The sampler reports 0 when the platform has no cheap read.
-                rss_peak_bytes: (rss_peak > 0).then_some(rss_peak),
-            },
-        );
+        fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::HeapThresholdCrossed {
+            threshold_bytes: threshold,
+            resident_bytes: stats.resident,
+            allocated_bytes: stats.allocated,
+            // The sampler reports 0 when the platform has no cheap read.
+            rss_peak_bytes: (rss_peak > 0).then_some(rss_peak),
+        });
 
         let temp_dir = match PrivateTempDir::create() {
             Ok(d) => d,
@@ -605,7 +603,8 @@ async fn upload_pair(
     };
     let config = gcs_config.with_auth(Some(Arc::clone(&handles.auth_manager)));
 
-    if let Err(e) = fuigo_file_utils::gcs::upload_file(&config, heap_object, heap_path, heap_ct).await
+    if let Err(e) =
+        fuigo_file_utils::gcs::upload_file(&config, heap_object, heap_path, heap_ct).await
     {
         return log_upload_result(heap_object, file_size, false, Some(&e.to_string()));
     }

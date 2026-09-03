@@ -384,9 +384,9 @@ impl InitProgress {
     }
 }
 
-/// One in-process SDK MCP server registration: its tool-namespace name and the SDK-side id echoed back in `x.ai/mcp/sdk_call`.
+/// One in-process SDK MCP server registration: its tool-namespace name and the SDK-side id echoed back in `fuigo/mcp/sdk_call`.
 /// A named struct (rather than a `(String, String)` tuple) so callers can't transpose the two strings.
-/// `Deserialize`d from a `_meta["x.ai/mcp/servers"]` entry, so the `serverId` wire field name is declared (and serde-checked) exactly once here.
+/// `Deserialize`d from a `_meta["fuigo/mcp/servers"]` entry, so the `serverId` wire field name is declared (and serde-checked) exactly once here.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AcpServerEntry {
     pub name: McpServerName,
@@ -394,14 +394,14 @@ pub struct AcpServerEntry {
     pub server_id: String,
 }
 
-/// The session's in-process SDK MCP servers (declared via `_meta["x.ai/mcp/servers"]`), bundled with the shared reverse-RPC invoker.
+/// The session's in-process SDK MCP servers (declared via `_meta["fuigo/mcp/servers"]`), bundled with the shared reverse-RPC invoker.
 /// Held as `McpState::acp_mcp: Option<_>` so the servers and the invoker are present or absent together.
 /// The registry survives `update_configs` clears; config reloads only touch `configs`/`owned_clients`.
 /// Per-server config.toml overrides are NOT cached here; they are re-resolved per init (see [`McpState::build_pending_acp_clients`]).
 struct AcpMcpRegistry {
     /// Registered servers (`name -> serverId`).
     servers: Vec<AcpServerEntry>,
-    /// Shared reverse-RPC invoker all these servers' tools are called through (emits `x.ai/mcp/sdk_call` over the ACP connection).
+    /// Shared reverse-RPC invoker all these servers' tools are called through (emits `fuigo/mcp/sdk_call` over the ACP connection).
     invoker: Arc<dyn crate::acp_transport::AcpReverseInvoker>,
 }
 
@@ -463,7 +463,7 @@ pub struct McpState {
     event_writer: fuigo_session_events::EventWriter,
     /// Sender wired by the session actor to its `StatusDispatcher` task.
     /// When `Some`, the state and every [`McpClient`] reached through [`Self::all_clients`] / [`Self::get_client`] forward [`McpClientEvent`]s here.
-    /// Events are coalesced and fanned out as ACP `x.ai/mcp/server_status` notifications.
+    /// Events are coalesced and fanned out as ACP `fuigo/mcp/server_status` notifications.
     ///
     /// Intentionally `None` in subagent-pool / shared-pool snapshots ([`SharedMcpPool`]), where the **parent** session owns the notification flow.
     /// Clients in those snapshots inherit the parent's `Arc<McpClient>`, with the parent's `notify_tx` still pointing at the parent.
@@ -844,7 +844,7 @@ impl McpState {
     }
 
     /// Minimum wait between spawn attempts for an unreachable server.
-    /// Retry triggers (tool batches, `x.ai/mcp/list` refreshes) cannot dogpile the OAuth-discovery and probe timeout budget while a server is down.
+    /// Retry triggers (tool batches, `fuigo/mcp/list` refreshes) cannot dogpile the OAuth-discovery and probe timeout budget while a server is down.
     pub const UNREACHABLE_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
     /// Upper bound on an attempt's exclusivity (see [`UnreachableRetry`]).
@@ -1432,8 +1432,8 @@ pub struct McpTool {
 ///
 /// - **Model-visible** (default, or `["model", "app"]`): registered in `ToolBridge` so the LLM can invoke them during a conversation.
 /// - **App-visible only** (`["app"]`): not registered in `ToolBridge`, so the LLM never sees them.
-///   These are UI-only actions (e.g. refresh buttons) surfaced to the frontend via `x.ai/mcp/tools_changed` notifications.
-///   They are callable via `x.ai/mcp/call`.
+///   These are UI-only actions (e.g. refresh buttons) surfaced to the frontend via `fuigo/mcp/tools_changed` notifications.
+///   They are callable via `fuigo/mcp/call`.
 pub struct McpToolRegistration {
     pub name: String,
     pub description: String,
@@ -2644,7 +2644,7 @@ enum PendingTransport {
         config: HttpConfig,
         auth_manager: Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>,
     },
-    /// In-process SDK MCP server reached over the ACP reverse channel (`x.ai/mcp/sdk_call`).
+    /// In-process SDK MCP server reached over the ACP reverse channel (`fuigo/mcp/sdk_call`).
     /// Rebuildable from its `server_id` and invoker, so handshake failures restore like Http (unlike the consumed Stdio child).
     Acp {
         server_id: String,
@@ -2722,7 +2722,7 @@ pub enum LivenessCheck {
 ///    Currently `notifications/tools/list_changed` and `notifications/resources/list_changed`.
 /// 3. The session/managed-config layer when a server is added, removed, or successfully (re-)initialized.
 ///
-/// Consumers fan these out to ACP `x.ai/mcp/server_status` after 50 ms of tumbling-window coalescing keyed by `(server, kind)`.
+/// Consumers fan these out to ACP `fuigo/mcp/server_status` after 50 ms of tumbling-window coalescing keyed by `(server, kind)`.
 /// See the session-actor `StatusDispatcher`.
 #[derive(Debug, Clone)]
 pub enum McpClientEvent {
@@ -3362,7 +3362,7 @@ impl McpClient {
     }
 
     /// Build a client for an in-process SDK MCP server reached over the ACP reverse channel.
-    /// `server_id` is the id the agent echoes back in `x.ai/mcp/sdk_call`; the `invoker` performs the reverse request.
+    /// `server_id` is the id the agent echoes back in `fuigo/mcp/sdk_call`; the `invoker` performs the reverse request.
     /// Same downstream path as HTTP/stdio.
     pub fn new_acp(
         server_name: String,
@@ -3735,7 +3735,7 @@ impl McpClient {
                     })
             }
             PendingTransport::Acp { server_id, invoker } => {
-                // Per-reverse-call backstop on `x.ai/mcp/sdk_call`: the larger of the startup and tool timeouts
+                // Per-reverse-call backstop on `fuigo/mcp/sdk_call`: the larger of the startup and tool timeouts
                 // It never undercuts the real outer bound: the handshake `initialize` is bounded by the serve `timeout` below
                 // Tool calls are bounded by `tool_timeout_for` in `try_call_tool`
                 // The bridge forwards raw JSON-RPC without the tool name, so per-TOOL overrides aren't applied here in v1
@@ -4696,7 +4696,7 @@ impl McpClient {
 /// rmcp [`ClientHandler`] used by all MCP transports.
 ///
 /// Routes server-pushed notifications through an [`tokio::sync::mpsc::UnboundedSender<McpClientEvent>`].
-/// The session-actor dispatcher fans them out as ACP `x.ai/mcp/server_status` events.
+/// The session-actor dispatcher fans them out as ACP `fuigo/mcp/server_status` events.
 ///
 /// ## RPIT, not `#[async_trait]`
 ///

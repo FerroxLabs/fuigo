@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
-use serde::{Deserialize, Serialize};
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
+use serde::{Deserialize, Serialize};
 
 // The workspace crate defines these for fuzzy search; this module only re-exports them
 pub use fuigo_workspace::file_system::{ClientId, TargetClientId};

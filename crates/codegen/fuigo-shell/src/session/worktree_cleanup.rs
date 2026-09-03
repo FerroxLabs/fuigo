@@ -26,7 +26,8 @@ pub(crate) async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path:
     }
 
     let wt_path = wt.to_path_buf();
-    match tokio::task::spawn_blocking(move || fuigo_fast_worktree::remove_worktree(&wt_path)).await {
+    match tokio::task::spawn_blocking(move || fuigo_fast_worktree::remove_worktree(&wt_path)).await
+    {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             tracing::warn!(

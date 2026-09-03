@@ -1330,7 +1330,7 @@ fn drain_cancelled_finish_broadcasts(
         let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
             continue;
         };
-        assert_eq!(args.request.method.as_ref(), "x.ai/session_notification");
+        assert_eq!(args.request.method.as_ref(), "fuigo/session_notification");
         let notification: SessionNotification = serde_json::from_str(
                 args.request.params.get(),
             )
@@ -2178,6 +2178,7 @@ async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
 }
 #[tokio::test]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
+    crate::agent::config::Config::install_test_trusted_origins();
     let mut models = indexmap::IndexMap::new();
     let mut entry = test_model_entry("grok-4.5");
     entry.info.supports_backend_search = true;
@@ -2381,6 +2382,7 @@ async fn read_parent_sampling_config_resolves_backend_search_from_catalog() {
 }
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catalog() {
+    crate::agent::config::Config::install_test_trusted_origins();
     let mut entry = test_model_entry("grok-4.5");
     entry.info.supports_backend_search = true;
     let mut models = indexmap::IndexMap::new();

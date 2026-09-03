@@ -367,9 +367,9 @@ impl AgentView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuigo_pager_diff::DiffLine;
     use similar::ChangeTag;
     use std::sync::mpsc;
-    use fuigo_pager_diff::DiffLine;
 
     fn sample_hunks() -> Vec<DiffHunk> {
         vec![vec![DiffLine {

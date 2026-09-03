@@ -135,7 +135,7 @@ mod tests {
     // =========================================================================
     // Lazy-start mechanic tests
     //
-    // `CodebaseIndexManager::get()` returns None before the index is created, which maps to `x.ai/code/status` reporting `reason: notStarted`
+    // `CodebaseIndexManager::get()` returns None before the index is created, which maps to `fuigo/code/status` reporting `reason: notStarted`
     // `get_or_create()` is the lazy-start entry point
     // `MvpAgent::start_codebase_index_for_code_nav` calls it on the first code-nav request for an eligible session
     // =========================================================================
@@ -143,7 +143,7 @@ mod tests {
     /// An empty CodebaseIndexManager returns None for any path.
     ///
     /// This is the steady-state before ANY code-nav request has been made.
-    /// In `x.ai/code/status`, `resolve_index_handle()` calls `agent.get_codebase_index(cwd)` which calls `mgr.get(cwd)`.
+    /// In `fuigo/code/status`, `resolve_index_handle()` calls `agent.get_codebase_index(cwd)` which calls `mgr.get(cwd)`.
     /// When this returns None the status reports `reason: notStarted`.
     #[test]
     fn test_get_returns_none_before_any_index_created() {

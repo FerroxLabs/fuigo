@@ -120,7 +120,7 @@
 
     #[test]
     fn mcp_initialized_clears_progress() {
-        // x.ai/mcp_initialized must set mcp_init_progress to None.
+        // fuigo/mcp_initialized must set mcp_init_progress to None.
         let mut app = make_app_with_agent("sess-1");
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();
         agent.mcp_init_progress = Some(crate::app::agent_view::McpInitProgress {
@@ -400,7 +400,7 @@
             // Deliberately no `status`
         });
         let raw = serde_json::value::to_raw_value(&payload).unwrap();
-        let notif = acp::ExtNotification::new("x.ai/mcp/server_status", raw.into());
+        let notif = acp::ExtNotification::new("fuigo/mcp/server_status", raw.into());
         let redraw = handle_mcp_server_status(&notif, &mut app);
         assert!(!redraw, "malformed payload must not request a redraw");
 

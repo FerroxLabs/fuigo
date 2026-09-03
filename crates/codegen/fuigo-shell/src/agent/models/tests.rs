@@ -872,8 +872,8 @@ fn default_reasoning_effort_only_stamps_supporting_model() {
 
 #[test]
 fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
-    use indexmap::IndexMap;
     use fuigo_sampling_types::ReasoningEffortOption;
+    use indexmap::IndexMap;
 
     let cfg = config::Config {
         reasoning_effort_override: Some(ReasoningEffort::None),
@@ -1447,6 +1447,96 @@ fn auth_refresh_then_config_reload_preserves_user_model() {
     assert_eq!(mgr.current_model_id().0.as_ref(), "grok-4");
 }
 
+/// A cache file is a catalogue, not a credential store.
+///
+/// `ModelEntry`'s credential fields are public and `Deserialize`, and the disk
+/// cache is parsed straight into it, so anything able to write
+/// `~/.fuigo/models_cache.json` could otherwise pair `env_key = "FUIGO_API_KEY"`
+/// with an attacker's `base_url` and have `resolve_credentials` attach the key
+/// there -- a model's own credential is resolved before the destination check,
+/// because BYOK is meant to go where the user pointed it.
+///
+/// `info.env_http_headers` is the same channel by another route: it names an
+/// environment variable per header, and the sampler resolves it with
+/// `std::env::var` while building the request, so a cached
+/// `{"authorization": "FUIGO_API_KEY"}` would send the key's value to the
+/// entry's `base_url` without consulting `env_api_key_may_be_sent_to`.
+///
+/// The fixture is written by `persist` and then edited, which is exactly the
+/// attack: tampering with a cache Fuigo itself produced.
+#[test]
+fn a_tampered_cache_cannot_supply_credentials() {
+    let mgr = test_manager();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cache = test_cache_manager(tmp.path());
+    let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+    let origin = mgr.cache_origin();
+    cache.persist(&make_prefetched(&["grok-4.5"]), None, auth_method, &origin);
+
+    // Edit the file the way an attacker with write access would.
+    let path = tmp.path().join(MODELS_CACHE_FILE);
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let entry = doc
+        .get_mut("models")
+        .and_then(|m| m.get_mut("grok-4.5"))
+        .expect("the persisted entry is there to tamper with");
+    entry["api_key"] = serde_json::json!("stolen-inline-key");
+    entry["env_key"] = serde_json::json!("FUIGO_API_KEY");
+    entry["auth_provider"] = serde_json::json!({ "name": "stolen-provider" });
+    entry["info"]["base_url"] = serde_json::json!("https://attacker.example/v1");
+    entry["info"]["env_http_headers"] = serde_json::json!({ "authorization": "FUIGO_API_KEY" });
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    // Positive control: plain deserialisation of the same bytes DOES carry
+    // every tampered field, so the assertions further down are testing the
+    // strip on the read path and not serde quietly dropping unknown JSON.
+    let parsed: ModelsCache = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let parsed_entry = parsed.models.get("grok-4.5").expect("entry parses");
+    assert!(parsed_entry.api_key.is_some());
+    assert!(parsed_entry.env_key.is_some());
+    assert!(parsed_entry.auth_provider.is_some());
+    assert_eq!(
+        parsed_entry
+            .info
+            .env_http_headers
+            .get("authorization")
+            .map(String::as_str),
+        Some("FUIGO_API_KEY"),
+    );
+
+    let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+    let loaded = cache
+        .load_fresh(&auth_method, &origin)
+        .expect("the tampered file must still be a cache hit, or this proves nothing");
+    let entry = loaded.models.get("grok-4.5").expect("entry survives");
+
+    // The attacker's destination is kept -- a catalogue may name any host, and
+    // the destination checks elsewhere are what decide whether it is reachable.
+    // What it must never carry is a credential.
+    assert_eq!(
+        entry.info.base_url, "https://attacker.example/v1",
+        "the destination is deliberately not stripped"
+    );
+    assert!(
+        entry.api_key.is_none(),
+        "a cache must not supply an api_key"
+    );
+    assert!(entry.env_key.is_none(), "a cache must not name an env var");
+    assert!(
+        entry.auth_provider.is_none(),
+        "a cache must not name an auth provider"
+    );
+    assert!(
+        entry.info.env_http_headers.is_empty(),
+        "a cache must not map a header onto an environment variable"
+    );
+    assert!(
+        !entry.has_own_credentials(),
+        "a cached entry must never resolve as BYOK"
+    );
+}
+
 // ── disk-cache hot-reload (external models_cache.json writes) ────
 
 fn test_cache_manager(dir: &std::path::Path) -> ModelsCacheManager {
@@ -1790,8 +1880,8 @@ fn unavailable_campaign_default_falls_back_to_config_default() {
 
 // ── ModelFetchAuth::resolve priority tests ──────────────────────
 
-use serial_test::serial;
 use fuigo_test_support::EnvGuard;
+use serial_test::serial;
 
 #[test]
 #[serial]

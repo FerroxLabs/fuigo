@@ -29,10 +29,36 @@ impl AuthBackend for FuigoAuthBackend {
         true
     }
 
-    /// Some customers run their own gateway and sign in there with the session Ferrox Labs issued them, so a list of allowed hosts would lock them out.
-    /// The models cache stops one backend's models from being used by another: it remembers the URL each entry came from and ignores the rest.
-    fn may_receive_session(&self, _url: &str) -> bool {
-        true
+    /// The session bearer goes only to a configured first-party origin.
+    ///
+    /// This used to return `true` for every URL, with the reasoning that "some
+    /// customers run their own gateway and sign in there with the session we
+    /// issued them, so a list of allowed hosts would lock them out". That was
+    /// written when the trust set was the compiled-in vendor domain, and it no
+    /// longer holds: `set_trusted_api_origins` seeds the set from the user's
+    /// own `[endpoints]`, so a customer gateway is trusted *because they
+    /// configured it*. The objection is answered without the hole.
+    ///
+    /// The hole was real. `resolve_credentials` reaches this arm for any model
+    /// with no `api_key`/`env_key` and no `auth_provider`, which is every model
+    /// that came from the remote catalogue. Those never pass through the
+    /// `[model.*]` fail-closed guard in `resolve_model_list` (a prefetched map
+    /// replaces `resolved` wholesale), so this predicate was the only thing
+    /// standing between a third-party `base_url` and the session token — and it
+    /// was not looking.
+    ///
+    /// `is_fuigo_api_bearer_url` is the strict form: https only, loopback
+    /// refused. It is not purely configuration-derived, though: besides the
+    /// configured `[endpoints]` origins it has a second arm,
+    /// `is_trusted_cli_chat_proxy_url`, which trusts the compiled-in
+    /// production cli-chat-proxy base regardless of what the user configured.
+    /// That base is `fuigo_env::PROD_CLI_CHAT_PROXY_BASE_URL`, which is the
+    /// empty string in this tree, and an empty base never parses as a URL, so
+    /// the arm matches nothing here — with no `[endpoints]` installed the
+    /// predicate is false for every URL and this fails closed. BYOK is
+    /// unaffected — a model with its own credential never reaches this arm.
+    fn may_receive_session(&self, url: &str) -> bool {
+        crate::util::is_fuigo_api_bearer_url(url)
     }
 
     fn login_host(&self, config: &FuigoComConfig) -> String {

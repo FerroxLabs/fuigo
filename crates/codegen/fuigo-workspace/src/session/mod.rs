@@ -568,7 +568,7 @@ pub struct WorkspaceShared {
     /// `None` until `connect_hub()` sets it.
     pub(crate) activity_notify_handle:
         arc_swap::ArcSwap<Option<fuigo_tools::notification::types::ToolNotificationHandle>>,
-    /// Sink for workspace-originated ext-notifications to the client (e.g. `x.ai/search/fuzzy/status`).
+    /// Sink for workspace-originated ext-notifications to the client (e.g. `fuigo/search/fuzzy/status`).
     /// Mode-agnostic: the shell wires it to the agent gateway in local mode, and to the server in proxy mode.
     /// `None` until set via [`WorkspaceHandle::set_client_ext_sink`](crate::handle::WorkspaceHandle::set_client_ext_sink).
     pub(crate) client_ext_sink: arc_swap::ArcSwap<Option<ClientExtSink>>,

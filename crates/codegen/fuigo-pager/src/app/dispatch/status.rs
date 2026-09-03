@@ -440,9 +440,7 @@ pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
         // FluxRouter billing, not grok.com: that host sells a plan Fuigo users
         // do not have, and the egress guard refuses it. Same destination as the
         // credit-limit upsell (`UPSELL_URL_PAYG`).
-        crate::app::actions::Action::OpenUrl(
-            super::billing::UPSELL_URL_PAYG.to_string(),
-        ),
+        crate::app::actions::Action::OpenUrl(super::billing::UPSELL_URL_PAYG.to_string()),
         app,
     )
 }

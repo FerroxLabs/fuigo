@@ -97,7 +97,7 @@ impl AgentView {
     /// Views that own input ahead of the dashboard overlay cascade.
     /// That cascade runs before `handle_input`, so without this guard Left/Esc on an empty prompt would exit the overlay.
     /// It would never reach `/gboom` (turn/close), video (seek/close), image (close), `/agents`, persona detail, or the block viewer.
-    pub(super) fn modal_owns_input(&self) -> bool {
+    pub(crate) fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
             || self.gboom.is_some()

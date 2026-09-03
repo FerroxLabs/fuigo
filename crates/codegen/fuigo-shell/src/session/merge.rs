@@ -1,6 +1,6 @@
 //! Merged session listing: combines local and remote session data.
 //!
-//! Used by both the ACP `x.ai/session/list` handler and the `fuigo sessions` CLI command.
+//! Used by both the ACP `fuigo/session/list` handler and the `fuigo sessions` CLI command.
 //! Deduplicates by session ID (remote wins) and filters local results by query.
 //! Sorts by the same key the picker UI displays (`last_active_at` falling back to `updated_at`) descending.
 
@@ -212,9 +212,7 @@ pub(crate) async fn fetch_lanes(
             return Vec::new();
         }
         cwd.map(|c| {
-            fuigo_workspace::session::git::resolve_normalized_remote_urls(std::path::Path::new(
-                c,
-            ))
+            fuigo_workspace::session::git::resolve_normalized_remote_urls(std::path::Path::new(c))
         })
         .unwrap_or_default()
     };

@@ -1,7 +1,7 @@
 //! rmcp transport bridge over the ACP reverse channel.
 //!
 //! In-process SDK MCP servers (the official `fuigo-agent-sdk`'s `@tool` / `create_sdk_mcp_server`) run in the SDK-host process, not behind a socket.
-//! The agent reaches them by sending each MCP JSON-RPC message to the client as a reverse `x.ai/mcp/sdk_call` request and feeding the response back.
+//! The agent reaches them by sending each MCP JSON-RPC message to the client as a reverse `fuigo/mcp/sdk_call` request and feeding the response back.
 //! This module adapts that request/response channel into an rmcp transport.
 //! An in-process server then reuses the same `RunningService` tool-dispatch path as HTTP/stdio servers for tool calls.
 //!
@@ -23,7 +23,7 @@ use rmcp::transport::async_rw::AsyncRwTransport;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
-/// Sends one MCP JSON-RPC message to an in-process server over the ACP reverse channel (`x.ai/mcp/sdk_call`) and returns its JSON-RPC response.
+/// Sends one MCP JSON-RPC message to an in-process server over the ACP reverse channel (`fuigo/mcp/sdk_call`) and returns its JSON-RPC response.
 /// The `Err` string is returned as a JSON-RPC error to the waiting rmcp request.
 /// This is fail-closed: a missing tool server is a real error, unlike a hook gate.
 ///
@@ -56,7 +56,7 @@ const INTERNAL_ERROR_CODE: i64 = -32603;
 
 /// Build an rmcp transport that bridges to an in-process MCP server via `invoker`.
 ///
-/// Spawns a pump that forwards each client-to-server message as a reverse `x.ai/mcp/sdk_call` and writes the server-to-client response back.
+/// Spawns a pump that forwards each client-to-server message as a reverse `fuigo/mcp/sdk_call` and writes the server-to-client response back.
 /// The pump exits when rmcp drops its half of the duplex (service shutdown), so it never leaks.
 ///
 /// `invoke_timeout` is the resolved per-server tool timeout.
@@ -143,7 +143,7 @@ async fn read_requests(
                 continue;
             }
         };
-        // An id-less message is a notification (no response), and the SDK peer rejects reverse `x.ai/mcp/sdk_call`s without a JSON-RPC id
+        // An id-less message is a notification (no response), and the SDK peer rejects reverse `fuigo/mcp/sdk_call`s without a JSON-RPC id
         // So id-less messages (e.g. rmcp's `notifications/initialized` on every handshake) are logged and discarded locally.
         // That avoids spawning a doomed round-trip
         // Safe only because the SDK `Server` is lenient about never receiving `initialized` (a documented v1 limit)

@@ -1,4 +1,4 @@
-//! `x.ai/session/updates`: returns a session's updates in a single response, with the dead branches left by rewinds filtered out.
+//! `fuigo/session/updates`: returns a session's updates in a single response, with the dead branches left by rewinds filtered out.
 //! Supports optional pagination (`offset`, `limit`) for large sessions.
 //!
 //! ## Usage
@@ -25,7 +25,7 @@
 //! `turnIndex` slices by user-message turn boundaries instead of raw count.
 //!
 //! Each element in the `updates` array is the full JSONL storage envelope (`timestamp`, `method`, `params`), not just the inner notification params.
-//! Clients parse the `method` field to tell the update type (`"session/update"` for ACP, `"_x.ai/session/update"` for Ferrox Labs extensions).
+//! Clients parse the `method` field to tell the update type (`"session/update"` for ACP, `"_fuigo/session/update"` for Ferrox Labs extensions).
 //! The notification payload is in `params`.
 //!
 //! Metadata columns and cross-host import live in [`crate::extensions::session_state`].
@@ -277,7 +277,7 @@ fn extract_last_event_id<T: AsRef<str>>(lines: &[T]) -> Option<String> {
     None
 }
 
-/// Send updates as chunked `_x.ai/session/updates/chunk` notifications.
+/// Send updates as chunked `_fuigo/session/updates/chunk` notifications.
 /// Injects routing metadata when `target_client_id` is set.
 fn send_streamed_chunks<T: AsRef<str>>(
     gateway: &fuigo_acp_lib::AcpAgentGatewaySender,
@@ -309,7 +309,7 @@ fn send_streamed_chunks<T: AsRef<str>>(
 
         if let Ok(raw) = serde_json::value::to_raw_value(&params) {
             gateway.forward_fire_and_forget(acp::ExtNotification::new(
-                "x.ai/session/updates/chunk",
+                "fuigo/session/updates/chunk",
                 std::sync::Arc::from(raw),
             ));
         }
@@ -517,7 +517,7 @@ mod tests {
         }
 
         let raw = serde_json::value::to_raw_value(&serde_json::Value::Object(map)).unwrap();
-        acp::ExtRequest::new("x.ai/session/updates", std::sync::Arc::from(raw))
+        acp::ExtRequest::new("fuigo/session/updates", std::sync::Arc::from(raw))
     }
 
     #[tokio::test]
@@ -577,7 +577,7 @@ mod tests {
                 r#"{"timestamp":2,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp1"}}}}"#,
                 r#"{"timestamp":3,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"dead-branch"}}}}"#,
                 r#"{"timestamp":4,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"dead-resp"}}}}"#,
-                r#"{"timestamp":5,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"rewind_marker","target_prompt_index":1}}}"#,
+                r#"{"timestamp":5,"method":"_fuigo/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"rewind_marker","target_prompt_index":1}}}"#,
                 r#"{"timestamp":6,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"replacement"}}}}"#,
                 r#"{"timestamp":7,"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replacement-resp"}}}}"#,
             ]
@@ -684,7 +684,7 @@ mod tests {
             map.insert("offset".into(), serde_json::json!(off));
         }
         let raw = serde_json::value::to_raw_value(&serde_json::Value::Object(map)).unwrap();
-        acp::ExtRequest::new("x.ai/session/updates", std::sync::Arc::from(raw))
+        acp::ExtRequest::new("fuigo/session/updates", std::sync::Arc::from(raw))
     }
 
     fn extract_chunk_params(
@@ -793,7 +793,7 @@ mod tests {
             map.insert("limit".into(), serde_json::json!(lim));
         }
         let raw = serde_json::value::to_raw_value(&serde_json::Value::Object(map)).unwrap();
-        acp::ExtRequest::new("x.ai/session/updates", std::sync::Arc::from(raw))
+        acp::ExtRequest::new("fuigo/session/updates", std::sync::Arc::from(raw))
     }
 
     fn user_chunk(text: &str) -> String {
@@ -810,7 +810,7 @@ mod tests {
 
     fn fuigo_rewind(target: usize) -> String {
         format!(
-            r#"{{"timestamp":0,"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"rewind_marker","target_prompt_index":{target}}}}}}}"#
+            r#"{{"timestamp":0,"method":"_fuigo/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"rewind_marker","target_prompt_index":{target}}}}}}}"#
         )
     }
 

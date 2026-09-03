@@ -30,6 +30,68 @@ pub enum SwitchModelError {
 /// Synchronous, side-effect-free user intent.
 ///
 /// Produced by [`super::input`] from key/mouse events.
+/// An API key, wrapped so that `{:?}` cannot print it.
+///
+/// `Action` and `Effect` both `#[derive(Debug)]` and both carry a submitted
+/// key. Nothing on the dispatch path formats them today, but one
+/// `tracing::debug!(?action, ...)` added later would write a live credential
+/// into `~/.fuigo/logs`. A newtype makes that impossible rather than
+/// improbable, and costs one `.0` at the consumers.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretKey(pub String);
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Length is safe and occasionally useful; the bytes are not.
+        write!(f, "SecretKey(<redacted, {} chars>)", self.0.chars().count())
+    }
+}
+
+impl From<String> for SecretKey {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+#[cfg(test)]
+mod secret_key_tests {
+    use super::SecretKey;
+
+    /// The whole point: a `{:?}` on an action carrying a key must not print it.
+    #[test]
+    fn debug_never_prints_the_key() {
+        let k = SecretKey("sk-flux-REALSECRETVALUE0123".to_string());
+        let rendered = format!("{k:?}");
+        assert!(!rendered.contains("REALSECRETVALUE"), "{rendered}");
+        assert!(!rendered.contains("sk-flux"), "{rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    /// Including when nested in the action that actually carries it.
+    #[test]
+    fn debug_of_the_action_never_prints_the_key() {
+        let a = super::Action::SubmitApiKey(SecretKey("sk-SENSITIVE-XYZ-9999".into()));
+        let rendered = format!("{a:?}");
+        assert!(!rendered.contains("SENSITIVE"), "{rendered}");
+    }
+
+    #[test]
+    fn debug_of_the_effect_never_prints_the_key() {
+        let e = super::Effect::SubmitApiKey {
+            request_seq: 1,
+            key: SecretKey("sk-SENSITIVE-XYZ-9999".into()),
+        };
+        let rendered = format!("{e:?}");
+        assert!(!rendered.contains("SENSITIVE"), "{rendered}");
+    }
+
+    #[test]
+    fn the_value_is_still_reachable_for_the_one_caller_that_needs_it() {
+        let k = SecretKey("sk-abc".to_string());
+        assert_eq!(k.0, "sk-abc");
+    }
+}
+
 /// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -61,7 +123,7 @@ pub enum Action {
     },
     /// Open grok.com in the browser for SuperGrok subscription upsell.
     OpenSuperfuigoUrl,
-    /// Re-check subscription status via the shell's `x.ai/auth/check_subscription`.
+    /// Re-check subscription status via the shell's `fuigo/auth/check_subscription`.
     CheckSubscription,
     /// Open an arbitrary URL in the system browser (with scheme validation).
     OpenUrl(String),
@@ -188,20 +250,20 @@ pub enum Action {
     /// Try to drain the next queued prompt (after editing completes, etc.).
     DrainQueue,
     /// Remove a server-authoritative (shared) queued prompt by its stable `prompt_id`.
-    /// Routed to the agent as `x.ai/queue/remove`; the resulting `x.ai/queue/changed` rebroadcast is the source of truth.
+    /// Routed to the agent as `fuigo/queue/remove`; the resulting `fuigo/queue/changed` rebroadcast is the source of truth.
     QueueRemoveShared {
         id: String,
         expected_version: u64,
     },
-    /// Reorder the server-authoritative (shared) queued prompts to match `ordered_ids`. Routed as `x.ai/queue/reorder`.
+    /// Reorder the server-authoritative (shared) queued prompts to match `ordered_ids`. Routed as `fuigo/queue/reorder`.
     QueueReorderShared {
         ordered_ids: Vec<String>,
     },
     /// Clear the caller's server-authoritative (shared) queued prompts.
-    /// Routed as `x.ai/queue/clear`.
+    /// Routed as `fuigo/queue/clear`.
     QueueClearShared,
     /// Replace the text of a server-authoritative (shared) queued prompt.
-    /// Routed to the agent as `x.ai/queue/edit`; the rebroadcast of `x.ai/queue/changed` is the source of truth.
+    /// Routed to the agent as `fuigo/queue/edit`; the rebroadcast of `fuigo/queue/changed` is the source of truth.
     /// Last write wins via the session actor's serialized mailbox; no client-side conflict resolution.
     QueueEditShared {
         id: String,
@@ -217,8 +279,8 @@ pub enum Action {
     },
     /// Interject a server-authoritative (shared) queued prompt into the running turn.
     /// The agent atomically removes it from the queue and merges its text into the in-flight turn.
-    /// Routed as `x.ai/queue/interject`.
-    /// The `x.ai/session/interjection` and `x.ai/queue/changed` rebroadcasts are the source of truth (no optimistic client-side block).
+    /// Routed as `fuigo/queue/interject`.
+    /// The `fuigo/session/interjection` and `fuigo/queue/changed` rebroadcasts are the source of truth (no optimistic client-side block).
     /// Mirrors the local "Send now" / `Ctrl+Enter` path, which uses [`Interject`](Self::Interject) directly because the local queue is client-owned.
     QueueInterjectShared {
         id: String,
@@ -236,7 +298,7 @@ pub enum Action {
         local_id: u64,
         /// `Some` for a server-authoritative row.
         /// `None` covers both a local row and a server row that vanished from the mirror before Enter.
-        /// With nothing to remove, no versioned `x.ai/queue/remove` request is sent.
+        /// With nothing to remove, no versioned `fuigo/queue/remove` request is sent.
         server: Option<SharedQueueTarget>,
         text: String,
     },
@@ -361,12 +423,12 @@ pub enum Action {
     ExecutePluginsAction(fuigo_hooks_plugins_types::PluginsAction),
     /// Execute a marketplace management action from the modal.
     ExecuteMarketplaceAction(fuigo_hooks_plugins_types::MarketplaceAction),
-    /// Add or update an MCP server via x.ai/mcp/upsert.
+    /// Add or update an MCP server via fuigo/mcp/upsert.
     UpsertMcpServer {
         name: String,
         config: Box<fuigo_shell::util::config::McpServerConfig>,
     },
-    /// Delete an MCP server via x.ai/mcp/delete.
+    /// Delete an MCP server via fuigo/mcp/delete.
     DeleteMcpServer {
         server_name: String,
     },
@@ -375,7 +437,7 @@ pub enum Action {
         server_name: String,
         enabled: bool,
     },
-    /// Toggle a skill enable/disable via x.ai/skills/toggle.
+    /// Toggle a skill enable/disable via fuigo/skills/toggle.
     ToggleSkill {
         skill_name: String,
         enabled: bool,
@@ -404,7 +466,7 @@ pub enum Action {
     CancelScheduledTask(String),
     /// Demote the currently running execute tool to a background task.
     DemoteToBackground,
-    /// Request current bundle cache status via `x.ai/bundle/status`.
+    /// Request current bundle cache status via `fuigo/bundle/status`.
     RequestBundleStatus,
     /// View a catalog entry's raw content in the block viewer.
     ViewCatalogEntry {
@@ -614,7 +676,22 @@ pub enum Action {
     /// Open the API-key entry screen from the first-run welcome menu.
     EnterApiKey,
     /// User submitted an API key typed or pasted into that screen.
-    SubmitApiKey(String),
+    SubmitApiKey(SecretKey),
+    /// Apply the credential found in the named environment variable.
+    ///
+    /// Carries the VARIABLE NAME, never the key. `Action` is
+    /// `#[derive(Debug)]`, so a secret in a variant is one stray `{:?}` away
+    /// from a log file; a variable name is already display-safe -- the menu
+    /// paints it.
+    ///
+    /// A name rather than an index on purpose. The key is re-read from the
+    /// environment at dispatch, so an index would be a positional reference
+    /// into a list that could have changed since it was rendered: with more
+    /// than one appliable provider, a row labelled A could apply B's secret.
+    /// That is the exact hazard this feature was scoped to avoid, so the
+    /// reference is made unambiguous instead of relying on the list being
+    /// short.
+    UseDetectedKey(String),
     /// Copy the auth URL to the clipboard during authentication.
     CopyAuthUrl,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
@@ -938,7 +1015,7 @@ pub struct SharedQueueTarget {
 /// Persist-and-notify behavior for [`Effect::PersistPermissionMode`].
 ///
 /// Both variants write to `~/.fuigo/config.toml` and route ACP
-/// `x.ai/yolo_mode_changed` notifications.
+/// `fuigo/yolo_mode_changed` notifications.
 /// The ACP notification is gated on disk-write success when `WithRollback` is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionModePersist {
@@ -1400,14 +1477,14 @@ pub enum Effect {
         host: crate::views::session_picker_surface::SessionPickerHost,
         /// Live generation of the requesting picker at dispatch time.
         generation: u64,
-        /// Text search pushed down to `x.ai/session/list` as `query` (chat mode: forwarded to the backend conversations search).
+        /// Text search pushed down to `fuigo/session/list` as `query` (chat mode: forwarded to the backend conversations search).
         /// `None` fetches the unfiltered list.
         query: Option<String>,
         /// Snapshot of [`crate::app::app_view::AppView::session_picker_list_seq`].
         /// The response is dropped when no longer current, so out-of-order completions can't clobber newer results.
         seq: u64,
         /// Optional unified-list `kind` facet filter (`"chat"` / `"build"`).
-        /// When set, stamped as `_meta["x.ai/facetFilters"].kind`.
+        /// When set, stamped as `_meta["fuigo/facetFilters"].kind`.
         /// The shell then honors multi-source history under `--chat` instead of forcing chat-only.
         kind_filter: Option<Vec<String>>,
         /// Server-side `session_kind=headless` policy: `Only` while the picker is on the Headless page, `Exclude` everywhere else.
@@ -1423,10 +1500,10 @@ pub enum Effect {
         query: String,
         seq: u64,
     },
-    /// Fetch the leader session roster (FleetView dashboard) via `x.ai/sessions/list`.
+    /// Fetch the leader session roster (FleetView dashboard) via `fuigo/sessions/list`.
     /// Only issued in leader mode while the dashboard is open.
     FetchRoster,
-    /// Fetch the local on-disk session list (dormant/idle sessions) for the dashboard via `x.ai/session/list`.
+    /// Fetch the local on-disk session list (dormant/idle sessions) for the dashboard via `fuigo/session/list`.
     /// This is the non-leader fallback for the FleetView roster.
     /// Issued while the dashboard is open and NOT in leader mode so the dashboard shows idle sessions instead of being empty.
     FetchDashboardSessions,
@@ -1499,7 +1576,7 @@ pub enum Effect {
         task_id: String,
         source: fuigo_shell::extensions::task::TaskKillSource,
     },
-    /// Cancel a subagent via `x.ai/subagent/cancel`.
+    /// Cancel a subagent via `fuigo/subagent/cancel`.
     KillSubagent {
         session_id: acp::SessionId,
         subagent_id: String,
@@ -1596,39 +1673,39 @@ pub enum Effect {
     },
     /// Toggle plan mode: fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },
-    /// Remove a server-owned queued prompt: fire-and-forget `x.ai/queue/remove`.
+    /// Remove a server-owned queued prompt: fire-and-forget `fuigo/queue/remove`.
     /// The agent re-broadcasts the authoritative queue.
     QueueRemove {
         session_id: acp::SessionId,
         id: String,
         expected_version: u64,
     },
-    /// Reorder server-owned queued prompts: fire-and-forget `x.ai/queue/reorder`.
+    /// Reorder server-owned queued prompts: fire-and-forget `fuigo/queue/reorder`.
     QueueReorder {
         session_id: acp::SessionId,
         ordered_ids: Vec<String>,
     },
-    /// Clear the caller's server-owned queued prompts: fire-and-forget `x.ai/queue/clear`.
+    /// Clear the caller's server-owned queued prompts: fire-and-forget `fuigo/queue/clear`.
     QueueClear { session_id: acp::SessionId },
-    /// Replace the text of a server-owned queued prompt in place: fire-and-forget `x.ai/queue/edit`.
+    /// Replace the text of a server-owned queued prompt in place: fire-and-forget `fuigo/queue/edit`.
     /// The session actor's serialized mailbox makes this last-writer-wins for concurrent edits.
-    /// The rebroadcast of `x.ai/queue/changed` is the truth signal.
+    /// The rebroadcast of `fuigo/queue/changed` is the truth signal.
     QueueEdit {
         session_id: acp::SessionId,
         id: String,
         new_text: String,
     },
-    /// Hold a server-owned row out of combine-on-promote while the composer edits it: fire-and-forget `x.ai/queue/hold_edit`.
+    /// Hold a server-owned row out of combine-on-promote while the composer edits it: fire-and-forget `fuigo/queue/hold_edit`.
     QueueHoldEdit {
         session_id: acp::SessionId,
         id: String,
     },
-    /// Release a previous [`Self::QueueHoldEdit`]: `x.ai/queue/release_edit`.
+    /// Release a previous [`Self::QueueHoldEdit`]: `fuigo/queue/release_edit`.
     QueueReleaseEdit {
         session_id: acp::SessionId,
         id: String,
     },
-    /// Interject a server-owned queued prompt into the running turn: fire-and-forget `x.ai/queue/interject`.
+    /// Interject a server-owned queued prompt into the running turn: fire-and-forget `fuigo/queue/interject`.
     /// The session actor atomically removes it from the queue and merges its text into the in-flight turn.
     /// It then broadcasts both the interjection and the authoritative queue.
     /// `new_text` (when `Some`, serialized as `newText`) replaces the stored queue text in the interjection.
@@ -1665,7 +1742,7 @@ pub enum Effect {
         cwd: std::path::PathBuf,
         session_id: String,
     },
-    /// Resolve the running agent name for a session (`x.ai/session/info`).
+    /// Resolve the running agent name for a session (`fuigo/session/info`).
     FetchSessionAgentName {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1681,17 +1758,17 @@ pub enum Effect {
     PollAuthUrl { request_seq: u64 },
     /// Submit a manually-pasted auth code (ext request).
     SubmitAuthCode { request_seq: u64, code: String },
-    /// Persist an API key through the agent (`x.ai/setApiKey`).
+    /// Persist an API key through the agent (`fuigo/setApiKey`).
     /// The agent owns `auth.json`, so the key is never written from the TUI
     /// process — in leader mode they are not even the same process.
-    SubmitApiKey { request_seq: u64, key: String },
-    /// Fetch MCP server list from the shell (x.ai/mcp/list).
+    SubmitApiKey { request_seq: u64, key: SecretKey },
+    /// Fetch MCP server list from the shell (fuigo/mcp/list).
     FetchMcpsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
         cache: bool,
     },
-    /// Trigger MCP OAuth for a server (x.ai/mcp/auth_trigger).
+    /// Trigger MCP OAuth for a server (fuigo/mcp/auth_trigger).
     McpAuthTrigger {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1703,12 +1780,12 @@ pub enum Effect {
         server_name: String,
         values: std::collections::HashMap<String, String>,
     },
-    /// Fetch hooks list from the shell (x.ai/hooks/list).
+    /// Fetch hooks list from the shell (fuigo/hooks/list).
     FetchHooksList {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Fetch plugins list from the shell (x.ai/plugins/list).
+    /// Fetch plugins list from the shell (fuigo/plugins/list).
     FetchPluginsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1740,7 +1817,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Fetch skills list from the shell (x.ai/skills/list).
+    /// Fetch skills list from the shell (fuigo/skills/list).
     FetchSkillsList {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1749,7 +1826,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Toggle a skill via x.ai/skills/toggle (enable/disable without restart).
+    /// Toggle a skill via fuigo/skills/toggle (enable/disable without restart).
     ToggleSkill {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1762,21 +1839,21 @@ pub enum Effect {
         session_id: acp::SessionId,
         action: fuigo_hooks_plugins_types::MarketplaceAction,
     },
-    /// Install a plugin from the inline CTA via `x.ai/marketplace/action`, reported back via `TaskResult::CtaPluginInstallDone`.
+    /// Install a plugin from the inline CTA via `fuigo/marketplace/action`, reported back via `TaskResult::CtaPluginInstallDone`.
     InstallPluginFromCta {
         agent_id: AgentId,
         session_id: acp::SessionId,
         source_url_or_path: String,
         plugin_relative_path: String,
     },
-    /// Reload plugins after a CTA install via `x.ai/plugins/action` (`PluginsAction::Reload`), reported back via `TaskResult::CtaPluginReloadDone`.
+    /// Reload plugins after a CTA install via `fuigo/plugins/action` (`PluginsAction::Reload`), reported back via `TaskResult::CtaPluginReloadDone`.
     /// Modal-independent.
     ReloadPluginsForCta {
         agent_id: AgentId,
         session_id: acp::SessionId,
         plugin_name: String,
     },
-    /// Read the MCP server list after a CTA install via `x.ai/mcp/list`, reported back via `TaskResult::PluginCtaMcpsLoaded`.
+    /// Read the MCP server list after a CTA install via `fuigo/mcp/list`, reported back via `TaskResult::PluginCtaMcpsLoaded`.
     /// Modal-independent.
     FetchPluginCtaMcps {
         agent_id: AgentId,
@@ -1784,7 +1861,7 @@ pub enum Effect {
         plugin_name: String,
     },
     /// Re-probe the MCP server list after a short delay while waiting for a just-installed plugin's servers to finish initializing.
-    /// Sleeps, then runs the same `x.ai/mcp/list` fetch as `FetchPluginCtaMcps`, reported back via `TaskResult::PluginCtaMcpsLoaded`.
+    /// Sleeps, then runs the same `fuigo/mcp/list` fetch as `FetchPluginCtaMcps`, reported back via `TaskResult::PluginCtaMcpsLoaded`.
     RetryPluginCtaMcps {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1795,27 +1872,27 @@ pub enum Effect {
         agent_id: AgentId,
         plugin_name: String,
     },
-    /// Upsert an MCP server via x.ai/mcp/upsert.
+    /// Upsert an MCP server via fuigo/mcp/upsert.
     UpsertMcpServer {
         agent_id: AgentId,
         session_id: acp::SessionId,
         name: String,
         config: Box<fuigo_shell::util::config::McpServerConfig>,
     },
-    /// Delete an MCP server via x.ai/mcp/delete.
+    /// Delete an MCP server via fuigo/mcp/delete.
     DeleteMcpServer {
         agent_id: AgentId,
         session_id: acp::SessionId,
         server_name: String,
     },
-    /// Live-toggle an MCP server via x.ai/mcp/toggle (no restart needed).
+    /// Live-toggle an MCP server via fuigo/mcp/toggle (no restart needed).
     ToggleMcpServer {
         agent_id: AgentId,
         session_id: acp::SessionId,
         server_name: String,
         enabled: bool,
     },
-    /// Toggle a single MCP tool via x.ai/mcp/toggle_tool.
+    /// Toggle a single MCP tool via fuigo/mcp/toggle_tool.
     ToggleMcpTool {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1828,7 +1905,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Fetch and display session info via x.ai/session/info.
+    /// Fetch and display session info via fuigo/session/info.
     /// Auth lines are derived in the effect from SessionFlags and env (not Effect fields).
     ShowSessionInfo {
         agent_id: AgentId,
@@ -1837,16 +1914,16 @@ pub enum Effect {
         /// Usage-modal fetch generation; echoed back on the task result.
         nonce: u64,
     },
-    /// Fetch and display detailed context usage via x.ai/session/info.
+    /// Fetch and display detailed context usage via fuigo/session/info.
     ShowContextInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
         /// Usage-modal fetch generation; echoed back on the task result.
         nonce: u64,
     },
-    /// Fetch current bundle cache status via `x.ai/bundle/status`.
+    /// Fetch current bundle cache status via `fuigo/bundle/status`.
     FetchBundleStatus,
-    /// Fetch a bundled entry's raw content via `x.ai/bundle/entry/get`.
+    /// Fetch a bundled entry's raw content via `fuigo/bundle/entry/get`.
     FetchCatalogEntry { kind: String, name: String },
     /// Send feedback about the current session (fire-and-forget POST).
     SendFeedback {
@@ -1866,7 +1943,7 @@ pub enum Effect {
         text: String,
         cwd: std::path::PathBuf,
     },
-    /// Send raw note to x.ai/memory/rewrite for LLM-powered reformatting.
+    /// Send raw note to fuigo/memory/rewrite for LLM-powered reformatting.
     /// On success, the rewritten text populates the prompt for inline review.
     /// On failure, falls back to showing the raw text for review.
     RewriteMemoryNote {
@@ -1885,7 +1962,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Fire a /btw side question via x.ai/btw ext method.
+    /// Fire a /btw side question via fuigo/btw ext method.
     SendBtw {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -1893,30 +1970,30 @@ pub enum Effect {
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
-    /// Request a session recap via the x.ai/recap ext method.
+    /// Request a session recap via the fuigo/recap ext method.
     /// Fire-and-forget: the recap arrives later as a `SessionRecap` notification.
     SendRecap {
         session_id: acp::SessionId,
         auto: bool,
     },
-    /// Send a mid-turn interjection via x.ai/interject ext method.
+    /// Send a mid-turn interjection via fuigo/interject ext method.
     SendInterject {
         agent_id: AgentId,
         session_id: acp::SessionId,
         text: String,
-        /// Client-minted id echoed back on the `x.ai/session/interjection` broadcast so the originator can dedup its optimistic local block.
+        /// Client-minted id echoed back on the `fuigo/session/interjection` broadcast so the originator can dedup its optimistic local block.
         interjection_id: String,
         /// Structured text and image content blocks.
         /// `None` for text-only interjections; the wire shape stays byte-identical to legacy.
         blocks: Option<Vec<acp::ContentBlock>>,
     },
-    /// Log out via `x.ai/auth/logout` (shell clears auth.json and in-memory state).
+    /// Log out via `fuigo/auth/logout` (shell clears auth.json and in-memory state).
     Logout,
-    /// Cancel an in-flight interactive auth on the shell (`x.ai/auth/cancel`).
+    /// Cancel an in-flight interactive auth on the shell (`fuigo/auth/cancel`).
     /// Used when the user abandons mid-session `/login` so the device-code poll stops instead of running until the code expires.
     /// `request_seq` scopes the cancel so a delayed RPC cannot tear down a successor login.
     CancelAuth { request_seq: u64 },
-    /// Re-check subscription status via `x.ai/auth/check_subscription`.
+    /// Re-check subscription status via `fuigo/auth/check_subscription`.
     /// `verify` scopes the result to a deferred-gate verification (see [`crate::app::subscription`]); `None` for generic checks.
     CheckSubscription { verify: Option<u64> },
     /// One-shot subscription re-check triggered by a credit-limit 403.
@@ -1974,7 +2051,7 @@ pub enum Effect {
         previous_display_name: Option<String>,
         previous_generated_title: Option<String>,
     },
-    /// Delete a session's stored data (local and remote) via `x.ai/session/delete`.
+    /// Delete a session's stored data (local and remote) via `fuigo/session/delete`.
     DeleteSession {
         source: String,
         session_id: String,
@@ -1993,7 +2070,7 @@ pub enum Effect {
         /// Unresolved index rows are omitted from both classified views.
         headless_policy: fuigo_shell::session::unified_list::HeadlessPolicy,
     },
-    /// Call `x.ai/session/fork` to create a peer session that resumes from `parent_session_id` in the same cwd (no worktree).
+    /// Call `fuigo/session/fork` to create a peer session that resumes from `parent_session_id` in the same cwd (no worktree).
     /// Mirror of the worktree branch of [`Effect::CreateWorktreeSession`].
     /// The worktree-fork path reuses `CreateWorktreeSession { load_session_id }` directly so we get worktree creation and code restore for free.
     ForkSession {
@@ -2025,7 +2102,7 @@ pub enum Effect {
         session_id: acp::SessionId,
         target_prompt_index: usize,
     },
-    /// Fetch billing/credit usage from the agent's `x.ai/billing` extension.
+    /// Fetch billing/credit usage from the agent's `fuigo/billing` extension.
     /// When `silent` is true the result updates `credit_balance` without pushing a system message into scrollback.
     /// The silent form is used for automatic refreshes on session init and after each turn.
     FetchBilling {
@@ -2037,7 +2114,7 @@ pub enum Effect {
     /// Fetch billing data at the app level (no agent required).
     /// Used on startup to populate the welcome-screen credit warning.
     FetchAppBilling,
-    /// Fetch per-session token/cost via `x.ai/session/usage` (auth-agnostic).
+    /// Fetch per-session token/cost via `fuigo/session/usage` (auth-agnostic).
     FetchSessionUsage {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -2051,7 +2128,7 @@ pub enum Effect {
     DebounceSuggestions { agent_id: AgentId, generation: u64 },
     /// Spawn a debounce sleep task for plugin-CTA keyword matching.
     DebouncePluginCta { agent_id: AgentId, generation: u64 },
-    /// Send an ACP `x.ai/suggest` request to the shell.
+    /// Send an ACP `fuigo/suggest` request to the shell.
     /// `agent_id` is echoed on the result so the response routes to the agent that fetched, not whatever view is active when it lands.
     FetchShellSuggestions {
         agent_id: AgentId,
@@ -2066,7 +2143,7 @@ pub enum Effect {
         /// Deterministic Tab fetches run only the shell's token providers (path/file); the as-you-type pipeline keeps all of them.
         token_only: bool,
     },
-    /// Send an ACP `x.ai/suggestPrompt` request to the shell.
+    /// Send an ACP `fuigo/suggestPrompt` request to the shell.
     /// It predicts the user's likely next prompt after a completed turn (tab autocomplete ghost text).
     FetchPromptSuggestion {
         agent_id: AgentId,
@@ -2100,7 +2177,7 @@ pub enum Effect {
         plan: Box<crate::diagnostics::FixPlan>,
     },
 }
-/// Wire params for `x.ai/session/rename`.
+/// Wire params for `fuigo/session/rename`.
 /// Shared with the effect executor so dispatch tests can pin the exact camelCase payload.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2139,7 +2216,7 @@ impl RenameSessionRequest {
         }
     }
 }
-/// Outcome of an `x.ai/subagent/cancel` request, telling dispatch whether the pager must finalize the subagent row itself.
+/// Outcome of an `fuigo/subagent/cancel` request, telling dispatch whether the pager must finalize the subagent row itself.
 #[derive(Debug)]
 pub enum SubagentKillOutcome {
     /// Shell stopped a live subagent; a real `SubagentFinished` is coming.
@@ -2197,7 +2274,7 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         models: Option<acp::SessionModelState>,
         /// Whether this session's scheduled fires run detached, as the shell resolved it at spawn.
-        /// Read from the response `_meta["x.ai/schedulerBackgroundLoops"]`.
+        /// Read from the response `_meta["fuigo/schedulerBackgroundLoops"]`.
         /// `None` from a shell that predates the key.
         /// See [`crate::app::effects::parse_session_scheduler_background_loops`].
         scheduler_background_loops: Option<bool>,
@@ -2246,7 +2323,7 @@ pub enum TaskResult {
         code_restored: bool,
         restore_summary: Option<String>,
         restore_degree: Option<fuigo_workspace::session::git::RestoreDegree>,
-        /// The session's in-flight running prompt id (from the load response `_meta["x.ai/runningPromptId"]`).
+        /// The session's in-flight running prompt id (from the load response `_meta["fuigo/runningPromptId"]`).
         /// Present only when the session was loaded MID-turn (another client is driving).
         /// The loader adopts it to pass the live `session/update` gate without re-rendering the user block (replay already rendered it).
         running_prompt_id: Option<String>,
@@ -2278,9 +2355,9 @@ pub enum TaskResult {
         /// Echo of [`Effect::FetchSessionList::generation`]; results for a superseded picker incarnation are dropped.
         generation: u64,
         sessions: Vec<crate::app::app_view::SessionPickerEntry>,
-        /// A degraded conversations lane (`_meta["x.ai/partial"]`), shown as an actionable picker notice instead of a silent empty list.
+        /// A degraded conversations lane (`_meta["fuigo/partial"]`), shown as an actionable picker notice instead of a silent empty list.
         partial: Option<crate::app::effects::ConversationsPartial>,
-        /// Directory scope `sessions` were drawn from (`x.ai/listScope`).
+        /// Directory scope `sessions` were drawn from (`fuigo/listScope`).
         scope: fuigo_shell::session::unified_list::ListScope,
         /// Echo of [`Effect::FetchSessionList::seq`]; stale results are dropped.
         seq: u64,
@@ -2329,7 +2406,7 @@ pub enum TaskResult {
         query: String,
         seq: u64,
     },
-    /// Leader session roster loaded via `x.ai/sessions/list`.
+    /// Leader session roster loaded via `fuigo/sessions/list`.
     RosterLoaded {
         sessions: Vec<crate::app::roster::RosterEntry>,
     },
@@ -2430,7 +2507,7 @@ pub enum TaskResult {
     ConsentPersistFailed {
         error: String,
     },
-    /// Response to `x.ai/subagent/cancel`; see [`SubagentKillOutcome`].
+    /// Response to `fuigo/subagent/cancel`; see [`SubagentKillOutcome`].
     KillSubagentComplete {
         session_id: acp::SessionId,
         subagent_id: String,
@@ -2502,7 +2579,7 @@ pub enum TaskResult {
         /// Deprecated: superseded by `mode` (authoritative).
         /// Kept only as a back-compat fallback for older agents that don't send `mode`.
         external: bool,
-        /// Presentation mode from `x.ai/auth/get_url`; `None` on older agents.
+        /// Presentation mode from `fuigo/auth/get_url`; `None` on older agents.
         mode: Option<String>,
     },
     /// Auth code was submitted (fire-and-forget).
@@ -2769,7 +2846,7 @@ pub enum TaskResult {
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
-    /// `x.ai/recap` request acknowledged (fire-and-forget).
+    /// `fuigo/recap` request acknowledged (fire-and-forget).
     /// The recap itself arrives separately as a `SessionRecap` notification; this only carries a transport error, if any, for logging.
     RecapRequested {
         /// Session the recap was requested for; lets the handler find the agent whose manual loading spinner must be cleared on failure.
@@ -2799,9 +2876,9 @@ pub enum TaskResult {
     },
     /// Shell acknowledged logout (auth cleared).
     LogoutComplete,
-    /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
+    /// Best-effort `fuigo/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
-    /// Shell responded to `x.ai/auth/check_subscription`.
+    /// Shell responded to `fuigo/auth/check_subscription`.
     /// `verify` echoes the generation from `Effect::CheckSubscription` for deferred-gate verifications.
     CheckSubscriptionComplete {
         verify: Option<u64>,
@@ -2831,7 +2908,7 @@ pub enum TaskResult {
         results: Vec<fuigo_shell::extensions::session_search::SearchSessionHit>,
         seq: u64,
     },
-    /// `x.ai/session/fork` completed (no-worktree path).
+    /// `fuigo/session/fork` completed (no-worktree path).
     /// The pager adopts the new session id and emits [`Effect::LoadSession`] to start the replay.
     /// Mirrors [`TaskResult::WorktreeForked`] in shape.
     ForkSessionReady {
@@ -2841,7 +2918,7 @@ pub enum TaskResult {
         /// Parent session id the fork was taken from (to retarget the one-shot restore-code suppression).
         parent_session_id: acp::SessionId,
     },
-    /// `x.ai/session/fork` failed.
+    /// `fuigo/session/fork` failed.
     /// The placeholder agent stays in `app.agents` with no `session_id` so the user can switch away.
     ForkSessionFailed {
         agent_id: AgentId,
@@ -2904,7 +2981,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         generation: u64,
     },
-    /// Shell suggestions loaded from ACP `x.ai/suggest`.
+    /// Shell suggestions loaded from ACP `fuigo/suggest`.
     /// `request_text` / `request_cursor` echo what the request was built from, paired atomically with the items.
     /// They are the anchor the items' `replaceRange` offsets index into and the position Tab targets.
     /// `agent_id` routes the landing to the agent that fetched.
@@ -2914,7 +2991,7 @@ pub enum TaskResult {
         request_text: String,
         request_cursor: usize,
     },
-    /// Predicted next prompt loaded from ACP `x.ai/suggestPrompt`.
+    /// Predicted next prompt loaded from ACP `fuigo/suggestPrompt`.
     /// `suggestion` is `None` when the shell had nothing to suggest.
     PromptSuggestionLoaded {
         agent_id: AgentId,

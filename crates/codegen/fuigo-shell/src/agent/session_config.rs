@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
-use serde::Serialize;
 use fuigo_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use serde::Serialize;
 
 use crate::session::unified_list::SessionKind;
 
@@ -125,10 +125,7 @@ mod tests {
 
     #[test]
     fn options_have_one_selected_model_and_a_mode_per_effort() {
-        let models = [
-            model("fuigo-build", "Fuigo"),
-            model("grok-4.5", "Grok 4.5"),
-        ];
+        let models = [model("fuigo-build", "Fuigo"), model("grok-4.5", "Grok 4.5")];
         let current = acp::ModelId::from("fuigo-build");
         let opts = build_session_config_options(
             &models,

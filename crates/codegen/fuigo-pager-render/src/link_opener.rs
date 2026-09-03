@@ -316,7 +316,7 @@ pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
 /// If the URL already contains a parameter with that name, its value is left untouched (the caller upstream may have intentionally set one).
 /// On parse failure, the original string is returned unchanged so this is safe to apply to opener input from untrusted sources.
 ///
-/// Used by the SuperGrok upsell flow to attribute clicks to `referrer=fuigo-build`, matching the OAuth consent screen and x.ai/cli marketing links.
+/// Used by the SuperGrok upsell flow to attribute clicks to `referrer=fuigo-build`, matching the OAuth consent screen and fuigo/cli marketing links.
 /// The parameter is added whatever the remote settings `gate_url` value happens to be.
 pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {

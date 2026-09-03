@@ -1,4 +1,4 @@
-//! ACP extension handler for session search (`x.ai/session/search`).
+//! ACP extension handler for session search (`fuigo/session/search`).
 //!
 //! Exposes session full-text search as an ACP extension method.
 //! The client sends a query and receives ranked results across all (or workspace-filtered) past sessions.
@@ -74,10 +74,10 @@ pub struct SearchSessionHit {
     pub snippet: Option<String>,
 }
 
-/// Route `x.ai/session/search` extension method calls.
+/// Route `fuigo/session/search` extension method calls.
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/session/search" => {
+        "fuigo/session/search" => {
             let req: SearchSessionsRequest = super::parse_params(args)?;
             let headless = HeadlessPolicy::from_wire(req.headless.as_deref());
             let SearchSessionsRequest {

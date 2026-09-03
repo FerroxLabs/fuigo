@@ -9,6 +9,8 @@ pub mod feedback_client;
 pub mod folder_trust;
 pub(crate) mod handlers;
 pub mod init;
+/// Provider credentials already present in the environment, for first run.
+pub mod key_discovery;
 pub mod model_providers;
 pub mod models;
 pub mod mvp_agent;

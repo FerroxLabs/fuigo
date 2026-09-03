@@ -1,7 +1,7 @@
 //! Credit balance indicator for the agent status bar.
 //!
 //! Shows the user's coding credit usage as a compact status bar item.
-//! Fetches real data from the `x.ai/billing` agent extension.
+//! Fetches real data from the `fuigo/billing` agent extension.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};

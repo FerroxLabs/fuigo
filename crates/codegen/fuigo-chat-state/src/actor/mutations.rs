@@ -169,7 +169,7 @@ impl ChatStateActor {
         });
     }
 
-    /// Out-of-band history repair (`x.ai/session/repair`): run
+    /// Out-of-band history repair (`fuigo/session/repair`): run
     /// [`crate::compaction_utils::repair_history`] and persist changes via
     /// [`Self::replace_conversation`]. Unlike
     /// [`Self::ensure_conversation_integrity`], this also removes orphaned

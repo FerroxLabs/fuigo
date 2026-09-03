@@ -48,7 +48,7 @@
             }
         });
         let raw = serde_json::value::to_raw_value(&raw_payload).unwrap();
-        let request = acp::ExtNotification::new("x.ai/session_notification", raw.into());
+        let request = acp::ExtNotification::new("fuigo/session_notification", raw.into());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let msg = AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
             request,
@@ -141,7 +141,7 @@
             let (tx, _rx) = tokio::sync::oneshot::channel();
             handle(
                 AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
-                    request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+                    request: acp::ExtNotification::new("fuigo/session_notification", raw.into()),
                     response_tx: tx,
                 }),
                 app,
@@ -356,7 +356,7 @@
             }
         });
         let raw = serde_json::value::to_raw_value(&raw_payload).unwrap();
-        let request = acp::ExtNotification::new("x.ai/session_notification", raw.into());
+        let request = acp::ExtNotification::new("fuigo/session_notification", raw.into());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let msg = AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
             request,
@@ -501,7 +501,7 @@
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let affected = handle(
             AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
-                request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+                request: acp::ExtNotification::new("fuigo/session_notification", raw.into()),
                 response_tx: tx,
             }),
             &mut app,

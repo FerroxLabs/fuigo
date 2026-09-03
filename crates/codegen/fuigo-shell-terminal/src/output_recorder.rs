@@ -1,7 +1,7 @@
 //! Reconstructs a client-side terminal's log file from its `terminal/output` snapshots.
 //! The truncation `read_file` path and the monitor file tail read that file.
 //!
-//! TODO: this is a fallback until clients push exact output via an `x.ai/terminal/output_delta` notification.
+//! TODO: this is a fallback until clients push exact output via an `fuigo/terminal/output_delta` notification.
 
 use std::path::PathBuf;
 

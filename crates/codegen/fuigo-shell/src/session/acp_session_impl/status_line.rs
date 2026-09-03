@@ -266,7 +266,9 @@ impl SessionActor {
             return;
         }
         let context = self.build_status_context().await;
-        self.send_fuigo_notification_transient(FuigoSessionUpdate::SessionStatus(Box::new(context)));
+        self.send_fuigo_notification_transient(FuigoSessionUpdate::SessionStatus(Box::new(
+            context,
+        )));
     }
 }
 

@@ -2,14 +2,14 @@
 //!
 //! Individual test modules import via `use super::common::*`.
 
-pub(crate) use serde_json::json;
-pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::time::{Duration, Instant};
 pub(crate) use fuigo_pager_pty_harness::{
     AgentTurnExpectation, ContentController, EnvOp, MockModel, PtyExitPoll, PtyHarness,
     ScriptedResponse, SseEvent, keys, oauth_credential_ops, pager_binary, seed_fake_oauth, sse,
     wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
+pub(crate) use serde_json::json;
+pub(crate) use std::path::{Path, PathBuf};
+pub(crate) use std::time::{Duration, Instant};
 
 /// Default PTY size used by every e2e test.
 /// Large enough to render the welcome screen without wrapping, small enough to make `screen_contents()` scans cheap.
@@ -254,7 +254,7 @@ pub(crate) fn turn_sentinel(n: u8) -> String {
 /// Seeded server name; it only renders once the MCP list fetch resolves.
 pub(crate) const MCP_TEST_SERVER: &str = "ptytestmcp";
 
-/// Budget for session creation plus the `x.ai/mcp/list` round-trip.
+/// Budget for session creation plus the `fuigo/mcp/list` round-trip.
 pub(crate) const MCP_MENU_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configured servers list with a status badge even when never connected.
@@ -1128,7 +1128,9 @@ pub(crate) fn run_wrap_driving(
             None
         }
         Ok(PtyExitPoll::PendingStatus) => {
-            panic!("fuigo wrap exited but portable status remained unavailable for {WRAP_TIMEOUT:?}")
+            panic!(
+                "fuigo wrap exited but portable status remained unavailable for {WRAP_TIMEOUT:?}"
+            )
         }
         Err(error) => panic!("poll fuigo wrap exit: {error:#}"),
     };

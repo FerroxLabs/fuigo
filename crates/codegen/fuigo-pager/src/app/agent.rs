@@ -8,12 +8,12 @@ use crate::acp::tracker::{AcpUpdateTracker, TurnActivity};
 use crate::scrollback::EntryId;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
 use fuigo_acp_lib::AcpAgentTx;
 use fuigo_shell::extensions::notification::GoalClassifierVerdict;
 use fuigo_shell::sampling::types::ReasoningEffort;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 /// Unique local identifier for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub usize);
@@ -121,7 +121,7 @@ pub enum AgentCommand {
     /// Restoring code in same directory (non-worktree `--restore-code`).
     RestoreCode,
     /// Forking the current session into a peer (no-worktree path).
-    /// Drives the spinner shown on the placeholder agent while the `x.ai/session/fork` request is in flight.
+    /// Drives the spinner shown on the placeholder agent while the `fuigo/session/fork` request is in flight.
     ForkSession,
 }
 impl AgentCommand {
@@ -683,10 +683,10 @@ pub struct AgentSession {
     /// Display-only mirror of the applied permission mode, read via `is_auto()`.
     /// Kept in sync wherever the pager applies the mode; mutually exclusive with `yolo_mode` (yolo wins).
     pub(crate) auto_mode: bool,
-    /// Prompt history for the current session, fetched from ACP (`x.ai/prompt_history` scoped via `filter_session_id`). Most-recent-first.
+    /// Prompt history for the current session, fetched from ACP (`fuigo/prompt_history` scoped via `filter_session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are additionally front-inserted locally on send.
     pub prompt_history: Vec<String>,
-    /// True until the session's startup/load `x.ai/prompt_history` fetch completes.
+    /// True until the session's startup/load `fuigo/prompt_history` fetch completes.
     pub prompt_history_loading: bool,
     /// Session is currently replaying historical updates from `session/load`.
     /// Used to suppress live-style redraw/render work until the load completes.

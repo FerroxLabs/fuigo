@@ -1,4 +1,4 @@
-//! `x.ai/session/load_history` fetches one older page of a gateway-backed conversation.
+//! `fuigo/session/load_history` fetches one older page of a gateway-backed conversation.
 //! The client owns the cursor: it passes `beforeId` and receives `nextBeforeId` for the next page.
 use super::ExtResult;
 use crate::agent::MvpAgent;

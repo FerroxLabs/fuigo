@@ -1448,7 +1448,7 @@ impl FinalizedToolset {
     }
     /// Resolve canonical [`ToolIdentity`] (kind, namespace, presentation label)
     /// for a tool by its client-facing wire name. Drives the first-party
-    /// `x.ai/*` tool `_meta` contract (tool normalization). Returns `None` for
+    /// `fuigo/*` tool `_meta` contract (tool normalization). Returns `None` for
     /// unknown tools (e.g. uninitialized MCP, backend-only tools).
     pub fn tool_identity(&self, tool_name: &str) -> Option<crate::normalization::ToolIdentity> {
         self.tools
@@ -2523,7 +2523,7 @@ mod tests {
             Some("run_terminal_cmd")
         );
     }
-    /// `merge_tool_meta` (the harness emission path) must stamp `x.ai/tool` for a
+    /// `merge_tool_meta` (the harness emission path) must stamp `fuigo/tool` for a
     /// known tool while preserving existing markers, and leave meta untouched for
     /// an unknown tool.
     #[tokio::test]

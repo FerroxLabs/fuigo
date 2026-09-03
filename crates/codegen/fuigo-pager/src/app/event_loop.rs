@@ -194,10 +194,10 @@ struct ReinitOutcome {
 struct AgentLoadOutcome {
     agent_id: super::agent::AgentId,
     success: bool,
-    /// `x.ai/runningPromptId` from the reload response: the turn another client is driving mid-reconnect.
+    /// `fuigo/runningPromptId` from the reload response: the turn another client is driving mid-reconnect.
     /// Adopted at finalize (mirrors the `SessionLoaded` adoption in `dispatch.rs`).
     running_prompt_id: Option<String>,
-    /// `x.ai/schedulerBackgroundLoops` from the reload response.
+    /// `fuigo/schedulerBackgroundLoops` from the reload response.
     /// A reconnect re-spawns the session actor, which re-pins the fire mode, so the pre-reconnect value can be stale.
     /// Adopt the reloaded one or `/loop` describes a runtime the new actor will not use.
     scheduler_background_loops: Option<bool>,
@@ -283,15 +283,12 @@ fn reconnect_restore_outcome(
 /// `TrustOutcome::Prompt` (interactive and untrusted, with repo configs present) becomes `TrustState::Pending` (show the question).
 /// Everything else becomes `TrustState::Done`.
 /// The feature-off fast path (kill-switch / opt-out / local build) short-circuits before any I/O.
-fn seed_trust_state(
-    app: &mut AppView,
-    remote: Option<&fuigo_shell::util::config::RemoteSettings>,
-) {
-    use std::io::IsTerminal;
+fn seed_trust_state(app: &mut AppView, remote: Option<&fuigo_shell::util::config::RemoteSettings>) {
     use fuigo_workspace::folder_trust::{
         TrustOutcome, decide, decide_inputs_with_interactive, feature_enabled,
     };
     use fuigo_workspace::trust::workspace_key;
+    use std::io::IsTerminal;
 
     let feature = feature_enabled(remote);
     if !feature {
@@ -1152,13 +1149,11 @@ pub(crate) async fn run(
                 .and_then(|s| s.privacy_banner_reshow_days)
         });
     // Local dismiss timestamp for the coding-data privacy banner.
-    app.privacy_banner_acked = fuigo_shell::config::load_from_disk()
-        .ok()
-        .and_then(|root| {
-            fuigo_shell::util::config::load_config_from_toml(&root)
-                .privacy
-                .privacy_banner_acked
-        });
+    app.privacy_banner_acked = fuigo_shell::config::load_from_disk().ok().and_then(|root| {
+        fuigo_shell::util::config::load_config_from_toml(&root)
+            .privacy
+            .privacy_banner_acked
+    });
     app.plugin_cta_enabled = fuigo_config::env_bool("FUIGO_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);
@@ -1282,9 +1277,10 @@ pub(crate) async fn run(
         }
     } else {
         // No cached session: check if the API key is the active credential
-        app.is_api_key_auth = app.auth_methods.iter().any(|m| {
-            m.id().0.as_ref() == fuigo_shell::agent::auth_method::FUIGO_API_KEY_METHOD_ID
-        });
+        app.is_api_key_auth = app
+            .auth_methods
+            .iter()
+            .any(|m| m.id().0.as_ref() == fuigo_shell::agent::auth_method::FUIGO_API_KEY_METHOD_ID);
         // No AuthMeta on this path: API keys / external auth have no consumer billing surface
         // External auth also hides `/usage`
         if app.is_api_key_auth || app.has_external_auth_provider {
@@ -1299,7 +1295,7 @@ pub(crate) async fn run(
         app.is_api_key_auth,
     );
     if !voice_mode_enabled {
-        app.voice_reset();
+        app.voice_cancel_all_dictation();
         app.voice_ui_active = false;
     }
     app.apply_voice_mode_enabled(voice_mode_enabled);
@@ -3176,8 +3172,9 @@ pub(crate) async fn run(
                         voice_rx = None;
                         let was_listening = app.voice_listening();
                         app.voice_cmd_tx = None;
-                        // Pipeline is gone: drop any session/interim entirely.
-                        app.voice_reset();
+                        // Pipeline is gone: nothing can deliver any pending
+                        // transcript, so drop every session, not just the live one.
+                        app.voice_cancel_all_dictation();
                         if was_listening {
                             app.show_toast("Voice stopped unexpectedly. Try again.");
                         }

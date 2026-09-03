@@ -1536,9 +1536,7 @@ impl SessionActor {
         purpose: DrainPurpose,
         extra: Vec<fuigo_tools::implementations::fuigo_build::update_goal::UpdateGoalEnvelope>,
     ) {
-        use fuigo_tools::implementations::fuigo_build::update_goal::{
-            RejectReason, UpdateGoalAck,
-        };
+        use fuigo_tools::implementations::fuigo_build::update_goal::{RejectReason, UpdateGoalAck};
         if !self.goal_harness_enabled() {
             let reject = || UpdateGoalAck::Rejected {
                 reason: RejectReason::HarnessDisabled,

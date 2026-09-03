@@ -52,7 +52,7 @@ pub(crate) fn conversations_lane_enabled() -> bool {
 pub fn conversations_lane_active() -> bool {
     conversations_lane_enabled() || crate::agent::chat_modes::process_chat_mode_enabled()
 }
-/// Parse `x.ai/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet (see [`force_kind_chat`]).
+/// Parse `fuigo/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet (see [`force_kind_chat`]).
 ///
 /// Client-sent `kind` of `chat`/`build` is honored only behind `feature = "local-workspace"` (pager welcome Local history).
 /// Chat-only Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot surface Build rows.
@@ -80,7 +80,7 @@ fn client_sent_kind_filter(req: &ListReq) -> bool {
     let Some(kind) = req
         .meta
         .as_ref()
-        .and_then(|m| m.get("x.ai/facetFilters"))
+        .and_then(|m| m.get("fuigo/facetFilters"))
         .and_then(|f| f.get("kind"))
     else {
         return false;
@@ -106,7 +106,7 @@ pub struct ListReq {
     pub cursor: Option<String>,
     /// Which directories the listing draws from. The wire carries the original `allowRelax` boolean.
     /// `Only` is reachable only in code (ACP `session/list`), so "exact" and "relax" cannot be requested together.
-    /// A relaxed response sets `_meta["x.ai/listScope"]`, re-evaluated per page.
+    /// A relaxed response sets `_meta["fuigo/listScope"]`, re-evaluated per page.
     #[serde(
         default,
         rename = "allowRelax",
@@ -121,7 +121,7 @@ pub struct ListReq {
     pub meta: Option<serde_json::Value>,
 }
 /// Directory scope the returned sessions were drawn from.
-/// Wire form is the `as_str` value (`x.ai/listScope`), so no serde derive is needed.
+/// Wire form is the `as_str` value (`fuigo/listScope`), so no serde derive is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListScope {
     /// Scoped to the request cwd.
@@ -165,7 +165,7 @@ impl ParsedMeta {
             return Self::default();
         };
         let facet_filters = meta
-            .get("x.ai/facetFilters")
+            .get("fuigo/facetFilters")
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
@@ -174,11 +174,11 @@ impl ParsedMeta {
             })
             .unwrap_or_default();
         let query = meta
-            .get("x.ai/query")
+            .get("fuigo/query")
             .and_then(|v| v.as_str())
             .map(str::to_owned);
         let limit = meta
-            .get("x.ai/limit")
+            .get("fuigo/limit")
             .and_then(serde_json::Value::as_u64)
             .map(|n| n as usize);
         Self {
@@ -207,7 +207,7 @@ pub(crate) fn force_kind(req: &mut ListReq, kind: SessionKind) {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     };
-    let mut filters = match meta.remove("x.ai/facetFilters") {
+    let mut filters = match meta.remove("fuigo/facetFilters") {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     };
@@ -216,7 +216,7 @@ pub(crate) fn force_kind(req: &mut ListReq, kind: SessionKind) {
         serde_json::json!([kind.as_str()]),
     );
     meta.insert(
-        "x.ai/facetFilters".to_owned(),
+        "fuigo/facetFilters".to_owned(),
         serde_json::Value::Object(filters),
     );
     req.meta = Some(serde_json::Value::Object(meta));
@@ -524,12 +524,12 @@ pub(crate) struct ExtListResponse {
 }
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ExtListResponseMeta {
-    #[serde(rename = "x.ai/facets")]
+    #[serde(rename = "fuigo/facets")]
     pub facets: FacetSummary,
-    #[serde(rename = "x.ai/partial")]
+    #[serde(rename = "fuigo/partial")]
     pub partial: PartialInfo,
     /// Present only when the listing relaxed beyond the cwd.
-    #[serde(rename = "x.ai/listScope", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fuigo/listScope", skip_serializing_if = "Option::is_none")]
     pub list_scope: Option<&'static str>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(value["source"], "local");
         assert_eq!(value["numMessages"], 7);
         assert_eq!(value["title"], "a summary");
-        assert_eq!(value["_meta"]["x.ai/session"]["kind"], "build");
+        assert_eq!(value["_meta"]["fuigo/session"]["kind"], "build");
         assert_eq!(value["gitRootDir"], "/Users/me/fuigo");
         assert_eq!(value["gitRemotes"][0], "git@github.com:example/repo.git");
         assert_eq!(value["sourceWorkspaceDir"], "/Users/me/fuigo-src");
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(value["sessionId"], "s1");
         assert_eq!(value["cwd"], "/Users/me/fuigo");
         assert_eq!(value["title"], "a summary");
-        assert_eq!(value["_meta"]["x.ai/session"]["kind"], "build");
+        assert_eq!(value["_meta"]["fuigo/session"]["kind"], "build");
         assert!(value.get("summary").is_none());
         assert!(value.get("source").is_none());
     }
@@ -717,9 +717,9 @@ mod tests {
     #[test]
     fn parsed_meta_reads_facet_filters_query_and_limit() {
         let meta = serde_json::json!({
-            "x.ai/facetFilters": { "kind": ["build"], "starred": true },
-            "x.ai/query": "antelope",
-            "x.ai/limit": 5,
+            "fuigo/facetFilters": { "kind": ["build"], "starred": true },
+            "fuigo/query": "antelope",
+            "fuigo/limit": 5,
         });
         let parsed = ParsedMeta::parse(Some(&meta));
         assert_eq!(parsed.query.as_deref(), Some("antelope"));
@@ -780,7 +780,7 @@ mod tests {
     fn forced_kind_replaces_client_build_filter() {
         let mut req = ListReq {
             meta: Some(serde_json::json!({
-                "x.ai/facetFilters": { "kind": ["build"] },
+                "fuigo/facetFilters": { "kind": ["build"] },
             })),
             ..ListReq::default()
         };
@@ -801,9 +801,9 @@ mod tests {
     fn forced_kind_preserves_other_facets() {
         let mut req = ListReq {
             meta: Some(serde_json::json!({
-                "x.ai/facetFilters": { "kind": ["build"], "starred": [true], "workspace": ["w1"] },
-                "x.ai/query": "antelope",
-                "x.ai/limit": 5,
+                "fuigo/facetFilters": { "kind": ["build"], "starred": [true], "workspace": ["w1"] },
+                "fuigo/query": "antelope",
+                "fuigo/limit": 5,
             })),
             ..ListReq::default()
         };
@@ -841,7 +841,10 @@ mod tests {
         ));
         am.hot_swap(crate::auth::FuigoAuth {
             auth_mode: crate::auth::AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::fuigo_oauth2_issuer().to_owned()),
+            // A literal, not `fuigo_oauth2_issuer()`: that reads a binary-wide
+            // OnceLock, so this fixture's meaning depended on which test
+            // installed an issuer first.
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_owned()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             ..crate::auth::FuigoAuth::test_default()
         });
@@ -893,7 +896,7 @@ mod tests {
         let client = ConversationsClient::new(fuigo_auth_manager(home.path()));
         let mut req = ListReq {
             meta: Some(serde_json::json!({
-                "x.ai/facetFilters": { "kind": ["build"] },
+                "fuigo/facetFilters": { "kind": ["build"] },
             })),
             ..ListReq::default()
         };
@@ -968,8 +971,7 @@ mod tests {
     fn conversations_lane_active_truth_table() {
         use crate::agent::chat_modes::FUIGO_CHAT_MODE_ENV;
         let _chat_off = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_MODE_ENV);
-        let _desktop_off =
-            fuigo_test_support::EnvGuard::unset("FUIGO_SESSION_LIST_CONVERSATIONS");
+        let _desktop_off = fuigo_test_support::EnvGuard::unset("FUIGO_SESSION_LIST_CONVERSATIONS");
         assert!(
             !conversations_lane_active(),
             "no env ⇒ lane off (Build-mode default)"
@@ -994,7 +996,7 @@ mod tests {
     fn parse_list_req_forces_kind_under_process_chat_mode_only() {
         use crate::agent::chat_modes::FUIGO_CHAT_MODE_ENV;
         let raw = serde_json::json!({
-            "_meta": { "x.ai/facetFilters": { "kind": ["build"], "starred": [true] } },
+            "_meta": { "fuigo/facetFilters": { "kind": ["build"], "starred": [true] } },
         })
         .to_string();
         {
@@ -1035,9 +1037,9 @@ mod tests {
                 "absent client kind still forces chat under process chat mode"
             );
             for bad in [
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+                serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": [] } } }),
+                serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": null } } }),
+                serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": ["other"] } } }),
             ] {
                 let req = parse_list_req(&bad.to_string()).expect("parse");
                 let parsed = ParsedMeta::parse(req.meta.as_ref());
@@ -1049,7 +1051,7 @@ mod tests {
             }
         }
     }
-    /// Wire pin for the cross-crate `x.ai/partial` envelope the pager parses: the serialized reason strings must not drift.
+    /// Wire pin for the cross-crate `fuigo/partial` envelope the pager parses: the serialized reason strings must not drift.
     /// The pager maps unknown reasons to a generic retry notice, masking a rename.
     #[test]
     fn ext_list_response_serializes_partial_reasons() {
@@ -1067,7 +1069,7 @@ mod tests {
             }))
             .expect("serialize");
             assert_eq!(
-                value["_meta"]["x.ai/partial"],
+                value["_meta"]["fuigo/partial"],
                 serde_json::json!({ "conversations": true, "reason": wire })
             );
         }
@@ -1080,7 +1082,7 @@ mod tests {
         }))
         .expect("serialize");
         assert_eq!(
-            healthy["_meta"]["x.ai/partial"],
+            healthy["_meta"]["fuigo/partial"],
             serde_json::json!({ "conversations": false })
         );
     }
@@ -1260,7 +1262,7 @@ mod tests {
         assert!(!policy_emptied_cwd_lane(true, &husk));
         assert!(!policy_emptied_cwd_lane(false, &husk));
     }
-    /// Send-side wire pin: `x.ai/listScope` present iff the scope relaxed.
+    /// Send-side wire pin: `fuigo/listScope` present iff the scope relaxed.
     #[test]
     fn ext_list_response_serializes_scope() {
         let result = |scope| UnifiedListResult {
@@ -1272,9 +1274,9 @@ mod tests {
         };
         let with =
             serde_json::to_value(ext_list_response(result(ListScope::Repo))).expect("serialize");
-        assert_eq!(with["_meta"]["x.ai/listScope"], serde_json::json!("repo"));
+        assert_eq!(with["_meta"]["fuigo/listScope"], serde_json::json!("repo"));
         let without =
             serde_json::to_value(ext_list_response(result(ListScope::Cwd))).expect("serialize");
-        assert!(without["_meta"].get("x.ai/listScope").is_none());
+        assert!(without["_meta"].get("fuigo/listScope").is_none());
     }
 }

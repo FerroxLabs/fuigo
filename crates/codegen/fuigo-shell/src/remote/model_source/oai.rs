@@ -164,7 +164,10 @@ mod tests {
             assert!(!u.contains("acme-corp"), "must not follow inference: {u}");
         }
         let api = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::ApiKey);
-        assert_eq!(api.url, "https://inference.acme-corp.example/fuigo/v1/models");
+        assert_eq!(
+            api.url,
+            "https://inference.acme-corp.example/fuigo/v1/models"
+        );
         assert_eq!(api.auth, EndpointAuth::ApiKey);
         let default = EndpointsConfig::from_config_value(&toml::Value::Table(Default::default()));
         assert_eq!(

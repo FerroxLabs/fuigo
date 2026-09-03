@@ -808,12 +808,11 @@ async fn observe_only_confident_completion_stays_warn_only() {
     local
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
-            fixture.actor.doom_loop_recovery =
-                Some(fuigo_sampling_types::DoomLoopRecoveryPolicy {
-                    max_threshold: 8,
-                    max_retries: 0,
-                    ..Default::default()
-                });
+            fixture.actor.doom_loop_recovery = Some(fuigo_sampling_types::DoomLoopRecoveryPolicy {
+                max_threshold: 8,
+                max_retries: 0,
+                ..Default::default()
+            });
             let actor = Arc::new(fixture.actor);
             *actor
                 .current_prompt_id
@@ -906,9 +905,7 @@ async fn exact_repetition_completion_is_tracked_for_incidence_only() {
             let fixture = make_replay_send_update_fixture().await;
             let actor = Arc::new(fixture.actor);
             let response = fuigo_sampling_types::ConversationResponse {
-                items: vec![fuigo_sampling_types::ConversationItem::assistant(
-                    "answer",
-                )],
+                items: vec![fuigo_sampling_types::ConversationItem::assistant("answer")],
                 stop_reason: None,
                 usage: None,
                 cost_usd_ticks: None,

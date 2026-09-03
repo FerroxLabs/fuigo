@@ -3,7 +3,7 @@
 //! - `GET  /rest/user-skills`: enabled user-uploaded skills
 //!
 //! Transport only.
-//! Chat `x.ai/commands/list` / ACP `available_commands_update` map this catalog to slash commands.
+//! Chat `fuigo/commands/list` / ACP `available_commands_update` map this catalog to slash commands.
 //!
 //! Desktop/shell chat uses this REST path, not gateway `conversation.commands.updated`.
 //! That keeps one process-local source for `available_commands_update`, list_commands, and slash resolve/expansion.
@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
 use fuigo_tools::implementations::skills::skill::extract_skill_body;
 use fuigo_tools::implementations::skills::types::{SkillInfo, SkillScope};
+use serde::Deserialize;
 
 use crate::auth::AuthManager;
 
@@ -802,7 +802,7 @@ mod tests {
     }
 
     fn test_auth_manager() -> Arc<AuthManager> {
-        use crate::auth::{AuthMode, FuigoAuth, FuigoComConfig, XAI_OAUTH2_ISSUER};
+        use crate::auth::{AuthMode, FuigoAuth, FuigoComConfig, GROK_OAUTH2_ISSUER};
         let dir = tempfile::tempdir().unwrap();
         let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());
         mgr.hot_swap(FuigoAuth {
@@ -812,7 +812,7 @@ mod tests {
             user_id: "user-1".into(),
             email: Some("test@example.com".into()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             ..Default::default()
         });
         std::mem::forget(dir);

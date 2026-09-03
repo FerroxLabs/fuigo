@@ -1,11 +1,11 @@
 //! Git branch/worktree info: cached queries shared across views.
 
+use fuigo_telemetry::region;
+use fuigo_telemetry::region::Parent;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use fuigo_telemetry::region;
-use fuigo_telemetry::region::Parent;
 
 use crate::host::HostOs;
 use crate::terminal::{TerminalName, terminal_context};
@@ -18,7 +18,7 @@ use crate::terminal::{TerminalName, terminal_context};
 /// Fed from three places, all off the render path:
 ///   - [`cwd_git_info_lazy`]: a lazy, throttled refresh when a view reads a cwd.
 ///   - [`populate_from_cwd_async`]: an eager warm at startup / on a cwd change.
-///   - [`update_from_notification`]: the `x.ai/git_head_changed` ACP notification.
+///   - [`update_from_notification`]: the `fuigo/git_head_changed` ACP notification.
 ///     A branch switch inside an agent thus reflects immediately instead of waiting out [`CWD_GIT_REFRESH_TTL`].
 type CwdCacheEntry = (Option<CwdGitInfo>, Instant);
 static CWD_GIT_CACHE: LazyLock<Mutex<HashMap<PathBuf, CwdCacheEntry>>> =

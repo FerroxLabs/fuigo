@@ -137,7 +137,7 @@ pub struct ClientCapabilities {
     #[serde(default)]
     pub client_version: Option<String>,
 
-    /// Whether this client has advertised `x.ai/codeNavigation.enabled`.
+    /// Whether this client has advertised `fuigo/codeNavigation.enabled`.
     /// When true, the leader injects `codeNavEnabled: true` into `session/new` and `session/load` requests.
     /// The agent can then gate code-nav startup per client rather than reading shared last-initialized state.
     #[serde(default)]
@@ -157,7 +157,7 @@ pub struct ClientCapabilities {
     #[serde(default)]
     pub fs_write: bool,
 
-    /// Whether this client will draw a status row (`x.ai/statusLine`).
+    /// Whether this client will draw a status row (`fuigo/statusLine`).
     /// When true, the leader injects `clientStatusLine: true`.
     /// The agent then builds the payload for a client that asked, not for whichever one started the process.
     /// The flag it sets is per session, so other subscribers of a shared session receive the payload too.
@@ -389,14 +389,14 @@ pub(crate) enum InternalMethod {
 impl InternalMethod {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::AuthCleared => "x.ai/internal/auth_cleared",
-            Self::EvictSessions => "x.ai/internal/evict_sessions",
-            Self::ReloadAllMcpServers => "x.ai/internal/reload_all_mcp_servers",
-            Self::ReloadModels => "x.ai/internal/reload_models",
-            Self::ReloadModelsCache => "x.ai/internal/reload_models_cache",
-            Self::ReloadProjectMcpServers => "x.ai/internal/reload_project_mcp_servers",
-            Self::ReloadSkills => "x.ai/internal/reload_skills",
-            Self::ReloadWorkflows => "x.ai/internal/reload_workflows",
+            Self::AuthCleared => "fuigo/internal/auth_cleared",
+            Self::EvictSessions => "fuigo/internal/evict_sessions",
+            Self::ReloadAllMcpServers => "fuigo/internal/reload_all_mcp_servers",
+            Self::ReloadModels => "fuigo/internal/reload_models",
+            Self::ReloadModelsCache => "fuigo/internal/reload_models_cache",
+            Self::ReloadProjectMcpServers => "fuigo/internal/reload_project_mcp_servers",
+            Self::ReloadSkills => "fuigo/internal/reload_skills",
+            Self::ReloadWorkflows => "fuigo/internal/reload_workflows",
         }
     }
 

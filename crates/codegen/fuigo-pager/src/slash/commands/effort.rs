@@ -79,8 +79,8 @@ mod tests {
     use crate::acp::model_state::ModelState;
     use crate::slash::commands::effort_levels::EFFORT_LEVELS;
     use agent_client_protocol as acp;
-    use std::sync::Arc;
     use fuigo_shell::sampling::types::ReasoningEffort;
+    use std::sync::Arc;
 
     fn model_with_reasoning(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));

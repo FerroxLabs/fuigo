@@ -9,8 +9,8 @@ use crate::session::helpers::session_summary::generate_session_summary;
 use crate::session::info::Info;
 use crate::session::persistence::PersistenceMsg;
 use agent_client_protocol as acp;
-use tokio::sync::mpsc;
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
+use tokio::sync::mpsc;
 
 enum State {
     /// No summary generated yet. The next [`SummaryGenerator::update`] call will attempt one.
@@ -118,7 +118,7 @@ pub(crate) fn notify_client(gateway: &Option<GatewaySender>, info: &Info, title:
     };
     if let Ok(params) = serde_json::value::to_raw_value(&notification) {
         gateway.forward_fire_and_forget(acp::ExtNotification::new(
-            "x.ai/session_notification",
+            "fuigo/session_notification",
             params.into(),
         ));
     }

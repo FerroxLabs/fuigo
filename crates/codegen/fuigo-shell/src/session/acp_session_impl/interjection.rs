@@ -14,12 +14,13 @@ pub(crate) use fuigo_interjection_core::{
 };
 
 /// Shell instantiation of the shared entry type: images are ACP content.
-pub(crate) type PendingInterjection = fuigo_interjection_core::PendingInterjection<acp::ImageContent>;
+pub(crate) type PendingInterjection =
+    fuigo_interjection_core::PendingInterjection<acp::ImageContent>;
 
 /// Prompt-id prefix for interjections that missed their turn and were converted into standalone prompt turns.
 /// They arrived while the session was idle, or after the running turn's final drain.
 /// The prefix keeps the turn's user echo persist-only.
-/// Every pane already rendered the text from the `x.ai/session/interjection` broadcast, so a live echo would duplicate it.
+/// Every pane already rendered the text from the `fuigo/session/interjection` broadcast, so a live echo would duplicate it.
 pub(crate) const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
 
 pub(crate) fn is_interject_fallback(prompt_id: &str) -> bool {
@@ -153,7 +154,7 @@ impl SessionActor {
             self.notifications
                 .gateway
                 .forward_fire_and_forget(acp::ExtNotification::new(
-                    "x.ai/session/interjection",
+                    "fuigo/session/interjection",
                     params.into(),
                 ));
         }
@@ -254,19 +255,15 @@ impl SessionActor {
         // Those attribute the turn, which this skill did not start
         // `SkillDispatched` still carries `plugin_source`, so dispatch counts stay complete
         for sk in &parsed {
-            fuigo_telemetry::session_ctx::log_event(
-                fuigo_telemetry::events::SlashCommandUsed {
-                    command: sk.name.clone(),
-                    args_provided: !sk.args.is_empty(),
-                },
-            );
-            fuigo_telemetry::session_ctx::log_event(
-                fuigo_telemetry::events::SkillDispatched {
-                    skill_name: sk.name.clone(),
-                    plugin_source: sk.plugin_name.clone(),
-                    trigger: fuigo_telemetry::events::SkillTrigger::SlashCommand,
-                },
-            );
+            fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::SlashCommandUsed {
+                command: sk.name.clone(),
+                args_provided: !sk.args.is_empty(),
+            });
+            fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::SkillDispatched {
+                skill_name: sk.name.clone(),
+                plugin_source: sk.plugin_name.clone(),
+                trigger: fuigo_telemetry::events::SkillTrigger::SlashCommand,
+            });
         }
         slash_commands::build_skill_information_for_refs(
             &parsed,

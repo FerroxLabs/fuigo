@@ -10,7 +10,7 @@ pub(super) const MAX_FOLLOW_UP_LABEL: usize = 256;
 /// Longer ids are rejected rather than truncated, because truncation could collide ids.
 pub(super) const MAX_RESPONSE_ID_LEN: usize = 128;
 
-/// Deserialize shape of the `x.ai/follow_ups` params emitted by the shell translator: `{ response_id, suggestions: [{ label, .. }] }`.
+/// Deserialize shape of the `fuigo/follow_ups` params emitted by the shell translator: `{ response_id, suggestions: [{ label, .. }] }`.
 /// The keys are prost-derived snake_case, not camelCase like most other pager notification payloads, so this struct must match snake_case verbatim.
 /// Every field defaults so a malformed or partial payload degrades to "no chips" instead of erroring.
 #[derive(serde::Deserialize)]
@@ -23,14 +23,14 @@ pub(super) struct FollowUpsParams {
     /// Older shells omit it; when present it makes dedup deterministic when a viewer adopts a turn (see [`AgentView::apply_follow_ups_with_prompt`]).
     #[serde(default, rename = "promptId")]
     prompt_id: Option<String>,
-    /// Carries the reserved `"x.ai/replayed"` marker, which the shell never sets in v1.
+    /// Carries the reserved `"fuigo/replayed"` marker, which the shell never sets in v1.
     /// Honoring it from day one means future replay producers need no pager change.
     /// Parsed loosely as a JSON value because the key contains a slash, which prost cannot model as a field.
     #[serde(default, rename = "_meta")]
     meta: Option<serde_json::Value>,
 }
 
-/// A single `x.ai/follow_ups` suggestion.
+/// A single `fuigo/follow_ups` suggestion.
 /// Only the human-facing `label` is consumed; `properties` and `tool_overrides` (also in the wire shape) are ignored.
 #[derive(serde::Deserialize)]
 pub(super) struct FollowUpSuggestionParam {
@@ -50,10 +50,10 @@ pub(super) fn sanitize_suggestion(label: &str) -> String {
     cleaned.trim().to_owned()
 }
 
-/// Handle `x.ai/follow_ups`: render follow-up suggestion chips for the latest assistant response.
+/// Handle `fuigo/follow_ups`: render follow-up suggestion chips for the latest assistant response.
 ///
 /// The keying that lets the newest response win lives in [`AgentView::apply_follow_ups`].
-/// The reserved `_meta["x.ai/replayed"] == true` marker suppresses rendering (it is absent today and treated as optional).
+/// The reserved `_meta["fuigo/replayed"] == true` marker suppresses rendering (it is absent today and treated as optional).
 /// The params carry no session id, so chips target the active agent.
 /// A background agent's follow-ups would mis-route until the shell adds a session id.
 /// Server-controlled count and label length are bounded and labels sanitized at ingestion.
@@ -65,7 +65,7 @@ pub(super) fn handle_follow_ups(notif: &acp::ExtNotification, app: &mut AppView)
     if params
         .meta
         .as_ref()
-        .and_then(|m| m.get("x.ai/replayed"))
+        .and_then(|m| m.get("fuigo/replayed"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {

@@ -1,6 +1,6 @@
 //! Bundle status state and response types.
 //!
-//! Pager-side cache of what `fuigo-shell` reports from `x.ai/bundle/status`.
+//! Pager-side cache of what `fuigo-shell` reports from `fuigo/bundle/status`.
 //! The shell downloads the bundle in the background after auth.
 //! The pager only reads the resulting on-disk catalog so it can populate the welcome-screen subagent pane.
 
@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 /// Pager-local snapshot of bundle availability on disk.
 ///
-/// Populated from `x.ai/bundle/status` ACP responses.
+/// Populated from `fuigo/bundle/status` ACP responses.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BundleState {
     pub has_cache: bool,
@@ -21,7 +21,7 @@ pub struct BundleState {
     pub role_details: Vec<RoleDetail>,
 }
 
-/// Deserialized response from `x.ai/bundle/status`.
+/// Deserialized response from `fuigo/bundle/status`.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleStatusResult {
@@ -61,7 +61,7 @@ pub struct RoleDetail {
     pub description: String,
 }
 
-/// Deserialized response from `x.ai/bundle/entry/get`.
+/// Deserialized response from `fuigo/bundle/entry/get`.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryGetResult {

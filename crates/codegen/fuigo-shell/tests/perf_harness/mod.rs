@@ -10,14 +10,14 @@ use std::time::Instant;
 use agent_client_protocol::{self as acp};
 
 use crate::acp_harness;
-use serde_json::Value;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use fuigo_acp_lib::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
 };
 use fuigo_shell::agent::config::Config as AgentConfig;
 use fuigo_shell::agent::mvp_agent::MvpAgent;
+use serde_json::Value;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 #[derive(Debug)]
 pub struct DispatchEvent {
@@ -143,7 +143,7 @@ impl acp::Client for PerfRecorder {
     }
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
-        if args.method.as_ref() != "x.ai/session_notification" {
+        if args.method.as_ref() != "fuigo/session_notification" {
             return Ok(());
         }
         let Ok(params) = serde_json::from_str::<Value>(args.params.get()) else {

@@ -126,9 +126,7 @@ pub(super) fn open_doctor_fix_question(
     plan: Box<crate::diagnostics::FixPlan>,
 ) {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
 
     let Some(agent) = app.agents.get_mut(&target.agent_id) else {
         return;
@@ -741,7 +739,7 @@ pub(super) fn dispatch_send_prompt_inner(
     } else {
         // ── Server-authoritative immediate send (plain prompt only) ──
         // A plain prompt typed while a turn is RUNNING is sent to the agent immediately instead of being held in the local drip-feed queue
-        // The agent appends it to its authoritative `pending_inputs` (turn starts never overlap) and drives the drain via `x.ai/queue/changed`
+        // The agent appends it to its authoritative `pending_inputs` (turn starts never overlap) and drives the drain via `fuigo/queue/changed`
         // We render an optimistic echo into the shared queue keyed by `prompt_id`; the broadcast reconciles it by id
         //
         // The IDLE case is unchanged: it falls through to the local path below, which drains instantly and renders the user block
@@ -1104,7 +1102,7 @@ pub(super) fn handle_prompt_response(
                     }
                 }
                 // This prompt's RPC resolved without becoming the running turn (removed, cancelled, rewound)
-                // Retire its optimistic echo so a later `x.ai/queue/changed` broadcast can't re-pin a stale placeholder and reorder the queue
+                // Retire its optimistic echo so a later `fuigo/queue/changed` broadcast can't re-pin a stale placeholder and reorder the queue
                 if let Some(sid) = agent.session.session_id.as_ref().map(|s| s.0.to_string()) {
                     retire_optimistic_echo(
                         &mut app.optimistic_prompt_echoes,

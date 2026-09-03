@@ -174,19 +174,17 @@ impl SessionHarnessMetrics {
         }
         let hook_names: Vec<String> = hooks.into_iter().map(|h| h.name).collect();
 
-        let agents_md_dir_names = fuigo_agent::prompt::agents_md::read_agents_config_with_paths(
-            &self.cwd,
-            self.compat,
-        )
-        .await
-        .iter()
-        .filter_map(|f| {
-            std::path::Path::new(&f.file_path)
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-        })
-        .collect();
+        let agents_md_dir_names =
+            fuigo_agent::prompt::agents_md::read_agents_config_with_paths(&self.cwd, self.compat)
+                .await
+                .iter()
+                .filter_map(|f| {
+                    std::path::Path::new(&f.file_path)
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                })
+                .collect();
         SessionHarness {
             session_id: self.session_id,
             client_identifier: self.client_identifier,

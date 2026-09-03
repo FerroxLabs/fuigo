@@ -19,11 +19,11 @@ use crate::views::prompt_widget::PromptWidget;
 use crate::views::welcome::WelcomePromptFocus;
 use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use fuigo_acp_lib::AcpAgentTx;
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use fuigo_acp_lib::AcpAgentTx;
 /// State for the "New Worktree" popup dialog on the welcome screen.
 #[derive(Debug, Default)]
 pub struct NewWorktreeDialogState {
@@ -193,8 +193,7 @@ impl WorktreeMode {
     }
     /// Same as [`Self::resolve_from_hints`], for merged effective config (`toml::Value`).
     pub fn resolve_from_hints_value(hints: Option<&toml::Value>) -> (Self, Self) {
-        let (new_session, fork) =
-            fuigo_shell::util::config::WorktreeHintMode::resolve_pair(hints);
+        let (new_session, fork) = fuigo_shell::util::config::WorktreeHintMode::resolve_pair(hints);
         (new_session.into(), fork.into())
     }
     fn resolve_from_hint_strings(get_str: impl Fn(&str) -> Option<Self>) -> (Self, Self) {
@@ -303,13 +302,22 @@ pub enum VoiceState {
     ColdStart { hold: bool, target: VoiceTarget },
     /// Mic is open and streaming audio to STT.
     Recording {
+        /// Identifies this capture to the pipeline and on every event it emits.
+        /// Minted by [`AppView::voice_begin_recording`], which is the only place
+        /// a press is sent.
+        session: u64,
         hold: bool,
         target: VoiceTarget,
         interim: Option<String>,
     },
     /// Capture was explicitly stopped (Esc / Ctrl+Space / [stop] / Ctrl+Space release).
     /// The target (and the last interim) are kept so a trailing STT final still lands without the overlay flickering in the meantime.
+    ///
+    /// Batch dictation is *always* delivered in this state -- the transcript
+    /// only exists after the release -- so this is the ordinary path, not an
+    /// edge case, and the session id has to survive into it.
     Stopping {
+        session: u64,
         target: VoiceTarget,
         interim: Option<String>,
     },
@@ -322,6 +330,16 @@ impl VoiceState {
     /// A start is queued for the lazy pipeline (the `ColdStart` state).
     pub fn pending_cold_start(&self) -> bool {
         matches!(self, Self::ColdStart { .. })
+    }
+    /// The capture session the pager is currently on, if any.
+    ///
+    /// `ColdStart` has none: no press has been sent yet, so no event can name
+    /// it. The id is minted when the press goes out.
+    pub fn session(&self) -> Option<u64> {
+        match self {
+            Self::Recording { session, .. } | Self::Stopping { session, .. } => Some(*session),
+            Self::Idle | Self::ColdStart { .. } => None,
+        }
     }
     /// The prompt box that owns this session's dictation, if any.
     pub fn target(&self) -> Option<VoiceTarget> {
@@ -713,12 +731,12 @@ pub struct AppView {
     /// Periodic billing poll requested (credits >= 99%).
     pub billing_poll_wanted: bool,
     /// Leader-mode session roster (FleetView dashboard).
-    /// Populated from `x.ai/sessions/list` polls and `x.ai/sessions/changed` broadcasts.
+    /// Populated from `fuigo/sessions/list` polls and `fuigo/sessions/changed` broadcasts.
     /// Empty in non-leader mode, which gates roster rendering.
     pub leader_roster: Vec<crate::app::roster::RosterEntry>,
     /// Local on-disk session list (dormant/idle sessions) shown on the dashboard when NOT in leader mode.
     /// There is no live leader roster to poll outside leader mode.
-    /// We fetch the same `x.ai/session/list` the resume picker uses and render those as idle rows.
+    /// We fetch the same `fuigo/session/list` the resume picker uses and render those as idle rows.
     /// Entries are stored as [`crate::app::roster::RosterEntry`] (activity `Dormant`) so they reuse the existing roster-row rendering / attach path.
     /// Empty in leader mode.
     pub dashboard_local_sessions: Vec<crate::app::roster::RosterEntry>,
@@ -749,12 +767,12 @@ pub struct AppView {
         fuigo_dashboard_store::MemberMetadata,
     >,
     /// Server-authoritative shared prompt queues, keyed by `sessionId`.
-    /// Reconciled from `x.ai/queue/changed` broadcasts so every client renders the same ordered queue (including prompts queued by other clients).
+    /// Reconciled from `fuigo/queue/changed` broadcasts so every client renders the same ordered queue (including prompts queued by other clients).
     /// Empty in non-leader mode.
     pub shared_prompt_queues:
         std::collections::HashMap<String, Vec<crate::app::prompt_queue::QueueEntryWire>>,
     /// Optimistic echo rows for prompts the pager sent server-authoritatively (plain prompt typed while a turn is running).
-    /// The confirming `x.ai/queue/changed` broadcast has not yet arrived. Keyed by `sessionId`.
+    /// The confirming `fuigo/queue/changed` broadcast has not yet arrived. Keyed by `sessionId`.
     /// Pinned into `shared_prompt_queues` on reconcile so the row doesn't flicker.
     /// Dropped once the authoritative broadcast reflects the id (or it starts running). Never persisted.
     pub optimistic_prompt_echoes:
@@ -777,7 +795,7 @@ pub struct AppView {
     pub cancel_rewind_enabled: bool,
     /// Whether session recap (`/recap` and the automatic away recap) is rolled out.
     /// Resolved by the shell and advertised on ACP initialize (`sessionRecap`).
-    /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
+    /// When false, the pager must not request recaps (zero `fuigo/recap` traffic).
     pub session_recap_available: bool,
     /// Shell-advertised eligibility for the `/feedback` trace-upload offer, exactly as received (initialize meta / auth-meta refreshes).
     /// Read it through [`Self::feedback_trace_offer`], which subtracts the latch.
@@ -979,7 +997,7 @@ pub struct AppView {
     /// Automatically enabled by `plan_mode`.
     pub ask_user: bool,
     /// Process-wide gateway light-frontend from CLI `--chat` only.
-    /// Stamps `_meta["x.ai/session"].kind = "chat"` and omits Build agent profiles on create/load while set.
+    /// Stamps `_meta["fuigo/session"].kind = "chat"` and omits Build agent profiles on create/load while set.
     /// `/chat` does **not** set this (uses [`Self::deferred_startup`] one-shot state instead).
     pub chat_mode: bool,
     /// Welcome picker mode; ignored when `local_workspace_startup_locked`.
@@ -1066,6 +1084,15 @@ pub struct AppView {
     pub account_email: Option<String>,
     /// Login button label from `AuthMethod.name` (e.g., "grok.com", "Acme Corp").
     pub login_label: Option<String>,
+    /// Credentials found in the environment at startup, for the first-run menu.
+    ///
+    /// Display-only — no key material. The secret is re-read from the
+    /// environment at dispatch time, so it never becomes resident in the root
+    /// view struct and cannot reach a log through a `{:?}` on an action.
+    pub detected_keys: Vec<crate::app::pending_menu::DetectedKeyRow>,
+    /// The same rows' environment variable names, in menu order. Kept
+    /// separately so the input path can borrow them without the render rows.
+    pub detected_env_vars: Vec<String>,
     /// The auth method ID to use for login.
     pub login_method_id: Option<acp::AuthMethodId>,
     /// Initial auth mode hint from method metadata.
@@ -1206,6 +1233,19 @@ pub struct AppView {
     /// One state at a time, so inconsistent combinations are unrepresentable.
     /// Production mutates it only through the `AppView::voice_*` transition methods.
     pub voice_state: VoiceState,
+    /// Next capture session id. Monotonic for the life of the process, so an id
+    /// is never reused and a late event can always be told apart from a current
+    /// one.
+    pub voice_next_session: u64,
+    /// Sessions that are no longer current but are still owed a delivery: the
+    /// user re-pressed while an upload was in flight, so the recording they
+    /// already made is still being transcribed somewhere.
+    ///
+    /// Holds the target the dictation was bound to when it started, because
+    /// that -- not whatever is bound now -- is where those words belong.
+    /// Bounded: the pipeline keeps at most `MAX_IN_FLIGHT_UPLOADS` uploads
+    /// alive and evicts the oldest itself, so this cannot grow without limit.
+    pub voice_detached: std::collections::VecDeque<(u64, VoiceTarget)>,
 }
 /// Reshow window elapsed? None or 0 means never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1221,13 +1261,66 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
     };
     chrono::Utc::now() >= next
 }
+/// Hard cap on remembered detached sessions.
+///
+/// A backstop against unbounded growth, NOT the lifecycle mechanism. Entries are
+/// meant to leave by being resolved -- the pipeline sends a final, a failure, or
+/// an eviction notice for every session it detaches, and each of those forgets
+/// its entry. Dropping one here instead means a transcript arrives to an owner
+/// that has been forgotten and is silently discarded.
+///
+/// So this sits far above the pipeline's own `MAX_IN_FLIGHT_UPLOADS`. Sizing it
+/// to exactly that cap was wrong: the pager mints a session per press while the
+/// pipeline may still be opening the first one, so a burst of presses that never
+/// record anything could evict the one entry that was genuinely uploading. Each
+/// entry is a `u64` and a small enum, so the slack is free.
+const VOICE_DETACHED_MAX: usize = 32;
+
+/// Hand `cmd` to a voice pipeline, reporting whether it will be delivered.
+///
+/// `try_send` first, because the 32-slot channel is effectively never full and
+/// the fast path must not await; only when it *is* full does the command go to a
+/// task that can wait for room. That re-send has no ordering guarantee against
+/// later commands, which is why every press and release names its session and
+/// the pipeline drops a release that does not match the session it is running.
+///
+/// A closed channel is the one unrecoverable case: the pipeline is gone, so
+/// there is nothing to deliver to -- and equally no microphone left open.
+///
+/// Free-standing so a caller that has already taken the sender out of the
+/// `AppView` (a shutdown, which must replace the pipeline) can still use it.
+pub(crate) fn send_voice_command_reliably(
+    tx: &tokio::sync::mpsc::Sender<fuigo_voice::VoiceCommand>,
+    cmd: fuigo_voice::VoiceCommand,
+) -> bool {
+    use tokio::sync::mpsc::error::TrySendError;
+    match tx.try_send(cmd) {
+        Ok(()) => true,
+        Err(TrySendError::Full(cmd)) => {
+            // Outside a runtime (unit tests construct an `AppView` directly)
+            // there is nowhere to queue it; say so rather than pretending.
+            let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                tracing::warn!("voice command dropped: channel full and no runtime to queue it");
+                return false;
+            };
+            let tx = tx.clone();
+            handle.spawn(async move {
+                if tx.send(cmd).await.is_err() {
+                    tracing::warn!("voice pipeline closed before a queued command was delivered");
+                }
+            });
+            true
+        }
+        Err(TrySendError::Closed(_)) => {
+            tracing::debug!("voice command dropped: pipeline channel closed");
+            false
+        }
+    }
+}
 impl AppView {
     /// Finishes startup if this view still holds the obligation; does nothing after.
     pub(crate) fn finish_startup(&mut self, outcome: fuigo_telemetry::startup::StartupOutcome) {
-        fuigo_telemetry::startup::PendingStartup::finish_held(
-            &mut self.pending_startup,
-            outcome,
-        );
+        fuigo_telemetry::startup::PendingStartup::finish_held(&mut self.pending_startup, outcome);
     }
     /// Releases the obligation without recording; does nothing after finish.
     pub(crate) fn abandon_startup(&mut self) {
@@ -1374,7 +1467,7 @@ impl AppView {
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
         } else if was_api_key && is_restricted_tier(self.subscription_tier.as_deref()) {
-            self.voice_reset();
+            self.voice_cancel_all_dictation();
             self.voice_ui_active = false;
             self.apply_voice_mode_enabled(false);
         }
@@ -1583,6 +1676,21 @@ impl AppView {
             consent_state: crate::app::consent::ConsentState::Done,
             account_email: None,
             login_label: None,
+            // Read once at construction. Only the masked form is kept, so no
+            // secret becomes resident here; `dispatch_use_detected_key`
+            // re-reads the environment when a row is actually chosen.
+            detected_env_vars: fuigo_shell::agent::key_discovery::discover_appliable()
+                .iter()
+                .map(|d| d.env_var.to_owned())
+                .collect(),
+            detected_keys: fuigo_shell::agent::key_discovery::discover_appliable()
+                .iter()
+                .map(|d| crate::app::pending_menu::DetectedKeyRow {
+                    provider_label: d.provider.label.to_owned(),
+                    env_var: d.env_var.to_owned(),
+                    masked: d.masked(),
+                })
+                .collect(),
             login_method_id: None,
             auth_start_mode: AuthMode::Pending,
             auth_code_input: LineEditor::default(),
@@ -1673,6 +1781,8 @@ impl AppView {
             voice_auth: None,
             voice_cmd_tx: None,
             voice_state: VoiceState::Idle,
+            voice_next_session: 1,
+            voice_detached: std::collections::VecDeque::new(),
         }
     }
     /// Seed `deferred_model_switch` from CLI `-m`.
@@ -1742,7 +1852,7 @@ impl AppView {
     /// Sync the deny list into every slash surface (welcome prompt, all agents, dashboard) so restricted commands hide/show in lockstep.
     /// Mirrors [`Self::apply_voice_mode_enabled`].
     ///
-    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the `x.ai/settings/update` handler when the subscription tier changes.
+    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the `fuigo/settings/update` handler when the subscription tier changes.
     /// A mid-session upgrade thus lifts the restrictions without a restart.
     pub fn apply_tier_restrictions(&mut self) {
         let restricted = self.team_name.is_none()
@@ -1817,19 +1927,73 @@ impl AppView {
     pub fn voice_interim(&self) -> Option<&str> {
         self.voice_state.interim()
     }
-    /// Best-effort one-shot command into the voice pipeline (no-op if it isn't up).
-    fn voice_send(&self, cmd: fuigo_voice::VoiceCommand) {
-        if let Some(tx) = &self.voice_cmd_tx
-            && tx.try_send(cmd).is_err()
-        {
-            tracing::trace!("voice command dropped: pipeline channel full or closed");
+    /// Hand `cmd` to the voice pipeline. Returns whether it will be delivered.
+    ///
+    /// Not best-effort, because the commands that matter here are the ones that
+    /// stop things: a shed release leaves the microphone open behind a UI that
+    /// has already moved on. `try_send` runs first because the 32-slot channel
+    /// is effectively never full and the fast path must not await; only when it
+    /// *is* full does the command go to a task that can wait for room.
+    ///
+    /// That re-send has no ordering guarantee against later commands, which is
+    /// why every press and release names its session and the pipeline drops a
+    /// release that does not match the session it is running
+    /// ([`fuigo_voice::VoiceCommand::PttRelease`]).
+    ///
+    /// A closed channel is the one unrecoverable case: the pipeline is gone, so
+    /// there is nothing to deliver to -- and equally no microphone left open.
+    /// Returning `false` lets the caller decline to advance the UI.
+    fn voice_send_reliably(&self, cmd: fuigo_voice::VoiceCommand) -> bool {
+        let Some(tx) = &self.voice_cmd_tx else {
+            return false;
+        };
+        send_voice_command_reliably(tx, cmd)
+    }
+    /// Move the session being left behind into [`Self::voice_detached`], so a
+    /// transcript still being uploaded is delivered to the box it was dictated
+    /// into rather than to whatever is bound by the time it arrives.
+    ///
+    /// Only for a session that ends *softly*. A hard teardown
+    /// ([`Self::voice_reset`]) deliberately does not call this: the user
+    /// cancelled, and cancelled dictation should not reappear later.
+    fn voice_detach_current_session(&mut self) {
+        let (Some(session), Some(target)) = (self.voice_state.session(), self.voice_state.target())
+        else {
+            return;
+        };
+        self.voice_detached.retain(|(known, _)| *known != session);
+        self.voice_detached.push_back((session, target));
+        while self.voice_detached.len() > VOICE_DETACHED_MAX {
+            self.voice_detached.pop_front();
         }
+    }
+    /// Forget a detached session, once it has delivered or failed.
+    pub(crate) fn voice_forget_detached(&mut self, session: u64) -> Option<VoiceTarget> {
+        let at = self
+            .voice_detached
+            .iter()
+            .position(|(known, _)| *known == session)?;
+        self.voice_detached.remove(at).map(|(_, target)| target)
     }
     /// Open the mic now (pipeline already up) and enter [`VoiceState::Recording`] bound to `target`.
     /// `hold` marks a Ctrl+Space hold-press start.
+    ///
+    /// No-op if the pipeline is gone: entering `Recording` then would paint a
+    /// listening UI over a microphone that was never opened.
     pub(crate) fn voice_begin_recording(&mut self, target: VoiceTarget, hold: bool) {
-        self.voice_send(fuigo_voice::VoiceCommand::PttPress);
+        let session = self.voice_next_session;
+        if !self.voice_send_reliably(fuigo_voice::VoiceCommand::PttPress { session }) {
+            self.voice_state = VoiceState::Idle;
+            self.show_toast("Voice: dictation is not running; try /voice again.");
+            return;
+        }
+        self.voice_next_session += 1;
+        // The session this replaces may still be uploading a recording the user
+        // finished making. Remember where its words belong before losing the
+        // binding.
+        self.voice_detach_current_session();
         self.voice_state = VoiceState::Recording {
+            session,
             hold,
             target,
             interim: None,
@@ -1855,26 +2019,60 @@ impl AppView {
             VoiceState::Idle | VoiceState::ColdStart { .. } => {}
         }
     }
-    /// Explicit stop (Esc / Ctrl+Space / `[stop]`): release the mic but keep the target and last interim so a trailing STT final still lands.
-    /// Always allowed (never leaves a hot mic). No-op unless recording.
+    /// Explicit stop (Esc / Ctrl+Space / `[stop]`): release the mic but keep the session, target and last interim so a trailing STT final still lands.
+    /// No-op unless recording.
+    ///
+    /// The release is delivered even when the command channel is momentarily
+    /// full ([`Self::voice_send_reliably`]), so this does not leave a hot mic;
+    /// if the channel is closed the pipeline is gone and there is no mic to
+    /// leave open.
     pub(crate) fn voice_stop_keeping_final(&mut self) {
         let VoiceState::Recording {
-            target, interim, ..
+            session,
+            target,
+            interim,
+            ..
         } = &mut self.voice_state
         else {
             return;
         };
+        let session = *session;
         let target = *target;
         let interim = interim.take();
-        self.voice_send(fuigo_voice::VoiceCommand::PttRelease);
-        self.voice_state = VoiceState::Stopping { target, interim };
+        self.voice_send_reliably(fuigo_voice::VoiceCommand::PttRelease { session });
+        self.voice_state = VoiceState::Stopping {
+            session,
+            target,
+            interim,
+        };
     }
     /// Hard teardown (submit / error / kill-switch / navigate-away): release the mic and forget the session (no trailing final, no queued start).
+    ///
+    /// The session is *not* detached: this is the cancel path, and dictation the
+    /// user cancelled must not resurface in a prompt box later.
     pub(crate) fn voice_reset(&mut self) {
-        if self.voice_state.listening() {
-            self.voice_send(fuigo_voice::VoiceCommand::PttRelease);
+        if let VoiceState::Recording { session, .. } = self.voice_state {
+            self.voice_send_reliably(fuigo_voice::VoiceCommand::PttRelease { session });
         }
         self.voice_state = VoiceState::Idle;
+    }
+    /// Turn dictation off wholesale: end the current session AND abandon every
+    /// detached one still owed a transcript.
+    ///
+    /// Only for the paths where voice itself is going away -- the mode switched
+    /// off, the tier lost access, the pipeline died, the language changed and
+    /// took the pipeline with it. There is nothing left to deliver those
+    /// transcripts *with*, so remembering them would only let one surface later
+    /// in a prompt box, reading as the app typing by itself.
+    ///
+    /// Deliberately NOT what [`Self::voice_reset`] does. That one ends a single
+    /// session and is reached by an ordinary failure -- a no-speech watchdog on
+    /// the recording in progress, say -- where other sessions are still
+    /// uploading text the user really said, and dropping them would be exactly
+    /// the silent loss this design exists to prevent.
+    pub(crate) fn voice_cancel_all_dictation(&mut self) {
+        self.voice_reset();
+        self.voice_detached.clear();
     }
     /// Ctrl+Space hold release: end only a session a Ctrl+Space hold started.
     /// Cancel a queued hold cold-start, or stop a live hold recording (keeping its trailing final).
@@ -1921,6 +2119,68 @@ impl AppView {
             _ => false,
         }
     }
+    /// Whether a bare Enter right now would land in the very box this dictation
+    /// is bound to.
+    ///
+    /// Stricter than [`Self::voice_target_on_active_surface`], which only asks
+    /// whether the box is on screen. Enter is claimed by things that sit *over*
+    /// a visible prompt without being modals -- a permission card, an MCP
+    /// elicitation, a question, the plan-approval viewer -- and swallowing their
+    /// key to stop a recording would leave the user unable to answer them at
+    /// all. So this additionally requires the prompt to hold focus with nothing
+    /// inline waiting on a keystroke.
+    ///
+    /// Anything not proven safe returns false: the cost of being wrong here is a
+    /// key the user cannot deliver, while the cost of declining is one extra
+    /// keystroke to stop the dictation. The predicates below are the view's own,
+    /// deliberately, because a hand-written list of overlays would rot -- an
+    /// earlier revision of this function checked a field the Enter handler does
+    /// not even read.
+    fn voice_enter_would_reach_the_dictated_box(&self) -> bool {
+        if !self.voice_target_on_active_surface() {
+            return false;
+        }
+        match self.voice_recording_target() {
+            Some(VoiceTarget::Agent(id)) => self.agents.get(&id).is_some_and(|agent| {
+                // Three of the view's own predicates rather than an enumeration
+                // here, so a future card or dropdown is covered by the place
+                // that already has to know about it:
+                // - `no_input_overlay_pending`: permission, cancel-turn,
+                //   question, MCP elicitation, plan approval.
+                // - `modal_owns_input`: the agents modal and the other overlays
+                //   that take keys without being scroll-blocking modals.
+                // - `any_dropdown_open`: the composer's own slash, file-search,
+                //   completion and history-search popups, where Enter accepts
+                //   the highlighted entry.
+                agent.active_pane == crate::views::agent::ActivePane::Prompt
+                    && agent.no_input_overlay_pending()
+                    && !agent.modal_owns_input()
+                    && !agent.prompt.any_dropdown_open()
+                    // In multiline the bare Enter is a newline and the send is
+                    // Mod+Enter, so intercepting it would stop the dictation for
+                    // a key that was never a submit -- and then advise pressing
+                    // Enter again, which only inserts another newline.
+                    && !agent.multiline_mode
+            }),
+            // The dashboard's Enter belongs to the row list unless the input
+            // itself holds focus: with the list focused it attaches or creates
+            // an agent (`dispatch_send_action`), which is not ours to swallow.
+            Some(VoiceTarget::DashboardDispatch) => self.dashboard.as_ref().is_some_and(|d| {
+                !d.list_focused && !d.dispatch.any_dropdown_open() && !d.multiline_mode
+            }),
+            // The peek reply needs its own focus check for the same reason
+            // dispatch needs `list_focused`: with the rows focused, Enter
+            // attaches the row rather than sending the reply.
+            Some(VoiceTarget::DashboardPeekReply(_)) => self.dashboard.as_ref().is_some_and(|d| {
+                d.peek
+                    .as_ref()
+                    .is_some_and(|p| p.focused && p.question.is_none())
+                    && !d.peek_reply.any_dropdown_open()
+                    && !d.multiline_mode
+            }),
+            None => false,
+        }
+    }
     /// Auto-release the mic if the user navigates away from the box that started recording (another agent / dashboard popup / a changed peek row).
     /// Keeps stop controls and the recording session aligned.
     /// Run by the event loop each tick; no-op unless recording.
@@ -1928,6 +2188,12 @@ impl AppView {
         if !self.voice_state.listening() || self.voice_target_on_active_surface() {
             return;
         }
+        // A hard teardown, so an in-flight recording is dropped rather than
+        // detached. That is deliberate: leaving the box mid-dictation reads as
+        // abandoning it, and text surfacing later in a prompt the user walked
+        // away from would be harder to explain than losing it. The paths that
+        // do keep a recording (stop, submit, re-press) all leave the user
+        // looking at the box the words are going to land in.
         self.voice_reset();
     }
     /// Esc handling shared by the agent and dashboard surfaces.
@@ -1946,6 +2212,15 @@ impl AppView {
             Some(InputOutcome::Action(Action::VoiceToggle))
         } else if self.voice_state.pending_cold_start() {
             self.voice_reset();
+            Some(InputOutcome::Changed)
+        } else if matches!(self.voice_state, VoiceState::Stopping { .. }) {
+            // The way out of a transcription that never lands. Enter is
+            // deliberately swallowed while one is pending, and the batch client
+            // allows a two-minute request, so without this a hung upload leaves
+            // the composer unsendable with no way to give up. Esc abandons the
+            // transcript, which is the user's own choice to make.
+            self.voice_reset();
+            self.show_toast("Voice: stopped waiting for the transcript.");
             Some(InputOutcome::Changed)
         } else {
             None
@@ -2103,7 +2378,7 @@ impl AppView {
             &self.dashboard_local_sessions
         }
     }
-    /// Reconcile the shared prompt queue for a session from a `x.ai/queue/changed` broadcast.
+    /// Reconcile the shared prompt queue for a session from a `fuigo/queue/changed` broadcast.
     /// The broadcast is authoritative: it fully replaces the previously-known queue for that session.
     /// An empty list clears the entry.
     ///
@@ -2172,7 +2447,7 @@ impl AppView {
     }
     /// Push an optimistic echo row for a server-authoritative prompt the pager just sent.
     /// (A plain prompt or agent-bound kind typed while a turn is running.)
-    /// The row is keyed by `prompt_id` so the authoritative `x.ai/queue/changed` broadcast replaces it (matched by `id`) rather than duplicating it.
+    /// The row is keyed by `prompt_id` so the authoritative `fuigo/queue/changed` broadcast replaces it (matched by `id`) rather than duplicating it.
     /// `kind` (`"prompt"`/`"bash"`/…) drives the row's display and, on adoption, the turn-start shim's block and focus flag.
     pub fn push_optimistic_prompt_echo(
         &mut self,
@@ -2457,6 +2732,65 @@ impl AppView {
             self.pending_action = None;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
+        // A bare Enter while a *batch* dictation is live means "I have finished
+        // speaking", not "send what is in the box".
+        //
+        // Batch produces no interim, so at this moment the user has not seen a
+        // single word of what they dictated. Submitting would send the agent a
+        // prompt missing the dictation entirely -- and auto-submitting once the
+        // transcript arrived would send text nobody has ever read. Neither is
+        // acceptable for input that drives a coding agent. So the Enter ends the
+        // capture and is consumed here; the transcript lands in the composer and
+        // a second Enter sends what the user can by then see.
+        //
+        // This has to sit above the view layer: with an empty composer -- plain
+        // voice-only dictation -- no view turns Enter into a send at all (the
+        // agent prompt rejects empty text, the dashboard inputs attach a row
+        // instead), so there is no submit path downstream to intercept.
+        //
+        // Narrowed to the case where that Enter would otherwise have gone to the
+        // box being dictated into. Anything else -- a modal, an elicitation, the
+        // plan-approval viewer, a non-prompt pane -- owns its own Enter, and
+        // swallowing that key to stop a recording would leave the user unable to
+        // answer it. See `voice_enter_would_reach_the_dictated_box`.
+        //
+        // Streaming is deliberately untouched: its interim is on screen, so
+        // Enter there submits what the user can already read.
+        if let Some(key) = key_event
+            && key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && matches!(self.voice_state, VoiceState::Recording { .. })
+            && self.voice_config.stt_mode == fuigo_voice::SttMode::Batch
+            && !modal_open
+            && self.voice_enter_would_reach_the_dictated_box()
+        {
+            self.voice_stop_keeping_final();
+            self.show_toast("Voice: transcribing your dictation…");
+            return InputOutcome::Changed;
+        }
+        // While that transcription is still in flight, Enter must not submit
+        // either. The words are not in the composer yet, so submitting now sends
+        // a prompt missing the dictation and then drops the transcript into an
+        // empty box afterwards -- the user followed the instruction and got the
+        // opposite of what it promised.
+        //
+        // Once the final lands the session ends and this guard stops matching,
+        // so the very next Enter sends the merged text; a failure resets the
+        // session the same way. That covers every path the pipeline reports on,
+        // but says nothing about how long a slow upload takes -- so Esc gives up
+        // on the transcript and releases the composer (`voice_esc_outcome`).
+        if let Some(key) = key_event
+            && key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && matches!(self.voice_state, VoiceState::Stopping { .. })
+            && self.voice_config.stt_mode == fuigo_voice::SttMode::Batch
+            && !modal_open
+            && self.voice_enter_would_reach_the_dictated_box()
+        {
+            self.show_toast("Voice: still transcribing — your dictation will land here.");
+            return InputOutcome::Changed;
+        }
+
         if let Event::Mouse(mouse) = ev
             && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
             && !modal_open
@@ -2531,6 +2865,8 @@ impl AppView {
                     new_worktree_dialog: &mut self.new_worktree_dialog,
                     menu_index: &mut self.welcome_menu_index,
                     menu_rects: &self.welcome_menu_rects,
+                    pending_detected_env_vars: &self.detected_env_vars,
+                    login_available: self.login_label.is_some(),
                     menu_count: if zdr_blocked {
                         2
                     } else {
@@ -3155,6 +3491,11 @@ struct WelcomeInputCtx<'a> {
     menu_index: &'a mut Option<usize>,
     menu_rects: &'a [ratatui::layout::Rect],
     menu_count: usize,
+    /// Environment variables holding discovered credentials, in menu order.
+    /// Names, never values -- these are painted on screen already.
+    pending_detected_env_vars: &'a [String],
+    /// Whether an interactive login row is offered (an issuer is configured).
+    login_available: bool,
     prompt_rect: Option<&'a ratatui::layout::Rect>,
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
@@ -3192,8 +3533,7 @@ struct WelcomeInputCtx<'a> {
     /// Mirrors the render's `session_picker_loading` param: the spinner-only picker still owns input (Esc must dismiss it, not hit the hidden menu).
     sp_loading: bool,
     sp_state: &'a mut crate::views::picker::PickerState,
-    sp_content_results:
-        &'a Option<Vec<fuigo_shell::extensions::session_search::SearchSessionHit>>,
+    sp_content_results: &'a Option<Vec<fuigo_shell::extensions::session_search::SearchSessionHit>>,
     sp_content_loading: bool,
     /// The query `sp_entries` were server-fetched with (see [`crate::views::session_picker::effective_filter_query`]).
     sp_entries_query: &'a Option<String>,
@@ -3822,6 +4162,29 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     }
                     return InputOutcome::Action(Action::QuitConfirmed);
                 }
+                // Digit rows first: `1`..`N` apply a discovered credential.
+                // These need explicit keys because arrow-key selection is
+                // gated to `AuthState::Done`, so this menu is otherwise
+                // mouse-only and a numbered row would be unreachable.
+                // Matched directly rather than through `key!`, which needs a
+                // literal; the digit is derived from the row index.
+                if let crossterm::event::KeyCode::Char(c) = key.code
+                    && key.modifiers.is_empty()
+                    && let Some(d) = c.to_digit(10)
+                    && d >= 1
+                {
+                    let i = (d - 1) as usize;
+                    if i < ctx
+                        .pending_detected_env_vars
+                        .len()
+                        .min(crate::app::pending_menu::MAX_DETECTED_ROWS)
+                    {
+                        if let Some(row) = ctx.pending_detected_env_vars.get(i) {
+                            return InputOutcome::Action(Action::UseDetectedKey(row.clone()));
+                        }
+                        return InputOutcome::Unchanged;
+                    }
+                }
                 if key!('k').matches(key) || key!(Enter).matches(key) {
                     return InputOutcome::Action(Action::EnterApiKey);
                 }
@@ -3852,7 +4215,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     let trimmed = ctx.auth_code_input.text().trim().to_string();
                     if !trimmed.is_empty() {
                         return InputOutcome::Action(if matches!(mode, AuthMode::ApiKey) {
-                            Action::SubmitApiKey(trimmed)
+                            Action::SubmitApiKey(crate::app::actions::SecretKey(trimmed))
                         } else {
                             Action::SubmitAuthCode(trimmed)
                         });
@@ -3927,7 +4290,11 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         && mouse.row < rect.y + rect.height
                     {
                         if matches!(ctx.auth_state, AuthState::Pending { .. }) {
-                            return dispatch_pending_menu_action(i, ctx.menu_rects.len());
+                            return dispatch_pending_menu_action(
+                                i,
+                                ctx.pending_detected_env_vars,
+                                ctx.login_available,
+                            );
                         }
                         if ctx.is_zdr_blocked {
                             return dispatch_zdr_menu_action(i);
@@ -4169,18 +4536,26 @@ fn handle_menu_nav(
 /// Dispatch an action for a welcome menu item when not yet authenticated.
 ///
 /// Item 0 is "Enter API key" and the LAST item is Quit. A "Login with ..." row
-/// sits between them only when an interactive provider is configured, so the
-/// menu is either 2 or 3 rows. `menu_len` comes from the rects the renderer
-/// actually produced, which keeps this in step with the menu by construction
-/// rather than by two places agreeing on a layout.
-fn dispatch_pending_menu_action(index: usize, menu_len: usize) -> InputOutcome {
-    if index + 1 == menu_len {
-        return InputOutcome::Action(Action::Quit);
-    }
-    match index {
-        0 => InputOutcome::Action(Action::EnterApiKey),
-        1 => InputOutcome::Action(Action::Login),
-        _ => InputOutcome::Unchanged,
+/// Built from `pending_menu_rows`, the same function the renderer uses. This
+/// previously hardcoded `0 => EnterApiKey, 1 => Login` and derived Quit from
+/// the rect count, which held only while the menu had two or three fixed
+/// rows -- adding one silently remapped every click to the wrong action.
+fn dispatch_pending_menu_action(
+    index: usize,
+    detected_env_vars: &[String],
+    has_login: bool,
+) -> InputOutcome {
+    let detected = detected_env_vars.len();
+    use crate::app::pending_menu::{PendingMenuRow, pending_menu_rows};
+    match pending_menu_rows(detected, has_login).get(index) {
+        Some(PendingMenuRow::UseDetectedKey(i)) => match detected_env_vars.get(*i) {
+            Some(env_var) => InputOutcome::Action(Action::UseDetectedKey(env_var.clone())),
+            None => InputOutcome::Unchanged,
+        },
+        Some(PendingMenuRow::EnterApiKey) => InputOutcome::Action(Action::EnterApiKey),
+        Some(PendingMenuRow::Login) => InputOutcome::Action(Action::Login),
+        Some(PendingMenuRow::Quit) => InputOutcome::Action(Action::Quit),
+        None => InputOutcome::Unchanged,
     }
 }
 /// Dispatch an action for a welcome menu item when ZDR-blocked.
@@ -4574,6 +4949,7 @@ impl AppView {
                             consent_state: &self.consent_state,
                             consent_hover_link: self.welcome_consent_hover_link,
                             login_label: self.login_label.as_deref(),
+                            detected_keys: &self.detected_keys,
                             auth_code_input: self.auth_code_input.text(),
                             auth_code_cursor_byte: self.auth_code_input.cursor_byte(),
                             clipboard_delivery: self.auth_clipboard_delivery,
@@ -4718,8 +5094,7 @@ impl AppView {
                             self.access_gate_shown_logged = true;
                             fuigo_telemetry::session_ctx::log_event(
                                 fuigo_telemetry::events::SuperGrokUpsellShown {
-                                    source:
-                                        fuigo_telemetry::events::SuperGrokUpsell::WelcomeScreen,
+                                    source: fuigo_telemetry::events::SuperGrokUpsell::WelcomeScreen,
                                     auth_method: self
                                         .login_method_id
                                         .as_ref()

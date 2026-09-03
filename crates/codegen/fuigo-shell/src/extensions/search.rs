@@ -5,10 +5,10 @@
 use crate::agent::mvp_agent::MvpAgent;
 use crate::session::ExtMethodResult;
 use agent_client_protocol as acp;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use fuigo_workspace::file_system::ContentSearchRequest as ContentSearchRequestParams;
 use fuigo_workspace::workspace_ops::{FuzzyChangeReq, FuzzyCloseReq, FuzzyOpenReq};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
@@ -114,7 +114,7 @@ pub struct ContentSearchRequest {
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/search/fuzzy/open" => {
+        "fuigo/search/fuzzy/open" => {
             let req: FuzzyOpenRequest = parse(args.params.get())?;
             let cwd = resolve_cwd(agent, req.cwd, req.session_id.as_ref())?;
             let search_root = match &req.root {
@@ -149,12 +149,12 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .to_ext_response()
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))
         }
-        "x.ai/search/fuzzy/change" => {
+        "fuigo/search/fuzzy/change" => {
             let req: FuzzyChangeRequest = parse(args.params.get())?;
             let ops = agent
                 .resolve_workspace_ops()
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            // The workspace owns the manager and spawns the status driver, which streams `x.ai/search/fuzzy/status` through the client sink
+            // The workspace owns the manager and spawns the status driver, which streams `fuigo/search/fuzzy/status` through the client sink
             let found = ops
                 .dispatch(
                     &FuzzyChangeReq {
@@ -181,7 +181,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .to_ext_response()
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))
         }
-        "x.ai/search/fuzzy/close" => {
+        "fuigo/search/fuzzy/close" => {
             let req: FuzzyCloseRequest = parse(args.params.get())?;
             let ops = agent
                 .resolve_workspace_ops()
@@ -205,7 +205,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .to_ext_response()
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))
         }
-        "x.ai/search/content" => {
+        "fuigo/search/content" => {
             let req: ContentSearchRequest = parse(args.params.get())?;
             let cwd = resolve_cwd(agent, req.cwd.clone(), req.session_id.as_ref())?;
             let context_id = req
@@ -217,7 +217,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .resolve_workspace_ops()
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
-            // The workspace runs the streaming search and emits `x.ai/search/content/status` batches through the client sink
+            // The workspace runs the streaming search and emits `fuigo/search/content/status` batches through the client sink
             let mut op = req.params;
             op.cwd = Some(cwd);
             op.context_id = Some(context_id);

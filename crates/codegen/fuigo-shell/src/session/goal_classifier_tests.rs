@@ -2884,8 +2884,8 @@ async fn verification_stage_resume_spawn_failure_falls_back_to_cold() {
 /// It captures each spawn's `runtime_overrides.model`.
 #[tokio::test]
 async fn cold_fallback_after_resume_failure_carries_pool0_model_on_request() {
-    use std::sync::Mutex as StdMutex;
     use fuigo_tools::implementations::fuigo_build::task::types::{SubagentEvent, SubagentResult};
+    use std::sync::Mutex as StdMutex;
 
     // (model, resume_from) per spawn, in spawn order.
     type SpawnCapture = Arc<StdMutex<Vec<(Option<String>, Option<String>)>>>;

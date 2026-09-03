@@ -1,4 +1,4 @@
-//! Mid-turn interjection dispatch: optimistic local echo, the `x.ai/interject` effect, and prompt-history recording.
+//! Mid-turn interjection dispatch: optimistic local echo, the `fuigo/interject` effect, and prompt-history recording.
 
 use super::ctx::NO_SESSION_NOTICE;
 use super::voice::voice_stop_on_submit;
@@ -9,9 +9,9 @@ use crate::scrollback::block::RenderBlock;
 
 /// Send a mid-turn interjection.
 /// Pushes a standard user prompt block locally for instant feedback, records the text in prompt history, and clears the prompt.
-/// Fires the `x.ai/interject` ext method carrying a client-minted id.
+/// Fires the `fuigo/interject` ext method carrying a client-minted id.
 ///
-/// The shell broadcasts `x.ai/session/interjection` to every attached pane so other clients viewing the same session render it too.
+/// The shell broadcasts `fuigo/session/interjection` to every attached pane so other clients viewing the same session render it too.
 /// (Multi-client / dashboard mode.)
 /// Our own broadcast echoes back carrying the same id.
 /// The id is recorded in `self_interjection_ids` so `handle_interjection` drops the echo instead of rendering a duplicate.
@@ -58,7 +58,7 @@ pub(super) fn dispatch_interject_on(
     agent.record_prompt_in_history(&text);
 
     // Push a standard user prompt block locally for instant feedback
-    // Record its id so the broadcast echo (`x.ai/session/interjection`) is deduped instead of rendering a second copy on this pane
+    // Record its id so the broadcast echo (`fuigo/session/interjection`) is deduped instead of rendering a second copy on this pane
     let interjection_id = uuid::Uuid::new_v4().to_string();
     agent.self_interjection_ids.insert(interjection_id.clone());
     agent
