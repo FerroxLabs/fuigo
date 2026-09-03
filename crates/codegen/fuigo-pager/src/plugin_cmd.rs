@@ -904,7 +904,23 @@ fn marketplace_add(
     };
     let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
 
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    // Held across the read and the write. This runs in the CLI process while a
+    // TUI may be editing the same file, which is exactly the cross-process lost
+    // update the shared lock exists to prevent.
+    let _config_lock = fuigo_config::fs_atomic::lock_config_for_write(&config_path)?;
+
+    // Only a missing file is empty; a hard read error must not become a
+    // whole-file replacement by the atomic write below.
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "refusing to edit {}: it could not be read ({e})",
+                config_path.display()
+            ));
+        }
+    };
     let mut doc: toml_edit::DocumentMut = content
         .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {e}"))?;
@@ -921,6 +937,23 @@ fn marketplace_add(
         .as_array_of_tables_mut()
         .ok_or_else(|| anyhow::anyhow!("marketplace.sources is not an array of tables"))?;
 
+    // Re-checked against the document read *under the lock*. The check further
+    // up ran before the lock existed, so two concurrent identical adds both
+    // passed it and then serialized into two identical entries.
+    let duplicate = sources.iter().any(|t| match &input {
+        MarketplaceAddInput::GitUrl(git_url) => t
+            .get("git")
+            .and_then(toml_edit::Item::as_str)
+            .is_some_and(|u| u.trim_end_matches(".git") == git_url.trim_end_matches(".git")),
+        MarketplaceAddInput::LocalPath(path) => t
+            .get("path")
+            .and_then(toml_edit::Item::as_str)
+            .is_some_and(|p| std::path::Path::new(p) == path.as_path()),
+    });
+    if duplicate {
+        bail!("Marketplace source already configured: {identity}");
+    }
+
     let mut entry = toml_edit::Table::new();
     entry["name"] = toml_edit::value(&name);
     match &input {
@@ -933,7 +966,11 @@ fn marketplace_add(
     }
     sources.push(entry);
 
-    std::fs::write(&config_path, doc.to_string())?;
+    fuigo_config::fs_atomic::write_atomically(
+        &config_path,
+        &doc.to_string(),
+        fuigo_config::fs_atomic::replacement_mode(&config_path, 0o600),
+    )?;
 
     println!("Added marketplace source: {name} ({identity})");
     Ok(())
@@ -1008,27 +1045,52 @@ fn marketplace_remove(
 
     let identity = source_identity(source);
 
-    let uninstalled = plugin::uninstall_marketplace_source_plugins(&identity);
-
+    // Config first, plugins second. Uninstalling before the config edit meant a
+    // lock failure left the source still configured with its plugins already
+    // gone -- and the command printed "Removed marketplace source" anyway.
     let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
     let mut removed_from_config = false;
-    if let Ok(content) = std::fs::read_to_string(&config_path)
-        && let Some(new) = plugin::remove_toml_marketplace_block(&content, &identity)
-    {
-        if let Err(e) = std::fs::write(&config_path, new) {
-            tracing::warn!("failed to write config.toml: {e}");
-        } else {
-            removed_from_config = true;
+    // Same lock as every other writer of this file, held across read and write.
+    match fuigo_config::fs_atomic::lock_config_for_write(&config_path) {
+        Ok(_config_lock) => {
+            if let Ok(content) = std::fs::read_to_string(&config_path)
+                && let Some(new) = plugin::remove_toml_marketplace_block(&content, &identity)
+            {
+                if let Err(e) = fuigo_config::fs_atomic::write_atomically(
+                    &config_path,
+                    &new,
+                    fuigo_config::fs_atomic::replacement_mode(&config_path, 0o600),
+                ) {
+                    tracing::warn!("failed to write config.toml: {e}");
+                } else {
+                    removed_from_config = true;
+                }
+            }
         }
+        Err(e) => tracing::warn!("failed to lock config.toml: {e}"),
     }
 
     // Fallback: settings.json or known_marketplaces.json
-    if !removed_from_config && !plugin::try_remove_source_from_json_files(&identity) {
+    let removed_anywhere =
+        removed_from_config || plugin::try_remove_source_from_json_files(&identity);
+    if !removed_anywhere {
         eprintln!(
             "Warning: source was found but could not be removed from config files.\n\
              It may be defined in a managed or read-only settings file."
         );
     }
+
+    // Refuse to uninstall when the source is still configured. Deleting the
+    // plugins anyway would leave the user with a source that still lists them
+    // and nothing on disk -- and the next sync would reinstall them, so the
+    // command would appear to do nothing.
+    if !removed_anywhere {
+        bail!(
+            "Refusing to uninstall plugins: {identity} could not be removed from any config file, \
+             so it is still configured. Fix the config (or its permissions) and retry."
+        );
+    }
+    let uninstalled = plugin::uninstall_marketplace_source_plugins(&identity);
 
     if uninstalled.is_empty() {
         println!("Removed marketplace source: {} ({identity})", source.name);

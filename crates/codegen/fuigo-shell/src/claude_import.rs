@@ -571,6 +571,14 @@ pub(crate) fn is_claude_import_marked_at(config_path: &Path) -> bool {
 /// Uses the same atomic write pattern as `save_mcp_server_config` (write to `.tmp`, then rename).
 /// Creates the file and parent directory if missing. Existing content in the file is preserved.
 fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
+    // Same lock every other writer of this file takes, held across the read and
+    // the write below.
+    let _lock = fuigo_config::fs_atomic::lock_config_for_write(config_path)?;
+    write_import_marker_locked(config_path)
+}
+
+/// Body of [`write_import_marker`]; the caller holds the config write lock.
+fn write_import_marker_locked(config_path: &Path) -> anyhow::Result<()> {
     // Report parse errors instead of silently discarding the file
     // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
     // The user can fix the TOML and retry
@@ -602,17 +610,15 @@ fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = config_path.with_extension("toml.tmp");
-    // Best-effort cleanup of the .tmp file if either write or rename fails
-    // A stale .tmp would otherwise survive next to the real config, and the next attempt would inherit a half-written file before the rename clobbers it
-    if let Err(e) = std::fs::write(&tmp, &toml_str) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    if let Err(e) = std::fs::rename(&tmp, config_path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    // The shared writer: a uniquely named temp file (a fixed `.toml.tmp` let two
+    // concurrent writers inherit each other's half-written file), the existing
+    // mode re-applied so a `chmod 600` config does not come back world-readable,
+    // and cleanup on any error.
+    fuigo_config::fs_atomic::write_atomically(
+        config_path,
+        &toml_str,
+        fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
+    )?;
     Ok(())
 }
 
@@ -710,6 +716,15 @@ impl ImportResult {
 
 /// Apply items to a single config.toml file using atomic write.
 fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
+    let _lock = fuigo_config::fs_atomic::lock_config_for_write(config_path)?;
+    apply_items_to_config_locked(config_path, items)
+}
+
+/// Body of [`apply_items_to_config`]; the caller holds the config write lock.
+fn apply_items_to_config_locked(
+    config_path: &Path,
+    items: &[ImportableItem],
+) -> anyhow::Result<usize> {
     // Read existing TOML, reporting parse errors instead of silently discarding the file
     // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
     let mut root: TomlValue = match std::fs::read_to_string(config_path) {
@@ -772,14 +787,19 @@ fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow
     }
 
     if count > 0 {
-        // Atomic write: write to .tmp, then rename.
         let toml_str = toml::to_string_pretty(&root)?;
-        let tmp = config_path.with_extension("toml.tmp");
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&tmp, &toml_str)?;
-        std::fs::rename(&tmp, config_path)?;
+        // The shared writer: uniquely named temp (a fixed `.toml.tmp` let two
+        // concurrent writers inherit each other's half-written file) and the
+        // existing mode re-applied, so a `chmod 600` config that may carry
+        // imported credentials does not come back world-readable.
+        fuigo_config::fs_atomic::write_atomically(
+            config_path,
+            &toml_str,
+            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
+        )?;
         info!(
             path = %config_path.display(),
             count,
