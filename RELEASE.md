@@ -12,8 +12,25 @@ downloads only the one matching the host's `os`/`cpu`, so a user pulls one
 
 ## The version has exactly one source
 
-`crates/codegen/fuigo-version/Cargo.toml` → `fuigo_version::VERSION` → what
-`fuigo --version` prints. Everything else is **derived**:
+`crates/codegen/fuigo-version/Cargo.toml` is the one place the number is
+written. Three things derive from it, and all three are checked:
+
+| derivation | mechanism | what catches drift |
+|---|---|---|
+| `fuigo_version::VERSION` | that crate's own `CARGO_PKG_VERSION` | — |
+| the binary's `<version> (<commit>)` stamp | `fuigo-pager-bin/build.rs` reads the manifest above | `the_stamped_version_is_the_one_source_of_truth` |
+| the seven npm packages | `sync-version.js` | `npm run check-version`, `prepublishOnly` |
+
+**This section used to claim the same thing while it was false.** `build.rs`
+stamped `fuigo-pager-bin`'s *own* `CARGO_PKG_VERSION`, so the version lived in
+two manifests that had to be bumped together and nothing noticed when only one
+was. v1.0.2 was tagged and pushed with the binary reporting `1.0.1`; the CI
+smoke test caught it after the tag, which is the last place it could still be
+caught for free. `build.rs` now reads the manifest directly and panics if it
+cannot — there is no fallback, because a wrong version is not a degraded build,
+it is a build that lies about which one it is.
+
+To cut a version, edit `fuigo-version/Cargo.toml` and run `sync-version`:
 
 ```sh
 cd crates/codegen/fuigo-pager/npm/fuigo
@@ -34,9 +51,6 @@ Three guards now make that unpublishable:
 | `sync-version.js` refuses a non-`x.y.z` version | any run without `--allow-prerelease` |
 | `assemble-platform-packages.js` runs `--check` first | every assemble |
 | `prepublishOnly` runs `--check` | every `npm publish` |
-
-To cut a new version, edit `fuigo-version/Cargo.toml` and run `sync-version`.
-Nothing else.
 
 ---
 

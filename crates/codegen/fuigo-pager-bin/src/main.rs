@@ -2787,6 +2787,28 @@ mod tests {
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }
     }
+    /// The stamp must name the same version `fuigo_version::VERSION` does.
+    ///
+    /// The test above only checks the stamp against itself, which is true no
+    /// matter which version it carries -- it passed on a build that printed
+    /// `1.0.1` from a tree whose single source of truth said `1.0.2`, because
+    /// build.rs read this crate's `CARGO_PKG_VERSION` instead of that source.
+    /// CI caught it after the tag was already pushed. This catches it at
+    /// `cargo test`.
+    #[test]
+    fn the_stamped_version_is_the_one_source_of_truth() {
+        let stamp = env!("VERSION_WITH_COMMIT");
+        let (version, rest) = stamp
+            .split_once(' ')
+            .unwrap_or_else(|| panic!("stamp is not `<version> (<commit>)`: {stamp:?}"));
+        assert_eq!(
+            version,
+            fuigo_version::VERSION,
+            "build.rs stamped {version:?} but fuigo_version::VERSION is {:?}",
+            fuigo_version::VERSION
+        );
+        assert!(rest.starts_with('(') && rest.ends_with(')'), "{stamp:?}");
+    }
     #[test]
     fn version_flags_and_doctor_are_distinct_early_intents() {
         let version = PagerArgs::try_parse_from(["fuigo", "--version"]).unwrap();
