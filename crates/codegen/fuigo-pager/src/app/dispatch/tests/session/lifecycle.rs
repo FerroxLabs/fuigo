@@ -24,7 +24,7 @@ fn voice_on_welcome_creates_session_and_records() {
     assert_eq!(app.voice_recording_target(), Some(VoiceTarget::Agent(id)));
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttPress)
+        Ok(fuigo_voice::VoiceCommand::PttPress { .. })
     ));
 }
 #[test]
@@ -37,12 +37,14 @@ fn voice_final_routes_to_recording_session_not_active_view() {
         .insert(other, AgentView::new(session, ScrollbackState::new()));
     app.active_view = ActiveView::Agent(other);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(rec),
         interim: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "hello".into(),
         },
     );
@@ -57,6 +59,7 @@ fn voice_final_dropped_after_recording_session_cleared() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "late".into(),
         },
     );
@@ -69,6 +72,7 @@ fn voice_auto_stops_when_leaving_recording_session() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: None,
@@ -87,7 +91,7 @@ fn voice_auto_stops_when_leaving_recording_session() {
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 #[test]

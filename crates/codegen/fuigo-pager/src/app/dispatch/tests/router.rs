@@ -182,11 +182,13 @@ fn external_prompt_editor_refuses_voice_and_pending_paste_with_visible_messages(
             target: VoiceTarget::Agent(AgentId(0)),
         },
         VoiceState::Recording {
+            session: 1,
             hold: false,
             target: VoiceTarget::Agent(AgentId(0)),
             interim: Some("partial".to_owned()),
         },
         VoiceState::Stopping {
+            session: 1,
             target: VoiceTarget::Agent(AgentId(0)),
             interim: Some("partial".to_owned()),
         },

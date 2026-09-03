@@ -323,6 +323,8 @@ fn test_app() -> AppView {
         voice_auth: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        voice_next_session: 1,
+        voice_detached: std::collections::VecDeque::new(),
     }
 }
 /// Build a default `AgentSession` for tests.
@@ -378,6 +380,18 @@ pub(super) fn test_app_with_agent() -> AppView {
     app.agents.insert(id, agent);
     app.next_agent_id = 1;
     switch_to_agent(&mut app, id, SwitchCause::New);
+    app
+}
+/// Two agents, with the first active. For tests where a transcript must be
+/// proved to land in one prompt box and not the other.
+pub(super) fn test_app_with_two_agents() -> AppView {
+    let mut app = test_app_with_agent();
+    let id = AgentId(1);
+    let session = make_test_agent_session(&app, id, "second-session");
+    let mut agent = AgentView::new(session, ScrollbackState::new());
+    agent.active_pane = ActivePane::Scrollback;
+    app.agents.insert(id, agent);
+    app.next_agent_id = 2;
     app
 }
 /// Give a test agent a generated title so the dashboard renders it.

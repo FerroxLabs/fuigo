@@ -149,7 +149,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
                 .as_deref()
                 .is_some_and(fuigo_shell::tier::is_restricted_tier_name)
         {
-            app.voice_reset();
+            app.voice_cancel_all_dictation();
             app.voice_ui_active = false;
             app.apply_voice_mode_enabled(false);
         }
@@ -157,7 +157,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     if let Some(remote_v) = update.voice_mode_enabled {
         let v = crate::app::resolve_voice_mode_live(Some(remote_v), app.is_api_key_auth);
         if !v {
-            app.voice_reset();
+            app.voice_cancel_all_dictation();
             app.voice_ui_active = false;
         }
         app.apply_voice_mode_enabled(v);

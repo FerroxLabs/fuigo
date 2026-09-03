@@ -14,23 +14,38 @@ pub mod event;
 pub mod language;
 pub mod pipeline;
 pub mod probe;
+pub mod speech;
 pub mod stt;
 
 pub use auth::{SharedVoiceAuth, StaticVoiceAuth, VoiceAuthProvider};
-pub use config::VoiceConfig;
+pub use config::{SttMode, VoiceConfig};
 pub use error::VoiceError;
 pub use event::VoiceEvent;
 pub use language::{
     STT_LANGUAGE_AUTO, STT_LANGUAGE_DEFAULT, STT_LANGUAGES, SttLanguage, canonicalize_stt_language,
     language_for_api, stt_language_by_code,
 };
-pub use pipeline::{VoiceCommand, run_voice_pipeline};
+pub use pipeline::{MAX_IN_FLIGHT_UPLOADS, VoiceCommand, run_voice_pipeline};
 #[cfg(feature = "audio")]
 pub use probe::run_mic_only_probe;
 pub use probe::{
     InputDeviceInfo, VoiceProbeOptions, VoiceProbeReport, format_probe_report, input_device_info,
     run_streaming_probe,
 };
+pub use speech::contains_speech;
+
+/// Truncate `text` to `max_chars` characters, appending an ellipsis when cut.
+///
+/// Used on strings that came from a remote endpoint before they reach the UI:
+/// a server-supplied error message is untrusted text, and a toast is not a
+/// place an arbitrary length belongs. Slices on char boundaries, so multi-byte
+/// UTF-8 never panics.
+pub(crate) fn truncate_for_display(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((byte, _)) => format!("{}...", &text[..byte]),
+        None => text.to_owned(),
+    }
+}
 
 /// Whether this build can capture microphone audio (the `audio` feature).
 /// Production CLI builds enable it on every OS: macOS and Windows link `cpal` (coreaudio/wasapi).
@@ -108,5 +123,31 @@ mod intercept_tests {
             "chat",
             "__mic-capture"
         ])));
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_for_display;
+
+    #[test]
+    fn short_text_is_unchanged() {
+        assert_eq!(truncate_for_display("rate limited", 200), "rate limited");
+    }
+
+    #[test]
+    fn long_text_is_cut_and_marked() {
+        let long = "x".repeat(500);
+        let out = truncate_for_display(&long, 10);
+        assert_eq!(out, format!("{}...", "x".repeat(10)));
+    }
+
+    /// The bytes that reach this are whatever a remote endpoint sent, so a
+    /// multi-byte boundary must not panic.
+    #[test]
+    fn multibyte_text_is_cut_on_a_char_boundary() {
+        let text = "\u{e9}".repeat(50);
+        let out = truncate_for_display(&text, 3);
+        assert_eq!(out, "\u{e9}\u{e9}\u{e9}...");
     }
 }
