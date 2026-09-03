@@ -437,13 +437,57 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
 
 /// Write config.toml fields based on CLI flags.
 fn apply_config_writes(flags: &ConnectFlags) {
-    // Use toml_edit to preserve existing config structure
     let config_path =
         fuigo_shell::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut doc = content
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap_or_default();
+    // Held across the read and the write: this is a read-modify-write of the
+    // user's config, and every other writer of that file takes the same lock.
+    match fuigo_config::fs_atomic::locked_read_modify_write(&config_path, || {
+        apply_config_writes_locked(flags, &config_path);
+    }) {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to lock config.toml; connect flags not persisted")
+        }
+    }
+}
+
+/// Body of [`apply_config_writes`]; the caller holds the config write lock.
+fn apply_config_writes_locked(flags: &ConnectFlags, config_path: &std::path::Path) {
+    // Use toml_edit to preserve existing config structure
+    // Only a missing file is an empty config. Treating a hard read error
+    // (EACCES, EIO) as empty would let the atomic write below replace a file
+    // this process could not read, erasing every setting in it -- and the write
+    // being atomic now makes that erasure clean rather than partial.
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %config_path.display(),
+                "refusing to persist connect flags: config.toml could not be read"
+            );
+            return;
+        }
+    };
+    // An unparseable file is refused rather than defaulted: `unwrap_or_default`
+    // here silently replaced the user's whole config with just the keys written
+    // below, destroying every other table in it.
+    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) if content.trim().is_empty() => {
+            let _ = e;
+            toml_edit::DocumentMut::new()
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %config_path.display(),
+                "refusing to persist connect flags: config.toml is non-empty and unparseable"
+            );
+            return;
+        }
+    };
 
     let mut changed = false;
 
@@ -461,7 +505,13 @@ fn apply_config_writes(flags: &ConnectFlags) {
         if let Some(parent) = config_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
+        // Atomic rename rather than a truncating write, so a crash mid-write
+        // cannot leave a half-written config behind.
+        if let Err(e) = fuigo_config::fs_atomic::write_atomically(
+            config_path,
+            &doc.to_string(),
+            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
+        ) {
             tracing::warn!(error = %e, "failed to write config.toml");
         }
     }
