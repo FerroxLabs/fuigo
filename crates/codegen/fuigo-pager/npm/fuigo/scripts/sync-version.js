@@ -38,13 +38,10 @@ const PLATFORMS = [
     'win32-arm64', 'win32-x64',
 ];
 
-// The published NAME is not always `fuigo-<platform>`; see bin/postinstall.js
-// for the measured reason. The DIRECTORY keeps its `fuigo-<platform>` name --
-// only what npm sees differs.
-const PACKAGE_NAME_OVERRIDES = {
-    'win32-arm64': 'fuigo-windows-arm64',
-};
-const packageNameFor = (p) => PACKAGE_NAME_OVERRIDES[p] ?? `${PREFIX}-${p}`;
+// Platform packages publish scoped: @fuigo/<platform>-<arch>. The meta package
+// stays unscoped. See bin/postinstall.js for why the scope is load-bearing.
+// The DIRECTORY stays fuigo-<platform>-<arch>; only the npm name is scoped.
+const packageNameFor = (p) => `@fuigo/${p}`;
 
 // Unscoped. `fuigo` and the six `fuigo-<platform>` names are ours on npm;
 // the `@fuigo-official` scope this once used is not an org that exists.

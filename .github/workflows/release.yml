@@ -383,12 +383,9 @@ jobs:
           failed=""
           first=1
           for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
-            # The DIRECTORY is always fuigo-<platform>; the published NAME is not.
+            # The DIRECTORY is always fuigo-<platform>; the published NAME is scoped.
             dir="fuigo-$p"
-            case "$p" in
-              win32-arm64) name="fuigo-windows-arm64" ;;
-              *)           name="fuigo-$p" ;;
-            esac
+            name="@fuigo/$p"
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "--- $name@$VERSION already published, skipping"
               continue
@@ -409,6 +406,36 @@ jobs:
             echo "::error::platform packages failed to publish:$failed"
             exit 1
           fi
+
+      # WAIT FOR THE SIX TO BE RESOLVABLE BEFORE SHIPPING THE META PACKAGE.
+      # `npm publish` printing `+ name@version` does NOT mean the package is in
+      # the registry: a scoped first publish to a new org went to npm's Staged
+      # Packages and returned 404 to both anonymous and authenticated GETs for
+      # the better part of an hour. The meta package pins exact versions, so
+      # publishing it against names that do not resolve yet is the same broken
+      # install we just spent a release fixing. Poll until every one answers.
+      - name: Wait until every platform package resolves
+        if: github.event_name == 'push' || inputs.dry_run == false
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -uo pipefail
+          for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
+            name="@fuigo/$p"
+            ok=0
+            for attempt in $(seq 1 60); do
+              if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+                echo "--- $name@$VERSION resolves"; ok=1; break
+              fi
+              sleep 10
+            done
+            if [ "$ok" = 0 ]; then
+              echo "::error::$name@$VERSION did not become resolvable within 10 minutes."
+              echo "::error::It may be sitting in npm Staged Packages awaiting promotion."
+              exit 1
+            fi
+          done
 
       # Guarded the same way, so a re-run after a partial publish is safe.
       # This one must not go early: its optionalDependencies pin exact
