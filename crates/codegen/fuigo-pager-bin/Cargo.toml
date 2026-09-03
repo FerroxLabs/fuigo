@@ -1,6 +1,10 @@
 [package]
 name = "fuigo-pager-bin"
-version = "1.0.1"
+# NOT the version `fuigo --version` prints, and not what npm publishes. Both of
+# those come from fuigo-version/Cargo.toml, which build.rs reads directly. This
+# number exists because cargo requires one; it is kept in step only for tidiness,
+# and nothing breaks if it drifts.
+version = "1.0.2"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["Ferrox Labs"]
