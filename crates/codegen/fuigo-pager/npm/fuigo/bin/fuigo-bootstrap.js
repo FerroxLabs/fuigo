@@ -31,17 +31,20 @@ function readLocalVersion() {
     try { return require('../package.json').version; } catch { return undefined; }
 }
 
-// npm's spam filter refuses to CREATE any unscoped package name containing the
-// token `win32-arm64`: 403 "Package name triggered spam detection". Measured,
-// not guessed -- `fuigo-win32-x64`, `fuigo-darwin-arm64` and `fuigo-linux-arm64`
-// all publish fine from the same account, and `fuigo-windows-arm64` with
-// identical os/cpu metadata published minutes after `fuigo-win32-arm64` was
-// refused. So this one package's npm NAME cannot be derived from
-// process.platform/process.arch, and every place that derives it needs this map.
-const PLATFORM_PACKAGE_OVERRIDES = {
-    'win32-arm64': 'fuigo-windows-arm64',
-};
-const platformPackageName = (k) => PLATFORM_PACKAGE_OVERRIDES[k] ?? `fuigo-${k}`;
+// The platform packages are scoped under the `fuigo` npm org: @fuigo/<platform>-<arch>.
+// The meta package stays unscoped -- it is the name users install, and this is
+// the same split @next, @anthropic-ai and @vscode use for native sidecars.
+//
+// Scoping is not cosmetic. npm's spam filter refuses to CREATE an unscoped
+// package name containing the token `win32-arm64` (403 "Package name triggered
+// spam detection"), which is why fuigo-win32-arm64 never existed at any version
+// and Windows ARM shipped without a binary until 1.0.3. Measured: the refused
+// name fails even when published ALONE ten minutes after a successful sibling,
+// while the same binary under a different name publishes fine. A scope removes
+// that entire class of failure for every platform, not just the one that hit it.
+//
+// The DIRECTORY is still fuigo-<platform>-<arch>; only the npm name is scoped.
+const platformPackageName = (k) => `@fuigo/${k}`;
 
 // Returns null when npm skipped the matching optional dependency
 // (unsupported platform, or --no-optional).

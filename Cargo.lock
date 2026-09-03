@@ -4442,7 +4442,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-pager-bin"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5401,7 +5401,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "semver",
 ]
