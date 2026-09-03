@@ -38,6 +38,14 @@ const PLATFORMS = [
     'win32-arm64', 'win32-x64',
 ];
 
+// The published NAME is not always `fuigo-<platform>`; see bin/postinstall.js
+// for the measured reason. The DIRECTORY keeps its `fuigo-<platform>` name --
+// only what npm sees differs.
+const PACKAGE_NAME_OVERRIDES = {
+    'win32-arm64': 'fuigo-windows-arm64',
+};
+const packageNameFor = (p) => PACKAGE_NAME_OVERRIDES[p] ?? `${PREFIX}-${p}`;
+
 // Unscoped. `fuigo` and the six `fuigo-<platform>` names are ours on npm;
 // the `@fuigo-official` scope this once used is not an org that exists.
 const PREFIX = 'fuigo';
@@ -98,10 +106,13 @@ function main() {
     note('meta version', meta.version, version);
     meta.version = version;
 
-    meta.optionalDependencies = meta.optionalDependencies || {};
+    // Rebuilt from scratch, not merged: a renamed package must not leave its
+    // old pin behind, or npm resolves a name that will never exist again.
+    const priorPins = meta.optionalDependencies || {};
+    meta.optionalDependencies = {};
     for (const p of PLATFORMS) {
-        const name = `${PREFIX}-${p}`;
-        note(`  pin ${name}`, meta.optionalDependencies[name], version);
+        const name = packageNameFor(p);
+        note(`  pin ${name}`, priorPins[name], version);
         meta.optionalDependencies[name] = version;
     }
     if (!check) writeJson(META_PKG, meta);

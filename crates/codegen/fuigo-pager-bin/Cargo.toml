@@ -4,7 +4,7 @@ name = "fuigo-pager-bin"
 # those come from fuigo-version/Cargo.toml, which build.rs reads directly. This
 # number exists because cargo requires one; it is kept in step only for tidiness,
 # and nothing breaks if it drifts.
-version = "1.0.2"
+version = "1.0.3"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["Ferrox Labs"]

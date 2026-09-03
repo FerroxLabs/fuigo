@@ -40,12 +40,24 @@ if (!SUPPORTED.has(key)) {
     process.exit(0);
 }
 
+// npm's spam filter refuses to CREATE any unscoped package name containing the
+// token `win32-arm64`: 403 "Package name triggered spam detection". Measured,
+// not guessed -- `fuigo-win32-x64`, `fuigo-darwin-arm64` and `fuigo-linux-arm64`
+// all publish fine from the same account, and `fuigo-windows-arm64` with
+// identical os/cpu metadata published minutes after `fuigo-win32-arm64` was
+// refused. So this one package's npm NAME cannot be derived from
+// process.platform/process.arch, and every place that derives it needs this map.
+const PLATFORM_PACKAGE_OVERRIDES = {
+    'win32-arm64': 'fuigo-windows-arm64',
+};
+const platformPackageName = (k) => PLATFORM_PACKAGE_OVERRIDES[k] ?? `fuigo-${k}`;
+
 // Resolve the per-platform sibling package's directory. The matching
 // optionalDependency is installed by npm based on `os`/`cpu` filters; the
 // other five are silently skipped. If the matching one is missing, npm was
 // likely invoked with --no-optional or the platform is unsupported.
 function resolvePlatformPackageDir() {
-    const platformPkg = `fuigo-${key}`;
+    const platformPkg = platformPackageName(key);
     try {
         return path.dirname(require.resolve(`${platformPkg}/package.json`));
     } catch {
@@ -180,7 +192,7 @@ function cleanupOldVersions(binName) {
 
 const platformDir = resolvePlatformPackageDir();
 if (!platformDir) {
-    console.error(`fuigo: platform package fuigo-${key} not installed.`);
+    console.error(`fuigo: platform package ${platformPackageName(key)} not installed.`);
     console.error('  This usually means npm was invoked with --no-optional, or the install failed.');
     console.error('  Try: npm install -g fuigo');
     process.exit(0);
