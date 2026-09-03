@@ -1,6 +1,6 @@
 {
-    "name": "fuigo-win32-arm64",
-    "version": "1.0.2",
+    "name": "fuigo-windows-arm64",
+    "version": "1.0.3",
     "description": "win32-arm64 binary for fuigo. Do not install directly; install fuigo instead.",
     "license": "Apache-2.0",
     "files": [

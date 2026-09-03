@@ -359,10 +359,19 @@ jobs:
       # and then tripped npm's spam detection on the fifth, leaving a state no
       # naive re-run could recover.
       #
-      # The sleep is for the same incident. Creating six similarly-named
-      # packages back-to-back is exactly the burst npm's name heuristic
-      # watches for; it flagged the fifth after four in ~30 seconds. Spacing
-      # them out costs two minutes on a release that already takes an hour.
+      # The burst theory that first justified the sleep was WRONG, and the
+      # correction is worth keeping: npm's filter is name-based, not rate-based.
+      # Publishing `fuigo-win32-arm64` ALONE, ten minutes after a successful
+      # sibling publish from the same account, fails identically. The token
+      # `win32-arm64` in an unscoped name is what it refuses -- which is why
+      # that one platform publishes as `fuigo-windows-arm64` (see the case
+      # statement below and bin/postinstall.js). The sleep stays because it is
+      # cheap, not because it was ever the fix.
+      #
+      # The loop no longer aborts on the first failure. When the 403 hit
+      # win32-arm64 at v1.0.2 it killed the step before win32-x64 was ever
+      # attempted, so ONE refused name cost TWO missing packages and the
+      # release had to be finished by hand.
       - name: Publish platform packages
         if: github.event_name == 'push' || inputs.dry_run == false
         working-directory: crates/codegen/fuigo-pager/npm
@@ -370,19 +379,36 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          failed=""
           first=1
           for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
-            name="fuigo-$p"
+            # The DIRECTORY is always fuigo-<platform>; the published NAME is not.
+            dir="fuigo-$p"
+            case "$p" in
+              win32-arm64) name="fuigo-windows-arm64" ;;
+              *)           name="fuigo-$p" ;;
+            esac
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "--- $name@$VERSION already published, skipping"
               continue
             fi
             [ "$first" = 1 ] || sleep 20
             first=0
-            echo "--- publishing $name@$VERSION"
-            (cd "$name" && npm publish --access public)
+            echo "--- publishing $name@$VERSION (from $dir)"
+            if ! (cd "$dir" && npm publish --access public); then
+              echo "::error::failed to publish $name@$VERSION"
+              failed="$failed $name"
+            fi
           done
+          # Fail AFTER trying all six, so one refused name cannot hide the rest.
+          # The meta package step is skipped by this failure on purpose: its
+          # optionalDependencies pin exact versions, so it must not ship while
+          # any platform package is missing.
+          if [ -n "$failed" ]; then
+            echo "::error::platform packages failed to publish:$failed"
+            exit 1
+          fi
 
       # Guarded the same way, so a re-run after a partial publish is safe.
       # This one must not go early: its optionalDependencies pin exact

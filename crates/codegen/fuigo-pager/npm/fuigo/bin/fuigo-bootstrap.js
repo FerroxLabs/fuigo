@@ -31,10 +31,22 @@ function readLocalVersion() {
     try { return require('../package.json').version; } catch { return undefined; }
 }
 
+// npm's spam filter refuses to CREATE any unscoped package name containing the
+// token `win32-arm64`: 403 "Package name triggered spam detection". Measured,
+// not guessed -- `fuigo-win32-x64`, `fuigo-darwin-arm64` and `fuigo-linux-arm64`
+// all publish fine from the same account, and `fuigo-windows-arm64` with
+// identical os/cpu metadata published minutes after `fuigo-win32-arm64` was
+// refused. So this one package's npm NAME cannot be derived from
+// process.platform/process.arch, and every place that derives it needs this map.
+const PLATFORM_PACKAGE_OVERRIDES = {
+    'win32-arm64': 'fuigo-windows-arm64',
+};
+const platformPackageName = (k) => PLATFORM_PACKAGE_OVERRIDES[k] ?? `fuigo-${k}`;
+
 // Returns null when npm skipped the matching optional dependency
 // (unsupported platform, or --no-optional).
 function resolvePlatformPackageDir() {
-    const platformPkg = `fuigo-${process.platform}-${process.arch}`;
+    const platformPkg = platformPackageName(`${process.platform}-${process.arch}`);
     try {
         return path.dirname(require.resolve(`${platformPkg}/package.json`));
     } catch {
@@ -108,7 +120,7 @@ function resolveBinary() {
     const platformDir = resolvePlatformPackageDir();
     if (!platformDir) {
         console.error(`${pkgName}: no platform binary installed for ${process.platform}-${process.arch}.`);
-        console.error(`  Expected sibling package fuigo-${process.platform}-${process.arch}.`);
+        console.error(`  Expected sibling package ${platformPackageName(`${process.platform}-${process.arch}`)}.`);
         console.error(`  This usually means npm skipped optionalDependencies (e.g. --no-optional)`);
         console.error(`  or the platform is not supported.`);
         process.exit(1);
