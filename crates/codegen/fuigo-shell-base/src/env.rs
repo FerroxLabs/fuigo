@@ -12,8 +12,22 @@ pub use fuigo_env::{
     FuigoBuildEnvironment, PROD_ASSET_SERVER_URL, PROD_CLI_CHAT_PROXY_BASE_URL,
     PROD_GATEWAY_WS_URL, PROD_RELAY_WS_URL, PROD_WS_ORIGIN,
 };
-/// Public Computer Hub WebSocket URL used by the local-workspace supervisor (`workspace_server --hub-url`) when `agent_config.hub.url` is unset.
-pub const PROD_COMPUTER_HUB_WS_URL: &str = "wss://computer-hub.grok.com/v1/tools";
+/// Computer Hub WebSocket URL used by the local-workspace supervisor when
+/// `agent_config.hub.url` is unset. **Empty: Fuigo operates no Computer Hub.**
+///
+/// This used to default to `wss://computer-hub.grok.com/v1/tools`, so a plain
+/// `fuigo workspace start` opened a websocket to xAI infrastructure. It escaped
+/// the sweep that emptied every other production endpoint in `fuigo_env`
+/// (whose own comment names this exact failure mode: "a default-on websocket to
+/// a host we do not control is the worst kind of leftover: it never appears in
+/// an HTTP client audit") — and it escaped it for that reason. The
+/// `fuigo-extra-ca` egress blocklist does NOT cover it: that guard is a reqwest
+/// DNS resolver, and this connection is raw tungstenite.
+///
+/// Empty means the feature is off until an operator sets `agent_config.hub.url`
+/// or passes `--hub-url`. Do not repoint it at FluxRouter: that is an inference
+/// gateway, not a tool hub.
+pub const PROD_COMPUTER_HUB_WS_URL: &str = "";
 #[cfg(any(test, feature = "test-support"))]
 pub use fuigo_env::EnvVarGuard;
 /// Env var that opts a process into gateway-bridge mode.

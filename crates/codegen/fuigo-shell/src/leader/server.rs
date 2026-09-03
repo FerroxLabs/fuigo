@@ -1047,10 +1047,35 @@ async fn handle_workspace_start(
     cancel: CancellationToken,
 ) -> Result<ControlPayload, ControlError> {
     let ws = &control_state.workspace;
+    // Cancellation outranks configuration. A caller that is shutting down gets
+    // told so; it does not need to hear that the hub is unconfigured.
+    //
+    // This used to happen by accident: the hub URL defaulted to a real xAI
+    // address, so it always parsed, and the first thing that actually noticed
+    // the token was the auth wait further down. With no default that ordering
+    // reversed and an aborted start reported a config error instead. Making the
+    // check explicit keeps the precedence a decision rather than a side effect.
+    if cancel.is_cancelled() {
+        return Err(workspace_err(
+            "leader is shutting down; cannot expose workspace to the hub",
+        ));
+    }
+    // PROD_COMPUTER_HUB_URL is empty by default (Fuigo runs no hub), so this can
+    // legitimately resolve to nothing. Say so plainly rather than letting an
+    // empty string reach `Url::parse` and surface as "relative URL without a base".
     let url_str = hub_url
         .filter(|u| !u.trim().is_empty())
         .or_else(|| ws.default_hub_url.clone())
-        .unwrap_or_else(|| PROD_COMPUTER_HUB_URL.to_string());
+        .or_else(|| {
+            let fallback = PROD_COMPUTER_HUB_URL.trim();
+            (!fallback.is_empty()).then(|| fallback.to_string())
+        })
+        .ok_or_else(|| {
+            workspace_err(
+                "no Computer Hub configured: set `hub.url` in the agent config or pass --hub-url"
+                    .to_string(),
+            )
+        })?;
     let url = url::Url::parse(&url_str)
         .map_err(|e| workspace_err(format!("invalid hub url {url_str}: {e}")))?;
     let cwd_path = PathBuf::from(&cwd);

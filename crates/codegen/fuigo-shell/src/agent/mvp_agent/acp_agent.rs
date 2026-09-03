@@ -334,7 +334,7 @@ impl acp::Agent for MvpAgent {
             tracing::info!(
                 label = ?login_label,
                 has_auth_provider,
-                "auth: advertising grok.com auth method",
+                "auth: advertising Fuigo auth method",
             );
         }
         let preferred_method = preferred_method_early;
