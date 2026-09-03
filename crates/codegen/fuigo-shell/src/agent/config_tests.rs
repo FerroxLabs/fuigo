@@ -1399,12 +1399,30 @@ fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
     let _alias = EnvGuard::set(alias, "");
     let _global = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, sentinel);
     let _legacy = EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-    let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
+    // A CONFIGURED first-party origin. This previously read
+    // `https://inference.example/v1` -- an arbitrary third-party host -- and
+    // asserted that `FUIGO_API_KEY` was sent there. The subject of this test is
+    // the fall-through from an empty `env_key` to the global key, which is
+    // unchanged; the destination was never the point, and it is now scoped.
+    crate::agent::config::Config::install_test_trusted_origins();
+    let mut model = test_model_entry("m", "https://api.fluxrouter.ai/v1", None, None, None);
     model.env_key = Some(EnvKeys::new([primary, alias]));
     assert!(!model.has_own_credentials());
     let creds = resolve_credentials(&model, None);
     assert_eq!(creds.auth_type, AuthType::ApiKey);
     assert_eq!(creds.api_key.as_deref(), Some(sentinel));
+
+    // And the property that made the old spelling dangerous. A prefetched
+    // catalogue model carries its own `base_url` and never passes through the
+    // `[model.*]` fail-closed guard, so if `FUIGO_API_KEY` were unscoped this
+    // is where a catalogue-chosen host would collect the user's first-party
+    // key.
+    let third_party = test_model_entry("m", "https://inference.example/v1", None, None, None);
+    let creds = resolve_credentials(&third_party, None);
+    assert!(
+        creds.api_key.is_none(),
+        "FUIGO_API_KEY must not be sent to an origin the user never configured"
+    );
 }
 #[test]
 fn resolve_credentials_empty_api_key_falls_through_to_session() {
@@ -1480,11 +1498,18 @@ fn resolve_credentials_env_key_byok_keeps_api_key_auth_with_session() {
 }
 #[test]
 fn proxy_messages_models_use_bearer_auth_scheme() {
-    let mut model = test_model_entry("grok-4.5", A_CLI_CHAT_PROXY_URL, None, None, None);
+    // The model carries its own key rather than relying on a session token.
+    // `A_CLI_CHAT_PROXY_URL` is plaintext loopback, and the session bearer is no
+    // longer attached to such a host -- `may_receive_session` now asks
+    // `is_fuigo_api_bearer_url`, which refuses http and refuses loopback so a
+    // co-located process cannot read the token. This test is about the auth
+    // SCHEME for a Messages-backend proxy model, so it states its credential
+    // directly instead of depending on routing that is now (correctly) refused.
+    let mut model = test_model_entry("grok-4.5", A_CLI_CHAT_PROXY_URL, Some("tok"), None, None);
     model.info.api_backend = ApiBackend::Messages;
     let config = sampling_config_for_model(
         &model,
-        resolve_credentials(&model, Some("tok")),
+        resolve_credentials(&model, None),
         None,
         None,
         None,
@@ -1518,6 +1543,56 @@ fn api_key_creds(base_url: &str) -> ResolvedCredentials {
         auth_scheme: Default::default(),
     }
 }
+/// The production trust mapping, asserted directly.
+///
+/// `install_trusted_api_origins` is test-pinned so the process-wide `OnceLock`
+/// cannot make results depend on the test schedule -- which means the
+/// `#[cfg(not(test))]` branch that turns `[endpoints]` into the trust set is
+/// unreachable from every unit test in this crate. This covers the mapping
+/// itself, which is what decides whether a real user's own gateway is
+/// first-party.
+#[test]
+fn configured_endpoints_become_the_trusted_origins() {
+    let raw: toml::Value = toml::from_str(
+        r#"
+[endpoints]
+fuigo_api_base_url = "https://gw.corp.example/v1"
+models_base_url = "https://models.corp.example/v1"
+cli_chat_proxy_base_url = "https://proxy.corp.example/v1"
+"#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    let origins = cfg.trusted_origins_from_endpoints();
+    assert!(
+        origins.contains(&"https://gw.corp.example/v1".to_string()),
+        "{origins:?}"
+    );
+    assert!(
+        origins.contains(&"https://models.corp.example/v1".to_string()),
+        "{origins:?}"
+    );
+    assert!(
+        origins.contains(&"https://proxy.corp.example/v1".to_string()),
+        "{origins:?}"
+    );
+
+    // The optional ones are omitted rather than defaulted, so an unset endpoint
+    // cannot widen the trust set.
+    let bare: toml::Value = toml::from_str(
+        r#"
+[endpoints]
+fuigo_api_base_url = "https://only.example/v1"
+"#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&bare).expect("config should parse");
+    assert_eq!(
+        cfg.trusted_origins_from_endpoints(),
+        vec!["https://only.example/v1".to_string()]
+    );
+}
+
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
 #[test]
 fn enforce_disable_api_key_auth_blocks_first_party_only() {
@@ -3253,9 +3328,15 @@ fn e2e_credential_priority_model_key_beats_session_beats_env() {
         sampling.base_url, "https://custom.api/v1",
         "model's own base_url must be used"
     );
+    // A CONFIGURED first-party origin, because the session token only goes to
+    // one. This previously read `https://proxy.api/v1` -- an arbitrary
+    // third-party host -- and asserted the user's session token was sent there.
+    // That was the bug `may_receive_session` now closes, not the behaviour to
+    // pin. The priority being tested (session beats env) is unchanged.
+    crate::agent::config::Config::install_test_trusted_origins();
     let model_no_key = test_model_entry(
         "test",
-        "https://proxy.api/v1",
+        "https://api.fluxrouter.ai/v1",
         None,
         None,
         Some("https://api.x.ai/v1"),
@@ -3267,7 +3348,7 @@ fn e2e_credential_priority_model_key_beats_session_beats_env() {
         "session token should beat env key when model has no own credentials"
     );
     assert_eq!(
-        sampling.base_url, "https://proxy.api/v1",
+        sampling.base_url, "https://api.fluxrouter.ai/v1",
         "session auth should use base_url, not api_base_url"
     );
     let sampling = resolve_sampling(&model_no_key, None);
@@ -3279,6 +3360,18 @@ fn e2e_credential_priority_model_key_beats_session_beats_env() {
     assert_eq!(
         sampling.base_url, "https://api.x.ai/v1",
         "env key should route to api_base_url"
+    );
+    // And the property that made the old spelling of this test dangerous: a
+    // model on a host the user never configured gets NO credential at all.
+    // Not just no session bearer -- `FUIGO_API_KEY` is scoped to the configured
+    // endpoint too, because the destination here was chosen by a catalogue and
+    // not by the user.
+    let third_party = test_model_entry("test", "https://proxy.api/v1", None, None, None);
+    let sampling = resolve_sampling(&third_party, Some("session-key"));
+    assert!(
+        sampling.api_key.is_none(),
+        "no credential may be sent to an unconfigured origin, got {:?}",
+        sampling.api_key
     );
     unsafe { std::env::remove_var("FUIGO_API_KEY") };
     let sampling = resolve_sampling(&model_no_key, None);

@@ -35,6 +35,24 @@ pub struct Provider {
     /// entry plus `model_provider` inside a `[model.<key>]` table, which is
     /// what arms the fail-closed guard.
     pub applies_to_configured_endpoint: bool,
+    /// `[model_providers.<id>].api_backend` -- the wire protocol, in its TOML
+    /// spelling (`chat_completions`, `responses`, `messages`).
+    ///
+    /// `base_url` alone does not say which protocol a host speaks. Anthropic's
+    /// API is not Chat-Completions-shaped, so writing a provider entry with
+    /// only a URL produces a config that cannot work.
+    pub api_backend: &'static str,
+    /// `[model_providers.<id>].auth_scheme` -- how the credential is presented,
+    /// in its TOML spelling (`bearer`, `x_api_key`).
+    ///
+    /// Anthropic wants `x-api-key`, not `Authorization: Bearer`. Until this was
+    /// modelled it was unreachable from any user config.
+    pub auth_scheme: &'static str,
+    /// Headers a request to this provider must carry beyond the credential.
+    ///
+    /// Anthropic requires `anthropic-version`; the OpenAI-compatible providers
+    /// require none, and carry an empty slice rather than a guess.
+    pub extra_headers: &'static [(&'static str, &'static str)],
 }
 
 /// Providers checked at first run, most preferred first.
@@ -49,6 +67,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: Some("sk-"),
         base_url: "https://api.fluxrouter.ai/v1",
         applies_to_configured_endpoint: true,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "anthropic",
@@ -57,6 +78,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: Some("sk-ant-"),
         base_url: "https://api.anthropic.com/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "messages",
+        auth_scheme: "x_api_key",
+        extra_headers: &[("anthropic-version", "2023-06-01")],
     },
     Provider {
         id: "openai",
@@ -65,6 +89,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: Some("sk-"),
         base_url: "https://api.openai.com/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "google",
@@ -73,6 +100,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: Some("AIza"),
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "xai",
@@ -85,6 +115,9 @@ pub const PROVIDERS: &[Provider] = &[
         // configurable, never offered as a one-keypress row.
         base_url: "https://api.x.ai/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "groq",
@@ -93,6 +126,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: Some("gsk_"),
         base_url: "https://api.groq.com/openai/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "openrouter",
@@ -101,6 +137,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: Some("sk-or-"),
         base_url: "https://openrouter.ai/api/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "deepseek",
@@ -109,6 +148,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: None,
         base_url: "https://api.deepseek.com/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
     Provider {
         id: "mistral",
@@ -117,6 +159,9 @@ pub const PROVIDERS: &[Provider] = &[
         key_prefix: None,
         base_url: "https://api.mistral.ai/v1",
         applies_to_configured_endpoint: false,
+        api_backend: "chat_completions",
+        auth_scheme: "bearer",
+        extra_headers: &[],
     },
 ];
 

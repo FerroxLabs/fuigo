@@ -2134,12 +2134,13 @@ impl Config {
     /// that installs origins: `fuigo-shell-base/tests/trust_fails_closed.rs`,
     /// which runs in its own process and installs nothing.
     ///
-    /// Ordering-independent ONLY because this is the single install point for
-    /// the whole test binary. The store is a process-wide `OnceLock`, so a
-    /// second call site passing a different set would make results depend on
-    /// the test schedule rather than on the code. If you need different
-    /// origins for a test, that test needs its own process (see
-    /// `fuigo-shell-base/tests/trust_fails_closed.rs`), not a second install.
+    /// Ordering-independent because every caller installs the SAME set, not
+    /// because there is only one caller -- there are many, across several test
+    /// files, plus `install_trusted_api_origins` itself under `cfg(test)`. The
+    /// store is a process-wide `OnceLock` where the first write wins, so a call
+    /// site passing a DIFFERENT set would silently make results depend on the
+    /// test schedule. If a test needs different origins it needs its own
+    /// process (see `fuigo-shell-base/tests/trust_fails_closed.rs`).
     #[cfg(test)]
     pub(crate) fn install_test_trusted_origins() {
         crate::util::set_trusted_api_origins([
@@ -2163,6 +2164,30 @@ impl Config {
     /// first-party if and only if they configured it. Previously `*.x.ai` was
     /// trusted by compilation and the configured endpoint was not.
     fn install_trusted_api_origins(&self) {
+        // In a test binary the store is one process-wide `OnceLock` shared by
+        // every test, and the FIRST writer wins. Whichever test happened to
+        // load a `Config` first would otherwise decide the trust set for the
+        // whole run, so `cargo test agent::config` and a full `cargo test`
+        // disagree about which hosts are first-party. That is not hypothetical:
+        // eight tests in this file passed in a full run and failed under a
+        // filter, and the full run is what hid it.
+        //
+        // Test builds therefore always install the suite's fixture origins, so
+        // the trust set does not depend on the schedule.
+        #[cfg(test)]
+        Self::install_test_trusted_origins();
+        #[cfg(not(test))]
+        crate::util::set_trusted_api_origins(self.trusted_origins_from_endpoints());
+    }
+
+    /// The origins [`Self::install_trusted_api_origins`] would publish.
+    ///
+    /// Split out because the install itself is test-pinned (above) and would
+    /// otherwise leave this mapping -- the thing that decides which hosts are
+    /// first-party for a real user -- with no coverage at all. This is a pure
+    /// function of the config, so it can be asserted directly without touching
+    /// the process-wide store.
+    pub(crate) fn trusted_origins_from_endpoints(&self) -> Vec<String> {
         let mut origins = vec![self.endpoints.fuigo_api_base_url.clone()];
         if let Some(url) = &self.endpoints.models_base_url {
             origins.push(url.clone());
@@ -2170,7 +2195,7 @@ impl Config {
         if let Some(url) = &self.endpoints.cli_chat_proxy_base_url {
             origins.push(url.clone());
         }
-        crate::util::set_trusted_api_origins(origins);
+        origins
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
     ///
@@ -3965,6 +3990,12 @@ pub struct ConfigModelOverride {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    /// How this model's credential is presented (`bearer` / `x_api_key`).
+    ///
+    /// Inherited from `[model_providers.<id>].auth_scheme` when unset here.
+    /// Before this existed the field was reachable only from the remote model
+    /// catalogue, so no user config could select `x-api-key`.
+    pub auth_scheme: Option<AuthScheme>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     #[serde(default)]
@@ -4033,6 +4064,9 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.api_backend {
             entry.info.api_backend = v.clone();
+        }
+        if let Some(v) = self.auth_scheme {
+            entry.info.auth_scheme = v;
         }
         if !self.extra_headers.is_empty() {
             entry.info.extra_headers = self.extra_headers.clone();
@@ -4757,6 +4791,73 @@ pub(crate) fn first_own_credential(
         .map(str::to_owned)
         .or_else(|| env_key.and_then(EnvKeys::resolve_value))
 }
+/// Whether the session bearer may be attached to `url`, saying so when not.
+///
+/// The refusal itself is `AuthBackend::may_receive_session`. This wrapper
+/// exists for the log line: without it a model on a host that is not a
+/// configured origin silently resolves with no credential, the request 401s,
+/// and the user is told to re-run `fuigo login` — which cannot fix it. The
+/// setups this affects (an `http://` or loopback gateway, or an inference host
+/// that differs from every `[endpoints]` value) are legitimate and need to be
+/// diagnosable.
+fn session_may_be_sent_to(model: &str, url: &str) -> bool {
+    if crate::auth::backend::AuthBackend::may_receive_session(
+        &crate::auth::backend::ActiveAuthBackend::default(),
+        url,
+    ) {
+        return true;
+    }
+    tracing::warn!(
+        model = %model,
+        base_url = %url,
+        "the session credential was not attached: this model's endpoint is not a \
+         configured first-party HTTPS origin. Set `[endpoints].fuigo_api_base_url` \
+         to it, or give the model its own `api_key`/`env_key`."
+    );
+    false
+}
+
+/// Whether `FUIGO_API_KEY` may be attached to `url`.
+///
+/// `FUIGO_API_KEY` is the credential for the endpoint the user configured, and
+/// nothing else. Scoping the *session* token without scoping this one leaves
+/// the same hole open with a different key: a prefetched catalogue model
+/// carries its own `base_url`, never passes through the `[model.*]` fail-closed
+/// guard in `resolve_model_list` (a prefetched map replaces `resolved`
+/// wholesale), and would otherwise receive the user's first-party API key at
+/// whatever host the catalogue named.
+///
+/// This uses [`crate::util::is_configured_api_origin`], not the strict
+/// `is_fuigo_api_bearer_url` that guards the session token, and not the broader
+/// `is_fuigo_api_url`. The two credentials differ in what the user chose: a
+/// session token is minted by a login the user never typed a destination for,
+/// while `FUIGO_API_KEY` is exported by hand alongside
+/// `[endpoints].fuigo_api_base_url`. Someone running a gateway on
+/// `http://localhost:8080/v1` configured both, and refusing their own key at
+/// their own endpoint would break them for no gain -- the threat is a
+/// destination they did NOT choose.
+///
+/// `is_fuigo_api_url` is specifically wrong here because it grants every
+/// loopback URL unconditionally, so a catalogue naming `http://localhost:9999`
+/// would harvest the key from any local listener.
+///
+/// A model with a genuinely third-party `base_url` should carry its own
+/// credential (`[model.<key>].env_key`, or a `[model_providers.<id>]` entry),
+/// which is resolved earlier and is unaffected by this.
+fn env_api_key_may_be_sent_to(model: &str, url: &str) -> bool {
+    if crate::util::is_configured_api_origin(url) {
+        return true;
+    }
+    tracing::warn!(
+        model = %model,
+        base_url = %url,
+        "FUIGO_API_KEY was not attached: this model's endpoint is not a configured \
+         first-party origin. Give the model its own `env_key`, or add the host to \
+         `[endpoints]`, if it should be reachable."
+    );
+    false
+}
+
 /// Priority: model api_key/env_key > cached auth-provider token > session token > FUIGO_API_KEY.
 pub(crate) fn resolve_credentials(
     model: &ModelEntry,
@@ -4777,21 +4878,20 @@ pub(crate) fn resolve_credentials(
             fuigo_chat_state::AuthType::ApiKey,
         )
     } else if let Some(key) = session_key
-        && crate::auth::backend::AuthBackend::may_receive_session(
-            &crate::auth::backend::ActiveAuthBackend::default(),
-            &info.base_url,
-        )
+        && session_may_be_sent_to(&info.model, &info.base_url)
     {
         (
             Some(key.to_owned()),
             info.base_url.clone(),
             fuigo_chat_state::AuthType::SessionToken,
         )
-    } else if let Ok(key) = crate::agent::auth_method::read_fuigo_api_key_env() {
-        let url = model
+    } else if let Ok(key) = crate::agent::auth_method::read_fuigo_api_key_env()
+        && let url = model
             .api_base_url
             .clone()
-            .unwrap_or_else(|| info.base_url.clone());
+            .unwrap_or_else(|| info.base_url.clone())
+        && env_api_key_may_be_sent_to(&info.model, &url)
+    {
         (Some(key), url, fuigo_chat_state::AuthType::ApiKey)
     } else {
         if let Some(ref env_keys) = model.env_key

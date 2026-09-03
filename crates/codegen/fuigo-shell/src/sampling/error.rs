@@ -523,12 +523,14 @@ mod tests {
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
         assert!(RATE_LIMITED_USER_MESSAGE_OAUTH.contains("Upgrade your account"));
-        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("team"));
-        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("credits"));
-        assert!(
-            RATE_LIMITED_USER_MESSAGE_API_KEY
-                .contains("https://docs.x.ai/developers/rate-limits#rate-limit-tiers")
-        );
+        // The API-key copy must not describe a billing model it cannot know:
+        // these keys are FluxRouter or direct-provider keys, and their limits
+        // are set by whoever issued them. The assertions below replace three
+        // that still pinned the old xAI wording ("team", "credits", and a
+        // docs.x.ai rate-limit link) after the copy had deliberately dropped it.
+        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("this API key"));
+        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("provider"));
+        assert!(!RATE_LIMITED_USER_MESSAGE_API_KEY.contains("docs.x.ai"));
         assert!(!RATE_LIMITED_USER_MESSAGE_API_KEY.contains("Upgrade your account"));
     }
 
