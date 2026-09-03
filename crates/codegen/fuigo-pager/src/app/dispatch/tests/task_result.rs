@@ -901,7 +901,7 @@ fn confirmation_required_builds_plugins_confirmation_with_confirmed_true() {
     }
 }
 
-/// Regression: a failed `x.ai/subagent/cancel` RPC must NOT finalize the row; the subagent may still be running.
+/// Regression: a failed `fuigo/subagent/cancel` RPC must NOT finalize the row; the subagent may still be running.
 /// Only a shell response of "nothing live" finalizes it.
 #[test]
 fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {

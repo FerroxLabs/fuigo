@@ -9,7 +9,10 @@ use crate::register_resource;
 // Safety-boundary constants. Not configurable.
 pub const MAX_URL_LENGTH: usize = 2_000;
 pub const MAX_REDIRECTS: usize = 10;
-pub const USER_AGENT_STRING: &str = "Mozilla/5.0 (compatible; fuigo-agent/1.0; +https://x.ai)";
+// No contact URL. The convention is to point site operators at the operator of
+// the bot; this advertised `+https://x.ai`, which told every third-party server
+// that Fuigo traffic was xAI traffic. An honest omission beats a wrong pointer.
+pub const USER_AGENT_STRING: &str = "Mozilla/5.0 (compatible; fuigo-agent/1.0)";
 
 /// Runtime-configurable parameters for the `web_fetch` tool.
 ///

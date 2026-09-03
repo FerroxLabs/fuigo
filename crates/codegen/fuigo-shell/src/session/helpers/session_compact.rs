@@ -5,9 +5,9 @@ use crate::sampling::{
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
+use fuigo_sampler::SamplerConfig as SamplingConfig;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
-use fuigo_sampler::SamplerConfig as SamplingConfig;
 
 // Re-export compaction utilities from fuigo-chat-state so existing callers that import from this module continue to work
 pub use fuigo_chat_state::compaction_utils::{
@@ -576,8 +576,7 @@ pub(crate) async fn generate_session_compact(
                             }
                             if let Some(fr) = choice.finish_reason {
                                 let sr = fuigo_sampling_types::StopReason::from(fr);
-                                truncated =
-                                    matches!(sr, fuigo_sampling_types::StopReason::Length);
+                                truncated = matches!(sr, fuigo_sampling_types::StopReason::Length);
                                 stop_reason = Some(sr.as_str().to_string());
                             }
                         }

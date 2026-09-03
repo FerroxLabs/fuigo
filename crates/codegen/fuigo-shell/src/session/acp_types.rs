@@ -500,7 +500,7 @@ pub fn model_display_name(
     model.to_string()
 }
 
-/// Full wire response for `x.ai/session/info`.
+/// Full wire response for `fuigo/session/info`.
 ///
 /// Wraps `SessionInfoData` with session-level fields (`session_id`, `cwd`) that come from the agent layer rather than the session actor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -359,11 +359,10 @@ pub(crate) async fn spawn_session_actor(
                     config.rules = merged;
                 }
                 None => {
-                    permission_config = Some(
-                        fuigo_workspace::permission::types::PermissionConfig::new(
+                    permission_config =
+                        Some(fuigo_workspace::permission::types::PermissionConfig::new(
                             cli_permission_rules,
-                        ),
-                    );
+                        ));
                 }
             }
         }
@@ -390,9 +389,7 @@ pub(crate) async fn spawn_session_actor(
                 })
                 .map(|t| {
                     std::sync::Arc::new(t)
-                        as std::sync::Arc<
-                            dyn fuigo_workspace::permission::PermissionHookTransport,
-                        >
+                        as std::sync::Arc<dyn fuigo_workspace::permission::PermissionHookTransport>
                 });
             if transport.is_none() {
                 tracing::debug!(
@@ -939,7 +936,7 @@ pub(crate) async fn spawn_session_actor(
             tracing::info!(
                 session_id = %session_info.id.0,
                 acp_mcp_servers = acp_server_count,
-                "Registered in-process SDK MCP servers (x.ai/mcp/sdk_call)"
+                "Registered in-process SDK MCP servers (fuigo/mcp/sdk_call)"
             );
         }
         Arc::new(TokioMutex::new(state))
@@ -1091,13 +1088,10 @@ pub(crate) async fn spawn_session_actor(
         None
     };
     let resolved_task_output =
-        fuigo_tools::reminders::task_completion::resolve_task_output_tool_name(
-            agent.tool_bridge(),
-        )
-        .await;
-    let resolved_read =
-        fuigo_tools::reminders::task_completion::resolve_read_tool_name(agent.tool_bridge())
+        fuigo_tools::reminders::task_completion::resolve_task_output_tool_name(agent.tool_bridge())
             .await;
+    let resolved_read =
+        fuigo_tools::reminders::task_completion::resolve_read_tool_name(agent.tool_bridge()).await;
     let resolved_scheduler_delete =
         fuigo_tools::reminders::task_completion::resolve_scheduler_delete_tool_name(
             agent.tool_bridge(),
@@ -2092,7 +2086,7 @@ pub(crate) async fn spawn_session_actor(
                     "ask_user_question reverse-request must carry a non-empty sessionId (design §5.4)"
                 );
                 let ext_request = agent_client_protocol::ExtRequest::new(
-                    "x.ai/ask_user_question",
+                    "fuigo/ask_user_question",
                     serde_json::value::to_raw_value(&ext_req)
                         .expect("AskUserQuestionExtRequest serialization should not fail")
                         .into(),
@@ -2395,9 +2389,8 @@ pub(crate) async fn spawn_session_on_thread(
     ),
     acp::Error,
 > {
-    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<
-        Result<SessionInitResult, fuigo_agent::AgentBuildError>,
-    >();
+    let (init_tx, init_rx) =
+        tokio::sync::oneshot::channel::<Result<SessionInitResult, fuigo_agent::AgentBuildError>>();
     let sid = session_info.id.0.to_string();
     let thread_name = format!("ses-{}", &sid[..sid.len().min(8)]);
     const SESSION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;

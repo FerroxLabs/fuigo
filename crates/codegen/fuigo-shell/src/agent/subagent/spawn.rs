@@ -15,12 +15,12 @@ use crate::agent::mvp_agent::{LocalRef, MvpAgent};
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::SessionCommand;
 use agent_client_protocol as acp;
-use tokio::sync::mpsc;
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 pub(crate) use fuigo_tools::implementations::fuigo_build::task::coordinator::{
     self, ChildCompletion, ChildRunOutput, StartedChild,
 };
 use fuigo_tools::implementations::fuigo_build::task::types::{SubagentRequest, SubagentResult};
+use tokio::sync::mpsc;
 /// Floor keeps the pool responsive when `available_parallelism` is tiny.
 const MIN_WORKER_THREADS: usize = 2;
 /// Four suffice for 32 children (each runs on its own OS thread); `FUIGO_SUBAGENT_WORKER_THREADS` overrides.
@@ -141,17 +141,16 @@ impl coordinator::ChildRunner for ShellChildRunner {
                         "subagent worker runtime failed to build"
                     );
                     return coordinator::ChildRunOutput {
-                        result: fuigo_tools::implementations::fuigo_build::task::types::SubagentResult {
-                            success: false,
-                            error: Some(
-                                format!(
-                                "Failed to start the subagent worker runtime: {err}"
-                            ),
-                            ),
-                            subagent_id: run.request.id.clone(),
-                            child_session_id: run.request.id,
-                            ..Default::default()
-                        },
+                        result:
+                            fuigo_tools::implementations::fuigo_build::task::types::SubagentResult {
+                                success: false,
+                                error: Some(format!(
+                                    "Failed to start the subagent worker runtime: {err}"
+                                )),
+                                subagent_id: run.request.id.clone(),
+                                child_session_id: run.request.id,
+                                ..Default::default()
+                            },
                         completion_data: Default::default(),
                         snapshot_ref: None,
                     };
@@ -254,9 +253,7 @@ impl coordinator::ChildRunner for ShellChildRunner {
 /// Coordinator limit sink; the coordinator cannot link telemetry directly.
 fn log_limit_notice(notice: coordinator::SubagentLimitNotice) {
     use coordinator::{LimitedSpawnOrigin, SubagentLimitDecision};
-    use fuigo_telemetry::events::{
-        SubagentLimitDisposition, SubagentLimitHit, SubagentOwnerKind,
-    };
+    use fuigo_telemetry::events::{SubagentLimitDisposition, SubagentLimitHit, SubagentOwnerKind};
     let (disposition, limit) = match notice.decision {
         SubagentLimitDecision::QueuedAtConcurrentLimit { limit } => {
             (SubagentLimitDisposition::Queued, limit as u64)
@@ -517,7 +514,7 @@ pub(crate) fn emit_subagent_notification(
         .ok();
     if let Some(params) = params {
         let ext_notification =
-            acp::ExtNotification::new("x.ai/session_notification", params.into());
+            acp::ExtNotification::new("fuigo/session_notification", params.into());
         gateway.forward_fire_and_forget(ext_notification);
     }
 }

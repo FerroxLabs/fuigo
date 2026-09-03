@@ -35,10 +35,7 @@ pub(super) fn remove_managed_config_files(home: &std::path::Path) {
     }
     let atomic_write_tmp_prefixes = [
         format!("{}.", fuigo_config::MANAGED_CONFIG_CACHE_FILE),
-        format!(
-            "{}.",
-            fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE
-        ),
+        format!("{}.", fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE),
         format!(
             "{}.",
             fuigo_config::signed_policy::MANAGED_IDENTITY_SIDECAR_FILE

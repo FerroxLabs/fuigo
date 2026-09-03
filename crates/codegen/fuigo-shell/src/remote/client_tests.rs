@@ -930,7 +930,10 @@ fn deployment_config_url_uses_cli_chat_proxy_when_not_overridden() {
     // nothing -- the point of the assertion is that it does NOT follow the
     // inference endpoint.
     assert_eq!(url, "/deployment/config");
-    assert!(!url.contains("fluxrouter"), "must not follow inference: {url}");
+    assert!(
+        !url.contains("fluxrouter"),
+        "must not follow inference: {url}"
+    );
     assert!(
         !url.contains("acme-corp"),
         "deployment key would be sent to the inference host: {url}"

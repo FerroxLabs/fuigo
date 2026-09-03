@@ -3,6 +3,7 @@ use indexmap::IndexMap;
 use super::config::{ConfigModelOverride, EnvKeys};
 use super::config_model_override_parse::{ConfigWarning, ConfigWarningKind};
 use crate::sampling::ApiBackend;
+use fuigo_sampler::config::AuthScheme;
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
@@ -12,6 +13,13 @@ pub struct ModelProviderConfig {
     pub env_key: Option<EnvKeys>,
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
+    /// How the credential is presented: `Authorization: Bearer` or `x-api-key`.
+    ///
+    /// Without this a provider config could only ever produce `Bearer`, which
+    /// is wrong for the Anthropic Messages API and made an `[model_providers.
+    /// anthropic]` entry unusable however it was written -- the wire protocol
+    /// was selectable via `api_backend` but the header was not.
+    pub auth_scheme: Option<AuthScheme>,
     pub extra_headers: IndexMap<String, String>,
     /// Query parameters folded into every request URL; inherited by models.
     pub query_params: IndexMap<String, String>,
@@ -178,6 +186,7 @@ impl ConfigModelOverride {
             env_key,
             api_key,
             api_backend,
+            auth_scheme,
             extra_headers,
             query_params,
             env_http_headers,
@@ -191,6 +200,7 @@ impl ConfigModelOverride {
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
+        merged.auth_scheme = merged.auth_scheme.or(*auth_scheme);
         merged.context_window = merged.context_window.or(*context_window);
         // Inherited wholesale only when the model sets none of its own.
         if merged.extra_headers.is_empty() {
@@ -1004,6 +1014,103 @@ mod tests {
                 .map(String::as_str),
             Some("model"),
             "a model that sets its own query params inherits none of the provider's"
+        );
+    }
+    /// End-to-end for what `/provider anthropic <model>` writes.
+    ///
+    /// The TOML below is byte-for-byte what `fuigo-pager`'s
+    /// `provider_config_edit` emits for that command (captured from its own
+    /// output, not written by hand). It is here because only this crate can
+    /// resolve it, and a provider entry that parses but resolves wrong is worse
+    /// than one that fails to parse.
+    #[test]
+    fn a_provider_written_by_the_provider_command_resolves_end_to_end() {
+        use crate::sampling::ApiBackend;
+        use fuigo_sampler::config::AuthScheme;
+
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+[model_providers.anthropic]
+base_url = "https://api.anthropic.com/v1"
+env_key = "ANTHROPIC_API_KEY"
+api_backend = "messages"
+auth_scheme = "x_api_key"
+
+[model_providers.anthropic.extra_headers]
+anthropic-version = "2023-06-01"
+
+[model.claude-opus-4-6]
+model_provider = "anthropic"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("claude-opus-4-6")
+            .expect("the model binding must produce an entry");
+
+        assert_eq!(entry.info.base_url, "https://api.anthropic.com/v1");
+        // Both of these were unreachable from user config before the provider
+        // command existed. `base_url` alone would have produced a Chat
+        // Completions request with an `Authorization: Bearer` header, which the
+        // Messages API rejects.
+        assert_eq!(entry.info.api_backend, ApiBackend::Messages);
+        assert_eq!(
+            entry.info.auth_scheme,
+            AuthScheme::XApiKey,
+            "the Messages API is keyed by x-api-key, not a bearer"
+        );
+        assert_eq!(
+            entry
+                .info
+                .extra_headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some("2023-06-01")
+        );
+        assert_eq!(
+            entry.env_key.as_ref().and_then(super::EnvKeys::primary),
+            Some("ANTHROPIC_API_KEY"),
+            "the env var NAME is inherited from the provider table"
+        );
+    }
+
+    /// The other half: the session bearer must not follow the model to
+    /// Anthropic. The guard installs a fail-closed auth provider, and the
+    /// resolver falls through to it rather than to the session token.
+    #[test]
+    fn a_third_party_provider_does_not_receive_the_session_bearer() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+[model_providers.anthropic]
+base_url = "https://api.anthropic.com/v1"
+env_key = "ANTHROPIC_API_KEY_THAT_IS_NOT_SET"
+
+[model.claude-opus-4-6]
+model_provider = "anthropic"
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let models = resolve_model_list(&cfg, None);
+        let entry = models.get("claude-opus-4-6").expect("entry");
+
+        assert!(
+            entry
+                .auth_provider
+                .as_ref()
+                .is_some_and(crate::auth::AuthProviderRef::is_fail_closed),
+            "a model on a third-party base_url must resolve to a fail-closed auth provider"
+        );
+
+        let creds = resolve_credentials(entry, Some("session-bearer"));
+        assert_ne!(
+            creds.api_key.as_deref(),
+            Some("session-bearer"),
+            "the session bearer must never be sent to a third-party provider"
         );
     }
 }

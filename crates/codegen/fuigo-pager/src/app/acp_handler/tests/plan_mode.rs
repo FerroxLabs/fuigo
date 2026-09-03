@@ -208,7 +208,7 @@
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(fuigo_acp_lib::AcpArgs {
-            request: acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into()),
+            request: acp::ExtRequest::new("fuigo/exit_plan_mode", raw.into()),
             response_tx: tx,
         });
 
@@ -239,7 +239,7 @@
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(fuigo_acp_lib::AcpArgs {
-            request: acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into()),
+            request: acp::ExtRequest::new("fuigo/exit_plan_mode", raw.into()),
             response_tx: tx,
         });
 
@@ -270,7 +270,7 @@
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(fuigo_acp_lib::AcpArgs {
-            request: acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into()),
+            request: acp::ExtRequest::new("fuigo/exit_plan_mode", raw.into()),
             response_tx: tx,
         });
 

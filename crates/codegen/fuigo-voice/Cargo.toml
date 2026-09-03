@@ -23,10 +23,19 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 fuigo-dirs = { workspace = true }
 fuigo-extra-ca = { workspace = true }
+# Batch STT is one multipart POST. The client is always built through
+# `fuigo_extra_ca::build_reqwest_client`, never `reqwest::Client::new`, so the
+# egress guard and the shared root store apply -- see `stt::batch`.
+reqwest = { workspace = true, features = ["multipart"] }
 # Sanctioned TTY detach for the capture subprocesses (Linux system recorders,
 # macOS `__mic-capture` self-exec helper) — workspace rule: never spawn a raw
 # `std::process::Command`.
 fuigo-tty-utils = { workspace = true }
+
+[dev-dependencies]
+# `test-util` gives the recording-loop tests a paused clock, so the 10s
+# no-speech watchdog can be exercised without sleeping for 10 real seconds.
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 
 [features]
 # `audio` = "microphone capture is compiled in". It's enabled on every OS for

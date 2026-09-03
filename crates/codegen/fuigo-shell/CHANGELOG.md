@@ -941,7 +941,7 @@
 ## Features
 
 - **System notifications** now carry structured kind/title/body for better rendering.
-- **x.ai/pr/status** now reports whether an open PR is in the merge queue.
+- **fuigo/pr/status** now reports whether an open PR is in the merge queue.
 - **Compact mode** now activates automatically on very small terminals.
 - **Up arrow** on an empty prompt now browses prompt history; `/history` searches it.
 - **Stop hook runs** now appear inline on the turn-completed line instead of a separate block.
@@ -2340,7 +2340,7 @@
 
 ## Features
 
-- Memory system: /remember command, note modal with raw/enhanced preview, x.ai/memory/rewrite ACP extension, Ctrl+F fullscreen toggle for /memory modal.
+- Memory system: /remember command, note modal with raw/enhanced preview, fuigo/memory/rewrite ACP extension, Ctrl+F fullscreen toggle for /memory modal.
 - Agent configuration: /config-agents modal with agents, personas, and defaults.
 - Goal classifier: end-to-end goal tracking with subagent-powered classification.
 

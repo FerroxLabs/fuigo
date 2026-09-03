@@ -1,5 +1,5 @@
 //! File I/O methods: the service-level `workspace.put_files` / `workspace.get_files` pair and the `workspace.fs_*` extension ops.
-//! The `workspace.fs_*` ops back the shell's `x.ai/fs/*` ACP methods.
+//! The `workspace.fs_*` ops back the shell's `fuigo/fs/*` ACP methods.
 
 use std::path::PathBuf;
 
@@ -309,7 +309,7 @@ impl WorkspaceRpc for FsDeleteFileReq {
 // Both the workspace server (`fuigo-workspace`) and the grok.com backend compile against the same structs; a field rename breaks both sides
 //
 // The method names use a `client_fs` segment (not `fs`)
-// The `workspace.fs_*` ops above already serve the shell's `x.ai/fs/*` methods with incompatible schemas
+// The `workspace.fs_*` ops above already serve the shell's `fuigo/fs/*` methods with incompatible schemas
 
 /// Wire method name for [`ClientFsListReq`].
 pub const CLIENT_FS_LIST_METHOD: &str = "workspace.client_fs_list";
@@ -318,7 +318,7 @@ pub const CLIENT_FS_STAT_METHOD: &str = "workspace.client_fs_stat";
 /// Wire method name for [`ClientFsReadFileReq`].
 pub const CLIENT_FS_READ_FILE_METHOD: &str = "workspace.client_fs_read_file";
 
-/// Filesystem node kind. Wire values match the shell's `x.ai/fs/list` node `type` strings.
+/// Filesystem node kind. Wire values match the shell's `fuigo/fs/list` node `type` strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FsNodeType {
@@ -357,7 +357,7 @@ fn default_max_bytes() -> u64 {
     1_048_576
 }
 
-/// ACP-compatible list request (camelCase wire format, mirrors `x.ai/fs/list` plus `offset` pagination).
+/// ACP-compatible list request (camelCase wire format, mirrors `fuigo/fs/list` plus `offset` pagination).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsListReq {

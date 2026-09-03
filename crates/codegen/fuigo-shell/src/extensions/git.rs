@@ -8,14 +8,14 @@ use super::{Empty, ExtResult, parse_params, to_ext_response, to_ext_response_par
 use crate::agent::MvpAgent;
 use crate::session::ExtMethodResult;
 use agent_client_protocol as acp;
-use serde::Deserialize;
-use std::path::PathBuf;
 use fuigo_workspace::session::git::{self, DiscardScope, GitDiffsData, check_diff_size_limits};
 use fuigo_workspace::workspace_ops::{
     GitBranchesReq, GitCheckoutCommitReq, GitCheckoutReq, GitCommitReq, GitCurrentCommitReq,
     GitDiffReq, GitDiscardReq, GitFilesReq, GitInfoReq, GitStageContentReq, GitStageReq,
     GitStashReq, GitStatusExtReq, GitStatusFormat, GitUnstageReq,
 };
+use serde::Deserialize;
+use std::path::PathBuf;
 fn default_head() -> String {
     "HEAD".to_string()
 }
@@ -295,18 +295,18 @@ pub async fn handle(
         }
     }
     match args.method.as_ref() {
-        "x.ai/git/git_repo_root" => {
+        "fuigo/git/git_repo_root" => {
             let req: git::GitRepoRequest = parse_params(args)?;
             let response = git::is_git_repo(&req).await?;
             super::to_raw_response(&response)
         }
-        "x.ai/git/serialize_changes" => {
+        "fuigo/git/serialize_changes" => {
             let _ = (args, ops);
             to_ext_response::<()>(Err(anyhow::anyhow!(
                 "git serialize_changes is unavailable in this build"
             )))
         }
-        "x.ai/git/status" => {
+        "fuigo/git/status" => {
             let req = parse_params::<GitStatusRequest>(args)?;
             let include_untracked = req.include_untracked.unwrap_or(false);
             let include_stats = req.include_stats.unwrap_or(false);
@@ -332,7 +332,7 @@ pub async fn handle(
             })?;
             to_ext_response(Ok(result))
         }
-        "x.ai/git/files" => {
+        "fuigo/git/files" => {
             let req = parse_params::<GitFilesRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -348,7 +348,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(result))
         }
-        "x.ai/git/diffs" => {
+        "fuigo/git/diffs" => {
             let req = parse_params::<GitDiffsRequest>(args)?;
             let max_bytes = req.max_patch_bytes;
             let max_lines = req.max_patch_lines;
@@ -377,7 +377,7 @@ pub async fn handle(
                 to_ext_response(Ok(data))
             }
         }
-        "x.ai/git/stage" => {
+        "fuigo/git/stage" => {
             let req = parse_params::<GitStageRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -392,7 +392,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(result))
         }
-        "x.ai/git/stage/content" => {
+        "fuigo/git/stage/content" => {
             let req = parse_params::<GitStageContentRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -407,7 +407,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
-        "x.ai/git/unstage" => {
+        "fuigo/git/unstage" => {
             let req = parse_params::<GitUnstageRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -421,7 +421,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
-        "x.ai/git/discard" => {
+        "fuigo/git/discard" => {
             let req = parse_params::<GitDiscardRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -437,7 +437,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
-        "x.ai/git/commit" => {
+        "fuigo/git/commit" => {
             let req = parse_params::<GitCommitRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -457,7 +457,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response_partial(Ok(commit_result.data), commit_result.warning)
         }
-        "x.ai/git/checkout" => {
+        "fuigo/git/checkout" => {
             let req = parse_params::<GitCheckoutRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -472,7 +472,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
-        "x.ai/git/stash" => {
+        "fuigo/git/stash" => {
             let req = parse_params::<GitStashRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -486,7 +486,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
-        "x.ai/git/info" => {
+        "fuigo/git/info" => {
             let req = parse_params::<GitInfoRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -497,7 +497,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(result))
         }
-        "x.ai/git/branches" => {
+        "fuigo/git/branches" => {
             let req = parse_params::<GitBranchesRequest>(args)?;
             let git_root = resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -508,7 +508,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
             to_ext_response(Ok(result))
         }
-        "x.ai/git/current_commit" => {
+        "fuigo/git/current_commit" => {
             let req = parse_params::<GitCurrentCommitRequest>(args)?;
             let result = match resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref())
                 .await
@@ -522,7 +522,7 @@ pub async fn handle(
             };
             to_ext_response(Ok(result))
         }
-        "x.ai/git/checkout_session_head" => {
+        "fuigo/git/checkout_session_head" => {
             let req = parse_params::<CheckoutSessionHeadRequest>(args)?;
             let git_root =
                 resolve_git_root(agent, ops, req.git_root, Some(&req.session_id)).await?;
@@ -565,7 +565,7 @@ pub async fn handle(
                 .map_err(|e| acp::Error::internal_error().data(format!("checkout failed: {e}")))?;
             super::to_raw_response(&result)
         }
-        "x.ai/git/checkout_commit" => {
+        "fuigo/git/checkout_commit" => {
             let req = parse_params::<GitCheckoutCommitRequest>(args)?;
             let git_root =
                 resolve_git_root(agent, ops, req.git_root, req.session_id.as_ref()).await?;

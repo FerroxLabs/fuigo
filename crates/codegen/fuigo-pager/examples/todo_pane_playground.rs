@@ -12,15 +12,15 @@ use std::time::Duration;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use fuigo_pager::appearance::LayoutConfig;
+use fuigo_pager::views::todo_pane::TodoPane;
+use fuigo_shell::tools::{TodoItem, TodoPriority, TodoStatus};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use fuigo_pager::appearance::LayoutConfig;
-use fuigo_pager::views::todo_pane::TodoPane;
-use fuigo_shell::tools::{TodoItem, TodoPriority, TodoStatus};
 
 type Scenario = (&'static str, &'static str, Vec<TodoItem>);
 

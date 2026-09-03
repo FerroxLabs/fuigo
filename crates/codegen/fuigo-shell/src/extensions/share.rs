@@ -1,4 +1,4 @@
-//! `x.ai/share_session` extension handler.
+//! `fuigo/share_session` extension handler.
 //!
 //! Loads a local session, exports it, uploads the message payload to cloud storage via a signed URL, and asks the backend for a public share URL.
 //! The signed URL lets large sessions bypass the proxy/backend body-size limits.
@@ -19,7 +19,7 @@ use fuigo_telemetry::id::agent_id;
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/share_session" => {
+        "fuigo/share_session" => {
             tracing::info!("handling share session request");
             handle_share_session(agent, args).await
         }
@@ -256,8 +256,9 @@ mod tests {
         };
         mgr.hot_swap(non_fuigo);
 
-        let err = require_fuigo_auth_for_share(&mgr)
-            .expect_err("non-Ferrox Labs accounts (API key, External, enterprise IdP) must be rejected");
+        let err = require_fuigo_auth_for_share(&mgr).expect_err(
+            "non-Ferrox Labs accounts (API key, External, enterprise IdP) must be rejected",
+        );
 
         // Test the *exact* actionable data string for the non-Ferrox Labs path (distinct from the generic "Authentication required to share session" path)
         let serialized =

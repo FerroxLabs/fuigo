@@ -4,11 +4,42 @@ use super::session::lifecycle::dispatch_new_session;
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView, VoiceState, VoiceTarget};
 
-/// Promote live interim into the bound prompt, then hard-reset (no trailing final).
-/// Returns the fragment for callers that captured text earlier.
+/// End the dictation that a submit implies, promoting any live interim into the
+/// bound prompt first.
+///
+/// The teardown differs by transport, and getting it wrong destroys words the
+/// user has already spoken.
+///
+/// **Batch** delivers nothing until its upload finishes, so a hard reset here
+/// sends the transcript to a session that no longer exists and it is dropped
+/// with no toast. Both live states must therefore survive the submit:
+/// `Recording` is stopped but kept, and `Stopping` -- the state the Enter
+/// interception itself puts the user in, one keystroke before it tells them to
+/// press Enter again -- is left exactly as it is. Either way the binding
+/// outlives the submit and the words land in the box they were dictated into.
+///
+/// **Streaming** must still tear down. Its interim was merged into the
+/// submission just above, and the server's trailing `speech_final` is a clean
+/// re-transcription of the whole turn, so keeping the session would append a
+/// second copy of what was just sent.
+///
+/// Anything that is not a live session (a queued cold start with nothing
+/// captured yet) is cancelled outright: there is no recording to preserve.
 pub(super) fn voice_stop_on_submit(app: &mut AppView) -> Option<String> {
     let interim = crate::voice::commit_interim_into_prompt(app);
-    app.voice_reset();
+    let batch = app.voice_config.stt_mode == fuigo_voice::SttMode::Batch;
+    let live_batch_session = batch
+        && matches!(
+            app.voice_state,
+            VoiceState::Recording { .. } | VoiceState::Stopping { .. }
+        );
+    if live_batch_session {
+        // A no-op when already `Stopping`, which is the point: that session is
+        // still owed a transcript and must keep its binding.
+        app.voice_stop_keeping_final();
+    } else {
+        app.voice_reset();
+    }
     interim
 }
 

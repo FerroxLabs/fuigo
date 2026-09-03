@@ -10,10 +10,10 @@ use std::time::Duration;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use fuigo_pager::scrollback::{RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackState};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use fuigo_pager::scrollback::{RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackState};
 
 const SAMPLES: &[(&str, &str)] = &[
     (

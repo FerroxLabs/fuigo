@@ -10,7 +10,7 @@
 //! Two events with the same key collapse into the latest one.
 //! An MCP server bursting 100 `tools/list_changed` notifications inside 10 ms produces exactly one ACP push.
 //!
-//! Each surviving entry is emitted as an ACP [`agent_client_protocol::ExtNotification`] with method `x.ai/mcp/server_status`.
+//! Each surviving entry is emitted as an ACP [`agent_client_protocol::ExtNotification`] with method `fuigo/mcp/server_status`.
 //! The payload schema is defined by [`McpServerStatusPayload`].
 //!
 //! ## Contract
@@ -27,12 +27,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol as acp;
-use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as TokioMutex;
-use tokio::sync::mpsc::UnboundedReceiver;
 use fuigo_mcp::servers::{
     McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name, mcp_transport_str,
 };
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::extensions::mcp::{MANAGED_GATEWAY_ENTRY_PREFIX, McpServerSource};
 
@@ -40,7 +40,7 @@ use crate::extensions::mcp::{MANAGED_GATEWAY_ENTRY_PREFIX, McpServerSource};
 pub(crate) const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
 /// Method name for the ACP push.
-pub const SERVER_STATUS_METHOD: &str = "x.ai/mcp/server_status";
+pub const SERVER_STATUS_METHOD: &str = "fuigo/mcp/server_status";
 
 /// JSON payload pushed over ACP. Fields written in camelCase per ACP convention.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -319,7 +319,7 @@ pub(crate) fn build_payload(
 
 /// Per-flush side effects:
 /// - update `shutting_down` for `ConfigRemoved` / `Ready` keys,
-/// - emit one ACP `x.ai/mcp/server_status` push per surviving buffer entry, via the provided gateway.
+/// - emit one ACP `fuigo/mcp/server_status` push per surviving buffer entry, via the provided gateway.
 ///
 /// Failures are logged and dropped; the dispatcher must not block the session actor.
 pub(crate) fn flush_window(
@@ -515,7 +515,7 @@ pub(crate) async fn drop_dead_clients(
 /// 2. `drop_dead_clients`: remove `TransportClosed` entries from [`McpState::owned_clients`] BEFORE pushing status notifications.
 ///    Eviction is gated on client identity (see [`collect_close_candidates`]).
 ///    Stale `TransportClosed` keys are stripped from the window so they push no status, emit no disconnect span, and schedule no restart.
-/// 3. `flush_window`: emit ACP `x.ai/mcp/server_status` per surviving entry.
+/// 3. `flush_window`: emit ACP `fuigo/mcp/server_status` per surviving entry.
 /// 4. `maybe_schedule_restart`: decide per `TransportClosed` / `HandshakeFailed` key whether to spawn an `auto_restart_stdio` task.
 ///    The gate lives in [`crate::session::mcp_restart`].
 ///    Skipped entirely when `restart_actions` is `None` (e.g. `mcp.auto_restart=false`).
@@ -964,8 +964,8 @@ mod tests {
     /// A `TransportClosed` carrying the registered client's identity must remove it from `owned_clients`.
     #[tokio::test]
     async fn dispatcher_drops_dead_clients_on_transport_closed() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let mcp_state = StdArc::new(TokioMutex::new(McpState::new(vec![])));
         // Pre-populate with a stub client so we have something to remove.
@@ -1059,8 +1059,8 @@ mod tests {
     /// Closed ids accumulate across the window.
     #[tokio::test]
     async fn window_accumulates_all_closed_ids_and_evicts_current_client() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let old_client = StdArc::new(McpClient::stub("demo-mcp"));
         let current = StdArc::new(McpClient::stub("demo-mcp"));
@@ -1116,8 +1116,8 @@ mod tests {
     /// It must NOT evict the replacement registered under the same name, and must be reported stale.
     #[tokio::test]
     async fn stale_transport_closed_does_not_evict_replacement_client() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let old_client = StdArc::new(McpClient::stub("demo-mcp"));
         let old_id = old_client.client_id();
@@ -1400,8 +1400,8 @@ mod tests {
     /// The replacement stays registered, no status is pushed, and no restart is scheduled (even though the server is stdio-configured).
     #[tokio::test(start_paused = true, flavor = "current_thread")]
     async fn run_dispatcher_stale_transport_closed_is_fully_inert() {
-        use std::sync::Arc as StdArc;
         use fuigo_mcp::servers::{McpClient, McpState};
+        use std::sync::Arc as StdArc;
 
         let old_client = StdArc::new(McpClient::stub("svr"));
         let replacement = StdArc::new(McpClient::stub("svr"));

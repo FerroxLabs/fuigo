@@ -4982,9 +4982,9 @@ mod feedback_input_tests {
     use crate::app::bundle::BundleState;
     use crate::scrollback::render::ScratchBuffer;
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState, feedback_input};
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
     /// Agent with the bare `/feedback` pane open and focused for typing.
     fn feedback_agent() -> AgentView {
         let mut agent = make_agent();
@@ -5166,10 +5166,10 @@ mod status_line_draw_tests {
     use crate::scrollback::render::ScratchBuffer;
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     use crate::views::status_line::{SanitizedText, StatusLineDisplay, StatusLineFrame};
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
     fn draw_script(output: &str, rows: u16) -> Buffer {
         draw_script_for(&mut make_agent(), output, rows)
     }

@@ -9,6 +9,8 @@ description = "Shared config loading for Fuigo — fuigo_home, effective config 
 base64 = { workspace = true }
 blake3 = { workspace = true }
 dunce = { workspace = true }
+# fs2: advisory cross-process flock for the config.toml write lock (fs_atomic).
+fs2 = { workspace = true }
 # Shared signed deployment-config envelope contract with the cli-chat-proxy signer.
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 ring = { workspace = true }

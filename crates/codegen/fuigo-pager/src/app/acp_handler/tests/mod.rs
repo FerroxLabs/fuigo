@@ -199,7 +199,7 @@ pub(super) fn interjection_broadcast(
     text: &str,
 ) -> acp::ExtNotification {
     acp::ExtNotification::new(
-        "x.ai/session/interjection",
+        "fuigo/session/interjection",
         std::sync::Arc::from(
             serde_json::value::to_raw_value(
                     &serde_json::json!({
@@ -264,7 +264,7 @@ pub(super) fn follow_ups_ext(
             "suggestions": suggestions,
         });
     acp::ExtNotification::new(
-        "x.ai/follow_ups",
+        "fuigo/follow_ups",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
@@ -283,13 +283,13 @@ pub(super) fn follow_ups_ext_with_prompt(
             "suggestions": suggestions,
         });
     acp::ExtNotification::new(
-        "x.ai/follow_ups",
+        "fuigo/follow_ups",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
 pub(super) fn voice_settings_update(enabled: bool) -> acp::ExtNotification {
     acp::ExtNotification::new(
-        "x.ai/settings/update",
+        "fuigo/settings/update",
         std::sync::Arc::from(
             serde_json::value::to_raw_value(
                     &serde_json::json!({ "voice_mode_enabled": enabled }),
@@ -300,7 +300,7 @@ pub(super) fn voice_settings_update(enabled: bool) -> acp::ExtNotification {
 }
 pub(super) fn tier_settings_update(tier: &str) -> acp::ExtNotification {
     acp::ExtNotification::new(
-        "x.ai/settings/update",
+        "fuigo/settings/update",
         std::sync::Arc::from(
             serde_json::value::to_raw_value(
                     &serde_json::json!({
@@ -319,7 +319,7 @@ pub(super) fn group_tool_verbs_settings_update(
         None => serde_json::json!({}),
     };
     acp::ExtNotification::new(
-        "x.ai/settings/update",
+        "fuigo/settings/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
@@ -331,7 +331,7 @@ pub(super) fn collapsed_edit_blocks_settings_update(
         None => serde_json::json!({}),
     };
     acp::ExtNotification::new(
-        "x.ai/settings/update",
+        "fuigo/settings/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
@@ -346,7 +346,7 @@ pub(super) fn subagent_ext_replay(
             "_meta": { "isReplay": true, "eventId": event_id },
         });
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
@@ -373,7 +373,7 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
         }),
         )
         .unwrap();
-    let request = acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into());
+    let request = acp::ExtRequest::new("fuigo/exit_plan_mode", raw.into());
     let (tx, rx) = tokio::sync::oneshot::channel();
     (
         fuigo_acp_lib::AcpArgs {
@@ -421,11 +421,11 @@ pub(super) fn queue_changed_ext(session_id: &str, ids: &[&str]) -> acp::ExtNotif
         .collect();
     let params = serde_json::json!({ "sessionId": session_id, "entries": entries });
     acp::ExtNotification::new(
-        "x.ai/queue/changed",
+        "fuigo/queue/changed",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
-/// Build a `x.ai/queue/changed` notification carrying `runningPromptId`.
+/// Build a `fuigo/queue/changed` notification carrying `runningPromptId`.
 pub(super) fn queue_changed_running(
     session_id: &str,
     ids: &[&str],
@@ -469,7 +469,7 @@ pub(super) fn queue_changed_running_ex(
         params["runningCombinedTexts"] = serde_json::json!(segs);
     }
     acp::ExtNotification::new(
-        "x.ai/queue/changed",
+        "fuigo/queue/changed",
         std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
     )
 }
@@ -552,7 +552,7 @@ pub(super) fn tool_call_block_count(agent: &AgentView) -> usize {
 pub(super) fn make_inject_notif(payload: &serde_json::Value) -> acp::ExtNotification {
     let raw = serde_json::value::to_raw_value(payload).unwrap();
     acp::ExtNotification::new(
-        "x.ai/scheduled_task_inject_prompt",
+        "fuigo/scheduled_task_inject_prompt",
         std::sync::Arc::from(raw),
     )
 }
@@ -575,7 +575,7 @@ pub(super) fn make_fired_notif(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_fired", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/scheduled_task_fired", std::sync::Arc::from(raw))
 }
 pub(super) fn make_fired_notif_with_subagent(
     session_id: &str,
@@ -594,7 +594,7 @@ pub(super) fn make_fired_notif_with_subagent(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_fired", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/scheduled_task_fired", std::sync::Arc::from(raw))
 }
 /// Set up an app with two agents; the active view points to agent 1, but agent 0 owns the scheduled task.
 /// Handlers that gate on `active_view` will mutate the wrong agent (or silently no-op).
@@ -631,7 +631,7 @@ pub(super) fn announcements_update_notif(
     announcements: &[fuigo_announcements::RemoteAnnouncement],
 ) -> acp::ExtNotification {
     acp::ExtNotification::new(
-        "x.ai/announcements/update",
+        "fuigo/announcements/update",
         std::sync::Arc::from(
             serde_json::value::to_raw_value(
                     &serde_json::json!({ "gen": r#gen, "announcements": announcements }),
@@ -666,7 +666,7 @@ pub(super) fn make_created_ext_notif(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_created", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/scheduled_task_created", std::sync::Arc::from(raw))
 }
 pub(super) fn make_deleted_ext_notif(
     session_id: &str,
@@ -694,7 +694,7 @@ pub(super) fn make_deleted_ext_notif_with_reason(
         meta: is_replay.then(crate::acp::meta::ReplayMetaStamp::replayed),
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_deleted", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/scheduled_task_deleted", std::sync::Arc::from(raw))
 }
 pub(super) fn make_token_notification_message(
     session_id: &str,
@@ -845,7 +845,7 @@ pub(super) fn fuigo_model_switch_notif(
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
@@ -859,7 +859,7 @@ pub(super) fn fuigo_unhandled_notif(
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
@@ -891,7 +891,7 @@ pub(super) fn make_token_notification_with_event(
         response_tx: tx,
     })
 }
-/// Build an `x.ai/session/prompt_complete` ext-notification for `session_id`.
+/// Build an `fuigo/session/prompt_complete` ext-notification for `session_id`.
 pub(super) fn prompt_complete_ext(session_id: &str) -> acp::ExtNotification {
     let raw = serde_json::value::to_raw_value(
             &serde_json::json!({
@@ -900,13 +900,13 @@ pub(super) fn prompt_complete_ext(session_id: &str) -> acp::ExtNotification {
         }),
         )
         .unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session/prompt_complete", std::sync::Arc::from(raw))
 }
 /// Insert a fresh agent at `id` with an optional pre-assigned session id.
 pub(super) fn insert_agent(app: &mut AppView, id: AgentId, session_id: Option<&str>) {
     app.agents.insert(id, make_agent(session_id));
 }
-/// Build an `x.ai/session/prompt_complete` ext-notification with an explicit `stopReason` and optional `agentResult`.
+/// Build an `fuigo/session/prompt_complete` ext-notification with an explicit `stopReason` and optional `agentResult`.
 pub(super) fn prompt_complete_ext_with_reason(
     session_id: &str,
     stop_reason: &str,
@@ -920,9 +920,9 @@ pub(super) fn prompt_complete_ext_with_reason(
         payload["agentResult"] = serde_json::json!(r);
     }
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session/prompt_complete", std::sync::Arc::from(raw))
 }
-/// Failed `x.ai/session/prompt_complete` carrying the typed `errorKind`.
+/// Failed `fuigo/session/prompt_complete` carrying the typed `errorKind`.
 /// Built through the typed [`PromptCompletePayload`] so the test wire shape can never drift from what `handle_prompt_complete` parses.
 /// Callers pass an `agent_result` with no canonical truncation text.
 /// A rail test therefore fails if its typed-kind read is deleted; the text fallback cannot mask it.
@@ -945,9 +945,9 @@ pub(super) fn prompt_complete_ext_failed_with_error_kind(
             },
         )
         .unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session/prompt_complete", std::sync::Arc::from(raw))
 }
-/// Build an `x.ai/session/prompt_complete` ext-notification carrying a `promptId` (shells with the lost-response fix).
+/// Build an `fuigo/session/prompt_complete` ext-notification carrying a `promptId` (shells with the lost-response fix).
 /// Built through the typed [`PromptCompletePayload`] so the test wire shape can never drift from what `handle_prompt_complete` parses.
 pub(super) fn prompt_complete_ext_with_prompt_id(
     session_id: &str,
@@ -968,7 +968,7 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
             },
         )
         .unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session/prompt_complete", std::sync::Arc::from(raw))
 }
 /// Build a live `AgentMessageChunk` whose meta carries `promptId` plus a `turnStartMs` `start_ms_ago` milliseconds in the past.
 /// Drives the viewer adoption path with a known authoritative turn start.
@@ -1099,7 +1099,7 @@ pub(super) fn send_replay_bash_tool_call(
         app,
     );
 }
-/// Build a durable `TurnCompleted` update on the `x.ai/session/update` rail, optionally stamped `isReplay`.
+/// Build a durable `TurnCompleted` update on the `fuigo/session/update` rail, optionally stamped `isReplay`.
 /// Built through the typed `SessionNotification` so the wire shape can't drift from what the dispatch parses.
 pub(super) fn fuigo_turn_completed_notif(
     session_id: &str,
@@ -1120,7 +1120,7 @@ pub(super) fn fuigo_turn_completed_notif(
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
@@ -1152,7 +1152,7 @@ pub(super) fn fuigo_turn_completed_replay(
         meta: Some(meta),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
@@ -1179,7 +1179,7 @@ pub(super) fn fuigo_turn_completed_failed_with_error_kind(
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
@@ -1208,7 +1208,7 @@ pub(super) fn fuigo_turn_completed_notif_with_cancel_trigger(
         ),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
@@ -1235,11 +1235,11 @@ pub(super) fn fuigo_wake_turn_completed_notif(
         meta: Some(meta),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
-/// Build a `HookExecution` update (one successful run) on the `x.ai/session/update` rail, optionally stamped `isReplay`.
+/// Build a `HookExecution` update (one successful run) on the `fuigo/session/update` rail, optionally stamped `isReplay`.
 /// `prompt_id == None` models pre-attribution shells.
 pub(super) fn fuigo_hook_execution_notif_for_prompt(
     session_id: &str,
@@ -1278,7 +1278,7 @@ pub(super) fn fuigo_hook_execution_notif_with_runs(
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
     acp::ExtNotification::new(
-        "x.ai/session/update",
+        "fuigo/session/update",
         serde_json::value::to_raw_value(&payload).unwrap().into(),
     )
 }
@@ -1338,11 +1338,11 @@ pub(super) fn seed_two_bg_tasks(app: &mut AppView, session_id: &str) {
         app,
     );
 }
-/// Build an `x.ai/session/interjection` ext-notification (no id).
+/// Build an `fuigo/session/interjection` ext-notification (no id).
 pub(super) fn interjection_ext(session_id: &str, text: &str) -> acp::ExtNotification {
     interjection_ext_with_id(session_id, text, None)
 }
-/// Build an `x.ai/session/interjection` ext-notification with an optional `interjectionId` (the originator-dedup key).
+/// Build an `fuigo/session/interjection` ext-notification with an optional `interjectionId` (the originator-dedup key).
 pub(super) fn interjection_ext_with_id(
     session_id: &str,
     text: &str,
@@ -1353,7 +1353,7 @@ pub(super) fn interjection_ext_with_id(
         payload["interjectionId"] = serde_json::json!(id);
     }
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session/interjection", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session/interjection", std::sync::Arc::from(raw))
 }
 /// Text of the most recent user prompt block in scrollback, if any.
 /// Interjections render as standard user prompt blocks.
@@ -1457,14 +1457,14 @@ pub(super) fn make_bash_stdout_message(
         response_tx: tx,
     })
 }
-/// Build an `ExtNotification` envelope for `x.ai/session_notification`.
+/// Build an `ExtNotification` envelope for `fuigo/session_notification`.
 pub(super) fn make_ext_session_notification(
     session_id: &str,
     update: FuigoSessionUpdate,
 ) -> AcpClientMessage {
     make_ext_session_notification_with_method(
         session_id,
-        "x.ai/session_notification",
+        "fuigo/session_notification",
         update,
     )
 }
@@ -1784,7 +1784,7 @@ pub(super) fn spawn_subagent_with_optional_updates(
     let _ = handle(
         make_ext_session_notification_with_method(
             "sess-parent",
-            "x.ai/session/update",
+            "fuigo/session/update",
             test_subagent_spawned("sess-parent", child_sid),
         ),
         app,
@@ -1822,7 +1822,7 @@ pub(super) fn dispatch_goal_update(
     let (tx, _rx) = tokio::sync::oneshot::channel();
     handle(
         AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
-            request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+            request: acp::ExtNotification::new("fuigo/session_notification", raw.into()),
             response_tx: tx,
         }),
         app,
@@ -1864,7 +1864,7 @@ pub(super) fn make_permission_message(
     });
     (msg, rx)
 }
-/// Build an `x.ai/session_notification` carrying `InteractionResolved{tool_call_id}`.
+/// Build an `fuigo/session_notification` carrying `InteractionResolved{tool_call_id}`.
 /// This is the first-answer-wins broadcast that tells every other pane to retract its shared interaction modal.
 pub(super) fn interaction_resolved_ext(
     session_id: &str,
@@ -1878,7 +1878,7 @@ pub(super) fn interaction_resolved_ext(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session_notification", std::sync::Arc::from(raw))
 }
 pub(super) fn make_git_head_changed_notif(
     session_id: &str,
@@ -1893,7 +1893,7 @@ pub(super) fn make_git_head_changed_notif(
         main_repo: main_repo.map(str::to_string),
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/git_head_changed", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/git_head_changed", std::sync::Arc::from(raw))
 }
 pub(super) fn make_task_backgrounded_notif(
     session_id: &str,
@@ -1915,7 +1915,7 @@ pub(super) fn make_task_backgrounded_notif(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/task_backgrounded", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/task_backgrounded", std::sync::Arc::from(raw))
 }
 /// Like [`make_task_backgrounded_notif`] but stamped `_meta.isReplay: true` via the typed [`ReplayMetaStamp`](crate::acp::meta::ReplayMetaStamp).
 /// Mirrors the `session/load` replay envelope.
@@ -1939,7 +1939,7 @@ pub(super) fn make_replayed_task_backgrounded_notif(
         meta: Some(crate::acp::meta::ReplayMetaStamp::replayed()),
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/session/update", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session/update", std::sync::Arc::from(raw))
 }
 /// Register a pending Execute tool call in the tracker and send an InProgress update to create the scrollback entry.
 /// Returns the agent for further use.
@@ -2073,7 +2073,7 @@ pub(super) fn task_completed_notif(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/task_completed", std::sync::Arc::from(raw))
 }
 pub(super) fn make_monitor_event_notif(
     session_id: &str,
@@ -2090,7 +2090,7 @@ pub(super) fn make_monitor_event_notif(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/monitor_event", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/monitor_event", std::sync::Arc::from(raw))
 }
 pub(super) fn make_model_info(id: &str) -> acp::ModelInfo {
     acp::ModelInfo::new(acp::ModelId::new(std::sync::Arc::from(id)), id.to_string())
@@ -2108,9 +2108,9 @@ pub(super) fn make_models_update_notif(
         models,
     );
     let raw = serde_json::value::to_raw_value(&state).unwrap();
-    acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/models/update", std::sync::Arc::from(raw))
 }
-/// `x.ai/models/update` carrying a single reasoning-capable model whose catalog-default effort is `default_effort`.
+/// `fuigo/models/update` carrying a single reasoning-capable model whose catalog-default effort is `default_effort`.
 /// The broadcast reports that catalog default for every client, never the per-session selection.
 pub(super) fn make_reasoning_models_update_notif(
     current_model_id: &str,
@@ -2128,7 +2128,7 @@ pub(super) fn make_reasoning_models_update_notif(
         vec![info],
     );
     let raw = serde_json::value::to_raw_value(&state).unwrap();
-    acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/models/update", std::sync::Arc::from(raw))
 }
 /// Seed a session's model catalog with the given ids and mark `current_model_id` as the active one (must be in the list).
 /// Used by the `ModelChanged` broadcast tests to set up a starting state that the simulated remote/local switch then transitions away from.
@@ -2155,7 +2155,7 @@ pub(super) fn model_changed_ext(
         meta: None,
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session_notification", std::sync::Arc::from(raw))
 }
 pub(super) fn model_changed_ext_with_event(
     session_id: &str,
@@ -2171,7 +2171,7 @@ pub(super) fn model_changed_ext_with_event(
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/session_notification", std::sync::Arc::from(raw))
 }
 pub(super) fn make_tool_call_update(title: &str) -> acp::SessionUpdate {
     acp::SessionUpdate::ToolCallUpdate(
@@ -2197,7 +2197,7 @@ pub(super) fn make_current_mode_update(mode_id: &str) -> acp::SessionUpdate {
         acp::CurrentModeUpdate::new(acp::SessionModeId::new(mode_id)),
     )
 }
-/// Helper: build an `x.ai/mcp/init_progress` notification.
+/// Helper: build an `fuigo/mcp/init_progress` notification.
 pub(super) fn make_mcp_init_progress_notif(
     total: u32,
     connected: u32,
@@ -2209,7 +2209,7 @@ pub(super) fn make_mcp_init_progress_notif(
         }),
         )
         .unwrap();
-    acp::ExtNotification::new("x.ai/mcp/init_progress", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp/init_progress", std::sync::Arc::from(raw))
 }
 pub(super) fn make_mcps_modal_with_servers(
     servers: Vec<crate::views::mcps_modal::McpServerInfo>,
@@ -2266,14 +2266,14 @@ pub(super) fn make_server_status_notif(
         tools,
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/server_status", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp/server_status", std::sync::Arc::from(raw))
 }
 /// `mcp/servers_updated` real wire shape: `{ mcpServers: [...] }` with NO `sessionId`.
 /// Regression guard: anything that tries to extract a session id here must fail and fall through to the broadcast path.
 pub(super) fn make_servers_updated_notif() -> acp::ExtNotification {
     let payload = serde_json::json!({ "mcpServers": [] });
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/servers_updated", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp/servers_updated", std::sync::Arc::from(raw))
 }
 /// Real post-handshake / auth-recovery wire shape: `McpToolsChanged { sessionId, serverName, tools }`.
 pub(super) fn make_tools_changed_notif_post_h2(
@@ -2285,14 +2285,14 @@ pub(super) fn make_tools_changed_notif_post_h2(
         tools: Vec::new(),
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/tools_changed", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp/tools_changed", std::sync::Arc::from(raw))
 }
 /// Legacy / forward-compat wire shape: older shells emit `{ serverName, tools }` with NO sessionId.
 /// The pager must fall back to active_view for this shape.
 pub(super) fn make_tools_changed_notif_pre_h2() -> acp::ExtNotification {
     let payload = serde_json::json!({ "serverName": "fuigo_com_linear", "tools": [] });
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/tools_changed", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp/tools_changed", std::sync::Arc::from(raw))
 }
 /// Real `mcp_initialized` wire shape: `{ sessionId, mcpToolCount, elapsedMs }`.
 pub(super) fn make_mcp_initialized_notif(session_id: &str) -> acp::ExtNotification {
@@ -2302,7 +2302,7 @@ pub(super) fn make_mcp_initialized_notif(session_id: &str) -> acp::ExtNotificati
             "elapsedMs": 250_u64,
         });
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp_initialized", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp_initialized", std::sync::Arc::from(raw))
 }
 /// Helper: `init_progress` notification carrying an explicit sessionId.
 pub(super) fn make_mcp_init_progress_notif_for(
@@ -2318,7 +2318,7 @@ pub(super) fn make_mcp_init_progress_notif_for(
         }),
         )
         .unwrap();
-    acp::ExtNotification::new("x.ai/mcp/init_progress", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp/init_progress", std::sync::Arc::from(raw))
 }
 /// Helper: `mcp_initialized` notification for a specific sessionId.
 pub(super) fn make_mcp_initialized_notif_for(session_id: &str) -> acp::ExtNotification {
@@ -2330,7 +2330,7 @@ pub(super) fn make_mcp_initialized_notif_for(session_id: &str) -> acp::ExtNotifi
         }),
         )
         .unwrap();
-    acp::ExtNotification::new("x.ai/mcp_initialized", std::sync::Arc::from(raw))
+    acp::ExtNotification::new("fuigo/mcp_initialized", std::sync::Arc::from(raw))
 }
 mod permissions;
 mod session_events;

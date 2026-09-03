@@ -6,12 +6,6 @@ use crate::auth::{AuthManager, FuigoComConfig, OidcAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellToolsetConfig};
 use agent_client_protocol as acp;
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::num::NonZeroU64;
-use std::path::PathBuf;
-use std::sync::Arc;
 use fuigo_agent::prompt::skills::SkillsConfig;
 use fuigo_sampler::{AuthScheme, SamplerConfig};
 use fuigo_sampling_types::{
@@ -22,6 +16,12 @@ use fuigo_sampling_types::{
 use fuigo_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
 };
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+use std::path::PathBuf;
+use std::sync::Arc;
 /// Determines behavior like relay sync enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentMode {
@@ -926,9 +926,7 @@ impl PluginsConfig {
             }
         }
     }
-    pub(crate) fn to_discovery_config(
-        &self,
-    ) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
+    pub(crate) fn to_discovery_config(&self) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
         fuigo_agent::plugins::discovery::DiscoveryConfig {
             cli_plugin_dirs: self.cli_plugin_dirs.clone(),
             config_paths: self.paths.iter().map(std::path::PathBuf::from).collect(),
@@ -1752,8 +1750,7 @@ impl Default for Config {
             subagents_limit_behavior: Default::default(),
             workflow_max_concurrent_agents:
                 crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
-            media_gen_batch_limits: fuigo_tools::media_gen_limits::MediaGenBatchLimits::default(
-            ),
+            media_gen_batch_limits: fuigo_tools::media_gen_limits::MediaGenBatchLimits::default(),
             subagent_model_overrides: std::collections::HashMap::new(),
             subagent_toggle: std::collections::HashMap::new(),
             subagent_roles: std::collections::HashMap::new(),
@@ -2118,7 +2115,87 @@ impl Config {
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
+        config.install_trusted_api_origins();
         Ok(config)
+    }
+
+    /// Install a first-party trust set for tests.
+    ///
+    /// These tests exercise *routing* — does a session bearer follow a
+    /// first-party endpoint and not a third-party one — rather than *policy*,
+    /// which is "no vendor is first-party unless configured". They therefore
+    /// need an installation that has configured origins.
+    ///
+    /// Both are installed because the suite uses `api.x.ai` as its
+    /// first-party fixture and FluxRouter is the shipped default; an
+    /// installation configured for Grok is a legitimate opt-in.
+    ///
+    /// The policy itself is asserted where it cannot be undermined by a test
+    /// that installs origins: `fuigo-shell-base/tests/trust_fails_closed.rs`,
+    /// which runs in its own process and installs nothing.
+    ///
+    /// Ordering-independent because every caller installs the SAME set, not
+    /// because there is only one caller -- there are many, across several test
+    /// files, plus `install_trusted_api_origins` itself under `cfg(test)`. The
+    /// store is a process-wide `OnceLock` where the first write wins, so a call
+    /// site passing a DIFFERENT set would silently make results depend on the
+    /// test schedule. If a test needs different origins it needs its own
+    /// process (see `fuigo-shell-base/tests/trust_fails_closed.rs`).
+    #[cfg(test)]
+    pub(crate) fn install_test_trusted_origins() {
+        crate::util::set_trusted_api_origins([
+            "https://api.fluxrouter.ai/v1".to_string(),
+            "https://api.x.ai/v1".to_string(),
+        ]);
+    }
+
+    /// Publish the configured first-party API origins to `fuigo-shell-base`,
+    /// which decides where a session bearer may be attached.
+    ///
+    /// This must happen after `apply_env_overrides`, so `FUIGO_API_BASE_URL`
+    /// and friends are reflected. The underlying store is a `OnceLock`: the
+    /// first config to load wins, and a later one cannot widen the trust set.
+    ///
+    /// Until this runs, nothing is first-party and every credential check
+    /// fails closed. That is the safe direction — see
+    /// `fuigo-shell-base/tests/trust_fails_closed.rs`.
+    ///
+    /// These are the endpoints the user pointed Fuigo at, so `x.ai` becomes
+    /// first-party if and only if they configured it. Previously `*.x.ai` was
+    /// trusted by compilation and the configured endpoint was not.
+    fn install_trusted_api_origins(&self) {
+        // In a test binary the store is one process-wide `OnceLock` shared by
+        // every test, and the FIRST writer wins. Whichever test happened to
+        // load a `Config` first would otherwise decide the trust set for the
+        // whole run, so `cargo test agent::config` and a full `cargo test`
+        // disagree about which hosts are first-party. That is not hypothetical:
+        // eight tests in this file passed in a full run and failed under a
+        // filter, and the full run is what hid it.
+        //
+        // Test builds therefore always install the suite's fixture origins, so
+        // the trust set does not depend on the schedule.
+        #[cfg(test)]
+        Self::install_test_trusted_origins();
+        #[cfg(not(test))]
+        crate::util::set_trusted_api_origins(self.trusted_origins_from_endpoints());
+    }
+
+    /// The origins [`Self::install_trusted_api_origins`] would publish.
+    ///
+    /// Split out because the install itself is test-pinned (above) and would
+    /// otherwise leave this mapping -- the thing that decides which hosts are
+    /// first-party for a real user -- with no coverage at all. This is a pure
+    /// function of the config, so it can be asserted directly without touching
+    /// the process-wide store.
+    pub(crate) fn trusted_origins_from_endpoints(&self) -> Vec<String> {
+        let mut origins = vec![self.endpoints.fuigo_api_base_url.clone()];
+        if let Some(url) = &self.endpoints.models_base_url {
+            origins.push(url.clone());
+        }
+        if let Some(url) = &self.endpoints.cli_chat_proxy_base_url {
+            origins.push(url.clone());
+        }
+        origins
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
     ///
@@ -3023,7 +3100,7 @@ pub(crate) fn resolve_turn_transient_retry(
 ///
 /// `util::config::resolve_mcp_push_server_status` delegates here so the precedence is single-sourced.
 ///
-/// The default is `true`: the pager's subscription to `x.ai/mcp/server_status` is wired on by default.
+/// The default is `true`: the pager's subscription to `fuigo/mcp/server_status` is wired on by default.
 /// The flag exists primarily as a kill switch.
 pub fn resolve_mcp_push_server_status(
     requirement: Option<bool>,
@@ -3913,6 +3990,12 @@ pub struct ConfigModelOverride {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    /// How this model's credential is presented (`bearer` / `x_api_key`).
+    ///
+    /// Inherited from `[model_providers.<id>].auth_scheme` when unset here.
+    /// Before this existed the field was reachable only from the remote model
+    /// catalogue, so no user config could select `x-api-key`.
+    pub auth_scheme: Option<AuthScheme>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     #[serde(default)]
@@ -3981,6 +4064,9 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.api_backend {
             entry.info.api_backend = v.clone();
+        }
+        if let Some(v) = self.auth_scheme {
+            entry.info.auth_scheme = v;
         }
         if !self.extra_headers.is_empty() {
             entry.info.extra_headers = self.extra_headers.clone();
@@ -4564,7 +4650,7 @@ pub struct Features {
     /// Per-`Ready`-client transport-liveness pollers and the session-actor `StatusDispatcher`.
     ///
     /// When `true` (default), each successfully-handshaken MCP client gets a poller.
-    /// The poller detects rmcp service-loop termination and pushes `x.ai/mcp/server_status` updates to the client.
+    /// The poller detects rmcp service-loop termination and pushes `fuigo/mcp/server_status` updates to the client.
     /// When `false`, neither watchers nor the dispatcher are spawned, useful as an emergency kill switch for the rollout.
     /// `None` defers to env / default (true).
     ///
@@ -4587,11 +4673,11 @@ pub struct Features {
     /// The resolver reads raw TOML; declared only so `serde_ignored` allows the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_transient_retry: Option<bool>,
-    /// Pager-side subscription to the `x.ai/mcp/server_status` push.
+    /// Pager-side subscription to the `fuigo/mcp/server_status` push.
     ///
     /// When `true` (default), the pager subscribes to the per-server status delta the shell emits via the dispatcher.
     /// It patches the MCP servers modal in-place (no re-fetch round trip).
-    /// When `false`, the pager ignores the push and falls back to the legacy `x.ai/mcp/tools_changed` debounced refetch path.
+    /// When `false`, the pager ignores the push and falls back to the legacy `fuigo/mcp/tools_changed` debounced refetch path.
     /// `None` defers to env / default (true).
     ///
     /// Not read through this struct.
@@ -4705,6 +4791,73 @@ pub(crate) fn first_own_credential(
         .map(str::to_owned)
         .or_else(|| env_key.and_then(EnvKeys::resolve_value))
 }
+/// Whether the session bearer may be attached to `url`, saying so when not.
+///
+/// The refusal itself is `AuthBackend::may_receive_session`. This wrapper
+/// exists for the log line: without it a model on a host that is not a
+/// configured origin silently resolves with no credential, the request 401s,
+/// and the user is told to re-run `fuigo login` — which cannot fix it. The
+/// setups this affects (an `http://` or loopback gateway, or an inference host
+/// that differs from every `[endpoints]` value) are legitimate and need to be
+/// diagnosable.
+fn session_may_be_sent_to(model: &str, url: &str) -> bool {
+    if crate::auth::backend::AuthBackend::may_receive_session(
+        &crate::auth::backend::ActiveAuthBackend::default(),
+        url,
+    ) {
+        return true;
+    }
+    tracing::warn!(
+        model = %model,
+        base_url = %url,
+        "the session credential was not attached: this model's endpoint is not a \
+         configured first-party HTTPS origin. Set `[endpoints].fuigo_api_base_url` \
+         to it, or give the model its own `api_key`/`env_key`."
+    );
+    false
+}
+
+/// Whether `FUIGO_API_KEY` may be attached to `url`.
+///
+/// `FUIGO_API_KEY` is the credential for the endpoint the user configured, and
+/// nothing else. Scoping the *session* token without scoping this one leaves
+/// the same hole open with a different key: a prefetched catalogue model
+/// carries its own `base_url`, never passes through the `[model.*]` fail-closed
+/// guard in `resolve_model_list` (a prefetched map replaces `resolved`
+/// wholesale), and would otherwise receive the user's first-party API key at
+/// whatever host the catalogue named.
+///
+/// This uses [`crate::util::is_configured_api_origin`], not the strict
+/// `is_fuigo_api_bearer_url` that guards the session token, and not the broader
+/// `is_fuigo_api_url`. The two credentials differ in what the user chose: a
+/// session token is minted by a login the user never typed a destination for,
+/// while `FUIGO_API_KEY` is exported by hand alongside
+/// `[endpoints].fuigo_api_base_url`. Someone running a gateway on
+/// `http://localhost:8080/v1` configured both, and refusing their own key at
+/// their own endpoint would break them for no gain -- the threat is a
+/// destination they did NOT choose.
+///
+/// `is_fuigo_api_url` is specifically wrong here because it grants every
+/// loopback URL unconditionally, so a catalogue naming `http://localhost:9999`
+/// would harvest the key from any local listener.
+///
+/// A model with a genuinely third-party `base_url` should carry its own
+/// credential (`[model.<key>].env_key`, or a `[model_providers.<id>]` entry),
+/// which is resolved earlier and is unaffected by this.
+fn env_api_key_may_be_sent_to(model: &str, url: &str) -> bool {
+    if crate::util::is_configured_api_origin(url) {
+        return true;
+    }
+    tracing::warn!(
+        model = %model,
+        base_url = %url,
+        "FUIGO_API_KEY was not attached: this model's endpoint is not a configured \
+         first-party origin. Give the model its own `env_key`, or add the host to \
+         `[endpoints]`, if it should be reachable."
+    );
+    false
+}
+
 /// Priority: model api_key/env_key > cached auth-provider token > session token > FUIGO_API_KEY.
 pub(crate) fn resolve_credentials(
     model: &ModelEntry,
@@ -4725,21 +4878,20 @@ pub(crate) fn resolve_credentials(
             fuigo_chat_state::AuthType::ApiKey,
         )
     } else if let Some(key) = session_key
-        && crate::auth::backend::AuthBackend::may_receive_session(
-            &crate::auth::backend::ActiveAuthBackend::default(),
-            &info.base_url,
-        )
+        && session_may_be_sent_to(&info.model, &info.base_url)
     {
         (
             Some(key.to_owned()),
             info.base_url.clone(),
             fuigo_chat_state::AuthType::SessionToken,
         )
-    } else if let Ok(key) = crate::agent::auth_method::read_fuigo_api_key_env() {
-        let url = model
+    } else if let Ok(key) = crate::agent::auth_method::read_fuigo_api_key_env()
+        && let url = model
             .api_base_url
             .clone()
-            .unwrap_or_else(|| info.base_url.clone());
+            .unwrap_or_else(|| info.base_url.clone())
+        && env_api_key_may_be_sent_to(&info.model, &url)
+    {
         (Some(key), url, fuigo_chat_state::AuthType::ApiKey)
     } else {
         if let Some(ref env_keys) = model.env_key

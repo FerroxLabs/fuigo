@@ -402,7 +402,10 @@ mod tests {
         cmd.env("LC_FUIGO_APPEARANCE", "light");
         apply_wrap_child_env(&mut cmd, Some(SystemAppearance::Dark));
         assert_eq!(env_str(&cmd, "FUIGO_APPEARANCE").as_deref(), Some("dark"));
-        assert_eq!(env_str(&cmd, "LC_FUIGO_APPEARANCE").as_deref(), Some("dark"));
+        assert_eq!(
+            env_str(&cmd, "LC_FUIGO_APPEARANCE").as_deref(),
+            Some("dark")
+        );
         assert_eq!(env_str(&cmd, "FUIGO_OSC52_SINK").as_deref(), Some("1"));
         assert_eq!(env_str(&cmd, "LC_FUIGO_OSC52_SINK").as_deref(), Some("1"));
     }

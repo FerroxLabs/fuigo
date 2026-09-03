@@ -1,9 +1,7 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 #[allow(unused_imports)]
 use crate::common::*;
-use fuigo_pager_pty_harness::{
-    InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher,
-};
+use fuigo_pager_pty_harness::{InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher};
 
 /// Must never appear in the answer text, so the assertions can tell them apart.
 const REASONING_SENTINEL: &str = "REASONINGSENTINEL";

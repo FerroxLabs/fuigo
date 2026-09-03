@@ -4,13 +4,13 @@
 //! It also carries recently-touched on-disk (`Dormant`) sessions.
 //! Clients read it two ways:
 //!
-//!   - request/response `x.ai/sessions/list` returns `{ "sessions": [RosterEntry, …] }`
-//!   - broadcast notification `x.ai/sessions/changed` carries `{ "upserted": [RosterEntry, …], "removed": ["sess-abc", …] }`
+//!   - request/response `fuigo/sessions/list` returns `{ "sessions": [RosterEntry, …] }`
+//!   - broadcast notification `fuigo/sessions/changed` carries `{ "upserted": [RosterEntry, …], "removed": ["sess-abc", …] }`
 //!
 //! The wire shape is intentionally small and current-state only; no event fold or materialized snapshot is required (the snapshot is deferred).
 
-use serde::{Deserialize, Serialize};
 use fuigo_sampling_types::ReasoningEffort;
+use serde::{Deserialize, Serialize};
 
 use crate::session::persistence::Summary;
 
@@ -75,13 +75,13 @@ pub struct RosterEntry {
     pub origin: RosterOrigin,
 }
 
-/// Response payload for `x.ai/sessions/list`.
+/// Response payload for `fuigo/sessions/list`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RosterListResponse {
     pub sessions: Vec<RosterEntry>,
 }
 
-/// Params payload for the `x.ai/sessions/changed` broadcast notification.
+/// Params payload for the `fuigo/sessions/changed` broadcast notification.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RosterChanged {
     #[serde(default)]
@@ -91,8 +91,8 @@ pub struct RosterChanged {
 }
 
 /// JSON-RPC method names for the roster API.
-pub const SESSIONS_LIST_METHOD: &str = "x.ai/sessions/list";
-pub const SESSIONS_CHANGED_METHOD: &str = "x.ai/sessions/changed";
+pub const SESSIONS_LIST_METHOD: &str = "fuigo/sessions/list";
+pub const SESSIONS_CHANGED_METHOD: &str = "fuigo/sessions/changed";
 
 /// Merge live `resident` rows with on-disk `summaries` into the sorted roster.
 /// Pure, so it is unit-testable without disk or a live actor.

@@ -1,7 +1,7 @@
 //! Finalizing a turn from a terminal turn signal.
 //!
 //! The pager learns a turn reached its terminal outcome from two rails.
-//! One is the fire-and-forget `x.ai/session/prompt_complete` broadcast, kept for one release so leaders that have not yet upgraded still work.
+//! One is the fire-and-forget `fuigo/session/prompt_complete` broadcast, kept for one release so leaders that have not yet upgraded still work.
 //! The other is the durable `FuigoSessionUpdate::TurnCompleted`, which is persisted and replayed.
 //! Both converge on [`finalize_turn_from_terminal`] so the turn-finalize behavior lives in one place.
 //! A viewer that re-attaches mid-turn can then finalize the turn from replay instead of staying stuck on "Waiting…".
@@ -15,8 +15,7 @@ use super::app_view::AppView;
 use super::cancel_latency::TurnEnd;
 
 /// `_meta.cancellationCategory` of a hook-denied turn end: renders the "blocked by a hook" marker instead of "cancelled by user" on every rail.
-pub(crate) const HOOK_DENIED_CATEGORY: &str =
-    fuigo_shell::session::commands::HOOK_DENIED_CATEGORY;
+pub(crate) const HOOK_DENIED_CATEGORY: &str = fuigo_shell::session::commands::HOOK_DENIED_CATEGORY;
 
 /// `_meta` key of a cancelled terminal's trigger (`"send_now"`, `"ctrl_c"`, …).
 pub(crate) const CANCEL_TRIGGER_KEY: &str = "cancelTrigger";
@@ -225,9 +224,7 @@ fn open_prompt_blocked_card(
     prompt_text: String,
 ) {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
 
     if agent.question_view.is_some()
         || matches!(

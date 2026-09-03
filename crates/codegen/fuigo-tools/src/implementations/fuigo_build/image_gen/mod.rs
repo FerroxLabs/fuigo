@@ -42,11 +42,16 @@ pub use fuigo_tools_api::slash_commands::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, imagine_instruction, imagine_usage_message,
 };
 
-/// Prose returned to the model (as a normal, successful tool result) when a
-/// free / X Basic user calls `image_gen` or `image_edit`. The model relays it
-/// to the user. The deliberate `/imagine` slash command shows the richer
-/// SuperGrok upsell modal instead; this covers the natural-language path.
-pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is a SuperGrok feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to SuperGrok: https://grok.com/supergrok?referrer=grok-build. Do not retry this tool.";
+/// Prose returned to the model (as a normal, successful tool result) when the
+/// configured provider refuses `image_gen` / `image_edit` for the current
+/// credential. The model relays it to the user.
+///
+/// This used to instruct the model to upsell the user to SuperGrok, complete
+/// with a `?referrer=grok-build` tag -- marketing a competitor's subscription
+/// from inside Fuigo, to users who reached it through FluxRouter or their own
+/// key. Fuigo has no subscription tiers, so the tier framing was also simply
+/// untrue here. It now states the fact and stops.
+pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is not available with the current API key or provider. Let the user know their key's provider does not grant access to image generation. Do not retry this tool.";
 
 /// HTTP client for Ferrox Labs Imagine API. Cloned per-request; shares `Arc` state.
 #[derive(Clone)]

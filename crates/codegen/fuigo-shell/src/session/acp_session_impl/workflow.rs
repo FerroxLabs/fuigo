@@ -205,7 +205,9 @@ impl SessionActor {
                              and cannot be resumed. Start a new run instead."
                         );
                     }
-                    let suggested = used.saturating_add(64).min(fuigo_workflow::MAX_AGENT_BUDGET);
+                    let suggested = used
+                        .saturating_add(64)
+                        .min(fuigo_workflow::MAX_AGENT_BUDGET);
                     return format!(
                         "Run '{name}' exhausted its agent budget ({used}{limit} agents). \
                          Resuming keeps all finished work but needs a higher absolute cap — \

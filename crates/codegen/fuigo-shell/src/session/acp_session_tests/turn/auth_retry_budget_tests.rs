@@ -6,10 +6,10 @@
 use super::support::*;
 use super::*;
 use crate::auth::{AuthManager, AuthMode, FuigoAuth, FuigoComConfig};
+use fuigo_test_support::{MockInferenceServer, MockModelEntry};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use fuigo_test_support::{MockInferenceServer, MockModelEntry};
 
 /// The token the mock server accepts and the refresher mints on success.
 const FRESH_TOKEN: &str = "refreshed-test-token";
@@ -62,7 +62,7 @@ fn expired_auth_manager(
     (dir, am)
 }
 
-/// `x.ai/session_notification` payloads the client was sent.
+/// `fuigo/session_notification` payloads the client was sent.
 type FuigoUpdates = Arc<parking_lot::Mutex<Vec<serde_json::Value>>>;
 
 fn drain_gateway(

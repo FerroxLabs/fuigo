@@ -1,9 +1,9 @@
-use tokio::sync::mpsc;
+use fuigo_message_delivery_core::DeliveryEnvelope;
 use fuigo_tools::implementations::fuigo_build::task::coordinator::{
     ActiveMessageAdmission, ChildControl, LocalBoxFuture, SendBoxFuture, SubagentProgress,
 };
 use fuigo_tools::implementations::fuigo_build::task::types::ActiveAgentMessageDelivery;
-use fuigo_message_delivery_core::DeliveryEnvelope;
+use tokio::sync::mpsc;
 
 use super::prompt_turn_receipt::{PromptTurnReceipt, cancel_shell_child_turn};
 use crate::session::{SessionCommand, SessionThread};

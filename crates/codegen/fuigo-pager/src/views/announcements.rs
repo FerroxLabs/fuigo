@@ -151,10 +151,7 @@ pub fn is_dismissible(a: &fuigo_announcements::RemoteAnnouncement) -> bool {
 /// The hidden-ids filter the selection gates share.
 /// It applies only to dismissible items: an explicit `dismissible: false` stays selectable even with its hide key stored.
 /// Flipping the flag server-side thus resurrects a previously-hidden banner (the remote config stays source of truth).
-fn is_hidden(
-    a: &fuigo_announcements::RemoteAnnouncement,
-    hidden_ids: &BTreeSet<String>,
-) -> bool {
+fn is_hidden(a: &fuigo_announcements::RemoteAnnouncement, hidden_ids: &BTreeSet<String>) -> bool {
     is_dismissible(a) && hidden_ids.contains(&fuigo_announcements::announcement_hide_key(a))
 }
 

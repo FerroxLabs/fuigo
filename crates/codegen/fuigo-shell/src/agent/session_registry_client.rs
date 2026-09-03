@@ -171,14 +171,13 @@ impl SessionRegistryClient {
 
     /// Attach an `AuthManager` so request signing and 401 recovery go through the shared auth path.
     pub fn with_auth(mut self, auth_manager: std::sync::Arc<crate::auth::AuthManager>) -> Self {
-        let provider: std::sync::Arc<dyn fuigo_auth::AuthCredentialProvider> =
-            std::sync::Arc::new(
-                crate::auth::credential_provider::ShellAuthCredentialProvider::new(
-                    auth_manager.clone(),
-                    self.credentials.deployment_key.clone(),
-                    self.credentials.alpha_test_key.clone(),
-                ),
-            );
+        let provider: std::sync::Arc<dyn fuigo_auth::AuthCredentialProvider> = std::sync::Arc::new(
+            crate::auth::credential_provider::ShellAuthCredentialProvider::new(
+                auth_manager.clone(),
+                self.credentials.deployment_key.clone(),
+                self.credentials.alpha_test_key.clone(),
+            ),
+        );
         self.credentials = self.credentials.with_auth_manager(auth_manager);
         self.client = crate::http::with_auth_retry(self.raw_client.clone(), provider);
         self
@@ -190,10 +189,7 @@ impl SessionRegistryClient {
         &self,
         builder: RequestBuilder,
         op: &'static str,
-    ) -> Result<(
-        reqwest::Response,
-        Option<fuigo_auth::StampedBearerSuffix>,
-    )> {
+    ) -> Result<(reqwest::Response, Option<fuigo_auth::StampedBearerSuffix>)> {
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
         fuigo_auth::execute_with_stamp(&self.client, request)

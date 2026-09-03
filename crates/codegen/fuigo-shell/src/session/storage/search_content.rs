@@ -7,7 +7,7 @@ use std::io::{self, BufRead};
 use std::path::Path;
 
 use super::{
-    ContentPeek, PromptExtractEvent, RawLinePeek, RawParamsPeek, FUIGO_SESSION_UPDATE_METHOD,
+    ContentPeek, FUIGO_SESSION_UPDATE_METHOD, PromptExtractEvent, RawLinePeek, RawParamsPeek,
     collect_prompts_from_events,
 };
 use crate::session::wire_tags::{REWIND_MARKER, USER_MESSAGE_CHUNK};
@@ -127,21 +127,21 @@ pub(super) fn collect_all_indexable_content_single_pass(
             continue;
         }
 
-        let (raw_params, is_fuigo) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed)
-        {
-            let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
-            let fuigo = env.method == Some(FUIGO_SESSION_UPDATE_METHOD);
-            (raw, fuigo)
-        } else {
-            (trimmed, false)
-        };
+        let (raw_params, is_fuigo) =
+            if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed) {
+                let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
+                let fuigo = env.method == Some(FUIGO_SESSION_UPDATE_METHOD);
+                (raw, fuigo)
+            } else {
+                (trimmed, false)
+            };
 
         let update_peek = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
             .ok()
             .and_then(|p| p.update);
         let tag = update_peek.as_ref().map(|u| u.session_update);
 
-        // Content events arrive on ACP "session/update"; control events (rewind markers) on the Ferrox Labs "_x.ai/session/update" extension
+        // Content events arrive on ACP "session/update"; control events (rewind markers) on the Ferrox Labs "_fuigo/session/update" extension
         if !is_fuigo {
             match tag {
                 Some(t) if t == *USER_MESSAGE_CHUNK => {

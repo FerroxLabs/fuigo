@@ -74,9 +74,10 @@ fn prepare_items(
 fn effective_image_budget_limits(compaction_tool_tokens: u64) -> (usize, usize) {
     // The existing tool estimate is bytes/4; invert that same heuristic here.
     // Saturation is conservative: an unrepresentable reserve leaves no image budget.
-    let reserved_bytes =
-        usize::try_from(fuigo_token_estimation::estimate_chars(compaction_tool_tokens))
-            .unwrap_or(usize::MAX);
+    let reserved_bytes = usize::try_from(fuigo_token_estimation::estimate_chars(
+        compaction_tool_tokens,
+    ))
+    .unwrap_or(usize::MAX);
     (
         IMAGE_COMPACT_TRIGGER_BYTES.saturating_sub(reserved_bytes),
         IMAGE_COMPACT_RECLAIM_TARGET_BYTES.saturating_sub(reserved_bytes),

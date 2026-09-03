@@ -17,7 +17,7 @@ pub(crate) struct PendingRunningAdoption {
     pub turn_ended: bool,
 }
 
-/// Wire payload of `x.ai/session/prompt_complete`, emitted by `MvpAgent::prompt()` on the shell after every turn.
+/// Wire payload of `fuigo/session/prompt_complete`, emitted by `MvpAgent::prompt()` on the shell after every turn.
 ///
 /// `Serialize` is derived so tests construct payloads through the same type they are parsed into (shape drift fails at compile time, not at runtime).
 /// Unknown fields (e.g. `turnId`, future additions) are ignored.
@@ -93,7 +93,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
     let Ok(changed) =
         serde_json::from_str::<crate::app::prompt_queue::QueueChanged>(notif.params.get())
     else {
-        tracing::warn!("Failed to parse x.ai/queue/changed");
+        tracing::warn!("Failed to parse fuigo/queue/changed");
         return false;
     };
 
@@ -177,7 +177,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         local_current_prompt_id = %local_current_prompt_id,
         entry_count = changed.entries.len(),
         entries = ?recv_entry_ids,
-        "received x.ai/queue/changed broadcast",
+        "received fuigo/queue/changed broadcast",
     );
 
     let rekeyed_echo_ids = app.apply_queue_changed(changed);
@@ -442,7 +442,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
 /// Re-point the lost-RPC reconcile to the durable rail before deleting this legacy rail.
 pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(payload) = serde_json::from_str::<PromptCompletePayload>(notif.params.get()) else {
-        tracing::warn!("Failed to parse x.ai/session/prompt_complete");
+        tracing::warn!("Failed to parse fuigo/session/prompt_complete");
         return false;
     };
     let session_id = payload.session_id.as_str();

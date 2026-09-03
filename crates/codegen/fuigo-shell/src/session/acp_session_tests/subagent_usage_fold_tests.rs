@@ -394,9 +394,7 @@ async fn snapshot_ors_ledger_incomplete_even_when_reply_complete() {
 }
 
 fn scripted_outstanding_responder(
-    replies: Vec<
-        fuigo_tools::implementations::fuigo_build::task::types::SubagentOutstandingReply,
-    >,
+    replies: Vec<fuigo_tools::implementations::fuigo_build::task::types::SubagentOutstandingReply>,
 ) -> tokio::sync::mpsc::UnboundedSender<
     fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent,
 > {

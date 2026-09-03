@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio_util::sync::CancellationToken;
 use fuigo_telemetry::startup::{self, StartupPhase};
+use tokio_util::sync::CancellationToken;
 
 use fuigo_acp_lib::{
     AcpAgentChannel, AcpClientChannel, AcpClientTx, AcpGatewayReceiver, AcpGatewaySender,

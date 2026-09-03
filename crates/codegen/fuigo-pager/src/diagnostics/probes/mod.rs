@@ -323,8 +323,7 @@ fn collect_common<'a>(
     is_wayland: bool,
     native_tool: Option<&str>,
 ) -> ProbeSnapshot<'a> {
-    let data_control =
-        is_wayland && fuigo_shell::util::clipboard::wayland_data_control_supported();
+    let data_control = is_wayland && fuigo_shell::util::clipboard::wayland_data_control_supported();
     ProbeSnapshot {
         terminal,
         tmux: collect_tmux(terminal, control_mode, color_probe, tmux),

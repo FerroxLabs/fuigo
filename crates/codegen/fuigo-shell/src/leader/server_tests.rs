@@ -809,15 +809,15 @@ fn is_session_attach_request_detects_load_and_resume() {
 #[test]
 fn is_scheduled_task_inject_prompt_detects_only_inject() {
     assert!(is_scheduled_task_inject_prompt(&pv(
-        r#"{"method":"x.ai/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}"#
+        r#"{"method":"fuigo/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}"#
     )));
     // Gateway-wrapped form (the actual wire shape): `_`-prefixed top-level method with the real method and params nested under `params`
     assert!(is_scheduled_task_inject_prompt(&pv(
-        r#"{"method":"_x.ai/scheduled_task_inject_prompt","params":{"method":"x.ai/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}}"#
+        r#"{"method":"_fuigo/scheduled_task_inject_prompt","params":{"method":"fuigo/scheduled_task_inject_prompt","params":{"sessionId":"s1","taskId":"t1","prompt":"echo hi"}}}"#
     )));
     // The sibling informational notification is NOT driver-routed (it fans out so every dashboard updates its tasks pane)
     assert!(!is_scheduled_task_inject_prompt(&pv(
-        r#"{"method":"x.ai/scheduled_task_fired","params":{"sessionId":"s1"}}"#
+        r#"{"method":"fuigo/scheduled_task_fired","params":{"sessionId":"s1"}}"#
     )));
     assert!(!is_scheduled_task_inject_prompt(&pv(
         r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1"}}"#
@@ -828,9 +828,9 @@ fn is_scheduled_task_inject_prompt_detects_only_inject() {
 fn is_interaction_request_detects_only_interaction_methods() {
     for m in [
         "session/request_permission",
-        "x.ai/ask_user_question",
-        "x.ai/exit_plan_mode",
-        "x.ai/mcp/elicit",
+        "fuigo/ask_user_question",
+        "fuigo/exit_plan_mode",
+        "fuigo/mcp/elicit",
     ] {
         let payload = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}","params":{{}}}}"#);
         assert!(
@@ -840,9 +840,9 @@ fn is_interaction_request_detects_only_interaction_methods() {
     }
     // Gateway-wrapped ext methods (the actual wire shape for ask_user_question / exit_plan_mode): `_`-prefixed top-level method, real method nested
     for m in [
-        "x.ai/ask_user_question",
-        "x.ai/exit_plan_mode",
-        "x.ai/mcp/elicit",
+        "fuigo/ask_user_question",
+        "fuigo/exit_plan_mode",
+        "fuigo/mcp/elicit",
     ] {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"_{m}","params":{{"method":"{m}","params":{{}}}}}}"#
@@ -858,7 +858,7 @@ fn is_interaction_request_detects_only_interaction_methods() {
     )));
     // `is_interaction_request` keys only on method; the caller gates on `is_reverse_request` (id present) before treating it as a shared modal
     assert!(!is_interaction_request(&pv(
-        r#"{"jsonrpc":"2.0","method":"x.ai/sessions/changed","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"fuigo/sessions/changed","params":{}}"#
     )));
 }
 
@@ -867,7 +867,7 @@ fn extract_interaction_tool_call_id_handles_direct_and_nested() {
     // ext-methods carry it directly under params.
     assert_eq!(
         extract_interaction_tool_call_id(&pv(
-            r#"{"id":1,"method":"x.ai/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-q"}}"#
+            r#"{"id":1,"method":"fuigo/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-q"}}"#
         ))
         .as_deref(),
         Some("tc-q")
@@ -883,7 +883,7 @@ fn extract_interaction_tool_call_id_handles_direct_and_nested() {
     // Gateway-wrapped ask_user_question: real toolCallId lives at params.params.toolCallId
     assert_eq!(
         extract_interaction_tool_call_id(&pv(
-            r#"{"id":1,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-w"}}}"#
+            r#"{"id":1,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"s","toolCallId":"tc-w"}}}"#
         ))
         .as_deref(),
         Some("tc-w")
@@ -898,7 +898,7 @@ fn extract_interaction_tool_call_id_handles_direct_and_nested() {
 fn extract_interaction_resolved_tool_call_id_matches_only_resolved() {
     assert_eq!(
         extract_interaction_resolved_tool_call_id(&pv(
-            r#"{"method":"x.ai/session_notification","params":{"sessionId":"s","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-r"}}}"#
+            r#"{"method":"fuigo/session_notification","params":{"sessionId":"s","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-r"}}}"#
         ))
         .as_deref(),
         Some("tc-r")
@@ -906,7 +906,7 @@ fn extract_interaction_resolved_tool_call_id_matches_only_resolved() {
     // Gateway-wrapped form (the actual wire shape).
     assert_eq!(
         extract_interaction_resolved_tool_call_id(&pv(
-            r#"{"method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"s","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-rw"}}}}"#
+            r#"{"method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"s","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-rw"}}}}"#
         ))
         .as_deref(),
         Some("tc-rw")
@@ -914,7 +914,7 @@ fn extract_interaction_resolved_tool_call_id_matches_only_resolved() {
     // A different session update is not a resolution.
     assert_eq!(
         extract_interaction_resolved_tool_call_id(&pv(
-            r#"{"method":"x.ai/session_notification","params":{"sessionId":"s","update":{"sessionUpdate":"pending_interaction","tool_call_id":"tc-r","kind":"permission"}}}"#
+            r#"{"method":"fuigo/session_notification","params":{"sessionId":"s","update":{"sessionUpdate":"pending_interaction","tool_call_id":"tc-r","kind":"permission"}}}"#
         )),
         None
     );
@@ -1015,7 +1015,7 @@ fn event_seq_of_parses_acp_and_ext_and_handles_missing() {
     assert_eq!(event_seq_of(&acp), Some(42));
     // ExtNotification (Ferrox Labs): nested under params.params._meta.eventId.
     let ext = pv(
-        r#"{"params":{"method":"x.ai/session/update","params":{"sessionId":"019e-aa","_meta":{"eventId":"019e-aa-7"}}}}"#,
+        r#"{"params":{"method":"fuigo/session/update","params":{"sessionId":"019e-aa","_meta":{"eventId":"019e-aa-7"}}}}"#,
     );
     assert_eq!(event_seq_of(&ext), Some(7));
     // No eventId (Ferrox Labs one-shot / older shell) yields None, so dedup cannot drop the event
@@ -1470,11 +1470,11 @@ fn inject_capabilities_does_not_override_existing_model_id() {
 #[test]
 fn extract_yolo_mode_change_returns_value() {
     let payload =
-        r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"yolo_mode":true}}"#;
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#;
     assert_eq!(extract_yolo_mode_change(&pv(payload)), Some(true));
 
     let payload =
-        r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"yolo_mode":false}}"#;
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":false}}"#;
     assert_eq!(extract_yolo_mode_change(&pv(payload)), Some(false));
 }
 
@@ -1488,27 +1488,27 @@ fn extract_yolo_mode_change_returns_none_for_other_methods() {
 #[test]
 fn extract_auto_mode_change_explicit_flag_wins() {
     let payload =
-        r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"auto_mode":true}}"#;
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"auto_mode":true}}"#;
     assert_eq!(extract_auto_mode_change(&pv(payload)), Some(true));
 
     let payload =
-        r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"auto_mode":false}}"#;
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"auto_mode":false}}"#;
     assert_eq!(extract_auto_mode_change(&pv(payload)), Some(false));
 
     // Explicit flag wins even when permission_mode would say otherwise.
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"auto_mode":false,"permission_mode":"auto"}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"auto_mode":false,"permission_mode":"auto"}}"#;
     assert_eq!(extract_auto_mode_change(&pv(payload)), Some(false));
 }
 
 /// Branch 2: with no explicit flag, derive from `permission_mode`.
 #[test]
 fn extract_auto_mode_change_derives_from_permission_mode() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"permission_mode":"auto"}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"permission_mode":"auto"}}"#;
     assert_eq!(extract_auto_mode_change(&pv(payload)), Some(true));
 
     for mode in ["ask", "always-approve", "default"] {
         let payload = format!(
-            r#"{{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{{"permission_mode":"{mode}"}}}}"#
+            r#"{{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{{"permission_mode":"{mode}"}}}}"#
         );
         assert_eq!(
             extract_auto_mode_change(&pv(&payload)),
@@ -1526,7 +1526,7 @@ fn extract_auto_mode_change_returns_none_when_no_auto_signal() {
     assert_eq!(extract_auto_mode_change(&pv(payload)), None);
 
     let payload =
-        r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"yolo_mode":true}}"#;
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#;
     assert_eq!(extract_auto_mode_change(&pv(payload)), None);
 }
 
@@ -1720,14 +1720,14 @@ fn extract_session_id_from_params_works() {
 #[test]
 fn extract_session_id_from_nested_params_works() {
     // ext/notification: sessionId is nested inside params.params
-    let payload = r#"{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"sess-nested"}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"sess-nested"}}}"#;
     assert_eq!(
         extract_session_id(&pv(payload)),
         Some("sess-nested".to_string())
     );
 
     // Also works with snake_case session_id in nested params
-    let payload = r#"{"jsonrpc":"2.0","method":"_x.ai/fs_notify","params":{"method":"x.ai/fs_notify","params":{"session_id":"sess-nested-2","event":{}}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"_fuigo/fs_notify","params":{"method":"fuigo/fs_notify","params":{"session_id":"sess-nested-2","event":{}}}}"#;
     assert_eq!(
         extract_session_id(&pv(payload)),
         Some("sess-nested-2".to_string())
@@ -1743,7 +1743,7 @@ fn extract_session_id_from_nested_params_works() {
 
 #[test]
 fn extract_session_id_from_prompt_complete_works() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/session/prompt_complete","params":{"sessionId":"sess-prompt"}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/session/prompt_complete","params":{"sessionId":"sess-prompt"}}"#;
     assert_eq!(
         extract_session_id_from_prompt_complete(&pv(payload)),
         Some("sess-prompt".to_string())
@@ -1752,13 +1752,13 @@ fn extract_session_id_from_prompt_complete_works() {
 
 #[test]
 fn extract_session_id_from_prompt_complete_ignores_other_methods() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-prompt"}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-prompt"}}"#;
     assert_eq!(extract_session_id_from_prompt_complete(&pv(payload)), None);
 }
 
 #[test]
 fn extract_child_session_event_spawned() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-1"}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-1"}}}"#;
     match extract_child_session_event(&pv(payload)) {
         Some(ChildSessionEvent::Spawned(id)) => assert_eq!(id, "child-1"),
         other => panic!("Expected Spawned, got {:?}", other),
@@ -1767,7 +1767,7 @@ fn extract_child_session_event_spawned() {
 
 #[test]
 fn extract_child_session_event_finished() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-2"}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-2"}}}"#;
     match extract_child_session_event(&pv(payload)) {
         Some(ChildSessionEvent::Finished(id)) => assert_eq!(id, "child-2"),
         other => panic!("Expected Finished, got {:?}", other),
@@ -1776,7 +1776,7 @@ fn extract_child_session_event_finished() {
 
 #[test]
 fn extract_child_session_event_nested_ext_notification() {
-    let payload = r#"{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-3"}}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-3"}}}}"#;
     match extract_child_session_event(&pv(payload)) {
         Some(ChildSessionEvent::Spawned(id)) => assert_eq!(id, "child-3"),
         other => panic!("Expected Spawned, got {:?}", other),
@@ -1785,7 +1785,7 @@ fn extract_child_session_event_nested_ext_notification() {
 
 #[test]
 fn extract_child_session_event_nested_ext_notification_finished() {
-    let payload = r#"{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-4"}}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-4"}}}}"#;
     match extract_child_session_event(&pv(payload)) {
         Some(ChildSessionEvent::Finished(id)) => assert_eq!(id, "child-4"),
         other => panic!("Expected Finished, got {:?}", other),
@@ -1794,13 +1794,13 @@ fn extract_child_session_event_nested_ext_notification_finished() {
 
 #[test]
 fn extract_child_session_event_none_for_other_updates() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"message_delta","content":"hello"}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"message_delta","content":"hello"}}}"#;
     assert!(extract_child_session_event(&pv(payload)).is_none());
 }
 
 #[test]
 fn extract_child_session_event_none_without_child_id() {
-    let payload = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned"}}}"#;
+    let payload = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"parent","update":{"sessionUpdate":"subagent_spawned"}}}"#;
     assert!(extract_child_session_event(&pv(payload)).is_none());
 }
 
@@ -1946,7 +1946,7 @@ fn inject_capabilities_adds_leader_client_id_to_session_load() {
     inject_session_request_context(&mut json, &caps, "fuigo-tui", ClientId(42));
     // The unique ClientId is stamped so the agent can echo it onto replay notifications for leader unicast routing
     assert_eq!(
-        json["params"]["_meta"]["x.ai/leaderClientId"].as_u64(),
+        json["params"]["_meta"]["fuigo/leaderClientId"].as_u64(),
         Some(42)
     );
 }
@@ -1954,7 +1954,7 @@ fn inject_capabilities_adds_leader_client_id_to_session_load() {
 #[test]
 fn inject_capabilities_does_not_override_existing_leader_client_id() {
     let payload = format!(
-        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","_meta":{{"x.ai/leaderClientId":7}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","_meta":{{"fuigo/leaderClientId":7}}}}}}"#,
         AGENT_METHOD_NAMES.session_load
     );
     let caps = ClientCapabilities::default();
@@ -1963,7 +1963,7 @@ fn inject_capabilities_does_not_override_existing_leader_client_id() {
     inject_session_request_context(&mut json, &caps, "fuigo-tui", ClientId(42));
     // An explicit value already present is respected (mirrors the clientIdentifier guard)
     assert_eq!(
-        json["params"]["_meta"]["x.ai/leaderClientId"].as_u64(),
+        json["params"]["_meta"]["fuigo/leaderClientId"].as_u64(),
         Some(7)
     );
 }
@@ -1971,11 +1971,11 @@ fn inject_capabilities_does_not_override_existing_leader_client_id() {
 #[test]
 fn extract_target_client_id_some_when_meta_present() {
     // SessionNotification shape: _meta lives directly under params.
-    let direct = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","_meta":{"x.ai/leaderClientId":9}}}"#;
+    let direct = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","_meta":{"fuigo/leaderClientId":9}}}"#;
     assert_eq!(extract_target_client_id(&pv(direct)), Some(ClientId(9)));
 
     // ExtNotification shape: real params (and _meta) nested under params.params.
-    let nested = r#"{"jsonrpc":"2.0","method":"_x.ai/session/update","params":{"params":{"sessionId":"sess-1","_meta":{"x.ai/leaderClientId":11}}}}"#;
+    let nested = r#"{"jsonrpc":"2.0","method":"_fuigo/session/update","params":{"params":{"sessionId":"sess-1","_meta":{"fuigo/leaderClientId":11}}}}"#;
     assert_eq!(extract_target_client_id(&pv(nested)), Some(ClientId(11)));
 }
 
@@ -1993,10 +1993,11 @@ fn extract_target_client_id_none_when_absent() {
 #[test]
 fn inject_yolo_notification_adds_client_identifier() {
     let mut json =
-        pv(r#"{"jsonrpc":"2.0","method":"x.ai/yolo_mode_changed","params":{"yolo_mode":true}}"#);
+        pv(r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#);
 
     assert!(inject_client_identity_into_yolo_notification(
-        &mut json, "fuigo-tui"
+        &mut json,
+        "fuigo-tui"
     ));
     assert_eq!(json["params"]["clientIdentifier"], "fuigo-tui");
     assert_eq!(json["params"]["yolo_mode"], true);
@@ -2004,11 +2005,12 @@ fn inject_yolo_notification_adds_client_identifier() {
 
 #[test]
 fn inject_yolo_notification_skips_non_yolo_methods() {
-    let mut json = pv(r#"{"jsonrpc":"2.0","method":"x.ai/other","params":{"data":1}}"#);
+    let mut json = pv(r#"{"jsonrpc":"2.0","method":"fuigo/other","params":{"data":1}}"#);
     let before = json.clone();
 
     assert!(!inject_client_identity_into_yolo_notification(
-        &mut json, "fuigo-tui"
+        &mut json,
+        "fuigo-tui"
     ));
     assert_eq!(json, before);
 }
@@ -2089,7 +2091,7 @@ fn version_mismatch_notification_contains_correct_fields() {
     let payload = make_version_mismatch_notification("0.1.157", "0.1.150")
         .expect("should produce notification");
     let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(json["method"], "x.ai/leader/version_mismatch");
+    assert_eq!(json["method"], "fuigo/leader/version_mismatch");
     assert_eq!(json["params"]["clientVersion"], "0.1.157");
     assert_eq!(json["params"]["leaderVersion"], "0.1.150");
     assert!(
@@ -2570,7 +2572,7 @@ async fn ext_notification_with_nested_session_id_routes_correctly() {
 
     // ext/notification with nested sessionId for session A
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"sess-A","update":{"sessionUpdate":"retry_state","attempt":1,"maxRetries":3,"reason":"transient"}}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"sess-A","update":{"sessionUpdate":"retry_state","attempt":1,"maxRetries":3,"reason":"transient"}}}}"#.into())
         .unwrap();
 
     // Client A receives it
@@ -2582,7 +2584,7 @@ async fn ext_notification_with_nested_session_id_routes_correctly() {
     match msg {
         ServerMessage::Acp { payload } => {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(json["method"], "_x.ai/session_notification");
+            assert_eq!(json["method"], "_fuigo/session_notification");
         }
         other => panic!("Expected Acp message, got {:?}", other),
     }
@@ -3034,7 +3036,7 @@ async fn high_throughput_replay_no_drops() {
     cancel.cancel();
 }
 
-/// When a client disconnects after interacting with a session, the server sends an `x.ai/internal/evict_sessions` notification through acp_tx.
+/// When a client disconnects after interacting with a session, the server sends an `fuigo/internal/evict_sessions` notification through acp_tx.
 /// The agent uses it to release session memory.
 #[tokio::test]
 async fn evict_sessions_notification_on_disconnect() {
@@ -3337,7 +3339,7 @@ async fn two_clients_one_session_broadcast_and_driver() {
     cancel.cancel();
 }
 
-/// A `x.ai/scheduled_task_inject_prompt` (cron `/loop` fire) must be routed to the SINGLE session driver, not fanned out to every subscriber.
+/// A `fuigo/scheduled_task_inject_prompt` (cron `/loop` fire) must be routed to the SINGLE session driver, not fanned out to every subscriber.
 /// If it broadcast, each dashboard would enqueue and try to drive the same cron turn (phantom `#N` queue rows, competing drivers, stuck turns).
 /// The other clients render the resulting turn from the broadcast deltas.
 #[tokio::test]
@@ -3361,8 +3363,8 @@ async fn scheduled_task_inject_prompt_routes_to_driver_only() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // The agent fires a scheduled task, producing an inject_prompt notification in the real gateway-WRAPPED wire form
-    // That form (`_x.ai/...` top-level, nested method and params) is the shape that previously fell through to broadcast
-    let inject = r#"{"method":"_x.ai/scheduled_task_inject_prompt","params":{"method":"x.ai/scheduled_task_inject_prompt","params":{"sessionId":"sess-cron","taskId":"task-1","prompt":"echo hello","humanSchedule":"every 1m"}}}"#;
+    // That form (`_fuigo/...` top-level, nested method and params) is the shape that previously fell through to broadcast
+    let inject = r#"{"method":"_fuigo/scheduled_task_inject_prompt","params":{"method":"fuigo/scheduled_task_inject_prompt","params":{"sessionId":"sess-cron","taskId":"task-1","prompt":"echo hello","humanSchedule":"every 1m"}}}"#;
     response_tx.send(inject.to_string()).unwrap();
 
     let got_a = next_acp_payload(&mut reader_a).await;
@@ -3402,9 +3404,9 @@ async fn interaction_request_broadcasts_to_all_subscribers() {
     let _ = next_acp_payload(&mut reader_b).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // The agent raises an `ask_user_question` reverse-request in the gateway-WRAPPED wire form (`_x.ai/...` top-level, nested method and params)
+    // The agent raises an `ask_user_question` reverse-request in the gateway-WRAPPED wire form (`_fuigo/...` top-level, nested method and params)
     // This is the shape that previously fell through to driver-only.
-    let req = r#"{"jsonrpc":"2.0","id":501,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":501,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
 
     let got_a = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
@@ -3436,7 +3438,7 @@ async fn pending_interaction_replayed_to_late_joiner() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // An interaction raised (wrapped wire form) while only A is attached is cached by the leader
-    let req = r#"{"jsonrpc":"2.0","id":601,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-late","questions":[]}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":601,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-late","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -3499,7 +3501,7 @@ async fn reattached_client_backfilled_into_child_routes() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-sub","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-sub","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     assert!(
         next_acp_payload_matching(&mut reader_a, "subagent_spawned")
@@ -3531,7 +3533,7 @@ async fn reattached_client_backfilled_into_child_routes() {
     );
 
     // Backfill also re-seeded the child driver (the parent driver is A2), so a driver-only child reverse-request routes to A2 instead of dropping
-    let child_reverse = r#"{"jsonrpc":"2.0","id":777,"method":"x.ai/child_thing","params":{"sessionId":"child-sub"}}"#;
+    let child_reverse = r#"{"jsonrpc":"2.0","id":777,"method":"fuigo/child_thing","params":{"sessionId":"child-sub"}}"#;
     response_tx.send(child_reverse.to_string()).unwrap();
     assert!(
         next_acp_payload_matching(&mut reader_a2, "child_thing")
@@ -3558,7 +3560,7 @@ async fn replayed_spawn_registers_child_route_for_loading_client() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let spawned_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-fresh","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-fresh"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-fresh","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-fresh"}}}}}}"#,
         a_id.0
     );
     response_tx.send(spawned_replay).unwrap();
@@ -3596,7 +3598,7 @@ async fn late_attacher_backfilled_into_existing_child_routes() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // A live spawn while only A subscribes makes the child route the snapshot {A}
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-sub2","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub2"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-sub2","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub2"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
@@ -3639,7 +3641,7 @@ async fn replayed_finished_does_not_tear_down_live_child_route() {
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-tear","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-tear"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-tear","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-tear"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
@@ -3651,7 +3653,7 @@ async fn replayed_finished_does_not_tear_down_live_child_route() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let finished_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-tear","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-tear"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-tear","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-tear"}}}}}}"#,
         b_id.0
     );
     response_tx.send(finished_replay).unwrap();
@@ -3690,10 +3692,10 @@ async fn backfill_covers_nested_children() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // Child under parent, grandchild under child (live broadcasts)
-    let spawned_child = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-nest","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-nest"}}}"#;
+    let spawned_child = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-nest","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-nest"}}}"#;
     response_tx.send(spawned_child.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
-    let spawned_grandchild = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-nest","update":{"sessionUpdate":"subagent_spawned","child_session_id":"grandchild-nest"}}}"#;
+    let spawned_grandchild = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"child-nest","update":{"sessionUpdate":"subagent_spawned","child_session_id":"grandchild-nest"}}}"#;
     response_tx.send(spawned_grandchild.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "grandchild-nest").await;
 
@@ -3737,15 +3739,15 @@ async fn intermediate_finish_reparents_live_grandchild_for_root_backfill() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // Root spawns A, then A spawns B, both live
-    let spawned_a = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-rep","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-a"}}}"#;
+    let spawned_a = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-rep","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-a"}}}"#;
     response_tx.send(spawned_a.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "child-a").await;
-    let spawned_b = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-a","update":{"sessionUpdate":"subagent_spawned","child_session_id":"grandchild-b"}}}"#;
+    let spawned_b = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"child-a","update":{"sessionUpdate":"subagent_spawned","child_session_id":"grandchild-b"}}}"#;
     response_tx.send(spawned_b.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "grandchild-b").await;
 
     // Intermediate A finishes LIVE; B keeps running.
-    let finished_a = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-rep","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-a"}}}"#;
+    let finished_a = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-rep","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-a"}}}"#;
     response_tx.send(finished_a.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_finished").await;
 
@@ -3786,10 +3788,10 @@ async fn live_finished_prunes_index_so_reattach_skips_dead_child() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-dead","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-dead"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-dead","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-dead"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
-    let finished_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-dead","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-dead"}}}"#;
+    let finished_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-dead","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-dead"}}}"#;
     response_tx.send(finished_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_finished").await;
 
@@ -3831,7 +3833,7 @@ async fn detached_live_finished_prunes_index_so_reattach_skips_dead_child() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-detach","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-detach"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-detach","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-detach"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
@@ -3842,7 +3844,7 @@ async fn detached_live_finished_prunes_index_so_reattach_skips_dead_child() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // A live finish arrives while detached: relay-classified (no subscribers) and dropped, but it must still prune the dead child's edge
-    let finished_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-detach","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-detach"}}}"#;
+    let finished_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-detach","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-detach"}}}"#;
     response_tx.send(finished_live.to_string()).unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -3880,7 +3882,7 @@ async fn mid_burst_disconnect_still_prunes_dead_child_route() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let spawned_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-leak","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-leak"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-leak","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-leak"}}}}}}"#,
         a_id.0
     );
     response_tx.send(spawned_replay).unwrap();
@@ -3892,7 +3894,7 @@ async fn mid_burst_disconnect_still_prunes_dead_child_route() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let finished_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-leak","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-leak"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-leak","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-leak"}}}}}}"#,
         a_id.0
     );
     response_tx.send(finished_replay).unwrap();
@@ -3932,7 +3934,7 @@ async fn orphaned_replayed_finished_leaves_held_route_untouched() {
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-hold","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-hold"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-hold","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-hold"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
@@ -3942,7 +3944,7 @@ async fn orphaned_replayed_finished_leaves_held_route_untouched() {
     drop(writer_b);
     tokio::time::sleep(Duration::from_millis(50)).await;
     let finished_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-hold","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-hold"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-hold","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-hold"}}}}}}"#,
         b_id.0
     );
     response_tx.send(finished_replay).unwrap();
@@ -3974,7 +3976,7 @@ async fn replayed_spawn_unions_into_existing_live_route() {
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-union","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-union"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-union","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-union"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
 
@@ -3985,7 +3987,7 @@ async fn replayed_spawn_unions_into_existing_live_route() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let spawned_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-union","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-union"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-union","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-union"}}}}}}"#,
         b_id.0
     );
     response_tx.send(spawned_replay).unwrap();
@@ -4026,13 +4028,13 @@ async fn replayed_finished_last_subscriber_prunes_dead_child() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let spawned_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-last","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-last"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-last","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_spawned","child_session_id":"child-last"}}}}}}"#,
         a_id.0
     );
     response_tx.send(spawned_replay).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
     let finished_replay = format!(
-        r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"sess-last","_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-last"}}}}}}"#,
+        r#"{{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{{"sessionId":"sess-last","_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}},"update":{{"sessionUpdate":"subagent_finished","child_session_id":"child-last"}}}}}}"#,
         a_id.0
     );
     response_tx.send(finished_replay).unwrap();
@@ -4079,7 +4081,7 @@ async fn mid_load_child_delta_reaches_loader_via_request_side_backfill() {
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let spawned_live = r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-midload","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-midload"}}}"#;
+    let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-midload","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-midload"}}}"#;
     response_tx.send(spawned_live.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "subagent_spawned").await;
     drop(reader_a);
@@ -4123,7 +4125,7 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let req = r#"{"jsonrpc":"2.0","id":801,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-reconnect","questions":[]}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":801,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-reconnect","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -4158,7 +4160,7 @@ async fn interaction_raised_with_no_subscriber_is_cached_and_replayed_on_first_a
         setup_persistent_server_with_agent(&temp).await;
 
     // Interaction raised BEFORE any client attaches/subscribes.
-    let req = r#"{"jsonrpc":"2.0","id":901,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-nosub","questions":[]}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":901,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-nosub","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
 
@@ -4190,11 +4192,11 @@ async fn resolved_interaction_not_replayed_to_late_joiner() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // Raise then resolve the interaction (wrapped wire form), no other client attached yet
-    let req = r#"{"jsonrpc":"2.0","id":701,"method":"_x.ai/ask_user_question","params":{"method":"x.ai/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-ev","questions":[]}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":701,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-ev","questions":[]}}}"#;
     response_tx.send(req.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
 
-    let resolved = r#"{"method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"sess-int","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-ev"}}}}"#;
+    let resolved = r#"{"method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"sess-int","update":{"sessionUpdate":"interaction_resolved","tool_call_id":"tc-ev"}}}}"#;
     response_tx.send(resolved.to_string()).unwrap();
     let _ = next_acp_payload_matching(&mut reader_a, "interaction_resolved").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -4282,7 +4284,7 @@ async fn driver_disconnect_transfers_not_evicts() {
     cancel.cancel();
 }
 
-/// `x.ai/sessions/changed` is a machine-wide roster notification with no sessionId.
+/// `fuigo/sessions/changed` is a machine-wide roster notification with no sessionId.
 /// It must broadcast to every registered client (not just the last-active one) so all open dashboards stay in sync.
 #[tokio::test]
 async fn roster_changed_broadcasts_to_all_clients() {
@@ -4293,7 +4295,7 @@ async fn roster_changed_broadcasts_to_all_clients() {
     let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let changed = r#"{"jsonrpc":"2.0","method":"x.ai/sessions/changed","params":{"upserted":[{"sessionId":"sess-roster","cwd":"/repo","isWorktree":false,"yolo":false,"activity":"working","resident":true,"lastChangeUnixMs":1,"origin":{"kind":"local"}}],"removed":[]}}"#;
+    let changed = r#"{"jsonrpc":"2.0","method":"fuigo/sessions/changed","params":{"upserted":[{"sessionId":"sess-roster","cwd":"/repo","isWorktree":false,"yolo":false,"activity":"working","resident":true,"lastChangeUnixMs":1,"origin":{"kind":"local"}}],"removed":[]}}"#;
     response_tx.send(changed.to_string()).unwrap();
 
     let got_a = next_acp_payload(&mut reader_a).await;
@@ -4310,10 +4312,10 @@ async fn roster_changed_broadcasts_to_all_clients() {
     cancel.cancel();
 }
 
-/// `x.ai/models/update` is a machine-wide catalog notification with no sessionId.
+/// `fuigo/models/update` is a machine-wide catalog notification with no sessionId.
 /// It must broadcast to every registered client, not just the last-active one.
 /// Every model picker then refreshes after a config.toml / models_cache.json hot-reload.
-/// Uses the production wire form: agent ext notifications arrive `_`-prefixed (`_x.ai/models/update`).
+/// Uses the production wire form: agent ext notifications arrive `_`-prefixed (`_fuigo/models/update`).
 #[tokio::test]
 async fn models_update_broadcasts_to_all_clients() {
     let temp = TempDir::new().unwrap();
@@ -4323,7 +4325,7 @@ async fn models_update_broadcasts_to_all_clients() {
     let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let update = r#"{"jsonrpc":"2.0","method":"_x.ai/models/update","params":{"currentModelId":"fuigo-new","availableModels":[{"modelId":"fuigo-new","name":"Fuigo New"}]}}"#;
+    let update = r#"{"jsonrpc":"2.0","method":"_fuigo/models/update","params":{"currentModelId":"fuigo-new","availableModels":[{"modelId":"fuigo-new","name":"Fuigo New"}]}}"#;
     response_tx.send(update.to_string()).unwrap();
 
     let got_a = next_acp_payload(&mut reader_a).await;
@@ -4340,7 +4342,7 @@ async fn models_update_broadcasts_to_all_clients() {
     cancel.cancel();
 }
 
-/// `x.ai/mcp/servers_updated` is a machine-wide MCP-catalog notification with no sessionId (session-agnostic by design).
+/// `fuigo/mcp/servers_updated` is a machine-wide MCP-catalog notification with no sessionId (session-agnostic by design).
 /// It must broadcast to every registered client.
 /// Otherwise managed connectors vanish from clients that weren't last-active when the post-initialize background fetch resolved.
 /// Uses the production wire form (`_`-prefixed ext notification with the real method nested in params).
@@ -4353,7 +4355,7 @@ async fn mcp_servers_updated_broadcasts_to_all_clients() {
     let (mut reader_b, _writer_b) = connect_and_register(&sock_path, "client-b").await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let update = r#"{"jsonrpc":"2.0","method":"_x.ai/mcp/servers_updated","params":{"method":"x.ai/mcp/servers_updated","params":{"mcpServers":[{"name":"fuigo_com_slack","source":"managed"}]}}}"#;
+    let update = r#"{"jsonrpc":"2.0","method":"_fuigo/mcp/servers_updated","params":{"method":"fuigo/mcp/servers_updated","params":{"mcpServers":[{"name":"fuigo_com_slack","source":"managed"}]}}}"#;
     response_tx.send(update.to_string()).unwrap();
 
     let got_a = next_acp_payload(&mut reader_a).await;
@@ -4380,36 +4382,36 @@ async fn mcp_servers_updated_broadcasts_to_all_clients() {
 fn machine_wide_broadcast_classifier_matches_both_wire_forms() {
     // Direct forms.
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"x.ai/sessions/changed","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"fuigo/sessions/changed","params":{}}"#
     )));
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"x.ai/models/update","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"fuigo/models/update","params":{}}"#
     )));
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"x.ai/mcp/servers_updated","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"fuigo/mcp/servers_updated","params":{}}"#
     )));
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"x.ai/announcements/update","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"fuigo/announcements/update","params":{}}"#
     )));
     // `_`-prefixed production ext-notification forms.
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"_x.ai/sessions/changed","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"_fuigo/sessions/changed","params":{}}"#
     )));
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"_x.ai/models/update","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"_fuigo/models/update","params":{}}"#
     )));
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"_x.ai/mcp/servers_updated","params":{"method":"x.ai/mcp/servers_updated","params":{"mcpServers":[]}}}"#
+        r#"{"jsonrpc":"2.0","method":"_fuigo/mcp/servers_updated","params":{"method":"fuigo/mcp/servers_updated","params":{"mcpServers":[]}}}"#
     )));
     assert!(is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"_x.ai/announcements/update","params":{"method":"x.ai/announcements/update","params":{"gen":2,"announcements":[]}}}"#
+        r#"{"jsonrpc":"2.0","method":"_fuigo/announcements/update","params":{"method":"fuigo/announcements/update","params":{"gen":2,"announcements":[]}}}"#
     )));
-    // Non-broadcast methods. `x.ai/settings/update` must stay unicast: it carries auth/gate state resolved for the requesting client.
+    // Non-broadcast methods. `fuigo/settings/update` must stay unicast: it carries auth/gate state resolved for the requesting client.
     assert!(!is_machine_wide_broadcast_notification(&pv(
         r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s"}}"#
     )));
     assert!(!is_machine_wide_broadcast_notification(&pv(
-        r#"{"jsonrpc":"2.0","method":"x.ai/settings/update","params":{}}"#
+        r#"{"jsonrpc":"2.0","method":"fuigo/settings/update","params":{}}"#
     )));
 }
 
@@ -4603,7 +4605,7 @@ async fn subagent_child_session_routed_after_spawned() {
 
     // Agent sends SubagentSpawned on parent session
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-123"}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-123"}}}"#.into())
         .unwrap();
     let _: ServerMessage =
         tokio::time::timeout(Duration::from_millis(200), read_message(&mut reader))
@@ -4613,7 +4615,7 @@ async fn subagent_child_session_routed_after_spawned() {
 
     // A notification on the child session is routed to the parent owner
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-123","update":{"sessionUpdate":"message_delta","content":"hello"}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"child-123","update":{"sessionUpdate":"message_delta","content":"hello"}}}"#.into())
         .unwrap();
 
     let msg: ServerMessage =
@@ -4650,7 +4652,7 @@ async fn subagent_child_session_cleaned_up_on_finished() {
 
     // SubagentSpawned registers child
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-456"}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-456"}}}"#.into())
         .unwrap();
     let _: ServerMessage =
         tokio::time::timeout(Duration::from_millis(200), read_message(&mut reader))
@@ -4660,7 +4662,7 @@ async fn subagent_child_session_cleaned_up_on_finished() {
 
     // SubagentFinished deregisters child
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-456"}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_finished","child_session_id":"child-456"}}}"#.into())
         .unwrap();
     let _: ServerMessage =
         tokio::time::timeout(Duration::from_millis(200), read_message(&mut reader))
@@ -4670,7 +4672,7 @@ async fn subagent_child_session_cleaned_up_on_finished() {
 
     // A notification on the finished child session must NOT be routed
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-456","update":{"sessionUpdate":"message_delta"}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"child-456","update":{"sessionUpdate":"message_delta"}}}"#.into())
         .unwrap();
     let timeout_result: Result<Result<ServerMessage, _>, _> =
         tokio::time::timeout(Duration::from_millis(100), read_message(&mut reader)).await;
@@ -4701,7 +4703,7 @@ async fn subagent_child_session_not_leaked_to_other_client() {
 
     // SubagentSpawned with ext/notification wrapper format
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"_x.ai/session_notification","params":{"method":"x.ai/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-789"}}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"_fuigo/session_notification","params":{"method":"fuigo/session_notification","params":{"sessionId":"sess-parent","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-789"}}}}"#.into())
         .unwrap();
     let _: ServerMessage =
         tokio::time::timeout(Duration::from_millis(200), read_message(&mut reader_a))
@@ -4723,7 +4725,7 @@ async fn subagent_child_session_not_leaked_to_other_client() {
 
     // The child session notification goes to Client A, not B
     response_tx
-        .send(r#"{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{"sessionId":"child-789","update":{"sessionUpdate":"message_delta"}}}"#.into())
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"child-789","update":{"sessionUpdate":"message_delta"}}}"#.into())
         .unwrap();
 
     let msg: ServerMessage =
@@ -4745,7 +4747,7 @@ async fn subagent_child_session_not_leaked_to_other_client() {
 
 #[tokio::test]
 async fn leader_client_id_unicasts_to_target_only() {
-    // The agent stamps `_meta["x.ai/leaderClientId"]` onto every session/load replay line
+    // The agent stamps `_meta["fuigo/leaderClientId"]` onto every session/load replay line
     // A notification carrying it must be routed to ONLY that client, even when another client is attached to the same session
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx) = setup_persistent_server(&temp).await;
@@ -4785,7 +4787,7 @@ async fn leader_client_id_unicasts_to_target_only() {
     // Agent emits a replay notification tagged for client A only.
     response_tx
         .send(format!(
-            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"agent_message_chunk"}},"_meta":{{"x.ai/leaderClientId":{}}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"agent_message_chunk"}},"_meta":{{"fuigo/leaderClientId":{}}}}}}}"#,
             id_a
         ))
         .unwrap();
@@ -4854,13 +4856,13 @@ async fn leader_client_id_dropped_when_target_disconnected() {
     // The direct ACP shape carries `params._meta`; the nested ext/notification shape (the Ferrox Labs envelope) carries `params.params._meta`
     response_tx
         .send(format!(
-            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"agent_message_chunk"}},"_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"agent_message_chunk"}},"_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}}}}}}"#,
             id_a
         ))
         .unwrap();
     response_tx
         .send(format!(
-            r#"{{"jsonrpc":"2.0","method":"_x.ai/session/update","params":{{"params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"hook_annotation","message":"m"}},"_meta":{{"isReplay":true,"x.ai/leaderClientId":{}}}}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"_fuigo/session/update","params":{{"params":{{"sessionId":"sess-1","update":{{"sessionUpdate":"hook_annotation","message":"m"}},"_meta":{{"isReplay":true,"fuigo/leaderClientId":{}}}}}}}}}"#,
             id_a
         ))
         .unwrap();

@@ -1,12 +1,12 @@
 use agent_client_protocol as acp;
 use anyhow::Result;
+use fuigo_agent::prompt::skills::SkillsConfig;
+use fuigo_tools::types::compat::{CompatConfig, CompatConfigToml};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
-use fuigo_agent::prompt::skills::SkillsConfig;
-use fuigo_tools::types::compat::{CompatConfig, CompatConfigToml};
 
 pub use fuigo_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
 // MCP server config value types moved to `fuigo-config-types`; the re-export keeps `crate::util::config::*` paths working
@@ -490,7 +490,7 @@ pub struct McpSetupServerEntry {
 }
 
 /// Collect MCP configs that declare a `setup` schema from config and plugins.
-/// Used to show setup-required rows and drive `x.ai/mcp/setup`.
+/// Used to show setup-required rows and drive `fuigo/mcp/setup`.
 ///
 /// User/project **TOML** includes `enabled = false` so Space-disabled setup servers stay visible.
 /// (`handle_list` derives `session.enabled` from `disabled_mcp_servers`.)
@@ -737,14 +737,20 @@ fn nearest_project_mcp_definition(cwd: &std::path::Path, server_name: &str) -> O
 /// Apply `f`, write only if the serialized table changed. Returns whether written.
 ///
 /// Aligns with [`super::persist::save_config`] safety: refuse unparseable files (no wipe-to-empty).
-/// Writes go through [`super::persist::atomic_write_string`] (unique tmp, mode preserved) under the user-config write lock.
+/// Writes go through [`super::persist::atomic_write_string`] (unique tmp, mode preserved).
+///
+/// For the user config both locks are held across the read and the write: the
+/// process-local one and the cross-process file lock every other writer of that
+/// file takes. The process-local lock alone left this racing the CLI and a
+/// second pager. A project-scoped path takes neither, because nothing else in
+/// the workspace writes it.
 async fn write_toml_table_if_changed(
     path: &std::path::Path,
     f: impl FnOnce(&mut TomlMap<String, TomlValue>),
 ) -> Result<bool> {
     let is_user = path == config_path().as_path();
-    let _guard = if is_user {
-        Some(super::persist::lock_config_writes().await)
+    let _guards = if is_user {
+        Some(super::persist::lock_user_config_writes(path).await?)
     } else {
         None
     };

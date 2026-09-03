@@ -3859,6 +3859,7 @@ dependencies = [
  "blake3",
  "core-foundation",
  "dunce",
+ "fs2",
  "fuigo-dirs",
  "fuigo-tty-utils",
  "fuigo-version",
@@ -5400,7 +5401,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "semver",
 ]
@@ -5415,6 +5416,7 @@ dependencies = [
  "fuigo-extra-ca",
  "fuigo-tty-utils",
  "futures-util",
+ "reqwest 0.12.24",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

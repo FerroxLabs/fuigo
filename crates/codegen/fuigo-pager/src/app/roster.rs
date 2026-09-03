@@ -2,8 +2,8 @@
 //!
 //! The leader process hosts session actors and exposes a roster API the pager consumes in leader mode (FleetView dashboard):
 //!
-//! - Request/response `x.ai/sessions/list` parses into [`RosterListResponse`].
-//! - Broadcast notification `x.ai/sessions/changed` parses into [`RosterChanged`].
+//! - Request/response `fuigo/sessions/list` parses into [`RosterListResponse`].
+//! - Broadcast notification `fuigo/sessions/changed` parses into [`RosterChanged`].
 //!
 //! These structs mirror the producer-side wire format (camelCase JSON, snake_case activity enum).
 //! They are deserialize-only: the pager never produces them.
@@ -57,14 +57,14 @@ pub struct RosterEntry {
     pub origin: RosterOrigin,
 }
 
-/// Response to `x.ai/sessions/list`.
+/// Response to `fuigo/sessions/list`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RosterListResponse {
     #[serde(default)]
     pub sessions: Vec<RosterEntry>,
 }
 
-/// Broadcast payload for `x.ai/sessions/changed`.
+/// Broadcast payload for `fuigo/sessions/changed`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RosterChanged {
     #[serde(default)]
@@ -73,7 +73,7 @@ pub struct RosterChanged {
     pub removed: Vec<String>,
 }
 
-/// Parse an `x.ai/sessions/list` ext-response body into a [`RosterListResponse`].
+/// Parse an `fuigo/sessions/list` ext-response body into a [`RosterListResponse`].
 ///
 /// The agent answers through `ExtMethodResult::success(..).to_ext_response()`, which wraps the payload as `{ "result": { "sessions": [...] } }`.
 /// A bare `{ "sessions": [...] }` body (no envelope) is tolerated too.
@@ -120,7 +120,7 @@ mod tests {
             sessions: vec![agent_entry()],
         };
 
-        // Exact wire bytes the agent emits for `x.ai/sessions/list`.
+        // Exact wire bytes the agent emits for `fuigo/sessions/list`.
         let ext_response = ExtMethodResult::success(agent_resp)
             .to_ext_response()
             .expect("agent serializes the roster response");
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(parsed.sessions[0].session_id, "s1");
     }
 
-    /// Round-trip for `x.ai/sessions/changed`: serialize the agent's `RosterChanged` as `emit_roster_changed` does (bare params, no envelope).
+    /// Round-trip for `fuigo/sessions/changed`: serialize the agent's `RosterChanged` as `emit_roster_changed` does (bare params, no envelope).
     /// The pager's `RosterChanged` must recover `upserted`, `removed`, and the nested entry fields (camelCase).
     #[test]
     fn roster_changed_round_trips() {

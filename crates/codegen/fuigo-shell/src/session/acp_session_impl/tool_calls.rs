@@ -1,9 +1,9 @@
 //! Tool-call execution for `SessionActor`: a `#[path]` child of `acp_session`.
 use super::hooks::RewriteProblem;
 use super::*;
+use fuigo_hooks::result::HookDecision;
 use futures::StreamExt;
 use tracing::Instrument;
-use fuigo_hooks::result::HookDecision;
 #[path = "wait_interrupt.rs"]
 mod wait_interrupt;
 use wait_interrupt::{
@@ -321,7 +321,7 @@ pub(super) struct BridgeToolSuccess<'a> {
     pub model_output_override: Option<String>,
 }
 impl SessionActor {
-    /// Merge the canonical `x.ai/tool` identity envelope into a tool-call event's `_meta`, resolving the tool from the live toolset by wire name.
+    /// Merge the canonical `fuigo/tool` identity envelope into a tool-call event's `_meta`, resolving the tool from the live toolset by wire name.
     pub(super) fn stamp_tool_meta(
         &self,
         existing: Option<acp::Meta>,
@@ -1128,17 +1128,15 @@ impl SessionActor {
             } else {
                 (None, None)
             };
-            fuigo_telemetry::session_ctx::log_event(
-                fuigo_telemetry::events::ToolCallCompleted {
-                    tool_name: prepared.tool_name.clone(),
-                    outcome: tool_outcome,
-                    hook_rewrote,
-                    duration_ms,
-                    tool_result_size_bytes,
-                    file_path: ext_file_path,
-                    parameters: ext_parameters,
-                },
-            );
+            fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::ToolCallCompleted {
+                tool_name: prepared.tool_name.clone(),
+                outcome: tool_outcome,
+                hook_rewrote,
+                duration_ms,
+                tool_result_size_bytes,
+                file_path: ext_file_path,
+                parameters: ext_parameters,
+            });
             if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
                 tracing::info_span!(
                     "compaction.segment_read",
@@ -1574,15 +1572,13 @@ impl SessionActor {
             } else {
                 fuigo_telemetry::enums::PermissionMode::Ask
             };
-            fuigo_telemetry::session_ctx::log_event(
-                fuigo_telemetry::events::PermissionPrompted {
-                    tool_name: canonical_permission_tool_name.clone(),
-                    access_kind: telemetry_access_kind,
-                    permission_mode: perm_mode,
-                    subagent_session_id: subagent_session_id.clone(),
-                    subagent_type: None,
-                },
-            );
+            fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::PermissionPrompted {
+                tool_name: canonical_permission_tool_name.clone(),
+                access_kind: telemetry_access_kind,
+                permission_mode: perm_mode,
+                subagent_session_id: subagent_session_id.clone(),
+                subagent_type: None,
+            });
             let perm_start = self.events.permission_requested(&call.function.name);
             debug_assert!(
                 !self.session_info.id.0.is_empty(),
@@ -1874,7 +1870,7 @@ impl SessionActor {
         };
         Ok(Ok(prepared))
     }
-    /// Issue the `x.ai/exit_plan_mode` reverse-request and await the user's decision.
+    /// Issue the `fuigo/exit_plan_mode` reverse-request and await the user's decision.
     /// Shared by the mid-turn intercept and the resume re-park.
     /// Marks `awaiting_plan_approval` while the request is outstanding and clears it on every exit path via [`AwaitingApprovalGuard`].
     pub(super) async fn request_plan_approval(
@@ -1899,7 +1895,7 @@ impl SessionActor {
             "exit_plan_mode reverse-request must carry a non-empty sessionId (design §5.4)"
         );
         let ext_request = acp::ExtRequest::new(
-            "x.ai/exit_plan_mode",
+            "fuigo/exit_plan_mode",
             serde_json::value::to_raw_value(&ext_req)
                 .expect("ExitPlanModeExtRequest serialization should not fail")
                 .into(),
@@ -2185,13 +2181,11 @@ impl SessionActor {
                 vec![],
             ),
             ToolInput::Skill(skill) => {
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::SkillDispatched {
-                        skill_name: skill.skill.clone(),
-                        plugin_source: None,
-                        trigger: fuigo_telemetry::events::SkillTrigger::SkillTool,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::SkillDispatched {
+                    skill_name: skill.skill.clone(),
+                    plugin_source: None,
+                    trigger: fuigo_telemetry::events::SkillTrigger::SkillTool,
+                });
                 tracing::info_span!(
                     "skill.activated",
                     skill_name = %skill.skill,
@@ -2606,9 +2600,7 @@ impl SessionActor {
                 }
                 if ops.pr_merged {
                     self.signals_handle().record_pr_merged();
-                    fuigo_telemetry::session_ctx::log_event(
-                        fuigo_telemetry::events::PrMerged {},
-                    );
+                    fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::PrMerged {});
                 }
             }
             fuigo_tools::types::output::ToolOutput::MCP(m)

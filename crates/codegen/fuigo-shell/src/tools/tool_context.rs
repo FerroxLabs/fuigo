@@ -4,14 +4,14 @@
 //! Tool execution goes through the ToolBridge, which has its own SessionContext from fuigo-tools.
 use crate::terminal::AsyncTerminalRunner;
 use agent_client_protocol as acp;
-use std::collections::HashMap;
-use std::sync::Arc;
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
+use fuigo_hunk_tracker::HunkTrackerHandle;
 use fuigo_paths::AbsPathBuf;
+use fuigo_tty_utils::ProcessScope;
 use fuigo_workspace::file_system::{AsyncFileSystem, AsyncFsWrapper};
 use fuigo_workspace::session::file_state::FileStateHandle;
-use fuigo_hunk_tracker::HunkTrackerHandle;
-use fuigo_tty_utils::ProcessScope;
+use std::collections::HashMap;
+use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub struct TaskOutputTokenBudget {
     inner: Arc<parking_lot::Mutex<TaskOutputTokenBudgetState>>,
@@ -178,9 +178,9 @@ impl Drop for BlockingWaitGuard {
 pub(crate) fn subagent_foreground_wait(
     state: Arc<BlockingWaitState>,
 ) -> fuigo_tools::implementations::fuigo_build::task::types::SubagentForegroundWait {
-    fuigo_tools::implementations::fuigo_build::task::types::SubagentForegroundWait::new(
-        move || Box::new(BlockingWaitGuard::enter(Arc::clone(&state))),
-    )
+    fuigo_tools::implementations::fuigo_build::task::types::SubagentForegroundWait::new(move || {
+        Box::new(BlockingWaitGuard::enter(Arc::clone(&state)))
+    })
 }
 /// Session-level context. NOT used for tool execution (bridge handles that).
 #[derive(Clone)]
@@ -208,9 +208,8 @@ pub struct ToolContext {
             fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent,
         >,
     >,
-    pub subagent_coordinator_sender: Option<
-        fuigo_tools::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
-    >,
+    pub subagent_coordinator_sender:
+        Option<fuigo_tools::implementations::fuigo_build::task::backend::SubagentCoordinatorSender>,
     /// Shared LSP runtime, cloned cheaply (Arc) from parent to child.
     pub lsp: Option<Arc<dyn fuigo_tools::implementations::lsp::LspBackend>>,
     /// LSP server names captured at session creation (not updated mid-session).
@@ -225,8 +224,7 @@ pub struct ToolContext {
         Option<fuigo_tools::implementations::fuigo_build::monitor::types::MonitorEventBuffer>,
     pub task_completion_reservations:
         Option<fuigo_tools::reminders::task_completion::TaskCompletionReservations>,
-    pub task_wake_suppressed:
-        Option<fuigo_tools::reminders::task_completion::TaskWakeSuppressed>,
+    pub task_wake_suppressed: Option<fuigo_tools::reminders::task_completion::TaskWakeSuppressed>,
     /// Channel for requesting trace uploads for synthetic auto-wake turns.
     pub(crate) synthetic_trace_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
@@ -399,11 +397,11 @@ mod output_budget_tests {
 mod tests {
     use super::BlockingWaitState;
     use crate::{terminal::AsyncTerminalRunner, tools::ToolContext};
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use fuigo_hunk_tracker::HunkTrackerHandle;
     use fuigo_paths::AbsPathBuf;
     use fuigo_workspace::file_system::{AsyncFileSystem, AsyncFsWrapper};
-    use fuigo_hunk_tracker::HunkTrackerHandle;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     impl ToolContext {
         pub(crate) fn new_local_context(
             cwd: AbsPathBuf,

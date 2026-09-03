@@ -1,4 +1,4 @@
-//! `x.ai/recap` extension handler.
+//! `fuigo/recap` extension handler.
 //!
 //! Triggers generation of a session recap (a short "where was I" summary of the session so far) via [`SessionCommand::Recap`].
 //! This is fire-and-forget: the handler returns as soon as the command is queued rather than blocking on the model call.

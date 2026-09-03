@@ -1,7 +1,7 @@
 use super::RemoteSettings;
+use fuigo_fast_worktree::CreationMode;
 use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
-use fuigo_fast_worktree::CreationMode;
 
 /// Mirrors the internal `CreationMode` enum from fuigo-fast-worktree but uses config-friendly naming (lowercase strings in TOML).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

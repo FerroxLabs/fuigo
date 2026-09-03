@@ -1,4 +1,4 @@
-//! `x.ai/privacy/setCodingDataRetention` extension handler.
+//! `fuigo/privacy/setCodingDataRetention` extension handler.
 //!
 //! PUTs the new opt-out flag to cli-chat-proxy and updates local auth state to match.
 //! The local update only refreshes the cached copy, so its errors are ignored.
@@ -12,7 +12,7 @@ use crate::agent::MvpAgent;
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/privacy/setCodingDataRetention" => handle_set(agent, args).await,
+        "fuigo/privacy/setCodingDataRetention" => handle_set(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }

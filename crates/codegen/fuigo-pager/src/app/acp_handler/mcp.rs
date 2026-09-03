@@ -43,7 +43,7 @@ pub(super) fn handle_mcp_init_progress(notif: &acp::ExtNotification, app: &mut A
     is_active
 }
 
-/// Handle `x.ai/mcp/tools_changed` and `x.ai/mcp_initialized`.
+/// Handle `fuigo/mcp/tools_changed` and `fuigo/mcp_initialized`.
 ///
 /// Routing rules, verified against the four shell emit sites in `fuigo-shell/src/session/acp_session.rs`
 /// (toggle-tool ~L6661, `emit_mcp_tools_changed_notifications` ~L8997, post-handshake ~L10156, and `mcp_initialized` ~L10157):
@@ -66,7 +66,7 @@ pub(super) fn handle_mcp_init_progress(notif: &acp::ExtNotification, app: &mut A
 pub(super) fn handle_mcp_tools_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let method = notif.method.as_ref();
 
-    // Both `x.ai/mcp_initialized` and (newer shell) `x.ai/mcp/tools_changed` carry `sessionId`
+    // Both `fuigo/mcp_initialized` and (newer shell) `fuigo/mcp/tools_changed` carry `sessionId`
     // Route by it so a background agent's notification updates *its* state, not whichever agent is foregrounded
     // Unknown and subagent (child) sessions are dropped; a missing sessionId falls back to the active agent (legacy shells)
     #[derive(serde::Deserialize)]
@@ -103,7 +103,7 @@ pub(super) fn handle_mcp_tools_changed(notif: &acp::ExtNotification, app: &mut A
     let mut redraw = false;
 
     // `mcp_initialized` clears the matched agent's connecting indicator.
-    if method == "x.ai/mcp_initialized"
+    if method == "fuigo/mcp_initialized"
         && let Some(agent) = app.agents.get_mut(&id)
         && agent.mcp_init_progress.take().is_some()
     {
@@ -145,7 +145,7 @@ pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> 
     })
 }
 
-/// Handle `x.ai/mcp/server_status`.
+/// Handle `fuigo/mcp/server_status`.
 ///
 /// Routes by the notification's `sessionId` via [`find_session_match`].
 /// The matched agent's extensions modal is patched in-place via [`crate::views::mcps_modal::patch_server_row`] using the per-row delta.
@@ -174,7 +174,7 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
 
     let Ok(payload) = serde_json::from_str::<McpServerStatusPayload>(notif.params.get()) else {
         tracing::warn!(
-            "Failed to parse x.ai/mcp/server_status: {}",
+            "Failed to parse fuigo/mcp/server_status: {}",
             &notif.params.get()
                 [..crate::render::line_utils::floor_char_boundary(notif.params.get(), 100)]
         );
@@ -225,7 +225,7 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
                 tracing::warn!(
                     server = %payload.name,
                     error = %e,
-                    "x.ai/mcp/server_status: tools field present but not Vec<McpToolEntry>; status still applied"
+                    "fuigo/mcp/server_status: tools field present but not Vec<McpToolEntry>; status still applied"
                 );
                 None
             }
@@ -235,11 +235,11 @@ pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut A
     mutated && is_active
 }
 
-/// Handle `x.ai/mcp/elicit_complete`: dismiss the matched agent's URL-mode elicitation card that is still waiting on this `elicitation_id`.
+/// Handle `fuigo/mcp/elicit_complete`: dismiss the matched agent's URL-mode elicitation card that is still waiting on this `elicitation_id`.
 pub(super) fn handle_mcp_elicit_complete(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
-    let Ok(payload) = serde_json::from_str::<
-        fuigo_tools::mcp_elicitation::McpElicitCompletePayload,
-    >(notif.params.get()) else {
+    let Ok(payload) = serde_json::from_str::<fuigo_tools::mcp_elicitation::McpElicitCompletePayload>(
+        notif.params.get(),
+    ) else {
         return false;
     };
     let session_id = acp::SessionId::new(payload.session_id);
@@ -253,7 +253,7 @@ pub(super) fn handle_mcp_elicit_complete(notif: &acp::ExtNotification, app: &mut
     agent.dismiss_waiting_elicitation(&payload.elicitation_id, payload.server_name.as_deref())
 }
 
-/// Handle `x.ai/mcp/servers_updated`.
+/// Handle `fuigo/mcp/servers_updated`.
 ///
 /// Emitted by the shell from `MvpAgent` on managed-config resolve and on config reload.
 /// (See `notify_servers_updated` in `crates/codegen/fuigo-shell/src/agent/mvp_agent.rs`.)

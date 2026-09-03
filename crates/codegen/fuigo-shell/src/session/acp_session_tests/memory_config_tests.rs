@@ -1,10 +1,10 @@
 use super::support::*;
 use super::*;
 use crate::session::memory::MemorySearchSource;
-use tokio::sync::mpsc;
 use fuigo_paths::AbsPathBuf;
 use fuigo_workspace::file_system::MockFs;
 use fuigo_workspace::permission::PermissionHandle;
+use tokio::sync::mpsc;
 #[test]
 fn first_turn_memory_visibility_matches_displayed_score() {
     assert_eq!(

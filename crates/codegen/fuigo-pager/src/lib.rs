@@ -38,6 +38,7 @@ pub mod notifications;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
 pub mod plugin_cmd;
+mod provider_config_edit;
 pub mod pty_wrap;
 pub mod recent_dirs;
 pub mod scrollback;

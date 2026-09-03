@@ -28,10 +28,6 @@
 //! The subagent channels are wrapped in a `ChannelBackend` behind `SubagentBackendResource`.
 //! On rebuild, we must reuse the **same** senders so the existing coordinator keeps receiving requests.
 //! A fresh channel would orphan the running coordinator.
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 use fuigo_agent::config::AgentDefinition;
 use fuigo_agent::error::AgentBuildError;
 use fuigo_agent::prompt::context::PromptAudience;
@@ -51,6 +47,10 @@ use fuigo_tools::notification::ToolNotificationHandle;
 use fuigo_tools::types::SharedApiKeyProvider;
 use fuigo_tools::types::compat::CompatConfig;
 use fuigo_tools::types::memory_backend::MemoryBackend;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 /// Shell-resolved per-tool `ToolConfig.params` JSON maps.
 /// The struct keeps the spawn functions to a single argument instead of adjacent identically-typed positional arguments a caller could transpose.
 #[derive(Debug, Clone, Default)]
@@ -109,9 +109,8 @@ pub(crate) struct AgentRebuildSpec {
     pub attribution_callback: Option<fuigo_tools::SharedAttributionCallback>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
-    pub subagent_coordinator_sender: Option<
-        fuigo_tools::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
-    >,
+    pub subagent_coordinator_sender:
+        Option<fuigo_tools::implementations::fuigo_build::task::backend::SubagentCoordinatorSender>,
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,

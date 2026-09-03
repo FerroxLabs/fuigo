@@ -48,7 +48,7 @@ fn send_routed_notification(
     }
 }
 
-const NOTIFICATION_METHOD: &str = "x.ai/terminal/pty/notification";
+const NOTIFICATION_METHOD: &str = "fuigo/terminal/pty/notification";
 const OUTPUT_RING_BUFFER_SIZE: usize = 256 * 1024;
 const OUTPUT_BATCH_INTERVAL_MS: u64 = 16;
 const BUSY_POLL_INTERVAL_MS: u64 = 500;

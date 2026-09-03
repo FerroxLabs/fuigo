@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
+use fuigo_hunk_tracker::{
+    FileContentEntry, FileContentStatus, FileContentView, Hunk, HunkTrackerHandle,
+};
 use fuigo_workspace::workspace_ops::{
     FileContentEntryWire, FileContentStatusWire, FileContentViewWire, HunkActionKind,
     HunkActionReq, HunkAllActionReq, HunkFileActionReq, HunkGetAllFileContentsReq,
     HunkGetSessionSummaryReq, HunkSingleActionReq, HunkTurnActionReq,
-};
-use fuigo_hunk_tracker::{
-    FileContentEntry, FileContentStatus, FileContentView, Hunk, HunkTrackerHandle,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -302,7 +302,7 @@ pub async fn handle(
         // ───────────────────────────────────────────────────────────────
         // Queries
         // ───────────────────────────────────────────────────────────────
-        "x.ai/hunk-tracker/get-hunks" => {
+        "fuigo/hunk-tracker/get-hunks" => {
             let req = parse_params::<GetHunksRequest>(args)?;
             let ctx = get_hunk_tracker(agent, req.session_id.as_ref())?;
 
@@ -346,7 +346,7 @@ pub async fn handle(
             }))
         }
 
-        "x.ai/hunk-tracker/get-files" => {
+        "fuigo/hunk-tracker/get-files" => {
             let req = parse_params::<GetFilesRequest>(args)?;
             let ctx = get_hunk_tracker(agent, req.session_id.as_ref())?;
 
@@ -362,7 +362,7 @@ pub async fn handle(
             to_ext_response(Ok(GetFilesResponse { files }))
         }
 
-        "x.ai/hunk-tracker/get-all-file-contents" => {
+        "fuigo/hunk-tracker/get-all-file-contents" => {
             let req = parse_params::<GetFilesRequest>(args)?;
 
             let sid = req.session_id.as_ref().map(|s| s.0.as_ref());
@@ -388,7 +388,7 @@ pub async fn handle(
             to_ext_response(Ok(GetAllFileContentsResponse { files }))
         }
 
-        "x.ai/hunk-tracker/get-summary" => {
+        "fuigo/hunk-tracker/get-summary" => {
             let req = parse_params::<GetSummaryRequest>(args)?;
 
             let sid = req.session_id.as_ref().map(|s| s.0.as_ref());
@@ -402,7 +402,7 @@ pub async fn handle(
         // ───────────────────────────────────────────────────────────────
         // Single Hunk Action
         // ───────────────────────────────────────────────────────────────
-        "x.ai/hunk-tracker/hunk-action" => {
+        "fuigo/hunk-tracker/hunk-action" => {
             let req = parse_params::<HunkActionRequest>(args)?;
 
             let action_kind = match req.action.as_str() {
@@ -438,7 +438,7 @@ pub async fn handle(
         // ───────────────────────────────────────────────────────────────
         // Bulk Actions
         // ───────────────────────────────────────────────────────────────
-        "x.ai/hunk-tracker/file-action" => {
+        "fuigo/hunk-tracker/file-action" => {
             let req = parse_params::<FileActionRequest>(args)?;
 
             let action_kind = match req.action.as_str() {
@@ -469,7 +469,7 @@ pub async fn handle(
             }
         }
 
-        "x.ai/hunk-tracker/turn-action" => {
+        "fuigo/hunk-tracker/turn-action" => {
             let req = parse_params::<TurnActionRequest>(args)?;
 
             let action_kind = match req.action.as_str() {
@@ -500,7 +500,7 @@ pub async fn handle(
             }
         }
 
-        "x.ai/hunk-tracker/all-action" => {
+        "fuigo/hunk-tracker/all-action" => {
             let req = parse_params::<AllActionRequest>(args)?;
 
             let action_kind = match req.action.as_str() {
@@ -538,12 +538,12 @@ pub async fn handle(
 mod tests {
     use super::{GetAllFileContentsResponse, GetHunksResponse, compute_file_summaries};
     use chrono::Utc;
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-    use std::sync::Arc;
     use fuigo_hunk_tracker::{
         FileContentStatus, FileContentView, Hunk, HunkId, HunkLineInfo, HunkSource,
     };
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn make_hunk(
         id: &str,

@@ -62,7 +62,7 @@ pub(in crate::app::dispatch) fn dispatch_sessions_confirm_close(
     remove_agent_and_cleanup(app, closed_id);
     effects
 }
-/// Rename the current session via x.ai/session/rename.
+/// Rename the current session via fuigo/session/rename.
 ///
 /// Produces Effect::RenameSession which spawns an async ACP ext request.
 /// On completion, TaskResult::RenameSessionComplete shows the result.
@@ -95,7 +95,7 @@ pub(in crate::app::dispatch) fn dispatch_rename_session(
         kind: agent.rename_kind(),
     }]
 }
-/// Unpin the current session title via `x.ai/session/rename` with `resetToAuto`.
+/// Unpin the current session title via `fuigo/session/rename` with `resetToAuto`.
 ///
 /// Chat-kind sessions have no local `SummaryGenerator` to restore, so they are refused here (no optimistic clear, no ext request).
 pub(in crate::app::dispatch) fn dispatch_reset_session_title(app: &mut AppView) -> Vec<Effect> {

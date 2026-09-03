@@ -42,7 +42,7 @@ impl AgentView {
 
     /// Append the replayed transcript's `UserPrompt` blocks to `session.prompt_history`, newest first.
     ///
-    /// The browse reads that list alone, and the `x.ai/prompt_history` fetch delivers an empty list when it fails.
+    /// The browse reads that list alone, and the `fuigo/prompt_history` fetch delivers an empty list when it fails.
     /// This is therefore what makes a restored session's prompts recallable.
     /// Appended, not prepended: a prompt sent during the load is newer than anything the transcript holds.
     /// `PromptHistoryLoaded` skips fetched prompts whose trimmed text is already here.
@@ -1635,7 +1635,7 @@ mod prompt_suggestion_key_tests {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    /// Idle agent with the gate open and a loaded suggestion: the state right after a turn ends with `x.ai/suggestPrompt` resolved.
+    /// Idle agent with the gate open and a loaded suggestion: the state right after a turn ends with `fuigo/suggestPrompt` resolved.
     /// Pins the settings cache so `resolve_enabled()` never reads the dev machine's config.toml (thread-local, so per-test).
     fn suggestion_agent(text: &str) -> AgentView {
         crate::appearance::cache::set_prompt_suggestions(true);

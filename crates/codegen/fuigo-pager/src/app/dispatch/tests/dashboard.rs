@@ -9,12 +9,14 @@ fn voice_final_appends_to_dashboard_dispatch() {
     ensure_dashboard_state(&mut app);
     app.dashboard.as_mut().unwrap().dispatch.set_text("fix");
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::DashboardDispatch,
         interim: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "the build".into(),
         },
     );
@@ -47,12 +49,14 @@ fn voice_final_appends_to_peek_reply_when_peek_open() {
     ));
     dash.peek_reply.set_text("reply");
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::DashboardPeekReply(id),
         interim: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "with voice".into(),
         },
     );
@@ -91,6 +95,7 @@ fn voice_final_discarded_when_peek_row_changed_after_stop() {
     app.active_view = ActiveView::AgentDashboard;
     ensure_dashboard_state(&mut app);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::DashboardPeekReply(AgentId(0)),
         interim: None,
     };
@@ -98,6 +103,7 @@ fn voice_final_discarded_when_peek_row_changed_after_stop() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "late words".into(),
         },
     );
@@ -107,44 +113,55 @@ fn voice_final_discarded_when_peek_row_changed_after_stop() {
         "a final for a no-longer-peeked row must be discarded"
     );
 }
+/// Submitting while a *batch* dictation is live stops the microphone but keeps
+/// the session bound, so the recording already in flight is still delivered.
+///
+/// This test used to assert the opposite -- that submit dropped the target and
+/// a late final "must not refill the submitted dispatch box". That pinned a
+/// silent data loss: batch delivers nothing until the upload finishes, so the
+/// dropped final was the user's entire dictation. Landing it in the box is
+/// visible and recoverable; destroying it is neither.
 #[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
-fn voice_dashboard_dispatch_submit_tears_down_voice() {
+fn voice_dashboard_dispatch_submit_keeps_the_recording_it_cannot_yet_have() {
     let mut app = test_app();
     open_dashboard(&mut app);
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_mode_enabled = true;
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardDispatch,
         interim: Some("the build".into()),
     };
     let _ = dispatch_dashboard_dispatch(&mut app, "fix the build".into(), false);
     assert!(!app.voice_listening(), "submit stops capture");
-    assert!(
-        app.voice_recording_target().is_none(),
-        "submit drops the target"
+    assert_eq!(
+        app.voice_recording_target(),
+        Some(VoiceTarget::DashboardDispatch),
+        "the binding survives so the in-flight recording still has somewhere to go"
     );
     assert!(app.voice_interim().is_none());
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "late words".into(),
         },
     );
     assert!(
-        !app.dashboard
+        app.dashboard
             .as_ref()
             .unwrap()
             .dispatch
             .text()
             .contains("late words"),
-        "a late final must not refill the submitted dispatch box"
+        "the dictation the user already spoke must arrive, not be discarded"
     );
 }
 #[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
@@ -167,13 +184,14 @@ fn submit_cancels_pending_voice_cold_start() {
 }
 #[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
-fn voice_dashboard_peek_reply_submit_tears_down_voice() {
+fn voice_dashboard_peek_reply_submit_keeps_the_recording() {
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_mode_enabled = true;
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardPeekReply(AgentId(0)),
         interim: None,
@@ -185,13 +203,14 @@ fn voice_dashboard_peek_reply_submit_tears_down_voice() {
         false,
     );
     assert!(!app.voice_listening(), "peek reply submit stops capture");
-    assert!(
-        app.voice_recording_target().is_none(),
-        "submit drops the target"
+    assert_eq!(
+        app.voice_recording_target(),
+        Some(VoiceTarget::DashboardPeekReply(AgentId(0))),
+        "the binding survives so the in-flight recording still has somewhere to go"
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 #[test]
@@ -261,6 +280,7 @@ fn voice_auto_stops_when_peek_row_changes() {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardPeekReply(AgentId(0)),
         interim: None,
@@ -291,6 +311,7 @@ fn voice_suppressed_while_dashboard_popup_open() {
     assert!(!app.voice_listening());
     assert!(app.voice_recording_target().is_none());
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardDispatch,
         interim: None,
@@ -4478,9 +4499,9 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use fuigo_telemetry::events::AnnouncementCtaSurface;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use fuigo_telemetry::events::AnnouncementCtaSurface;
     let registry = ActionRegistry::defaults();
     let mut agents: indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView> =
         indexmap::IndexMap::new();

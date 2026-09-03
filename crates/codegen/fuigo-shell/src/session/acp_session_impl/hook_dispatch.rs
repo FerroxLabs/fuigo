@@ -242,8 +242,7 @@ impl SessionActor {
         let ctx = self.hook_run_ctx();
         // Prompt-gate events go through dispatch_prompt_submit_hook; dispatch_non_blocking debug-asserts observe-only
         let results =
-            fuigo_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx)
-                .await;
+            fuigo_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx).await;
         self.send_hook_execution(&event.to_string(), tool_name, prompt_id, &results)
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), tool_name, &results)
@@ -407,8 +406,7 @@ impl SessionActor {
             return fuigo_hooks::result::PromptDecision::Allow;
         };
         let ctx = self.hook_run_ctx();
-        let gate =
-            fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &envelope, &ctx).await;
+        let gate = fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &envelope, &ctx).await;
         self.send_hook_execution(&event.to_string(), None, prompt_id, &gate.results)
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)

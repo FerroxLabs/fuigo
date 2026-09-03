@@ -29,7 +29,7 @@ pub const ALLOW_EDITS_SESSION_OPTION_ID: &str = "allow-edits-session";
 ///     2. Drains any queued permission requests with `AllowOnce` responses
 ///     3. Persists `[ui] permission_mode = "always-approve"` to
 ///        `~/.fuigo/config.toml` via the `Effect::PersistPermissionMode` effect
-///     4. Sends the existing `x.ai/yolo_mode_changed` ACP notification so the agent's permission manager flips its `yolo_mode` flag
+///     4. Sends the existing `fuigo/yolo_mode_changed` ACP notification so the agent's permission manager flips its `yolo_mode` flag
 ///
 /// This split keeps the wire protocol plain ACP: no new methods, no extensions, no new `PermissionOptionKind` variant.
 /// A client that does not recognise the id treats it as an ordinary `AllowAlways` option; the shell still maps the response to `AllowOnce`.

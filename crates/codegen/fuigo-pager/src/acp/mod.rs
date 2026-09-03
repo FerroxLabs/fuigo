@@ -16,16 +16,17 @@ pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_b
 /// TUI dispatch, headless dispatch, and the session-load ACP barrier all share this list.
 /// A new method thus cannot be handled in one path and classified `Unrelated` in another.
 pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
-    matches!(method, "x.ai/session_notification" | "x.ai/session/update")
+    matches!(
+        method,
+        "fuigo/session_notification" | "fuigo/session/update"
+    )
 }
 
 use fuigo_telemetry::process_info::{
     Entrypoint, Interactivity, LeaderMode, ProcessIdentity, set_identity,
 };
 use fuigo_telemetry::startup;
-pub use fuigo_telemetry::startup::{
-    AgentKind, Owner, StartupOutcome, StartupPhase, StartupTimer,
-};
+pub use fuigo_telemetry::startup::{AgentKind, Owner, StartupOutcome, StartupPhase, StartupTimer};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -102,7 +103,7 @@ pub struct AcpConnection {
     pub cancel_rewind_enabled: bool,
     /// Whether the session-recap feature is rolled out for this connection.
     /// The shell resolves it (remote settings, config, env; default OFF) and advertises it in `InitializeResponse.meta.sessionRecap`.
-    /// The client gates its automatic away-recap poll and the manual `/recap` on this so a disabled feature produces zero `x.ai/recap` traffic.
+    /// The client gates its automatic away-recap poll and the manual `/recap` on this so a disabled feature produces zero `fuigo/recap` traffic.
     /// Defaults to `false` when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
     /// Shell-side feedback trace-offer eligibility (see `feedbackTraceOffer`).
@@ -132,7 +133,7 @@ pub struct ConnectFlags {
     pub laziness_debug_log: Option<std::path::PathBuf>,
     /// Storage mode override.
     pub storage_mode: Option<String>,
-    /// Whether this client will draw a status row, advertised as `x.ai/statusLine` so the agent can skip an unpainted payload.
+    /// Whether this client will draw a status row, advertised as `fuigo/statusLine` so the agent can skip an unpainted payload.
     pub status_line: bool,
     /// Client identifier for ACP Initialize metadata.
     pub client_identifier: Option<String>,
@@ -436,13 +437,57 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
 
 /// Write config.toml fields based on CLI flags.
 fn apply_config_writes(flags: &ConnectFlags) {
-    // Use toml_edit to preserve existing config structure
     let config_path =
         fuigo_shell::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut doc = content
-        .parse::<toml_edit::DocumentMut>()
-        .unwrap_or_default();
+    // Held across the read and the write: this is a read-modify-write of the
+    // user's config, and every other writer of that file takes the same lock.
+    match fuigo_config::fs_atomic::locked_read_modify_write(&config_path, || {
+        apply_config_writes_locked(flags, &config_path);
+    }) {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to lock config.toml; connect flags not persisted")
+        }
+    }
+}
+
+/// Body of [`apply_config_writes`]; the caller holds the config write lock.
+fn apply_config_writes_locked(flags: &ConnectFlags, config_path: &std::path::Path) {
+    // Use toml_edit to preserve existing config structure
+    // Only a missing file is an empty config. Treating a hard read error
+    // (EACCES, EIO) as empty would let the atomic write below replace a file
+    // this process could not read, erasing every setting in it -- and the write
+    // being atomic now makes that erasure clean rather than partial.
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %config_path.display(),
+                "refusing to persist connect flags: config.toml could not be read"
+            );
+            return;
+        }
+    };
+    // An unparseable file is refused rather than defaulted: `unwrap_or_default`
+    // here silently replaced the user's whole config with just the keys written
+    // below, destroying every other table in it.
+    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) if content.trim().is_empty() => {
+            let _ = e;
+            toml_edit::DocumentMut::new()
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %config_path.display(),
+                "refusing to persist connect flags: config.toml is non-empty and unparseable"
+            );
+            return;
+        }
+    };
 
     let mut changed = false;
 
@@ -460,7 +505,13 @@ fn apply_config_writes(flags: &ConnectFlags) {
         if let Some(parent) = config_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
+        // Atomic rename rather than a truncating write, so a crash mid-write
+        // cannot leave a half-written config behind.
+        if let Err(e) = fuigo_config::fs_atomic::write_atomically(
+            config_path,
+            &doc.to_string(),
+            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
+        ) {
             tracing::warn!(error = %e, "failed to write config.toml");
         }
     }
@@ -491,10 +542,10 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
     let hunk_mode =
         crate::settings::canonical_hunk_tracker_mode(flags.hunk_tracker_mode.as_deref());
     let mut meta = serde_json::json!({
-        "x.ai/incrementalBashOutput": true,
-        "x.ai/hunkTracker": { "mode": hunk_mode },
-        "x.ai/bashOutputNoColor": true,
-        "x.ai/gitHeadChanged": true,
+        "fuigo/incrementalBashOutput": true,
+        "fuigo/hunkTracker": { "mode": hunk_mode },
+        "fuigo/bashOutputNoColor": true,
+        "fuigo/gitHeadChanged": true,
     });
     meta[fuigo_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
     meta
@@ -840,9 +891,9 @@ mod tests {
 
     #[test]
     fn is_session_update_ext_method_covers_both_carriers() {
-        assert!(is_session_update_ext_method("x.ai/session_notification"));
-        assert!(is_session_update_ext_method("x.ai/session/update"));
-        assert!(!is_session_update_ext_method("x.ai/task_completed"));
+        assert!(is_session_update_ext_method("fuigo/session_notification"));
+        assert!(is_session_update_ext_method("fuigo/session/update"));
+        assert!(!is_session_update_ext_method("fuigo/task_completed"));
         assert!(!is_session_update_ext_method("session/update"));
     }
 
@@ -1019,7 +1070,7 @@ mod tests {
     /// It then either passes or fails on a meaningful new code path.
     #[test]
     fn startup_auth_fuigo_api_key_not_first_still_requires_login() {
-        use fuigo_shell::agent::auth_method::{FUIGO_COM_METHOD_ID, FUIGO_API_KEY_METHOD_ID};
+        use fuigo_shell::agent::auth_method::{FUIGO_API_KEY_METHOD_ID, FUIGO_COM_METHOD_ID};
 
         let methods = vec![
             make_auth_method(FUIGO_COM_METHOD_ID, "Fuigo", None),
@@ -1139,12 +1190,12 @@ mod tests {
     fn client_capabilities_meta_defaults_absent_or_blank_mode_to_off() {
         // Nothing set and a set-but-blank value both advertise the `off` default (never `""`, which maps to AllDirty)
         let absent = client_capabilities_meta(&ConnectFlags::default());
-        assert_eq!(absent["x.ai/hunkTracker"]["mode"], "off");
+        assert_eq!(absent["fuigo/hunkTracker"]["mode"], "off");
         let blank = client_capabilities_meta(&ConnectFlags {
             hunk_tracker_mode: Some("   ".into()),
             ..Default::default()
         });
-        assert_eq!(blank["x.ai/hunkTracker"]["mode"], "off");
+        assert_eq!(blank["fuigo/hunkTracker"]["mode"], "off");
     }
 
     /// The agent gates the whole payload on this key, so a misspelling on either side switches the feature off with nothing to show for it.
@@ -1168,7 +1219,7 @@ mod tests {
                 hunk_tracker_mode: Some(raw.into()),
                 ..Default::default()
             });
-            assert_eq!(meta["x.ai/hunkTracker"]["mode"], "off", "raw={raw}");
+            assert_eq!(meta["fuigo/hunkTracker"]["mode"], "off", "raw={raw}");
         }
     }
 }

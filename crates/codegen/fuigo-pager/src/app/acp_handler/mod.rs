@@ -554,37 +554,37 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         return handle_session_notification(notif, app);
     }
     match method {
-        "x.ai/follow_ups" => handle_follow_ups(notif, app),
-        "x.ai/task_backgrounded" => handle_task_backgrounded(notif, app),
-        "x.ai/task_completed" => handle_task_completed(notif, app),
-        "x.ai/models/update" => handle_models_update(notif, app),
-        "x.ai/settings/update" => handle_settings_update(notif, app),
-        "x.ai/sessions/changed" => handle_sessions_changed(notif, app),
-        "x.ai/queue/changed" => handle_queue_changed(notif, app),
-        "x.ai/session/prompt_complete" => handle_prompt_complete(notif, app),
-        "x.ai/session/interjection" => handle_interjection(notif, app),
-        "x.ai/monitor_event" => handle_monitor_event(notif, app),
-        "x.ai/scheduled_task_created" => handle_scheduled_task_created(notif, app),
-        "x.ai/scheduled_task_fired" => handle_scheduled_task_fired(notif, app),
-        "x.ai/scheduled_task_deleted" => handle_scheduled_task_deleted(notif, app),
-        "x.ai/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
-        "x.ai/announcements/update" => handle_announcements_update(notif, app),
-        "x.ai/git_head_changed" => handle_git_head_changed(notif, app),
-        "x.ai/leader/version_mismatch" => handle_version_mismatch(notif, app),
-        "x.ai/mcp/init_progress" => handle_mcp_init_progress(notif, app),
-        "x.ai/mcp/tools_changed" | "x.ai/mcp_initialized" => handle_mcp_tools_changed(notif, app),
-        "x.ai/mcp/server_status" if push_server_status_enabled() => {
+        "fuigo/follow_ups" => handle_follow_ups(notif, app),
+        "fuigo/task_backgrounded" => handle_task_backgrounded(notif, app),
+        "fuigo/task_completed" => handle_task_completed(notif, app),
+        "fuigo/models/update" => handle_models_update(notif, app),
+        "fuigo/settings/update" => handle_settings_update(notif, app),
+        "fuigo/sessions/changed" => handle_sessions_changed(notif, app),
+        "fuigo/queue/changed" => handle_queue_changed(notif, app),
+        "fuigo/session/prompt_complete" => handle_prompt_complete(notif, app),
+        "fuigo/session/interjection" => handle_interjection(notif, app),
+        "fuigo/monitor_event" => handle_monitor_event(notif, app),
+        "fuigo/scheduled_task_created" => handle_scheduled_task_created(notif, app),
+        "fuigo/scheduled_task_fired" => handle_scheduled_task_fired(notif, app),
+        "fuigo/scheduled_task_deleted" => handle_scheduled_task_deleted(notif, app),
+        "fuigo/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
+        "fuigo/announcements/update" => handle_announcements_update(notif, app),
+        "fuigo/git_head_changed" => handle_git_head_changed(notif, app),
+        "fuigo/leader/version_mismatch" => handle_version_mismatch(notif, app),
+        "fuigo/mcp/init_progress" => handle_mcp_init_progress(notif, app),
+        "fuigo/mcp/tools_changed" | "fuigo/mcp_initialized" => handle_mcp_tools_changed(notif, app),
+        "fuigo/mcp/server_status" if push_server_status_enabled() => {
             handle_mcp_server_status(notif, app)
         }
-        "x.ai/mcp/elicit_complete" => handle_mcp_elicit_complete(notif, app),
-        "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
+        "fuigo/mcp/elicit_complete" => handle_mcp_elicit_complete(notif, app),
+        "fuigo/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
         _ => false,
     }
 }
 
 fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Some(banner) = crate::acp::version_mismatch_banner(notif.params.get()) else {
-        tracing::warn!("ignoring x.ai/leader/version_mismatch without usable versions");
+        tracing::warn!("ignoring fuigo/leader/version_mismatch without usable versions");
         return false;
     };
     app.show_toast(&banner);
@@ -593,7 +593,7 @@ fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> b
 
 fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
-        tracing::warn!("Failed to parse x.ai/session/interjection");
+        tracing::warn!("Failed to parse fuigo/session/interjection");
         return false;
     };
     let Some(session_id) = parsed.get("sessionId").and_then(|v| v.as_str()) else {
@@ -641,9 +641,9 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
 
 fn handle_ext_method(ext: fuigo_acp_lib::AcpArgs<acp::ExtRequest>, app: &mut AppView) -> bool {
     match ext.request.method.as_ref() {
-        "x.ai/ask_user_question" => handle_ask_user_question(ext, app),
-        "x.ai/exit_plan_mode" => handle_exit_plan_mode(ext, app),
-        "x.ai/mcp/elicit" => handle_mcp_elicit(ext, app),
+        "fuigo/ask_user_question" => handle_ask_user_question(ext, app),
+        "fuigo/exit_plan_mode" => handle_exit_plan_mode(ext, app),
+        "fuigo/mcp/elicit" => handle_mcp_elicit(ext, app),
         unknown => {
             tracing::warn!("Unknown ext_method: {unknown}");
             ext.response_tx

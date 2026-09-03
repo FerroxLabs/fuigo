@@ -8,6 +8,12 @@ use crossterm::event::{
     MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use fuigo_pager::scrollback::text_selection::{
+    PersistentTextSelection, RangeHit, ResolvedSelectionModel, SelectionEndpoint, SelectionOrigin,
+    configured_word_separators, render_persistent_selection_overlay, semantic_selection_at,
+    url_range_at_col,
+};
+use fuigo_pager::scrollback::{RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackState};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -15,12 +21,6 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use fuigo_pager::scrollback::text_selection::{
-    PersistentTextSelection, RangeHit, ResolvedSelectionModel, SelectionEndpoint, SelectionOrigin,
-    configured_word_separators, render_persistent_selection_overlay, semantic_selection_at,
-    url_range_at_col,
-};
-use fuigo_pager::scrollback::{RenderBlock, ScratchBuffer, ScrollbackPane, ScrollbackState};
 
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
 const MULTI_CLICK_TIMEOUT_MS: u128 = 300;

@@ -3,12 +3,12 @@ use super::turn::{PromptTraceContext, UploadWait};
 use crate::sampling::types::ToolDefinition;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use base64::Engine as _;
+use fuigo_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy};
+use fuigo_workspace::permission::PermissionEvent;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
-use fuigo_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy};
-use fuigo_workspace::permission::PermissionEvent;
 /// Upload the canonical tool definitions trace and wait for completion.
 ///
 /// `ToolDefinition` serializes in Chat Completions format: `{ "type": "function", "function": { ... } }`.

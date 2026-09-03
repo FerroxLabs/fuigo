@@ -16,9 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::{self as acp, Agent as _};
-use serde_json::json;
-use tempfile::TempDir;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use fuigo_acp_lib::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     LineBufferedRead,
@@ -26,6 +23,9 @@ use fuigo_acp_lib::{
 use fuigo_shell::agent::config::Config as AgentConfig;
 use fuigo_shell::agent::mvp_agent::MvpAgent;
 use fuigo_test_support::{MockInferenceServer, MockModelEntry};
+use serde_json::json;
+use tempfile::TempDir;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 const DUPLEX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
@@ -35,7 +35,7 @@ const FRESH_TOKEN: &str = "fresh-token-the-provider-cannot-mint";
 const STALE_TOKEN: &str = "stale-external-token";
 const PROVIDER_LABEL: &str = "Acme SSO";
 
-/// Records `x.ai/session/update` payloads so a phase can read the terminal `retryState`.
+/// Records `fuigo/session/update` payloads so a phase can read the terminal `retryState`.
 #[derive(Clone, Default)]
 struct Capture {
     updates: std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>,

@@ -21,7 +21,7 @@ struct FuigoJsonRpcNotification<'a> {
 }
 
 const ACP_SESSION_UPDATE_METHOD: &str = "session/update";
-const FUIGO_SESSION_UPDATE_METHOD: &str = "_x.ai/session/update";
+const FUIGO_SESSION_UPDATE_METHOD: &str = "_fuigo/session/update";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedMessage {

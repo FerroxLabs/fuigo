@@ -320,9 +320,39 @@ pub(super) fn dispatch_enter_api_key(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Apply the Nth credential discovered in the environment.
+///
+/// The key is re-read here rather than carried in the action. `Action` and
+/// `Effect` are both `#[derive(Debug)]`, so a secret held in a variant is one
+/// stray `{:?}` away from a log file or a crash report; an index is inert.
+///
+/// Only `discover_appliable()` is consulted. That excludes every third-party
+/// provider, because `fuigo/setApiKey` is provider-blind — it stores whatever
+/// it is handed as *the* credential and it is then sent as the bearer to
+/// `[endpoints].fuigo_api_base_url`. Applying an OpenAI key that way would
+/// send an OpenAI secret to FluxRouter.
+///
+/// Matching on the variable NAME rather than a position means a variable
+/// that disappeared between render and keypress simply yields nothing, rather
+/// than applying whichever key slid into that slot.
+pub(super) fn dispatch_use_detected_key(app: &mut AppView, env_var: String) -> Vec<Effect> {
+    let found = fuigo_shell::agent::key_discovery::discover_appliable();
+    let Some(discovered) = found.iter().find(|d| d.env_var == env_var) else {
+        // The variable vanished between render and keypress. Do nothing rather
+        // than fall back to a neighbouring row.
+        return vec![];
+    };
+    let key = discovered.key().to_owned();
+    // Reuse the manual path's state transition so there is one way to become
+    // authenticated, then submit immediately instead of showing a paste box.
+    let mut effects = dispatch_enter_api_key(app);
+    effects.extend(dispatch_submit_api_key(app, key));
+    effects
+}
+
 /// User submitted an API key.
 ///
-/// An empty submission is ignored rather than sent: `x.ai/setApiKey` treats an
+/// An empty submission is ignored rather than sent: `fuigo/setApiKey` treats an
 /// empty key as "clear the stored credential", which is the opposite of what
 /// someone pressing Enter on a blank box wants.
 pub(super) fn dispatch_submit_api_key(app: &mut AppView, key: String) -> Vec<Effect> {
@@ -334,7 +364,10 @@ pub(super) fn dispatch_submit_api_key(app: &mut AppView, key: String) -> Vec<Eff
     if key.is_empty() {
         return vec![];
     }
-    vec![Effect::SubmitApiKey { request_seq, key }]
+    vec![Effect::SubmitApiKey {
+        request_seq,
+        key: crate::app::actions::SecretKey(key),
+    }]
 }
 
 /// User submitted a manually-pasted auth token in loopback mode.

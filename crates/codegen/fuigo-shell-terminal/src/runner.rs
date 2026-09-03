@@ -21,7 +21,7 @@ pub struct TerminalRunRequest {
     pub timeout: Duration,
     pub output_byte_limit: usize,
     /// Whether to stream output updates and register in the terminal registry.
-    /// - `true`: Agent tool calls (streaming updates, killable via x.ai/terminal/kill)
+    /// - `true`: Agent tool calls (streaming updates, killable via fuigo/terminal/kill)
     /// - `false`: Extension methods, git helpers (no updates, not killable)
     pub stream: bool,
     /// When Some, the streaming loop writes output to this file as it arrives.

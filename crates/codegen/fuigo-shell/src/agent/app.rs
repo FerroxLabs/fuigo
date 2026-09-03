@@ -8,6 +8,10 @@ use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig, run_auth_flow};
 use crate::leader::protocol::InternalMethod;
 use crate::util::fuigo_home;
 use agent_client_protocol as acp;
+use fuigo_acp_lib::{
+    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
+    LineBufferedRead,
+};
 use parking_lot::Mutex;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -18,10 +22,6 @@ use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::time::Duration;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 use tracing::{debug, info, warn};
-use fuigo_acp_lib::{
-    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
-    LineBufferedRead,
-};
 const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 use indexmap::IndexMap;
 /// Configuration for periodic auto-update checking in leader mode.
@@ -170,7 +170,7 @@ fn internal_reload_request_line(
 ) -> String {
     crate::leader::protocol::internal_request_line(id, method, params)
 }
-/// Start a skills file watcher and wire it to inject `x.ai/internal/reload_skills` messages into the shared ACP incoming stream.
+/// Start a skills file watcher and wire it to inject `fuigo/internal/reload_skills` messages into the shared ACP incoming stream.
 /// The messages fire when SKILL.md files change on disk.
 ///
 /// Returns the watcher task, or `None` if no directories could be watched.
@@ -1271,7 +1271,7 @@ pub async fn run_leader(
                             info!("UI config change detected by watcher");
                             let notification = serde_json::json!({
                                 "jsonrpc": "2.0",
-                                "method": "x.ai/config_changed",
+                                "method": "fuigo/config_changed",
                                 "params": {
                                     "section": "ui",
                                     "changes": {
@@ -1339,7 +1339,7 @@ mod tests {
         FuigoAuth {
             key: key.into(),
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             refresh_token: Some(format!("rt-{key}")),
             create_time,
             expires_at: Some(create_time + chrono::Duration::minutes(15)),
@@ -1403,7 +1403,7 @@ mod tests {
     fn test_relay_config(addr: std::net::SocketAddr) -> crate::agent::relay::RelayConfig {
         let auth = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             ..FuigoAuth::test_default()
         };
         let cfg = crate::auth::FuigoComConfig {
@@ -1420,7 +1420,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn embedded_otel_gate_keeps_a_session_user_fail_closed() {
-        use crate::agent::auth_method::{LEGACY_FUIGO_API_KEY_ENV_VAR, FUIGO_API_KEY_ENV_VAR};
+        use crate::agent::auth_method::{FUIGO_API_KEY_ENV_VAR, LEGACY_FUIGO_API_KEY_ENV_VAR};
         use fuigo_telemetry::external::{
             is_settings_gate_open, mark_external_otel_settings_resolved,
         };
@@ -1467,7 +1467,7 @@ mod tests {
         let session = FuigoAuth {
             expires_at: chrono::DateTime::from_timestamp(9_999_999_999, 0),
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             ..FuigoAuth::test_default()
         };
         let with_session = {
@@ -1501,6 +1501,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn eager_relay_connects_without_any_ipc_client() {
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
         let (addr, count) = spawn_mock_relay_server().await;
         let config = test_relay_config(addr);
         let cancel = CancellationToken::new();
@@ -1539,6 +1541,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn on_demand_relay_waits_for_headless_demand_signal() {
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
         let (addr, count) = spawn_mock_relay_server().await;
         let config = test_relay_config(addr);
         let cancel = CancellationToken::new();
@@ -1579,6 +1583,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn deferred_arm_connects_relay_when_auth_appears() {
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
         let (addr, count) = spawn_mock_relay_server().await;
         let cancel = CancellationToken::new();
         let (ws_to_agent_tx, _ws_to_agent_rx) = mpsc::unbounded_channel();
@@ -1618,7 +1624,7 @@ mod tests {
                 );
                 let eligible = FuigoAuth {
                     auth_mode: AuthMode::Oidc,
-                    oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+                    oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
                     ..FuigoAuth::test_default()
                 };
                 assert!(
@@ -1643,6 +1649,8 @@ mod tests {
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn cold_mint_auth_write_arms_deferred_relay() {
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
         use crate::config::reloader::{ConfigReloader, ConfigUpdate, hash_auth_key};
         let (addr, _count) = spawn_mock_relay_server().await;
         let fuigo_com_config = crate::auth::FuigoComConfig {
@@ -1654,7 +1662,7 @@ mod tests {
         let scope = "https://test.example.com".to_string();
         let session = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(crate::auth::GROK_OAUTH2_ISSUER.to_string()),
             ..FuigoAuth::test_default()
         };
         let mut store = std::collections::BTreeMap::new();
@@ -1725,7 +1733,7 @@ mod tests {
         assert!(line.ends_with('\n'), "must be a newline-terminated line");
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(
-            msg["method"], "_x.ai/internal/reload_models",
+            msg["method"], "_fuigo/internal/reload_models",
             "wire method must carry the `_` ext prefix or the ACP decoder \
              rejects it with method_not_found"
         );
@@ -1744,7 +1752,7 @@ mod tests {
             serde_json::json!({}),
         );
         let msg: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(msg["method"], "_x.ai/internal/auth_cleared");
+        assert_eq!(msg["method"], "_fuigo/internal/auth_cleared");
     }
     #[tokio::test]
     #[tracing::instrument(level = "debug", skip_all)]

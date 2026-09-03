@@ -1,9 +1,9 @@
 //! Announcement tracking for MCP servers and skills: which of them were already announced via `<system-reminder>` messages.
 //! The tracking keeps injections and resumed sessions from duplicating listings.
 
+use fuigo_tools::implementations::search_tool::ServerFingerprint;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use fuigo_tools::implementations::search_tool::ServerFingerprint;
 
 /// Persisted announcement tracking state.
 ///

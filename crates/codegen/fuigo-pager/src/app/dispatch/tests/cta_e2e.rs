@@ -320,8 +320,7 @@ fn plugin_cta_marketplace_override_install_targets_named_source() {
 #[test]
 fn plugin_cta_marketplace_override_naming_official_selects_it() {
     let mut app = test_app_with_agent();
-    app.plugin_cta_marketplace =
-        Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME.to_string());
+    app.plugin_cta_marketplace = Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME.to_string());
     let id = AgentId(0);
 
     let response = fuigo_hooks_plugins_types::MarketplaceListResponse {
@@ -765,8 +764,7 @@ fn plugin_cta_debounce_preserves_in_flight_states() {
         let id = AgentId(0);
         {
             let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-            cta.source_url_or_path =
-                Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
+            cta.source_url_or_path = Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
             cta.candidates = vec![cta_entry("figma", "not_installed")];
             cta.debounce_generation = 1;
             cta.phase = phase.clone();
@@ -1663,8 +1661,7 @@ mod cta_e2e {
         app.plugin_cta_enabled = true;
         {
             let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-            cta.source_url_or_path =
-                Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
+            cta.source_url_or_path = Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
             cta.candidates = vec![figma_candidate()];
             cta.debounce_generation = 1;
         }

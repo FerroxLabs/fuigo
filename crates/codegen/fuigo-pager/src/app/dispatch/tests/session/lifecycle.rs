@@ -24,7 +24,7 @@ fn voice_on_welcome_creates_session_and_records() {
     assert_eq!(app.voice_recording_target(), Some(VoiceTarget::Agent(id)));
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttPress)
+        Ok(fuigo_voice::VoiceCommand::PttPress { .. })
     ));
 }
 #[test]
@@ -37,12 +37,14 @@ fn voice_final_routes_to_recording_session_not_active_view() {
         .insert(other, AgentView::new(session, ScrollbackState::new()));
     app.active_view = ActiveView::Agent(other);
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(rec),
         interim: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "hello".into(),
         },
     );
@@ -57,6 +59,7 @@ fn voice_final_dropped_after_recording_session_cleared() {
     crate::voice::handle_voice_event(
         &mut app,
         fuigo_voice::VoiceEvent::UtteranceFinal {
+            session: 1,
             text: "late".into(),
         },
     );
@@ -69,6 +72,7 @@ fn voice_auto_stops_when_leaving_recording_session() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: None,
@@ -87,7 +91,7 @@ fn voice_auto_stops_when_leaving_recording_session() {
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(fuigo_voice::VoiceCommand::PttRelease)
+        Ok(fuigo_voice::VoiceCommand::PttRelease { .. })
     ));
 }
 #[test]
@@ -2081,9 +2085,7 @@ fn dispatch_new_worktree_session_repoints_dashboard_attached_agent() {
 #[test]
 fn translate_local_submit_always_returns_persist_always_for_new_session() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
     let q = Question {
         question: "?".into(),
         options: (0..4)
@@ -2123,9 +2125,7 @@ fn translate_local_submit_always_returns_persist_always_for_new_session() {
 #[test]
 fn translate_local_submit_never_returns_persist_never_for_new_session() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use fuigo_tools::implementations::fuigo_build::ask_user_question::{
-        Question, QuestionOption,
-    };
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
     let q = Question {
         question: "?".into(),
         options: (0..4)
@@ -3047,8 +3047,7 @@ mod welcome_workspace_mode {
             crate::app::session_startup::FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV,
         );
         let home = tempfile::tempdir().unwrap();
-        let _home =
-            fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
+        let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
         set_active_local_workspace(None).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let mut app = test_app();
@@ -3160,8 +3159,7 @@ mod welcome_workspace_mode {
             crate::app::session_startup::FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV,
         );
         let home = tempfile::tempdir().unwrap();
-        let _home =
-            fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
+        let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
         set_active_local_workspace(None).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let mut app = test_app();

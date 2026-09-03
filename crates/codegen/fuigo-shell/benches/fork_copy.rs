@@ -11,10 +11,10 @@ use agent_client_protocol as acp;
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
-use tempfile::TempDir;
 use fuigo_shell::session::info::Info;
 use fuigo_shell::session::storage::{CopySessionOptions, JsonlStorageAdapter, StorageAdapter};
 use fuigo_shell::session::testkit::synth::make_session_with_size_blocking;
+use tempfile::TempDir;
 
 fn bench_fork_copy(c: &mut Criterion) {
     let target_mb: u64 = std::env::var("FORK_BENCH_MB")

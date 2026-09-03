@@ -9,7 +9,7 @@ pub use fuigo_prompt_queue::{
 };
 
 // Outbound method for broadcast_queue_changed. This is an ACP routing concern, not a queue concern.
-pub const QUEUE_CHANGED_METHOD: &str = "x.ai/queue/changed";
+pub const QUEUE_CHANGED_METHOD: &str = "fuigo/queue/changed";
 
 #[cfg(test)]
 mod tests {

@@ -2,8 +2,8 @@
 //!
 //! Resolves the local env/config/default stack into a diagnostic report.
 
-use serde::Serialize;
 use fuigo_tools::types::compat::{COMPAT_CELLS, CompatCell, CompatConfig};
+use serde::Serialize;
 
 /// Derive the vendor origin from a file path.
 /// Returns `Some("cursor")` or `Some("claude")` when the path passes through a vendor config directory; `None` for native `.fuigo`/`.agents` paths.

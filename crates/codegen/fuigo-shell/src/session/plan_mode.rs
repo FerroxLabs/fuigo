@@ -587,9 +587,9 @@ mod tests {
         assert!(!t.has_pending_activation());
         assert_eq!(t.state(), PlanModeState::Active);
     }
-    use std::collections::HashMap;
     use fuigo_tools::types::template_renderer::TemplateRenderer;
     use fuigo_tools::types::tool::ToolKind;
+    use std::collections::HashMap;
     /// Build a test TemplateRenderer with standard Fuigo tool mappings.
     fn test_renderer() -> TemplateRenderer {
         let tools: HashMap<ToolKind, String> = [

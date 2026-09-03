@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use agent_client_protocol as acp;
-use pretty_assertions::assert_eq;
 use fuigo_tools::computer::types::TaskKind;
+use pretty_assertions::assert_eq;
 
 use super::*;
 
@@ -199,7 +199,7 @@ fn the_reservation_matches_the_line_the_transport_writes() {
 
     assert_eq!(line.len() - body.len(), WRAPPER_BYTES + METHOD.len());
     // Replay sends its own method through the same budget.
-    assert!("x.ai/session/update".len() <= METHOD.len());
+    assert!("fuigo/session/update".len() <= METHOD.len());
 }
 
 #[test]

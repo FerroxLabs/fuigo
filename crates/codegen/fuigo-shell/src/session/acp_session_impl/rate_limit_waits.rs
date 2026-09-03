@@ -3,9 +3,7 @@
 use std::time::Duration;
 
 use fuigo_sampler::{SamplingErrorInfo, SamplingErrorKind};
-use fuigo_telemetry::events::{
-    RateLimitWaitOutcome as ReportedOutcome, SubagentRateLimitWaited,
-};
+use fuigo_telemetry::events::{RateLimitWaitOutcome as ReportedOutcome, SubagentRateLimitWaited};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RateLimitWaitConfig {

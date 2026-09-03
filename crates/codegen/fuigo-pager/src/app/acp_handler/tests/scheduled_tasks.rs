@@ -50,7 +50,7 @@
 
     #[test]
     fn inject_prompt_drives_even_when_attached_as_viewer() {
-        // The leader routes `x.ai/scheduled_task_inject_prompt` to the SINGLE session driver, so any client that receives it IS the driver
+        // The leader routes `fuigo/scheduled_task_inject_prompt` to the SINGLE session driver, so any client that receives it IS the driver
         // It must enqueue and run the prompt, even a client that attached via `session/load` (`attached_as_viewer == true`)
         // This handler once latched on `attached_as_viewer` and skipped, stranding the cron loop with no output whenever the driver attached
         // Pin the corrected behavior: the inject drives the turn
@@ -88,7 +88,7 @@
     fn inject_prompt_malformed_json_returns_false() {
         let mut app = make_app_with_agent("sess-1");
         let raw = serde_json::value::to_raw_value(&"not a json object").unwrap();
-        let notif = acp::ExtNotification::new("x.ai/scheduled_task_inject_prompt", raw.into());
+        let notif = acp::ExtNotification::new("fuigo/scheduled_task_inject_prompt", raw.into());
 
         // The JSON is valid (a string), but sessionId/prompt fields won't exist.
         let result = handle_scheduled_task_inject_prompt(&notif, &mut app);

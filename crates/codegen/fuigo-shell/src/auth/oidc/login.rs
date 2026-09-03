@@ -421,7 +421,7 @@ pub async fn run_login_flow_with_config(
     } else {
         // No client UI: print to stderr
         eprintln!();
-        let provider_label = if oidc.issuer == super::super::config::XAI_OAUTH2_ISSUER {
+        let provider_label = if oidc.issuer == super::super::config::GROK_OAUTH2_ISSUER {
             "Fuigo".to_owned()
         } else {
             oidc.issuer.clone()

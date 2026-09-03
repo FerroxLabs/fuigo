@@ -11,7 +11,7 @@
   },
   {
     "category": "features",
-    "description": "**x.ai/pr/status** now reports whether an open PR is in the merge queue.",
+    "description": "**fuigo/pr/status** now reports whether an open PR is in the merge queue.",
     "breaking_change": false
   },
   {

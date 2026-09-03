@@ -1,4 +1,4 @@
-//! Decode `x.ai/leader/version_mismatch` into toast/log text.
+//! Decode `fuigo/leader/version_mismatch` into toast/log text.
 //!
 //! Versions are sanitized before the whitespace check, so a value made only of control characters is rejected instead of toasted.
 //! The full banner then goes through `sanitize_toast_message` too, so the `⚠` chrome glyph gets its ConHost fallback.

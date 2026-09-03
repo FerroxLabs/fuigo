@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use agent_client_protocol as acp;
-use serde::Deserialize;
 use fuigo_hooks::event::{HookEventEnvelope, HookEventName};
 use fuigo_hooks::matcher::HookMatcher;
 use fuigo_hooks_plugins_types::{HookEvent, HookHandlerType, HookInfo};
+use serde::Deserialize;
 
 use crate::agent::MvpAgent;
 
@@ -164,7 +164,7 @@ pub(crate) struct ClientHookResponse {
 pub(crate) fn parse_client_hooks(meta: Option<&acp::Meta>) -> ClientHooks {
     let mut hooks = ClientHooks::new();
     let Some(map) = meta
-        .and_then(|m| m.get("x.ai/hooks"))
+        .and_then(|m| m.get("fuigo/hooks"))
         .and_then(|h| h.as_object())
     else {
         return hooks;
@@ -172,11 +172,11 @@ pub(crate) fn parse_client_hooks(meta: Option<&acp::Meta>) -> ClientHooks {
     for (event_name, value) in map {
         let de = serde::de::value::StrDeserializer::<serde::de::value::Error>::new(event_name);
         let Ok(event) = HookEventName::deserialize(de) else {
-            tracing::warn!(event = %event_name, "ignoring unknown x.ai/hooks event");
+            tracing::warn!(event = %event_name, "ignoring unknown fuigo/hooks event");
             continue;
         };
         let Some(array) = value.as_array() else {
-            tracing::warn!(event = %event_name, "x.ai/hooks event value is not an array; skipping");
+            tracing::warn!(event = %event_name, "fuigo/hooks event value is not an array; skipping");
             continue;
         };
         let groups: Vec<ClientHookGroup> = array
@@ -191,7 +191,7 @@ pub(crate) fn parse_client_hooks(meta: Option<&acp::Meta>) -> ClientHooks {
 }
 
 pub(crate) fn reconnect_client_hooks(meta: Option<&acp::Meta>) -> Option<ClientHooks> {
-    meta.and_then(|m| m.get("x.ai/hooks"))
+    meta.and_then(|m| m.get("fuigo/hooks"))
         .map(|_| parse_client_hooks(meta))
 }
 
@@ -208,10 +208,10 @@ fn parse_hook_group(event: HookEventName, value: &serde_json::Value) -> Option<C
     }
 
     let group = WireGroup::deserialize(value)
-        .inspect_err(|err| tracing::warn!(%event, %err, "ignoring malformed x.ai/hooks group"))
+        .inspect_err(|err| tracing::warn!(%event, %err, "ignoring malformed fuigo/hooks group"))
         .ok()?;
     if group.hook_callback_ids.is_empty() {
-        tracing::warn!(%event, "ignoring x.ai/hooks group with no hookCallbackIds");
+        tracing::warn!(%event, "ignoring fuigo/hooks group with no hookCallbackIds");
         return None;
     }
     const MAX_HOOK_TIMEOUT_SECS: f64 = 600.0;
@@ -221,16 +221,14 @@ fn parse_hook_group(event: HookEventName, value: &serde_json::Value) -> Option<C
         .map(|s| std::time::Duration::from_secs_f64(s.min(MAX_HOOK_TIMEOUT_SECS)));
     let matcher = match group.matcher.as_deref() {
         None | Some("") | Some("*") => None,
-        Some(pattern)
-            if event.traits().matcher == fuigo_hooks::event::MatcherPolicy::Ignored =>
-        {
+        Some(pattern) if event.traits().matcher == fuigo_hooks::event::MatcherPolicy::Ignored => {
             tracing::warn!(%event, pattern, "matcher on a {event} hook group is ignored (this event always fires)");
             None
         }
         Some(pattern) => match HookMatcher::new(pattern) {
             Ok(matcher) => Some(matcher),
             Err(err) => {
-                tracing::warn!(%event, pattern, %err, "ignoring x.ai/hooks group with invalid matcher");
+                tracing::warn!(%event, pattern, %err, "ignoring fuigo/hooks group with invalid matcher");
                 return None;
             }
         },
@@ -244,7 +242,7 @@ fn parse_hook_group(event: HookEventName, value: &serde_json::Value) -> Option<C
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
-        "x.ai/hooks/list" => {
+        "fuigo/hooks/list" => {
             let req: ListRequest = super::parse_params(args)?;
             let sid = acp::SessionId::new(req.session_id);
 
@@ -254,7 +252,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .ok_or_else(|| anyhow::anyhow!("session not found"));
             super::to_ext_response(result)
         }
-        "x.ai/hooks/action" => {
+        "fuigo/hooks/action" => {
             let req: fuigo_hooks_plugins_types::HooksActionRequest = super::parse_params(args)?;
             let sid = acp::SessionId::new(req.session_id);
 
@@ -271,9 +269,9 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use fuigo_hooks::config::HookSpec;
     use fuigo_hooks::event::HookEventName;
+    use std::path::PathBuf;
 
     fn make_spec(
         command_raw: Option<&str>,
@@ -399,7 +397,7 @@ mod tests {
     #[test]
     fn parse_client_hooks_parses_valid_groups() {
         let meta = serde_json::json!({
-            "x.ai/hooks": {
+            "fuigo/hooks": {
                 "PreToolUse": [
                     { "matcher": "run_terminal_command", "hookCallbackIds": ["cb_0"] },
                     { "matcher": null, "hookCallbackIds": ["cb_1"] },
@@ -431,7 +429,7 @@ mod tests {
 
         let meta = serde_json::json!({
             "NotARealEvent": [{ "hookCallbackIds": ["x"] }],
-            "x.ai/hooks": {
+            "fuigo/hooks": {
                 "PreToolUse": [
                     { "matcher": "[invalid", "hookCallbackIds": ["bad_regex"] },
                     { "matcher": "run_terminal_command", "hookCallbackIds": [] },
@@ -447,7 +445,7 @@ mod tests {
     #[test]
     fn parse_client_hooks_reads_group_timeout() {
         let meta = serde_json::json!({
-            "x.ai/hooks": {
+            "fuigo/hooks": {
                 "PreToolUse": [
                     { "hookCallbackIds": ["a"], "timeout": 5.0 },
                     { "hookCallbackIds": ["b"], "timeout": 0 },
@@ -466,7 +464,7 @@ mod tests {
     #[test]
     fn parse_client_hooks_canonicalizes_subagent_alias() {
         let meta = serde_json::json!({
-            "x.ai/hooks": { "SubagentEnd": [{ "hookCallbackIds": ["cb"] }] }
+            "fuigo/hooks": { "SubagentEnd": [{ "hookCallbackIds": ["cb"] }] }
         });
         let hooks = parse_client_hooks(meta.as_object());
         assert!(hooks.contains_key(&HookEventName::SubagentStop));
@@ -478,12 +476,12 @@ mod tests {
         assert!(reconnect_client_hooks(None).is_none());
         assert!(reconnect_client_hooks(serde_json::json!({ "other": true }).as_object()).is_none());
 
-        let cleared = reconnect_client_hooks(serde_json::json!({ "x.ai/hooks": {} }).as_object());
+        let cleared = reconnect_client_hooks(serde_json::json!({ "fuigo/hooks": {} }).as_object());
         assert!(cleared.is_some_and(|h| h.is_empty()));
 
         let set = reconnect_client_hooks(
             serde_json::json!({
-                "x.ai/hooks": { "PreToolUse": [{ "hookCallbackIds": ["cb"] }] }
+                "fuigo/hooks": { "PreToolUse": [{ "hookCallbackIds": ["cb"] }] }
             })
             .as_object(),
         );

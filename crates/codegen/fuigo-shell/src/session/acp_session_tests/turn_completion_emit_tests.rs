@@ -121,7 +121,8 @@ async fn completion_and_cancel_arbitrate_during_cleanup() {
                 let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel();
                 let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
                 let lifecycle = std::rc::Rc::new(RecordingLifecycle::default());
-                let mut extensions = fuigo_agent_lifecycle::LocalExtensionRegistryBuilder::default();
+                let mut extensions =
+                    fuigo_agent_lifecycle::LocalExtensionRegistryBuilder::default();
                 extensions.turn_lifecycle_contributor(lifecycle.clone());
                 actor.extension_registry = extensions.build();
                 let actor = std::sync::Arc::new(actor);
@@ -849,7 +850,7 @@ async fn send_now_cancel_stamps_cancel_trigger_on_turn_end() {
             let mut wire_meta = None;
             while let Ok(msg) = gateway_rx.try_recv() {
                 if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg
-                    && args.request.method.as_ref() == "x.ai/session_notification"
+                    && args.request.method.as_ref() == "fuigo/session_notification"
                     && let Ok(v) =
                         serde_json::from_str::<serde_json::Value>(args.request.params.get())
                     && v["update"]["sessionUpdate"] == "turn_completed"

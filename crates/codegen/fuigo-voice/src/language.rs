@@ -1,7 +1,7 @@
 //! Fuigo Speech-to-Text language codes.
 //!
 //! Source of truth for the `language` query/form parameter on
-//! `https://api.x.ai/v1/stt` and `wss://api.x.ai/v1/stt`.
+//! the configured voice endpoint's `/v1/stt` route.
 //!
 //! Official catalog (25 languages):
 //! <https://docs.x.ai/developers/model-capabilities/audio/speech-to-text#supported-languages>

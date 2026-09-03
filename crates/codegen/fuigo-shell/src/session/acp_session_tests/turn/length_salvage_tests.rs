@@ -4,10 +4,10 @@
 //! That case gains coverage when the RemoteSettings gate makes the budget injectable.
 use super::support::*;
 use super::*;
-use std::sync::Arc;
-use std::time::Duration;
 use fuigo_test_support::sse::chat_completion_script_exact;
 use fuigo_test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
+use std::sync::Arc;
+use std::time::Duration;
 /// Distinctive fragment of the continue reminder.
 const REMINDER_MARKER: &str = "exceeded the output token limit";
 /// `SessionActor` turn futures overflow the default test thread stack.
@@ -249,8 +249,7 @@ fn rate_limit_mid_continuation_stays_terminal() {
                     "enough history that the token estimate clears the tiny window",
                 ),
             );
-            let error =
-                error_with_tiny_window(fuigo_sampler::SamplingErrorKind::RateLimited, 429);
+            let error = error_with_tiny_window(fuigo_sampler::SamplingErrorKind::RateLimited, 429);
             let Err(err) = actor
                 .handle_sampling_failure(error, 0, transient_state(0, true), true)
                 .await

@@ -409,8 +409,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_session(
     if fuigo_shell::session::resolve_local_session(&session_id, &local_cwd).is_some() {
         return dispatch_load_session(app, session_id, None, false);
     }
-    if let Some(original_cwd) = fuigo_shell::session::resolve_local_session_any_cwd(&session_id)
-    {
+    if let Some(original_cwd) = fuigo_shell::session::resolve_local_session_any_cwd(&session_id) {
         return dispatch_load_session(
             app,
             session_id,
@@ -864,7 +863,7 @@ pub(in crate::app::dispatch) fn dispatch_trigger_deep_search(
         }]
     }
 }
-/// Chat-mode replacement for local deep search: refetch the session list with the picker query pushed down as `x.ai/session/list` `query`.
+/// Chat-mode replacement for local deep search: refetch the session list with the picker query pushed down as `fuigo/session/list` `query`.
 /// Keystrokes are coalesced through [`Effect::DebounceSessionSearch`]; a forced search (Ctrl+/) or a cleared query fetches immediately.
 /// Every trigger bumps `session_picker_list_seq`, so stale in-flight debounces and fetches are dropped when they complete.
 fn dispatch_chat_search_refetch(app: &mut AppView, force: bool) -> Vec<Effect> {
@@ -1025,8 +1024,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     if fuigo_shell::session::resolve_local_session(&session_id, &local_cwd).is_some() {
         return dispatch_load_session(app, session_id, None, false);
     }
-    if let Some(original_cwd) = fuigo_shell::session::resolve_local_session_any_cwd(&session_id)
-    {
+    if let Some(original_cwd) = fuigo_shell::session::resolve_local_session_any_cwd(&session_id) {
         return dispatch_load_session(
             app,
             session_id,

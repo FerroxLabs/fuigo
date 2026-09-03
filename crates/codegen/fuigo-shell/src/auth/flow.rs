@@ -3,12 +3,12 @@ use crate::auth::config::LEGACY_AUTH_SCOPE;
 use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig, parse_output};
 use crate::http::TransportFailureKind;
 use crate::util::fuigo_home;
+use fuigo_telemetry::events::{LoginFailed, LoginFailureKind};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::sync::{mpsc, oneshot};
-use fuigo_telemetry::events::{LoginFailed, LoginFailureKind};
 pub(crate) type StderrCallback = Box<dyn Fn(&str)>;
 /// Reject a cached credential that lacks `oidc_issuer`, has a mismatched issuer, or whose team principal violates the `force_login_team_uuid` pin.
 /// Interactive login then starts fresh instead of reusing a stale or wrong-team session.
@@ -138,7 +138,7 @@ async fn should_use_device_flow(login_override: LoginTransportOverride) -> bool 
     );
     resolved.value
 }
-/// How login presents itself; sent to the TUI via `x.ai/auth/get_url`.
+/// How login presents itself; sent to the TUI via `fuigo/auth/get_url`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthUrlMode {
     /// Loopback-callback flow: the TUI shows a copyable URL and a paste box.
@@ -149,7 +149,7 @@ pub enum AuthUrlMode {
     Device,
 }
 impl AuthUrlMode {
-    /// Wire string for the `x.ai/auth/get_url` ACP response.
+    /// Wire string for the `fuigo/auth/get_url` ACP response.
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Loopback => "loopback",
@@ -625,10 +625,23 @@ pub(super) async fn run_auth_flow_steps(
         .await;
     }
     tracing::error!(
-        "auth: no OAuth2 configuration available (neither enterprise OIDC nor Ferrox Labs OAuth2 configured)"
+        "auth: no OAuth2 issuer configured (neither enterprise OIDC nor FUIGO_OAUTH2_*)"
     );
+    // The old text said "Run `fuigo login` to authenticate" -- advice to run
+    // the command that just failed. Fuigo ships with no issuer, so this is a
+    // configuration state, not a transient failure, and the message has to say
+    // what would fix it.
     anyhow::bail!(
-        "No OAuth2 configuration available. Run `fuigo login` to authenticate, or contact your administrator if you use enterprise SSO."
+        "No OAuth2 issuer is configured, so there is nothing to log in to.\n\
+         \n\
+         Fuigo ships without one on purpose: an API key is the normal path.\n\
+         Set FUIGO_API_KEY, or `api_key` in ~/.fuigo/config.toml.\n\
+         \n\
+         To use OAuth instead, configure an issuer:\n\
+         \x20 FUIGO_OAUTH2_ISSUER + FUIGO_OAUTH2_CLIENT_ID, or `[oidc]` in\n\
+         \x20 config.toml for enterprise SSO.\n\
+         \n\
+         If you use enterprise SSO, your administrator has these values."
     )
 }
 /// Non-interactive auth refresh: returns valid credentials if available without ever triggering interactive login (browser, device code, etc.).
@@ -667,7 +680,9 @@ pub(crate) async fn try_noninteractive_auth_no_mint(
 }
 /// Policy behind [`try_noninteractive_auth_no_mint`], with the `AuthManager`
 /// injected for tests.
-async fn try_noninteractive_auth_no_mint_with(auth_manager: &Arc<AuthManager>) -> Option<FuigoAuth> {
+async fn try_noninteractive_auth_no_mint_with(
+    auth_manager: &Arc<AuthManager>,
+) -> Option<FuigoAuth> {
     match tokio::time::timeout(
         crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
         try_ensure_fresh_auth_with(auth_manager),
@@ -839,8 +854,7 @@ pub async fn run_cli_login(
     ));
     crate::agent::init::update_telemetry_config(config, &auth_manager);
     let result = run_cli_login_steps(config, &auth_manager, oauth, device_auth).await;
-    fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN)
-        .await;
+    fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN).await;
     result
 }
 async fn run_cli_login_steps(
@@ -852,7 +866,9 @@ async fn run_cli_login_steps(
     let login_override = LoginTransportOverride::from_flags(oauth, device_auth);
     let authenticated = if cli_should_use_device(&config.fuigo_com_config, login_override).await {
         if config.fuigo_com_config.oauth2.is_none() {
-            anyhow::bail!("Sign-in is not available for this deployment. Set FUIGO_API_KEY instead.");
+            anyhow::bail!(
+                "Sign-in is not available for this deployment. Set FUIGO_API_KEY instead."
+            );
         }
         let (auth, did_auth) = run_auth_flow_interactive(
             auth_manager,
@@ -942,9 +958,7 @@ pub fn perform_logout(
         })),
     );
     if was_logged_in {
-        fuigo_telemetry::external::set_identity(
-            fuigo_telemetry::external::IdentityAttrs::default(),
-        );
+        fuigo_telemetry::external::set_identity(fuigo_telemetry::external::IdentityAttrs::default());
         fuigo_telemetry::external::flush();
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
@@ -985,7 +999,7 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
 mod tests {
     use super::*;
     use crate::auth::AuthMode;
-    use crate::auth::config::XAI_OAUTH2_ISSUER;
+    use crate::auth::GROK_OAUTH2_ISSUER;
     use crate::env::EnvVarGuard;
     use chrono::Utc;
     use std::path::Path;
@@ -1042,13 +1056,14 @@ mod tests {
         FuigoAuth {
             key: key.into(),
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             refresh_token: refresh.map(str::to_string),
             ..FuigoAuth::test_default()
         }
     }
     #[test]
     fn expired_refreshable_session_gate() {
+        crate::auth::set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
         let dir = tempfile::tempdir().unwrap();
         let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());
         mgr.hot_swap(FuigoAuth {
@@ -1351,6 +1366,7 @@ mod tests {
     }
     #[tokio::test]
     async fn enterprise_oidc_never_uses_device_flow() {
+        crate::auth::set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
         let cfg = FuigoComConfig {
             oidc: Some(crate::auth::OidcAuthConfig {
                 issuer: "https://idp.example".into(),
@@ -1365,7 +1381,8 @@ mod tests {
             !cli_should_use_device(&cfg, LoginTransportOverride::ForceDevice).await,
             "enterprise OIDC must stay on loopback"
         );
-        let fuigo = FuigoComConfig::default();
+        // A configured installation: the shipped default has no provider.
+        let fuigo = crate::auth::test_config_with_oauth2();
         assert!(fuigo.oauth2.is_some() && fuigo.oidc.is_none());
         assert!(cli_should_use_device(&fuigo, LoginTransportOverride::ForceDevice).await);
     }
@@ -1528,24 +1545,24 @@ mod tests {
     }
     #[test]
     fn weblogin_cred_is_never_compatible() {
-        let cfg = FuigoComConfig::default();
+        let cfg = crate::auth::test_config_with_oauth2();
         assert!(!is_cached_credential_compatible(&legacy_auth(), &cfg));
     }
     #[test]
     fn oidc_cred_with_matching_issuer_is_compatible() {
         let cfg = FuigoComConfig::default();
         assert!(is_cached_credential_compatible(
-            &oidc_auth(XAI_OAUTH2_ISSUER),
+            &oidc_auth(GROK_OAUTH2_ISSUER),
             &cfg,
         ));
     }
     #[test]
     fn external_cred_compatibility_follows_issuer() {
-        let cfg = FuigoComConfig::default();
+        let cfg = crate::auth::test_config_with_oauth2();
         assert!(is_cached_credential_compatible(
             &FuigoAuth {
                 auth_mode: AuthMode::External,
-                ..oidc_auth(XAI_OAUTH2_ISSUER)
+                ..oidc_auth(GROK_OAUTH2_ISSUER)
             },
             &cfg,
         ));
@@ -1586,7 +1603,7 @@ mod tests {
     fn cached_cred_with_wrong_team_is_incompatible() {
         let auth = FuigoAuth {
             key: team_jwt("team-wrong"),
-            ..oidc_auth(XAI_OAUTH2_ISSUER)
+            ..oidc_auth(GROK_OAUTH2_ISSUER)
         };
         assert!(!is_cached_credential_compatible(
             &auth,
@@ -1598,7 +1615,7 @@ mod tests {
     fn cached_cred_with_matching_team_is_compatible() {
         let auth = FuigoAuth {
             key: team_jwt("team-good"),
-            ..oidc_auth(XAI_OAUTH2_ISSUER)
+            ..oidc_auth(GROK_OAUTH2_ISSUER)
         };
         assert!(is_cached_credential_compatible(
             &auth,
@@ -1618,7 +1635,7 @@ mod tests {
             auth_mode: AuthMode::Oidc,
             expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
             refresh_token: Some("new-rt".into()),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.into()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.into()),
             oidc_client_id: Some("client-1".into()),
             ..FuigoAuth::test_default()
         };
@@ -1629,7 +1646,7 @@ mod tests {
             auth_mode: AuthMode::Oidc,
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
             refresh_token: Some("old-rt".into()),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.into()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.into()),
             oidc_client_id: Some("client-1".into()),
             ..FuigoAuth::test_default()
         };
@@ -1660,7 +1677,7 @@ mod tests {
             key: "still-valid".into(),
             auth_mode: AuthMode::Oidc,
             expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.into()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.into()),
             oidc_client_id: Some("client-1".into()),
             ..FuigoAuth::test_default()
         };
@@ -1691,7 +1708,7 @@ mod tests {
             auth_mode: AuthMode::Oidc,
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
             refresh_token: Some("valid-refresh-token".into()),
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.into()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.into()),
             oidc_client_id: Some("client-1".into()),
             ..FuigoAuth::test_default()
         };
@@ -1718,7 +1735,7 @@ mod tests {
     #[tokio::test]
     async fn run_auth_flow_falls_through_when_no_refresh_token() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = FuigoComConfig::default();
+        let mut cfg = crate::auth::test_config_with_oauth2();
         cfg.oauth2.as_mut().unwrap().issuer = "http://127.0.0.1:1".into();
         let writer = Arc::new(
             AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),

@@ -21,13 +21,13 @@ use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::state::verb_group::verb_group_kind_changed;
 use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
+use fuigo_tools::types::output::{BashOutput, ToolOutput};
+use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
+use fuigo_tools::util::strip_redundant_session_cd;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::debug;
-use fuigo_tools::types::output::{BashOutput, ToolOutput};
-use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
-use fuigo_tools::util::strip_redundant_session_cd;
 /// Convert a UTC millisecond timestamp to local time.
 fn utc_ms_to_local(ms: i64) -> DateTime<Local> {
     chrono::Utc
@@ -180,8 +180,8 @@ impl WritingToolCall {
             Some(name) => {
                 use fuigo_tools::types::tool::ToolKind;
                 let copy =
-                    fuigo_tools::tool_taxonomy::writing_tool_kind(name).and_then(|kind| {
-                        match kind {
+                    fuigo_tools::tool_taxonomy::writing_tool_kind(name).and_then(
+                        |kind| match kind {
                             ToolKind::Write => Some("Writing file"),
                             ToolKind::Edit => Some("Writing edit"),
                             ToolKind::Execute => Some("Writing command"),
@@ -193,13 +193,12 @@ impl WritingToolCall {
                             }
                             ToolKind::AskUser => Some("Preparing question"),
                             _ => None,
-                        }
-                    });
+                        },
+                    );
                 match copy {
                     Some(copy) => format!("{copy}{ordinal}…"),
                     None => {
-                        let name =
-                            fuigo_workspace::permission::mcp_pretty_name_if_qualified(name);
+                        let name = fuigo_workspace::permission::mcp_pretty_name_if_qualified(name);
                         format!("Preparing {}{ordinal}…", clamp_activity_subject(&name))
                     }
                 }
@@ -366,7 +365,7 @@ pub struct AcpUpdateTracker {
     pub(crate) task_tool_background: std::collections::HashMap<String, bool>,
     /// Tool call IDs marked as background (`is_background=true`).
     ///
-    /// First-detection (no scrollback entry yet): defers entry creation until `x.ai/task_backgrounded` creates a `BgTask` block.
+    /// First-detection (no scrollback entry yet): defers entry creation until `fuigo/task_backgrounded` creates a `BgTask` block.
     /// Late-detection (Execute block already exists): suppresses further output streaming; `handle_task_backgrounded` demotes the existing block.
     ///
     /// Value is the optional description from `raw_input.description`.
@@ -1616,8 +1615,7 @@ fn user_message_hidden_from_scrollback(
         return true;
     }
     if let Some(pid) = meta.prompt_id.as_deref()
-        && fuigo_shell::session::PromptOrigin::from_prompt_id(pid)
-            .hide_user_echo_from_scrollback()
+        && fuigo_shell::session::PromptOrigin::from_prompt_id(pid).hide_user_echo_from_scrollback()
     {
         return true;
     }
@@ -2359,7 +2357,7 @@ fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
 }
 /// Check if a tool call is a background execute (`is_background=true`).
 ///
-/// These are deferred from scrollback; the `x.ai/task_backgrounded` notification creates a `BgTask` block instead of an `Execute` block.
+/// These are deferred from scrollback; the `fuigo/task_backgrounded` notification creates a `BgTask` block instead of an `Execute` block.
 ///
 /// Eager ACP messages often use `kind=Other` with `title=run_terminal_command` before the kind is refined to Execute.
 /// Still treat those as execute tools when `raw_input` requests background so we don't flash the function name.

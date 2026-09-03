@@ -1,4 +1,4 @@
-//! Wire types for the `x.ai/exit_plan_mode` ACP ext_method.
+//! Wire types for the `fuigo/exit_plan_mode` ACP ext_method.
 //!
 //! Shared between the shell (serializer) and the pager/desktop/VS Code
 //! (deserializer) so both sides stay in sync.

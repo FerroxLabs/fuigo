@@ -8,8 +8,8 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
 use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-use std::sync::atomic::{AtomicU64, Ordering};
 use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic counter for correlating async rewrite responses with the modal that requested them.
 /// It prevents stale results from populating a different note's review modal when the user closes and re-opens quickly.
@@ -448,7 +448,7 @@ fn encode_feedback_images(
     (encoded, notice)
 }
 
-/// Send a raw remember note for LLM-powered rewriting via `x.ai/memory/rewrite`.
+/// Send a raw remember note for LLM-powered rewriting via `fuigo/memory/rewrite`.
 /// Clears remember mode and prompts the LLM to reformat the note with session context.
 /// Falls back to direct `SaveMemoryNote` when no session is available.
 fn send_remember_note(app: &mut AppView, text: String, record_in_history: bool) -> Vec<Effect> {
@@ -726,7 +726,7 @@ pub(crate) fn scrollback_has_user_messages(
 
 /// Request a session recap.
 /// Bypasses the prompt queue, so it works even while the agent is mid-turn.
-/// Fires the `x.ai/recap` ext method; the recap arrives asynchronously as a `SessionRecap` notification (rendered in scrollback).
+/// Fires the `fuigo/recap` ext method; the recap arrives asynchronously as a `SessionRecap` notification (rendered in scrollback).
 ///
 /// `auto` is `false` for an explicit `/recap` and `true` for the automatic return-from-away recap.
 /// The manual path clears the prompt and shows a toast when no session exists yet.
@@ -740,7 +740,7 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
     };
 
     // The shell is authoritative (remote settings, config, env)
-    // Skip client requests entirely when the feature is off so we never hit `x.ai/recap`
+    // Skip client requests entirely when the feature is off so we never hit `fuigo/recap`
     if !app.session_recap_available {
         if !auto {
             agent.show_toast("Session recap is not enabled");

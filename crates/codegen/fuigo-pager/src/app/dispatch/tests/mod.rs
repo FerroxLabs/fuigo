@@ -163,6 +163,8 @@ fn test_app() -> AppView {
         welcome_consent_hover_link: None,
         consent_answered: None,
         login_label: None,
+        detected_keys: Vec::new(),
+        detected_env_vars: Vec::new(),
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
         auth_code_input: Default::default(),
@@ -321,6 +323,8 @@ fn test_app() -> AppView {
         voice_auth: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        voice_next_session: 1,
+        voice_detached: std::collections::VecDeque::new(),
     }
 }
 /// Build a default `AgentSession` for tests.
@@ -376,6 +380,18 @@ pub(super) fn test_app_with_agent() -> AppView {
     app.agents.insert(id, agent);
     app.next_agent_id = 1;
     switch_to_agent(&mut app, id, SwitchCause::New);
+    app
+}
+/// Two agents, with the first active. For tests where a transcript must be
+/// proved to land in one prompt box and not the other.
+pub(super) fn test_app_with_two_agents() -> AppView {
+    let mut app = test_app_with_agent();
+    let id = AgentId(1);
+    let session = make_test_agent_session(&app, id, "second-session");
+    let mut agent = AgentView::new(session, ScrollbackState::new());
+    agent.active_pane = ActivePane::Scrollback;
+    app.agents.insert(id, agent);
+    app.next_agent_id = 2;
     app
 }
 /// Give a test agent a generated title so the dashboard renders it.
@@ -671,7 +687,7 @@ fn fork_test_app() -> AppView {
     app.agents.get_mut(&AgentId(0)).unwrap().current_branch = Some("main".into());
     app
 }
-/// Build a minimal `AcpArgs<acp::ExtRequest>` for an `x.ai/ask_user_question` ext-method request.
+/// Build a minimal `AcpArgs<acp::ExtRequest>` for an `fuigo/ask_user_question` ext-method request.
 /// Returns the args and the receiver half of the response oneshot so the test can assert the handler completes the ACP roundtrip.
 fn make_ask_user_question_args(
     tool_call_id: &str,
@@ -700,7 +716,7 @@ fn make_ask_user_question_args(
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let ext = acp::ExtRequest::new(
-        "x.ai/ask_user_question",
+        "fuigo/ask_user_question",
         serde_json::value::to_raw_value(&req)
             .expect("serialize AskUserQuestionExtRequest")
             .into(),
@@ -959,8 +975,7 @@ fn enqueue_permission_with_enable_always_approve(
     });
     response_rx
 }
-const POLICY_WARNING: &str =
-    fuigo_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
+const POLICY_WARNING: &str = fuigo_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
 fn agent_toast(app: &AppView) -> Option<String> {
     app.agents[&AgentId(0)]
         .toast

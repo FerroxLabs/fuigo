@@ -4,19 +4,19 @@
 //! persistent or shared agent state but are not part of the per-turn prompt
 //! lifecycle:
 //!
-//! - `x.ai/session/rename`                  rename a session locally and remote
-//! - `x.ai/session/delete`                  delete a session locally and remote
-//! - `x.ai/session/update_mcp_servers`      mid-session MCP server swap
-//! - `x.ai/session/add_local_workspace`     mid-session local workspace add-only (chat)
-//! - `x.ai/session/fork`                    fork a session into a new one
-//! - `x.ai/internal/reload_all_mcp_servers` config hot-reload, all sessions
-//! - `x.ai/internal/reload_project_mcp_servers` config hot-reload, cwd-scoped
-//! - `x.ai/internal/reload_skills`          skills file watcher fan-out
-//! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
-//! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
-//! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
-//! - `x.ai/plugins/reload`                  rebuild shared plugin registry
-//! - `x.ai/commands/list`                   list slash commands
+//! - `fuigo/session/rename`                  rename a session locally and remote
+//! - `fuigo/session/delete`                  delete a session locally and remote
+//! - `fuigo/session/update_mcp_servers`      mid-session MCP server swap
+//! - `fuigo/session/add_local_workspace`     mid-session local workspace add-only (chat)
+//! - `fuigo/session/fork`                    fork a session into a new one
+//! - `fuigo/internal/reload_all_mcp_servers` config hot-reload, all sessions
+//! - `fuigo/internal/reload_project_mcp_servers` config hot-reload, cwd-scoped
+//! - `fuigo/internal/reload_skills`          skills file watcher fan-out
+//! - `fuigo/internal/reload_models`          model list hot-reload from config.toml
+//! - `fuigo/internal/reload_models_cache`    model catalog hot-reload from disk cache
+//! - `fuigo/internal/auth_cleared`           auth hot-clear cleanup
+//! - `fuigo/plugins/reload`                  rebuild shared plugin registry
+//! - `fuigo/commands/list`                   list slash commands
 
 use std::path::Path;
 use std::sync::Arc;
@@ -43,14 +43,14 @@ pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
         return handle_internal(agent, args, method).await;
     }
     match args.method.as_ref() {
-        "x.ai/session/rename" => handle_session_rename(agent, args).await,
-        "x.ai/session/delete" => handle_session_delete(agent, args).await,
-        "x.ai/session/update_mcp_servers" => handle_update_mcp_servers(agent, args).await,
+        "fuigo/session/rename" => handle_session_rename(agent, args).await,
+        "fuigo/session/delete" => handle_session_delete(agent, args).await,
+        "fuigo/session/update_mcp_servers" => handle_update_mcp_servers(agent, args).await,
         #[cfg(feature = "local-workspace")]
-        "x.ai/session/add_local_workspace" => handle_add_local_workspace(agent, args).await,
-        "x.ai/session/fork" => handle_session_fork(agent, args).await,
-        "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
-        "x.ai/commands/list" => handle_commands_list(agent, args).await,
+        "fuigo/session/add_local_workspace" => handle_add_local_workspace(agent, args).await,
+        "fuigo/session/fork" => handle_session_fork(agent, args).await,
+        "fuigo/plugins/reload" => handle_plugins_reload(agent).await,
+        "fuigo/commands/list" => handle_commands_list(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -359,7 +359,7 @@ async fn notify_session_title_unpinned(agent: &MvpAgent, session_id: acp::Sessio
     };
     if let Ok(params) = serde_json::value::to_raw_value(&notification) {
         let ext_notification =
-            acp::ExtNotification::new("x.ai/session_notification", params.into());
+            acp::ExtNotification::new("fuigo/session_notification", params.into());
         let _ = agent.gateway.ext_notification(ext_notification).await;
     }
 
@@ -386,7 +386,7 @@ async fn notify_session_title(agent: &MvpAgent, session_id: acp::SessionId, titl
     };
     if let Ok(params) = serde_json::value::to_raw_value(&notification) {
         let ext_notification =
-            acp::ExtNotification::new("x.ai/session_notification", params.into());
+            acp::ExtNotification::new("fuigo/session_notification", params.into());
         let _ = agent.gateway.ext_notification(ext_notification).await;
     }
 
@@ -596,7 +596,7 @@ async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) ->
     if !agent.is_chat_kind_session(&params.session_id) {
         return Err(acp::Error::invalid_params().data(serde_json::json!({
             "code": "local_workspace_chat_only",
-            "message": "x.ai/session/add_local_workspace is only available on chat-kind sessions",
+            "message": "fuigo/session/add_local_workspace is only available on chat-kind sessions",
         })));
     }
 
@@ -842,7 +842,7 @@ async fn handle_plugins_reload(agent: &MvpAgent) -> ExtResult {
         let remote_settings = agent.cfg.borrow().remote_settings.clone();
         crate::agent::folder_trust::resolve_and_record(c, remote_settings.as_ref(), false)
     });
-    // Explicit desktop `x.ai/plugins/reload`: force a full local-install re-copy.
+    // Explicit desktop `fuigo/plugins/reload`: force a full local-install re-copy.
     agent
         .plugin_registry_handle()
         .reload(session_cwd.as_deref(), &disk_cfg, project_trusted, true);
@@ -896,7 +896,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     // For a given cwd, compute the plugin registry the same way a session would at spawn time (via build_for_cwd)
     // That is also how reload_plugins_impl computes it (ancestor project config walk and vendor compat merge)
-    // This makes `x.ai/commands/list` (the pull fuigo-desktop uses after session start) return plugin-provided slash commands for the target cwd
+    // This makes `fuigo/commands/list` (the pull fuigo-desktop uses after session start) return plugin-provided slash commands for the target cwd
     //
     // The shared snapshot is only populated at agent boot (using process CWD) and by explicit reloads
     // In desktop-to-docker (and ssh) setups the agent's launch CWD is unrelated to the user's chosen workspace dir

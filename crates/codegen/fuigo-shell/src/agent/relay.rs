@@ -899,22 +899,27 @@ mod tests {
     }
     #[test]
     fn for_session_builds_only_for_fuigo_issuer() {
-        use crate::auth::XAI_OAUTH2_ISSUER;
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
+        use crate::auth::GROK_OAUTH2_ISSUER;
         let cfg = FuigoComConfig::default();
         let builds = |a: &FuigoAuth| RelayConfig::for_session(a, &cfg, None, None).is_some();
         let fuigo = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             ..test_auth("fuigo-bearer")
         };
         assert!(fuigo.is_fuigo_auth(), "precondition: is_fuigo_auth");
         assert!(builds(&fuigo));
         let external_fuigo = FuigoAuth {
             auth_mode: AuthMode::External,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             ..test_auth("ext-bearer")
         };
-        assert!(external_fuigo.is_fuigo_auth(), "precondition: is_fuigo_auth");
+        assert!(
+            external_fuigo.is_fuigo_auth(),
+            "precondition: is_fuigo_auth"
+        );
         assert!(builds(&external_fuigo));
         assert!(!builds(&FuigoAuth {
             key: String::new(),
@@ -957,7 +962,9 @@ mod tests {
     /// A relay holding a private, refresher-less `AuthManager` fails this: it can only adopt sibling disk tokens, and there are none.
     #[tokio::test]
     async fn auth_recovery_refreshes_and_heals_missing_auth_json() {
-        use crate::auth::XAI_OAUTH2_ISSUER;
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
+        use crate::auth::GROK_OAUTH2_ISSUER;
         use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
         use std::sync::atomic::AtomicU32;
         struct CountingRefresher {
@@ -973,7 +980,7 @@ mod tests {
                 RefreshOutcome::Success(Box::new(FuigoAuth {
                     key: "fresh-from-authority".into(),
                     auth_mode: AuthMode::Oidc,
-                    oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+                    oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
                     refresh_token: Some("rt-rotated".into()),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
                     ..FuigoAuth::test_default()
@@ -988,7 +995,7 @@ mod tests {
         );
         let expired_session = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             refresh_token: Some("rt-valid-unconsumed".into()),
             expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(14)),
             ..test_auth("expired-overnight")
@@ -1020,7 +1027,9 @@ mod tests {
     /// The caller then backs off before reconnecting instead of tight-looping.
     #[tokio::test]
     async fn attempt_auth_recovery_same_key_backs_off_without_cancel() {
-        use crate::auth::XAI_OAUTH2_ISSUER;
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        crate::agent::config::Config::install_test_trusted_origins();
+        use crate::auth::GROK_OAUTH2_ISSUER;
         use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
         struct PanicRefresher;
         #[async_trait::async_trait]
@@ -1037,7 +1046,7 @@ mod tests {
         let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
         let fresh_session = FuigoAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
             refresh_token: Some("rt-valid".into()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             ..test_auth("fresh-key")

@@ -34,10 +34,19 @@ pub struct VoiceProbeReport {
     pub transcript: Option<String>,
 }
 
-/// Capture mic audio and stream it to Ferrox Labs STT, reporting the transcript.
+/// Capture mic audio and stream it to the configured STT WebSocket, reporting
+/// the transcript.
+///
+/// This always exercises the **streaming** transport, whatever
+/// `config.stt_mode` says. That is deliberate — it is the diagnostic for the
+/// WebSocket path — but it means a green result does not prove the batch path
+/// works for a user who is on it, so the report says which transport it tested.
 #[cfg(feature = "audio")]
 pub async fn run_streaming_probe(opts: VoiceProbeOptions) -> Result<VoiceProbeReport, VoiceError> {
-    let bearer = crate::auth::require_bearer(&opts.auth).await?;
+    // The probe always exercises the streaming transport, whatever `stt_mode`
+    // says, so it asks about the streaming destination specifically.
+    let endpoint = opts.config.streaming_credential_endpoint()?;
+    let bearer = crate::auth::require_bearer(&opts.auth, &endpoint).await?;
     let mut stt = StreamingSttSession::connect(&opts.config, &bearer).await?;
     let stt_tx = stt
         .audio_sender()
@@ -66,6 +75,13 @@ pub async fn run_streaming_probe(opts: VoiceProbeOptions) -> Result<VoiceProbeRe
     stt.finish_audio();
 
     let mut stt_log = Vec::new();
+    if opts.config.stt_mode != crate::config::SttMode::Streaming {
+        stt_log.push(format!(
+            "note: this probe tested the STREAMING transport, but [voice].stt_mode is {:?}. \
+             A pass here does not exercise the transport this config actually uses.",
+            opts.config.stt_mode
+        ));
+    }
     let mut transcript = None;
     let deadline = Duration::from_secs(30);
 

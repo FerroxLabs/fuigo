@@ -13,8 +13,8 @@ use crate::agent::config::{self, ModelEntry, resolve_credentials, sampling_confi
 use crate::auth::{AuthManager, FuigoAuth, FuigoComConfig};
 use crate::remote::{FetchModelsResult, ModelSource, active_model_source};
 use crate::sampling::SamplerConfig as SamplingConfig;
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use fuigo_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 // ── Auth method for model fetching ──────────────────────────────────────────
 
@@ -803,7 +803,7 @@ impl ModelsManager {
                 acp::SessionModelState::new(current, available.values().cloned().collect());
             if let Ok(params) = serde_json::value::to_raw_value(&model_state) {
                 gw.forward_fire_and_forget(acp::ExtNotification::new(
-                    "x.ai/models/update",
+                    "fuigo/models/update",
                     params.into(),
                 ));
             }
