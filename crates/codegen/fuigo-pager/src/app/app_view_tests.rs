@@ -329,6 +329,8 @@ pub(crate) fn test_app() -> AppView {
         voice_auth: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        voice_next_session: 1,
+        voice_detached: std::collections::VecDeque::new(),
     }
 }
 pub(crate) fn test_app_with_agent() -> AppView {
@@ -3255,6 +3257,7 @@ fn esc_owned_before_agent_covers_app_level_owners() {
     let mut app = test_app_with_agent();
     assert!(!app.esc_owned_before_agent());
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardDispatch,
         interim: None,
@@ -5127,6 +5130,7 @@ fn esc_on_dashboard_while_listening_stops_voice() {
     app.active_view = ActiveView::AgentDashboard;
     app.dashboard = Some(crate::views::dashboard::DashboardState::new());
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::DashboardDispatch,
         interim: None,
@@ -5181,6 +5185,7 @@ fn voice_overlay_bound_to_target_surface() {
     let id = super::super::agent::AgentId(0);
     let mut app = test_app();
     app.voice_state = VoiceState::Stopping {
+        session: 1,
         target: VoiceTarget::Agent(id),
         interim: Some("partial".into()),
     };
@@ -5204,6 +5209,7 @@ fn voice_target_on_agent_entered_from_dashboard() {
     let id = super::super::agent::AgentId(0);
     let mut app = test_app();
     app.voice_state = VoiceState::Recording {
+        session: 1,
         hold: false,
         target: VoiceTarget::Agent(id),
         interim: None,

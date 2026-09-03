@@ -85,14 +85,23 @@ pub fn transcription_url(config: &VoiceConfig) -> Result<String, VoiceError> {
                 .into(),
         ));
     }
-    if base.starts_with("http://") {
+    // Case-insensitively, because RFC 3986 schemes are: `HTTP://` must hit the
+    // plaintext rejection and `HTTPS://` must be recognised rather than being
+    // treated as scheme-less and rewritten to `https://HTTPS://...`. The
+    // streaming path already did this; batch did not, so the same `api_base`
+    // worked on one transport and produced an opaque parse error on the other.
+    let starts_with_ci = |s: &str, prefix: &str| {
+        s.get(..prefix.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+    };
+    if starts_with_ci(base, "http://") {
         return Err(VoiceError::Config(format!(
             "insecure voice api_base {base:?}: voice requires TLS. Refusing to \
              send the bearer token, or your microphone audio, over a plaintext \
              connection."
         )));
     }
-    let base = if base.starts_with("https://") {
+    let base = if starts_with_ci(base, "https://") {
         base.to_owned()
     } else {
         format!("https://{base}")
@@ -116,6 +125,221 @@ pub fn language_field(config: &VoiceConfig) -> Option<&str> {
     } else {
         Some(lang)
     }
+}
+
+/// Hard ceiling on the transcription response body.
+///
+/// A transcription response is a few hundred bytes of JSON. Reading it
+/// unbounded would let a hostile or broken endpoint stream until the pager
+/// runs out of memory, and there is no legitimate body anywhere near this.
+const MAX_RESPONSE_BYTES: usize = 1 << 20;
+
+/// How long the TCP+TLS connect may take before the attempt is abandoned.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the whole request may take, upload included.
+///
+/// Batch transcription is record-then-send, so this covers uploading up to the
+/// recording cap and waiting for the model. It is deliberately generous, and
+/// deliberately finite: without it a stalled endpoint leaves the user staring
+/// at a "transcribing" state with no way to learn it will never finish.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A client for `POST /v1/audio/transcriptions`.
+///
+/// Built at most once for the lifetime of a voice pipeline (the caller holds it
+/// in a `OnceCell`), not per utterance, so the TLS session and connection pool
+/// survive across every press.
+#[derive(Debug, Clone)]
+pub struct BatchSttClient {
+    http: reqwest::Client,
+}
+
+impl BatchSttClient {
+    /// Build the client through the sanctioned constructor.
+    ///
+    /// `build_reqwest_client` installs the egress guard resolver and the shared
+    /// root store, and it installs the resolver *after* this closure runs so
+    /// the configuration below cannot displace it.
+    ///
+    /// Redirects are disabled outright. reqwest does strip `Authorization` when
+    /// a redirect crosses hosts, so the credential is not the exposure here --
+    /// the recording is. A 307 or 308 replays the request body, so a redirect
+    /// would send the user's microphone audio to a host chosen by the server's
+    /// response rather than by their config, after the endpoint check in
+    /// [`crate::auth`] had already passed on the original URL.
+    pub fn new() -> Result<Self, VoiceError> {
+        let http = fuigo_extra_ca::build_reqwest_client(|builder| {
+            builder
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+        })
+        .map_err(|e| VoiceError::Stt(format!("could not build the transcription client: {e}")))?;
+        Ok(Self { http })
+    }
+
+    /// Transcribe one complete utterance.
+    ///
+    /// `wav` is a full WAV file, normally from [`pcm_to_wav`]. The request is
+    /// sent exactly once: a POST carrying a recording is not idempotent from
+    /// the endpoint's point of view (it is metered, and may be logged), so a
+    /// transparent retry would duplicate a charge and a copy of the user's
+    /// audio. A caller who wants a second attempt has to ask for one.
+    pub async fn transcribe(
+        &self,
+        config: &VoiceConfig,
+        bearer: &str,
+        wav: Vec<u8>,
+    ) -> Result<String, VoiceError> {
+        let url = transcription_url(config)?;
+
+        let part = reqwest::multipart::Part::bytes(wav)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| VoiceError::Stt(format!("multipart: {e}")))?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", config.stt_model.clone())
+            .text("response_format", "json");
+        // Omitted, never sent as `auto`: the live endpoint answers
+        // `language=auto` with a 502. See the module docs.
+        if let Some(language) = language_field(config) {
+            form = form.text("language", language.to_owned());
+        }
+
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {bearer}"));
+        // Attribution headers, matching the streaming transport. Skipped when
+        // empty (the probe binary and tests); their absence is never fatal.
+        if !config.client_identifier.is_empty() {
+            request = request.header("x-fuigo-client-identifier", &config.client_identifier);
+        }
+        if !config.user_agent.is_empty() {
+            request = request.header("User-Agent", &config.user_agent);
+        }
+
+        let response = request.multipart(form).send().await.map_err(|e| {
+            // `reqwest`'s Display for a timeout is opaque; name it, because
+            // "the endpoint never answered" and "the endpoint refused" need
+            // different things from the user.
+            if e.is_timeout() {
+                VoiceError::Stt(format!(
+                    "transcription timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                ))
+            } else if e.is_connect() {
+                VoiceError::Stt(format!("could not reach the voice endpoint: {e}"))
+            } else {
+                VoiceError::Stt(format!("transcription request failed: {e}"))
+            }
+        })?;
+
+        let status = response.status();
+        let body = read_bounded(response).await?;
+        if !status.is_success() {
+            return Err(status_error(status, &body));
+        }
+
+        let parsed: TranscriptionResponse = serde_json::from_slice(&body).map_err(|e| {
+            VoiceError::Stt(format!(
+                "could not parse the transcription response: {e} (body: {})",
+                String::from_utf8_lossy(&body[..body.len().min(200)])
+            ))
+        })?;
+        Ok(parsed.text)
+    }
+}
+
+/// The `json` response format's shape. Other fields (`language`, `duration`)
+/// are ignored rather than modelled: only the transcript is used.
+#[derive(serde::Deserialize)]
+struct TranscriptionResponse {
+    text: String,
+}
+
+/// Read at most [`MAX_RESPONSE_BYTES`], refusing rather than truncating.
+///
+/// Truncating would hand a partial JSON document to the parser and produce a
+/// parse error that hides the real problem.
+async fn read_bounded(mut response: reqwest::Response) -> Result<Vec<u8>, VoiceError> {
+    // Trust the advertised length only to refuse early; never to size the
+    // buffer, since a header can claim anything.
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(VoiceError::Stt(
+            "transcription response is implausibly large; refusing to read it".into(),
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| VoiceError::Stt(format!("reading the transcription response: {e}")))?
+    {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(VoiceError::Stt(
+                "transcription response is implausibly large; refusing to read it".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Map a non-2xx status onto an error the user can act on.
+///
+/// Split by what the user has to do about it, not by status class: an expired
+/// credential means re-authenticate, a 429 means wait, a 5xx means it is not
+/// their fault.
+pub(crate) fn status_error(status: reqwest::StatusCode, body: &[u8]) -> VoiceError {
+    let detail = server_message(body);
+    let suffix = detail.map(|d| format!(": {d}")).unwrap_or_default();
+    match status.as_u16() {
+        401 | 403 => VoiceError::Auth(format!(
+            "the voice endpoint rejected the credential ({status}){suffix}. \
+             Run `fuigo login` or check your API key."
+        )),
+        404 => VoiceError::Stt(format!(
+            "the voice endpoint has no transcription route ({status}){suffix}. \
+             Check `[voice].api_base`."
+        )),
+        413 => VoiceError::Stt(format!(
+            "the recording was rejected as too large ({status}){suffix}."
+        )),
+        429 => VoiceError::Stt(format!(
+            "the voice endpoint is rate limiting this request ({status}){suffix}. \
+             Wait a moment and try again."
+        )),
+        500..=599 => VoiceError::Stt(format!(
+            "the voice endpoint failed ({status}){suffix}. This is not a problem \
+             with your audio; try again."
+        )),
+        _ => VoiceError::Stt(format!("transcription failed ({status}){suffix}")),
+    }
+}
+
+/// The server's own error text, if the body is the usual
+/// `{"error":{"message":...}}` or `{"error":"..."}` shape.
+///
+/// Bounded, because this text is echoed into a toast: a hostile endpoint must
+/// not be able to write an arbitrarily long message into the UI.
+fn server_message(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let error = value.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.as_str())?;
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(crate::truncate_for_display(message, 200))
 }
 
 #[cfg(test)]
@@ -190,8 +414,22 @@ mod tests {
 
     #[test]
     fn plaintext_endpoint_is_refused() {
-        let err = transcription_url(&cfg("http://api.example.com/v1", "en")).unwrap_err();
-        assert!(format!("{err}").contains("TLS"), "{err}");
+        for base in ["http://api.example.com/v1", "HTTP://api.example.com/v1"] {
+            let err = transcription_url(&cfg(base, "en")).unwrap_err();
+            assert!(format!("{err}").contains("TLS"), "{base}: {err}");
+        }
+    }
+
+    /// Schemes are case-insensitive, and the streaming path already treated them
+    /// that way. Before this, `HTTPS://...` was taken for a scheme-less host and
+    /// rewritten to `https://HTTPS://...`, so one transport worked and the other
+    /// failed on the same `[voice].api_base`.
+    #[test]
+    fn an_uppercase_scheme_is_recognised_not_rewritten() {
+        assert_eq!(
+            transcription_url(&cfg("HTTPS://api.example.com/v1", "en")).unwrap(),
+            "HTTPS://api.example.com/v1/audio/transcriptions"
+        );
     }
 
     /// The live API answers `language=auto` with a 502, so it must never be

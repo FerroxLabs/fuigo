@@ -1295,7 +1295,7 @@ pub(crate) async fn run(
         app.is_api_key_auth,
     );
     if !voice_mode_enabled {
-        app.voice_reset();
+        app.voice_cancel_all_dictation();
         app.voice_ui_active = false;
     }
     app.apply_voice_mode_enabled(voice_mode_enabled);
@@ -3172,8 +3172,9 @@ pub(crate) async fn run(
                         voice_rx = None;
                         let was_listening = app.voice_listening();
                         app.voice_cmd_tx = None;
-                        // Pipeline is gone: drop any session/interim entirely.
-                        app.voice_reset();
+                        // Pipeline is gone: nothing can deliver any pending
+                        // transcript, so drop every session, not just the live one.
+                        app.voice_cancel_all_dictation();
                         if was_listening {
                             app.show_toast("Voice stopped unexpectedly. Try again.");
                         }

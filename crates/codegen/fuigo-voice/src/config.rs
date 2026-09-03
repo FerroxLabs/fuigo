@@ -97,6 +97,35 @@ impl VoiceConfig {
         ws_url(&self.api_base, &self.stt_ws_path)
     }
 
+    /// The URL a credential would be attached to for this config's transport.
+    ///
+    /// Passed to [`crate::auth::VoiceAuthProvider::bearer_for`] so the provider
+    /// can refuse a destination. See that trait for why the destination travels
+    /// with the request for a token.
+    pub fn credential_endpoint(&self) -> Result<String, VoiceError> {
+        match self.stt_mode {
+            SttMode::Streaming => self.streaming_credential_endpoint(),
+            SttMode::Batch => crate::stt::batch::transcription_url(self),
+        }
+    }
+
+    /// [`Self::credential_endpoint`] for the streaming transport specifically,
+    /// whatever `stt_mode` says. The probe always exercises streaming.
+    ///
+    /// Streaming dials `wss://`, but a trust predicate that decides where a
+    /// bearer may go is written against `https` — and it must be, since it also
+    /// has to reject `http`. A TLS WebSocket and an https request to the same
+    /// authority share an origin, so the https spelling is the honest question
+    /// to ask: "may this credential be sent to this host?"
+    pub fn streaming_credential_endpoint(&self) -> Result<String, VoiceError> {
+        let ws = self.stt_ws_url()?;
+        // `ws_url` returns a `wss://` URL or an error; there is no other shape.
+        Ok(match ws.strip_prefix("wss://") {
+            Some(rest) => format!("https://{rest}"),
+            None => ws,
+        })
+    }
+
     /// `api_base`: non-empty `[voice].api_base`, else `[endpoints].fuigo_api_base_url` from `root`, else `resolved_endpoints_base`, else the default.
     ///
     /// `resolved_endpoints_base` carries the caller's env/CLI overrides; it ranks below the raw table so config keeps beating env (shell precedence).

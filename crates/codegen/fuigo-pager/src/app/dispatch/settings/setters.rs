@@ -238,9 +238,22 @@ pub(super) fn set_voice_stt_language_inner(app: &mut AppView, canonical: &str) {
     // A running pipeline holds the VoiceConfig it was spawned with
     // Shut it down so the next capture starts one with the new language (the event loop respawns lazily whenever `voice_cmd_tx` is None)
     // Tear down any in-flight session first so the mic indicator clears immediately and the pipeline's channel-close is not misreported as "pipeline ended"
-    if language_changed && let Some(tx) = app.voice_cmd_tx.take() {
-        app.voice_reset();
-        let _ = tx.try_send(fuigo_voice::VoiceCommand::Shutdown);
+    if language_changed {
+        // Reset BEFORE taking the sender. Taking it first left `voice_reset`
+        // with nothing to send to, so the mic was never released -- the
+        // teardown this block exists to perform did not happen.
+        // The pipeline is about to be replaced, so nothing will deliver a
+        // detached upload either.
+        app.voice_cancel_all_dictation();
+        if let Some(tx) = app.voice_cmd_tx.take() {
+            // And the shutdown itself must not be shed: a dropped one leaves the
+            // pipeline running with the device open behind a UI that has already
+            // cleared, which is the hot mic this whole path is avoiding.
+            crate::app::app_view::send_voice_command_reliably(
+                &tx,
+                fuigo_voice::VoiceCommand::Shutdown,
+            );
+        }
     }
 }
 
