@@ -520,8 +520,11 @@ impl SamplingClient {
             match config.auth_scheme {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
+                        // Length and nothing else. The key is invalid, not
+                        // secret-by-accident: a malformed credential is still a
+                        // credential, and a debug log is a file on disk.
                         tracing::debug!(
-                            api_key = %api_key,
+                            api_key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
                         SamplingError::auth_unknown(
@@ -533,8 +536,9 @@ impl SamplingClient {
                 AuthScheme::Bearer => {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
+                        // See the `XApiKey` arm: length only, never the value.
                         tracing::debug!(
-                            api_key = %api_key,
+                            api_key_len = api_key.len(),
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
                         SamplingError::auth_unknown(
@@ -2070,11 +2074,11 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
 mod tests {
     use super::*;
     use axum::{Router, body::Bytes, routing::post};
+    use fuigo_sampling_types::ApiErrorCode;
+    use fuigo_sampling_types::types::ChatRequestMessage;
     use indexmap::IndexMap;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    use fuigo_sampling_types::ApiErrorCode;
-    use fuigo_sampling_types::types::ChatRequestMessage;
 
     #[test]
     fn splice_extra_tool_entries_extends_existing_tools_array() {

@@ -180,6 +180,46 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     }
     false
 }
+/// True only for hosts the user actually configured (see
+/// [`set_trusted_api_origins`]), and -- unless that host is loopback -- only
+/// over `https`.
+///
+/// The narrow sibling of [`is_fuigo_api_url`], and the first difference is
+/// loopback. `is_fuigo_api_url` grants **any** `localhost` / `127.0.0.1` /
+/// `::1` URL unconditionally, which is right for its job -- it gates a
+/// *refusal* (`disable_api_key_auth`) and is used by unit tests and local mock
+/// servers -- but wrong for deciding where a credential may be *sent*. A models
+/// catalogue that named `http://localhost:9999/v1` would otherwise collect the
+/// user's `FUIGO_API_KEY` from any local listener. Loopback is accepted here
+/// only when it is itself one of the configured origins.
+///
+/// The second difference is the scheme. A configured *remote* host must be
+/// reached over `https`: plaintext to another machine puts `FUIGO_API_KEY` on
+/// the wire, and it is a downgrade the user never asked for even when they did
+/// choose the host. A configured *loopback* host stays scheme-agnostic, so
+/// someone running their own gateway on `http://localhost:8080/v1` -- an
+/// endpoint they configured deliberately, on traffic that never leaves the
+/// machine -- keeps working.
+///
+/// Still port-agnostic: the host comparison is `host_matches_configured_origin`,
+/// which ignores both scheme and port, and the scheme check above is the only
+/// constraint layered on top of it.
+pub fn is_configured_api_origin(url: &str) -> bool {
+    configured_origin_scheme_allows(url) && host_matches_configured_origin(url)
+}
+
+/// The scheme half of [`is_configured_api_origin`], split out so the loopback
+/// carve-out is testable on its own: the shared trust set is a `OnceLock`, so
+/// an in-process test cannot install a loopback origin to exercise it through
+/// the public predicate.
+///
+/// Consults no configuration: `https` passes anywhere, any scheme passes on a
+/// loopback host, everything else fails. An unparseable URL fails.
+fn configured_origin_scheme_allows(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .is_ok_and(|parsed| parsed.scheme() == "https" || is_loopback_host(&parsed))
+}
+
 /// True for the CONFIGURED first-party API endpoints (see
 /// [`set_trusted_api_origins`]) plus the compiled cli-chat-proxy route.
 /// No vendor is privileged by compilation.
@@ -554,6 +594,69 @@ mod tests {
         // suite because it guards the host comparison, not the vendor name.
         assert!(!is_fuigo_api_bearer_url("https://\u{0445}.ai/v1"));
         assert!(!is_fuigo_api_bearer_url("https://fluxr\u{043e}uter.ai/v1"));
+    }
+
+    /// `is_configured_api_origin` must NOT inherit `is_fuigo_api_url`'s
+    /// unconditional loopback grant. It decides where `FUIGO_API_KEY` may be
+    /// sent, and a models catalogue naming a local port would otherwise harvest
+    /// it from any listener on the machine.
+    #[test]
+    fn configured_api_origin_does_not_grant_unconfigured_loopback() {
+        init_test_origins();
+        // The broad predicate grants loopback outright; the narrow one must not.
+        assert!(is_fuigo_api_url("http://localhost:9999/v1"));
+        assert!(!is_configured_api_origin("http://localhost:9999/v1"));
+        assert!(!is_configured_api_origin("http://127.0.0.1:9999/v1"));
+        assert!(!is_configured_api_origin("https://evil.example/v1"));
+
+        // A configured host is allowed over https.
+        assert!(is_configured_api_origin("https://api.fluxrouter.ai/v1"));
+    }
+
+    /// Configuring a host does not also opt it into cleartext.
+    ///
+    /// Choosing a remote endpoint is not choosing to put `FUIGO_API_KEY` on the
+    /// wire in the clear, so the scheme is checked even for a host that is in
+    /// the trust set.
+    #[test]
+    fn configured_api_origin_requires_https_for_remote_hosts() {
+        init_test_origins();
+        assert!(is_configured_api_origin("https://api.fluxrouter.ai/v1"));
+        assert!(!is_configured_api_origin("http://api.fluxrouter.ai/v1"));
+        // Nor via any other cleartext scheme.
+        assert!(!is_configured_api_origin("ws://api.fluxrouter.ai/v1"));
+        // The trailing-dot form of the same host is covered too.
+        assert!(is_configured_api_origin("https://api.fluxrouter.ai./v1"));
+        assert!(!is_configured_api_origin("http://api.fluxrouter.ai./v1"));
+    }
+
+    /// The loopback carve-out: a local gateway on `http://localhost:8080` is
+    /// still reachable once configured.
+    ///
+    /// Asserted against the scheme rule alone because the trust set is a
+    /// `OnceLock` shared by every test in this process -- installing a loopback
+    /// origin here would also make `http://localhost:9999` a configured host
+    /// and silently defeat
+    /// `configured_api_origin_does_not_grant_unconfigured_loopback`.
+    #[test]
+    fn configured_origin_scheme_rule_exempts_loopback_only() {
+        assert!(configured_origin_scheme_allows("http://localhost:8080/v1"));
+        assert!(configured_origin_scheme_allows("http://127.0.0.1:8080/v1"));
+        assert!(configured_origin_scheme_allows("http://[::1]:8080/v1"));
+        assert!(configured_origin_scheme_allows(
+            "https://api.fluxrouter.ai/v1"
+        ));
+
+        assert!(!configured_origin_scheme_allows(
+            "http://api.fluxrouter.ai/v1"
+        ));
+        // 127.0.0.2 is loopback per RFC 3330 and `Ipv4Addr::is_loopback`.
+        assert!(configured_origin_scheme_allows("http://127.0.0.2:8080/v1"));
+        // A hostname that merely contains "localhost" is not loopback.
+        assert!(!configured_origin_scheme_allows(
+            "http://localhost.evil.example/v1"
+        ));
+        assert!(!configured_origin_scheme_allows("not-a-url"));
     }
     #[test]
     fn test_truncate() {
