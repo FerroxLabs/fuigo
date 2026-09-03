@@ -42,6 +42,7 @@ pub mod personas;
 pub mod plan;
 pub mod plugin;
 pub mod privacy;
+pub mod provider;
 pub mod queue;
 pub mod recap;
 pub mod release_notes;
@@ -86,6 +87,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         // Per turn.
         Arc::new(effort::EffortCommand),
         Arc::new(model::ModelCommand),
+        Arc::new(provider::ProviderCommand),
         Arc::new(context::ContextCommand),
         Arc::new(compact::CompactCommand),
         Arc::new(fork::ForkCommand),
