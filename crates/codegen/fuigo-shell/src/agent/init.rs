@@ -179,7 +179,7 @@ fn resolve_config(
     }
     // A CLI/env-set Writeback still requires grok.com auth.
     if cfg.storage_mode == StorageMode::Writeback && !has_fuigo_auth {
-        tracing::info!("Writeback is disabled: requires auth with grok.com");
+        tracing::info!("Writeback is disabled: requires auth with Fuigo");
         cfg.storage_mode = StorageMode::Local;
     }
 
