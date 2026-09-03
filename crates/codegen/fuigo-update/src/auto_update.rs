@@ -30,43 +30,36 @@ pub enum UpdateRunMode {
 const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `fuigo update` to get the latest version.";
-/// An empty or `"stable"` channel means stable, the installers' default (`CHANNEL="${FUIGO_CHANNEL:-stable}"` in install.sh).
+/// An empty or `"stable"` channel means stable, which maps to the `@latest`
+/// npm dist-tag. (It also matches `CHANNEL="${FUIGO_CHANNEL:-stable}"` in the
+/// legacy bootstrap installers, which some existing installs still use.)
 fn is_stable_channel(channel: &str) -> bool {
     channel.is_empty() || channel == "stable"
 }
 
-/// Manual-install one-liner for this platform's bootstrap installer.
+/// Manual-install one-liner shown when auto-update cannot complete.
 ///
-/// On Unix the variable must prefix `bash` (which runs install.sh), not `curl`.
-/// In `VAR=x curl … | bash` the assignment applies to `curl` only and install.sh would fall back to stable.
+/// **npm, not a bootstrap script.** This used to print
+/// `curl -fsSL https://x.ai/cli/install.sh | bash` (and the PowerShell twin),
+/// which is xAI's installer for grok-build: following it would have replaced the
+/// user's Fuigo with a different product. Fuigo ships as the npm package `fuigo`
+/// plus six `@fuigo/<platform>` binaries, so npm is the real install path and the
+/// only one that yields Fuigo.
+///
+/// A release channel maps to an npm dist-tag. Stable (or an unset/unsafe value)
+/// means `@latest`.
 fn manual_install_cmd(channel: &str) -> String {
-    // Only interpolate a well-formed channel ([A-Za-z0-9._-]) into the shell one-liner
-    // Anything else falls back to stable (a working installer beats a broken quoted command)
+    // Only interpolate a well-formed channel ([A-Za-z0-9._-]) into the command.
+    // Anything else falls back to stable: a working install line beats a broken one.
     let channel = channel.trim();
     let safe = !channel.is_empty()
         && channel
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if channel == "enterprise" {
-        // Enterprise has its own bootstrap script; it needs no channel env.
-        return if cfg!(windows) {
-            "irm https://x.ai/cli/enterprise-install.ps1 | iex".to_string()
-        } else {
-            "curl -fsSL https://x.ai/cli/enterprise-install.sh | bash".to_string()
-        };
-    }
     if is_stable_channel(channel) || !safe {
-        return if cfg!(windows) {
-            "irm https://x.ai/cli/install.ps1 | iex".to_string()
-        } else {
-            "curl -fsSL https://x.ai/cli/install.sh | bash".to_string()
-        };
+        return "npm i -g fuigo@latest".to_string();
     }
-    if cfg!(windows) {
-        format!("$env:FUIGO_CHANNEL='{channel}'; irm https://x.ai/cli/install.ps1 | iex")
-    } else {
-        format!("curl -fsSL https://x.ai/cli/install.sh | FUIGO_CHANNEL='{channel}' bash")
-    }
+    format!("npm i -g fuigo@{channel}")
 }
 
 fn reinstall_hint(installer: &str, channel: &str) -> String {

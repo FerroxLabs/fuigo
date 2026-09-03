@@ -941,58 +941,49 @@ fn test_reinstall_hint_gh_release_mentions_gh_command() {
 
 #[test]
 fn test_reinstall_hint_internal_mentions_platform_installer() {
+    // These three tests used to pin the shape of a shell one-liner:
+    // `curl -fsSL https://x.ai/cli/install.sh | bash` / `irm … | iex`, that
+    // FUIGO_CHANNEL had to prefix `bash` and not `curl`, and that the enterprise
+    // channel used its own bootstrap script. All of that subtlety existed only
+    // because shell one-liners are fiddly -- and all of it pointed at xAI's
+    // installer, which installs grok-build, not Fuigo. Following that hint would
+    // have replaced the user's Fuigo with a different product.
+    //
+    // Fuigo ships as the npm package `fuigo` plus six `@fuigo/<platform>`
+    // binaries and nothing else, so npm is the only install path that yields
+    // Fuigo. A channel is an npm dist-tag; stable is `@latest`.
     let hint = reinstall_hint("internal", "stable");
-    if cfg!(windows) {
-        assert!(hint.contains("irm"), "should suggest irm install: {hint}");
-        assert!(
-            hint.contains("install.ps1"),
-            "should reference install.ps1: {hint}"
-        );
-        assert!(
-            !hint.contains("FUIGO_CHANNEL"),
-            "stable must not set channel: {hint}"
-        );
-    } else {
-        assert!(hint.contains("curl"), "should suggest curl install: {hint}");
-        assert!(
-            hint.contains("install.sh"),
-            "should reference install.sh: {hint}"
-        );
-        assert!(
-            !hint.contains("FUIGO_CHANNEL"),
-            "stable must not set channel: {hint}"
-        );
-    }
+    assert!(hint.contains("npm i -g fuigo@latest"), "{hint}");
+    assert!(
+        !hint.contains("x.ai") && !hint.contains("install.sh") && !hint.contains("install.ps1"),
+        "must not send a Fuigo user to xAI's installer: {hint}"
+    );
+    assert!(
+        !hint.contains("FUIGO_CHANNEL"),
+        "npm carries the channel in the tag, not an env var: {hint}"
+    );
 }
 
 #[test]
 fn test_reinstall_hint_internal_alpha_sets_channel() {
     let hint = reinstall_hint("internal", "alpha");
-    if cfg!(windows) {
-        assert!(
-            hint.contains("$env:FUIGO_CHANNEL='alpha'"),
-            "alpha should set FUIGO_CHANNEL: {hint}"
-        );
-    } else {
-        assert!(
-            hint.contains("| FUIGO_CHANNEL='alpha' bash"),
-            "alpha must set FUIGO_CHANNEL on bash (the process running \
-             install.sh), not curl: {hint}"
-        );
-    }
+    assert!(hint.contains("npm i -g fuigo@alpha"), "{hint}");
+    assert!(!hint.contains("FUIGO_CHANNEL"), "{hint}");
 }
 
 #[test]
-fn test_reinstall_hint_enterprise_uses_enterprise_script() {
-    // Enterprise ships via its own bootstrap script (channel hardcoded there), never install.sh with FUIGO_CHANNEL
+fn test_reinstall_hint_enterprise_uses_npm_like_every_other_channel() {
+    // Enterprise previously had its own bootstrap script. Fuigo publishes no
+    // enterprise artifact -- there is no Fuigo enterprise CDN, only npm -- so
+    // enterprise resolves to the `@enterprise` dist-tag like any other channel.
+    // NOTE FOR REVIEW: this presumes that dist-tag is actually published. If it
+    // is not, enterprise users get a 404 from npm instead of a wrong product;
+    // decide whether to publish the tag or fold enterprise into @latest.
     let hint = reinstall_hint("internal", "enterprise");
+    assert!(hint.contains("npm i -g fuigo@enterprise"), "{hint}");
     assert!(
-        hint.contains("/enterprise-install."),
-        "enterprise must use the published enterprise-install script: {hint}"
-    );
-    assert!(
-        !hint.contains("FUIGO_CHANNEL"),
-        "enterprise script needs no channel env: {hint}"
+        !hint.contains("enterprise-install."),
+        "must not point at xAI's enterprise bootstrap: {hint}"
     );
 }
 

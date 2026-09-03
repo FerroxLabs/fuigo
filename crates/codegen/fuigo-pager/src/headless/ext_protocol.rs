@@ -275,7 +275,7 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             tracing::warn!(
                 method,
                 error = %e,
-                "headless: malformed x.ai session notification; ignoring"
+                "headless: malformed Fuigo session notification; ignoring"
             );
             return ExtEvent::None;
         }

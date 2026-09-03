@@ -318,7 +318,7 @@ pub async fn run_headless(
     crate::http::set_process_client_mode_headless();
     use crate::agent::relay::spawn_relay_connection_with_callback;
     use tokio_util::sync::CancellationToken;
-    const HEADLESS_NO_SESSION: &str = "Headless mode requires a grok.com session. \
+    const HEADLESS_NO_SESSION: &str = "Headless mode requires a Fuigo session. \
         Run `fuigo login` to sign in, or use `fuigo agent stdio` for API-key access.";
     fuigo_file_utils::queue::cleanup_orphaned_uploads(
         &fuigo_home::fuigo_home(),
@@ -647,7 +647,7 @@ impl DeferredRelayArm {
         ) else {
             return Some(self);
         };
-        info!("Relay-eligible auth token appeared after startup — arming grok.com relay");
+        info!("Relay-eligible auth token appeared after startup — arming Fuigo relay");
         spawn_leader_relay(
             self.slot,
             relay_config,
@@ -1034,7 +1034,7 @@ pub async fn run_leader(
                 );
             } else {
                 info!(
-                    "Relay not started: no grok.com session token \
+                    "Relay not started: no Fuigo session token \
                      (BYOK / local-only leader); will arm if an eligible \
                      token is hot-reloaded"
                 );
