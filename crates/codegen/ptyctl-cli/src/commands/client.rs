@@ -1,22 +1,22 @@
 //! Client commands — send/screen/status/cursor/resize/stop via HTTP.
 
 use anyhow::{Context, Result};
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt;
 use reqwest::Client;
 
-/// Roots are skipped for plain HTTP targets: reqwest loads the OS store at
-/// build time regardless of scheme, and a broken store must not fail the CLI.
-fn builder_for(url: &str) -> reqwest::ClientBuilder {
+/// Keep HTTP builder configuration compatible while retaining the shared
+/// client's redirect and destination policy. Root-store failures are handled
+/// by the shared TLS builder.
+fn builder_for(url: &str, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     if url.starts_with("https://") {
-        Client::builder()
+        builder
     } else {
-        Client::builder().tls_built_in_root_certs(false)
+        builder.tls_built_in_root_certs(false)
     }
 }
 
-#[allow(clippy::disallowed_methods)] // scheme-aware builder above; loopback skips roots by construction
 fn client_for(url: &str) -> Result<Client> {
-    builder_for(url)
-        .build()
+    fuigo_extra_ca::build_reqwest_client(|builder| builder_for(url, builder))
         .context("failed to build HTTP client")
 }
 
@@ -31,7 +31,7 @@ pub async fn send(url: &str, keys: &str, enter: bool) -> Result<()> {
     let resp = client
         .post(format!("{url}/control/send"))
         .json(&serde_json::json!({"keys": keys}))
-        .send()
+        .send_checked()
         .await
         .context("failed to send keys")?;
 
@@ -69,7 +69,7 @@ pub async fn screen(
         req = req.query(&[("full", "true")]);
     }
 
-    let resp = req.send().await.context("failed to query screen")?;
+    let resp = req.send_checked().await.context("failed to query screen")?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -103,7 +103,7 @@ pub async fn cursor(url: &str) -> Result<()> {
     let client = client_for(url)?;
     let resp = client
         .get(format!("{url}/query/cursor"))
-        .send()
+        .send_checked()
         .await
         .context("failed to query cursor")?;
     let body = resp.text().await?;
@@ -116,7 +116,7 @@ pub async fn status(url: &str) -> Result<()> {
     let client = client_for(url)?;
     let resp = client
         .get(format!("{url}/query/status"))
-        .send()
+        .send_checked()
         .await
         .context("failed to query status")?;
     let body = resp.text().await?;
@@ -136,7 +136,7 @@ pub async fn resize(url: &str, size: &str) -> Result<()> {
     let resp = client
         .post(format!("{url}/control/resize"))
         .json(&serde_json::json!({"cols": cols, "rows": rows}))
-        .send()
+        .send_checked()
         .await
         .context("failed to resize")?;
 
@@ -158,14 +158,12 @@ pub async fn wait(
     timeout_secs: u64,
 ) -> Result<bool> {
     // The HTTP timeout outlasts the wait so the server, not the client, decides the outcome.
-    #[allow(clippy::disallowed_methods)]
-    // scheme-aware builder above; loopback skips roots by construction
-    let client = builder_for(url)
-        .timeout(std::time::Duration::from_secs(
+    let client = fuigo_extra_ca::build_reqwest_client(|builder| {
+        builder_for(url, builder).timeout(std::time::Duration::from_secs(
             timeout_secs.saturating_add(5),
         ))
-        .build()
-        .context("failed to build HTTP client")?;
+    })
+    .context("failed to build HTTP client")?;
 
     let mut req = client
         .get(format!("{url}/wait"))
@@ -183,7 +181,7 @@ pub async fn wait(
         req = req.query(&[("stable_ms", ms.to_string())]);
     }
 
-    let resp = req.send().await.context("failed to call wait")?;
+    let resp = req.send_checked().await.context("failed to call wait")?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("wait failed: {body}");
@@ -202,7 +200,7 @@ pub async fn stop(url: &str) -> Result<()> {
     let client = client_for(url)?;
     let resp = client
         .post(format!("{url}/control/stop"))
-        .send()
+        .send_checked()
         .await
         .context("failed to stop session")?;
 
