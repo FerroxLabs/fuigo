@@ -490,6 +490,7 @@ fn preview_activity_advanced(last_seen: u64, current: u64) -> bool {
 /// One scrape, classified so failure is quiet: a connect or timeout failure (proxy absent or still starting) is `Absent`.
 /// That is kept distinct from a genuine error response so neither is ever read as activity.
 async fn scrape_activity(client: &reqwest::Client, url: &str) -> ScrapeOutcome {
+    #[allow(clippy::disallowed_methods)] // Caller uses fixed IPv4 loopback activity_url and a no-redirect client.
     match client.get(url).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
@@ -667,6 +668,7 @@ async fn scrape_metrics_loop(
 
     // Scrape-first: a short-lived sandbox must not exit with zero samples.
     loop {
+        #[allow(clippy::disallowed_methods)] // metrics_url is fixed IPv4 loopback; this client disables redirects.
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => match resp.text().await {
                 Ok(body) => donate(&body),

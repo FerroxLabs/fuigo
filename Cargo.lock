@@ -10238,6 +10238,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "env_logger",
+ "fuigo-extra-ca",
  "ptyctl",
  "reqwest 0.12.24",
  "serde",

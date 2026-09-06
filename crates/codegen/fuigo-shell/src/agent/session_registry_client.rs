@@ -5,6 +5,7 @@
 //! The read methods (`search`, `get_session`, `download_file`) return typed results.
 
 use anyhow::{Context, Result};
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt;
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -349,7 +350,7 @@ impl SessionRegistryClient {
         let mut gcs_response = self
             .raw_client
             .get(&resp.download_url)
-            .send()
+            .send_checked()
             .await
             .context("download from GCS")?;
         if !gcs_response.status().is_success() {

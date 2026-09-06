@@ -11,6 +11,7 @@ name = "ptyctl"
 path = "src/main.rs"
 
 [dependencies]
+fuigo-extra-ca = { path = "../fuigo-extra-ca" }
 ptyctl = { path = "../ptyctl" }
 axum = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

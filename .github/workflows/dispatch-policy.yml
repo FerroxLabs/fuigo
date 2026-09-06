@@ -44,19 +44,16 @@ jobs:
           for method in 'reqwest::RequestBuilder::send' 'reqwest::Client::execute' 'reqwest::blocking::RequestBuilder::send' 'reqwest::blocking::Client::execute'; do
             grep -F "error: use of a disallowed method \`$method\`" dispatch-receipts/negative.log
           done
-      # Temporary consolidated diagnostic pass authorized for F06 closure.
-      # The strict step below remains the acceptance gate.
-      - name: Collect all shipping dispatch diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo clippy --locked --workspace --lib --bins --no-deps --keep-going --message-format=json -- -W clippy::disallowed_methods >dispatch-receipts/collection.jsonl 2>dispatch-receipts/collection.stderr
       - name: Check shipping libraries and binaries
-        if: success() || failure()
         shell: bash
         run: |
           set -euo pipefail
           cargo clippy --locked --workspace --lib --bins --no-deps -- -D clippy::disallowed_methods 2>&1 | tee dispatch-receipts/shipping.log
+      - name: Confirm dispatch and PTY compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fuigo-extra-ca -p ptyctl-cli -- --test-threads=1 2>&1 | tee dispatch-receipts/compatibility.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
