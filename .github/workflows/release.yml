@@ -329,7 +329,9 @@ jobs:
       # Fails if any npm version disagrees with fuigo-version/Cargo.toml.
       - name: Check versions
         working-directory: crates/codegen/fuigo-pager/npm/fuigo
-        run: npm run check-version
+        run: |
+          node scripts/test-postinstall.js
+          npm run check-version
 
       - name: Assemble platform packages
         working-directory: crates/codegen/fuigo-pager/npm/fuigo
