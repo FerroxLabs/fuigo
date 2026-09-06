@@ -244,6 +244,9 @@ impl OidcAuthProvider {
         if let Some(transport) = &self.http_transport {
             (transport.check_url)(&discovery_url)?;
         }
+        // Common SDK adapter: Fuigo hub_auth injects the policy-built client and
+        // check_url above; standalone SDK users retain their own transport policy.
+        #[allow(clippy::disallowed_methods)]
         let disc: Discovery = client
             .get(discovery_url)
             .timeout(Duration::from_secs(10))
@@ -280,6 +283,9 @@ impl OidcAuthProvider {
         if let Some(transport) = &self.http_transport {
             (transport.check_url)(&token_url)?;
         }
+        // Same adapter boundary: token_url is checked above before attaching the
+        // refresh-token form; the injected client also enforces redirect policy.
+        #[allow(clippy::disallowed_methods)]
         let tokens: Tokens = client
             .post(token_url)
             .form(&params)
