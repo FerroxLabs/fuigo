@@ -95,6 +95,7 @@ impl BlockingRequestBuilderExt for reqwest::blocking::RequestBuilder {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Approved boundary: check_url precedes raw dispatch.
 pub async fn execute(
     client: &reqwest::Client,
     request: reqwest::Request,
@@ -113,6 +114,7 @@ pub fn send_blocking(
     execute_blocking(&client, request?)
 }
 
+#[allow(clippy::disallowed_methods)] // Approved boundary: check_url precedes raw dispatch.
 pub fn execute_blocking(
     client: &reqwest::blocking::Client,
     request: reqwest::blocking::Request,

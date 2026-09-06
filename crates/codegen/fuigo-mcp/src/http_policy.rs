@@ -73,6 +73,7 @@ impl CheckedOAuthClient {
         })
     }
 
+    #[allow(clippy::disallowed_methods)] // reqwest 0.13 adapter: check_url precedes execution; clients enforce redirect policy.
     async fn execute_request(
         &self,
         mut request: reqwest::Request,
