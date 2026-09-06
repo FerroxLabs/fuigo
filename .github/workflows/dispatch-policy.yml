@@ -54,6 +54,12 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked -p fuigo-extra-ca -p ptyctl-cli -- --test-threads=1 2>&1 | tee dispatch-receipts/compatibility.log
+      - name: Confirm GCS auth and metadata transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p gcloud-auth -p gcloud-metadata --lib -- --test-threads=1 2>&1 | tee dispatch-receipts/gcs-auth.log
+          cargo test --locked -p fuigo-file-utils --lib gcs_ -- --test-threads=1 2>&1 | tee dispatch-receipts/gcs-storage.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

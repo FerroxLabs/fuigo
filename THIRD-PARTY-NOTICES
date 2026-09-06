@@ -4770,6 +4770,10 @@ gcloud-auth 1.3.0
 Source:  https://github.com/yoshidan/google-cloud-rust/tree/main/foundation/auth
 License: MIT
 
+Local modifications: Fuigo authentication transport policy injection, guarded
+dispatch and fallible HTTP client construction. Pinned source and original
+licence retained in third_party/gcloud-policy/gcloud-auth-1.3.0.
+
 Copyright notice:
   Copyright (c) 2021 Naohiro Yoshida
 
@@ -4780,6 +4784,10 @@ gcloud-metadata 1.0.2
 --------------------------------------------------------------------------------
 Source:  https://github.com/yoshidan/google-cloud-rust/tree/main/foundation/metadata
 License: MIT
+
+Local modifications: shared immutable transport policy hook, guarded metadata
+dispatch and fallible HTTP client construction. Pinned source and original
+licence retained in third_party/gcloud-policy/gcloud-metadata-1.0.2.
 
 Copyright notice:
   Copyright (c) 2021 Naohiro Yoshida
