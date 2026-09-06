@@ -2104,6 +2104,9 @@ async fn probe_anonymous_access(
     );
     apply_user_agent_policy(&mut probe_headers, server_name, url);
     let request = client.post(url).headers(probe_headers).body("{}");
+    // reqwest 0.13 adapter: check_url above rejects the destination before
+    // headers are attached; this probe's client never follows redirects.
+    #[allow(clippy::disallowed_methods)]
     match request.send().await {
         Ok(response) => {
             let status = response.status();
