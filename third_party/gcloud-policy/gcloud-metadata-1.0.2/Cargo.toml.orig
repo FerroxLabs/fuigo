@@ -1,0 +1,24 @@
+[package]
+name = "gcloud-metadata"
+version = "1.0.2"
+authors = ["yoshidan <naohiro.y@gmail.com>"]
+edition = "2021"
+repository = "https://github.com/yoshidan/google-cloud-rust/tree/main/foundation/metadata"
+keywords = ["gcp","googleapis","google-cloud-rust"]
+license = "MIT"
+readme = "README.md"
+description = "Google Cloud Platform rust client."
+
+[lib]
+doctest = false
+
+[dependencies]
+tokio = { version = "1.32", features = ["sync", "net", "parking_lot"] }
+# this crate uses http only
+reqwest = { version = "0.13" , default-features = false }
+thiserror = "2.0"
+
+[dev-dependencies]
+tokio = { version = "1.32", features = ["test-util", "rt-multi-thread", "macros"]}
+
+

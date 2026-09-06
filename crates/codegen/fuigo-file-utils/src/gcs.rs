@@ -494,6 +494,8 @@ async fn build_gcs_client(
 ) -> anyhow::Result<gcloud_storage::client::Client> {
     use gcloud_storage::client::{Client as GcsClient, ClientConfig as GcsClientConfig};
 
+    crate::gcs_http_policy::install_auth_policy()?;
+
     // Protect storage/IAM requests. gcloud-auth's separate token-source HTTP
     // clients are not controlled by this field and require a separate adapter.
     let config = GcsClientConfig {
