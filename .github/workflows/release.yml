@@ -256,21 +256,6 @@ jobs:
             *) echo "::error::unhandled macOS target ${{ matrix.target }}"; exit 1 ;;
           esac
 
-      - name: Security and recovery regression gate
-        if: matrix.npm_platform == 'linux-x64'
-        shell: bash
-        env:
-          RUST_MIN_STACK: "16777216"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-          CARGO_BUILD_JOBS: "4"
-        run: |
-          set -euo pipefail
-          cargo test --locked -p fuigo-extra-ca -p fuigo-shell-base -p fuigo-update -p fuigo-workflow -p fuigo-secrets -p fuigo-telemetry --lib -- --test-threads=1
-          cargo test --locked -p fuigo-shell -p fuigo-tools -p fuigo-mcp -p fuigo-hooks --lib t05_ -- --test-threads=1
-          cargo test --locked -p fuigo-shell -p fuigo-tools --lib t04_ -- --test-threads=1
-          cargo test --locked -p fuigo-sampler --lib actor::request_task::tests -- --test-threads=1
-
       - uses: actions/upload-artifact@v4
         with:
           name: fuigo-${{ matrix.npm_platform }}
@@ -280,9 +265,42 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+  security:
+    name: security and recovery regression gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUST_MIN_STACK: "16777216"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TARGET_DIR: target/security-checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare pinned test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cmake --version | head -1
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+          df -h .
+      - name: Run required regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fuigo-extra-ca -p fuigo-shell-base -p fuigo-update -p fuigo-workflow -p fuigo-secrets -p fuigo-telemetry --lib -- --test-threads=1
+          cargo test --locked -p fuigo-shell -p fuigo-tools -p fuigo-mcp -p fuigo-hooks --lib t05_ -- --test-threads=1
+          cargo test --locked -p fuigo-shell -p fuigo-tools --lib t04_ -- --test-threads=1
+          cargo test --locked -p fuigo-sampler --lib actor::request_task::tests -- --test-threads=1
+
   publish:
     name: assemble and publish
-    needs: build
+    needs: [build, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: npm-publish
