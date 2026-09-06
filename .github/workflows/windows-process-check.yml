@@ -1,0 +1,33 @@
+name: Windows process ownership check
+on:
+  push:
+    branches: [release/audit-1.0.6]
+    paths: [.github/workflows/windows-process-check.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  process:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Existing native attached-child termination test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p process-receipts
+          cargo test --locked -p fuigo-tty-utils --lib process_group_kill_terminates_attached_child -- --nocapture 2>&1 | tee process-receipts/result.log
+          grep -F '1 passed; 0 failed' process-receipts/result.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: process-${{ matrix.runner }}
+          path: process-receipts/
