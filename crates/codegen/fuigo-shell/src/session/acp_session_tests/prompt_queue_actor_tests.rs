@@ -1690,11 +1690,18 @@ async fn promote_queued_as_interjections_stops_at_send_now() {
 /// Product gate: with Steer off, a held plain row must not promote at a safe point (queue stays; no interjection in conversation).
 #[tokio::test]
 async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::drain_at_safe_point_with_steer_off_does_not_promote_held_row",
+    ) else {
+        return;
+    };
+    std::fs::write(home.join("config.toml"), "[ui]\nfollow_up_behavior = \"queue\"\n")
+        .expect("write isolated queue setting");
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(false);
             let (actor, _rx) = build_actor().await;
+            assert!(!crate::util::config::follow_up_steer_enabled().await);
             {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
@@ -1722,11 +1729,18 @@ async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
 /// Product gate: with Steer on, a held plain row promotes and drains into a synthetic interjection user item.
 #[tokio::test]
 async fn drain_at_safe_point_with_steer_on_promotes_and_drains_held_row() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::drain_at_safe_point_with_steer_on_promotes_and_drains_held_row",
+    ) else {
+        return;
+    };
+    std::fs::write(home.join("config.toml"), "[ui]\nfollow_up_behavior = \"steer\"\n")
+        .expect("write isolated steer setting");
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
             let (actor, _rx) = build_actor().await;
+            assert!(crate::util::config::follow_up_steer_enabled().await);
             {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
@@ -1956,11 +1970,18 @@ async fn promote_queued_as_interjections_stops_when_protected_is_next() {
 /// Steer-on safe-point drain must not treat a protected pin as promotable held work (pair with direct promote tests above).
 #[tokio::test]
 async fn drain_at_safe_point_with_steer_on_leaves_protected_row_queued() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::drain_at_safe_point_with_steer_on_leaves_protected_row_queued",
+    ) else {
+        return;
+    };
+    std::fs::write(home.join("config.toml"), "[ui]\nfollow_up_behavior = \"steer\"\n")
+        .expect("write isolated steer setting");
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
             let (actor, _rx) = build_actor().await;
+            assert!(crate::util::config::follow_up_steer_enabled().await);
             {
                 let mut state = actor.state.lock().await;
                 state.pending_inputs.push_back(user_item("running", "A"));
