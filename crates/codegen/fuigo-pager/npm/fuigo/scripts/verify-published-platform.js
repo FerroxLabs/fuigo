@@ -8,9 +8,15 @@ const {execFileSync} = require('child_process');
 const platform = process.argv[2];
 assert(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-arm64', 'win32-x64'].includes(platform));
 const version = require('../package.json').version;
+// npm is a .cmd shim on Windows, not an executable for execFileSync.
+// setup-node installs npm's JS entry beside node.exe; invoke it without a shell.
+const npmCommand = process.platform === 'win32' ? process.execPath : 'npm';
+const npmPrefix = process.platform === 'win32'
+    ? [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')] : [];
+const runNpm = (args, options) => execFileSync(npmCommand, [...npmPrefix, ...args], options);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fuigo-published-check-'));
 try {
-    const [packed] = JSON.parse(execFileSync('npm', ['pack', `@fuigo/${platform}@${version}`,
+    const [packed] = JSON.parse(runNpm(['pack', `@fuigo/${platform}@${version}`,
         '--ignore-scripts', '--json'], {cwd: dir, encoding: 'utf8'}));
     execFileSync('tar', ['-xzf', packed.filename], {cwd: dir});
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'package/package.json')));
@@ -29,12 +35,13 @@ try {
     const result = execFileSync(binary, ['--version'], {timeout: 60000, encoding: 'utf8',
         env: {...process.env, HOME: dir, USERPROFILE: dir, FUIGO_HOME: path.join(dir, 'home')}}).trim();
     assert(result.includes(` ${version} `), `Unexpected version: ${result}`);
-    if (process.env.GITHUB_SHA) assert(result.includes(process.env.GITHUB_SHA.slice(0, 12)), `Wrong source stamp: ${result}`);
+    const expectedCommit = process.env.FUIGO_EXPECTED_RELEASE_COMMIT || process.env.GITHUB_SHA;
+    if (expectedCommit) assert(result.includes(expectedCommit.slice(0, 12)), `Wrong source stamp: ${result}`);
     console.log(JSON.stringify({name: manifest.name, version, description, result, integrity: packed.integrity}));
     if (platform === 'linux-x64' || platform === 'darwin-arm64') {
         const prefix = path.join(dir, 'installed');
         const env = {...process.env, HOME: dir, FUIGO_HOME: path.join(dir, 'installed-home')};
-        const install = v => execFileSync('npm', ['install', '--prefix', prefix,
+        const install = v => runNpm(['install', '--prefix', prefix,
             '--no-audit', '--no-fund', `fuigo@${v}`], {env, stdio: 'inherit'});
         const entry = path.join(prefix, 'node_modules/.bin/fuigo');
         if (platform === 'linux-x64') {

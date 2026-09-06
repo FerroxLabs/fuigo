@@ -1,0 +1,34 @@
+name: verify published Windows release
+
+on:
+  push:
+    branches: [release/audit-1.0.6]
+    paths:
+      - .github/workflows/verify-release-windows.yml
+      - crates/codegen/fuigo-pager/npm/fuigo/scripts/verify-published-platform.js
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify published ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-latest, platform: win32-x64}
+          - {runner: windows-11-arm, platform: win32-arm64}
+    env:
+      FUIGO_EXPECTED_RELEASE_COMMIT: b921c6ded37d89add05bac5d0ef487487a53d908
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify published package and native execution
+        shell: bash
+        run: node crates/codegen/fuigo-pager/npm/fuigo/scripts/verify-published-platform.js '${{ matrix.platform }}'
