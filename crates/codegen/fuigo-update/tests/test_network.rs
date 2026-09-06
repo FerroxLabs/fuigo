@@ -312,6 +312,42 @@ async fn download_silent_writes_body_to_dest() {
 }
 
 #[tokio::test]
+async fn download_silent_follows_cdn_redirect_without_inherited_credentials() {
+    let origin = MockServer::start().await;
+    let cdn = MockServer::start().await;
+    let body = b"redirected binary bytes\x00\x01";
+    Mock::given(path("/artifact"))
+        .respond_with(
+            ResponseTemplate::new(307).insert_header("Location", format!("{}/binary", cdn.uri())),
+        )
+        .mount(&origin)
+        .await;
+    Mock::given(path("/binary"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .mount(&cdn)
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("fuigo");
+    download_silent(
+        &format!("{}/artifact?signature=fake-url-authority", origin.uri()),
+        &dest,
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(dest).unwrap(), body);
+    let requests = cdn.received_requests().await.unwrap();
+    assert!(requests.iter().any(|r| r.method.as_str() == "HEAD"));
+    assert!(requests.iter().any(|r| r.method.as_str() == "GET"));
+    for request in requests {
+        for forbidden in ["authorization", "x-api-key", "cookie", "referer"] {
+            assert!(!request.headers.contains_key(forbidden));
+        }
+        assert!(request.body.is_empty());
+        assert!(!request.url.as_str().contains("fake-url-authority"));
+    }
+}
+
+#[tokio::test]
 async fn download_silent_preserves_binary_bytes_unchanged() {
     let server = MockServer::start().await;
     let body: Vec<u8> = (0u8..=255).cycle().take(10_000).collect();

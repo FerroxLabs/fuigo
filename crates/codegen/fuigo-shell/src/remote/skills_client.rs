@@ -14,6 +14,7 @@
 //! Chat turn expansion for those entries happens on the product/gateway side.
 //! Shell only expands when a body is preloaded (user skills with `skill_md_content`).
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -269,10 +270,21 @@ pub enum SkillsError {
     NoAuth,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
+    #[error("request blocked by egress policy: {0}")]
+    Policy(&'static str),
     #[error("request failed: {status}")]
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for SkillsError {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::Policy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::Network(error),
+        }
+    }
 }
 
 impl SkillsError {
@@ -280,7 +292,7 @@ impl SkillsError {
         match self {
             SkillsError::Network(_) => true,
             SkillsError::Http { status } => *status >= 500,
-            SkillsError::NoAuth | SkillsError::Parse(_) => false,
+            SkillsError::NoAuth | SkillsError::Parse(_) | SkillsError::Policy(_) => false,
         }
     }
 }
@@ -478,7 +490,7 @@ impl SkillsClient {
         let builder = self
             .apply_auth_headers(self.http.post(&url).json(&body), key, user_id, email)
             .timeout(LIST_REQUEST_TIMEOUT);
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(SkillsError::Http {
@@ -499,7 +511,7 @@ impl SkillsClient {
         let builder = self
             .apply_auth_headers(self.http.get(&url), key, user_id, email)
             .timeout(LIST_REQUEST_TIMEOUT);
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(SkillsError::Http {
@@ -1212,5 +1224,16 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "my-skill");
         assert_eq!(infos[0].description, "first");
+    }
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn egress_policy_denial_preserves_its_category() {
+        let error = SkillsError::from(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"));
+        assert!(matches!(error, SkillsError::Policy("blocked")));
+        assert!(!error.is_retryable());
     }
 }

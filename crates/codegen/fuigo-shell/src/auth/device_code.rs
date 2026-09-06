@@ -6,6 +6,7 @@
 //!
 //! Callers control what happens between the two phases (print to stderr, show in TUI, display in IDE sidebar, etc.).
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -146,7 +147,7 @@ pub(crate) async fn request_device_code(
             ]),
         &url,
     )
-    .send()
+    .send_checked()
     .await?;
 
     if !resp.status().is_success() {
@@ -231,7 +232,7 @@ pub(crate) async fn complete_device_code_login(
                 ]),
             &token_url,
         )
-        .send()
+        .send_checked()
         .await?;
 
         if resp.status().is_success() {

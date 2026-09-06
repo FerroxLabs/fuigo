@@ -195,6 +195,22 @@ fn write_provider_locked(
         }
     }
 
+    // Resolve the prospective document through runtime's complete layer/model
+    // resolution before renaming anything. A model override can retain another
+    // provider's credential even though model_provider now names this one.
+    let mut layers = fuigo_config::ConfigLayers::load()?;
+    layers.user = toml::from_str(&doc.to_string())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fuigo_config::expand_env_vars_in_toml(&mut layers.user);
+    fuigo_config::apply_version_overrides_with_registered(&mut layers.user)?;
+    let effective = fuigo_shell::util::config::effective_config_from_layers(&layers)?;
+    fuigo_shell::agent::model_providers::validate_provider_binding(
+        &effective,
+        entry.id,
+        entry.models,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
     // `fuigo_config::fs_atomic::write_atomically` creates a uniquely named temp
     // file beside the target with `create_new`, applies `mode` at creation,
     // renames, and unlinks the temp file on any error.
@@ -260,6 +276,7 @@ fn subtable_mut<'d>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuigo_test_support::EnvGuard;
     use std::fs;
     use tempfile::tempdir;
 
@@ -287,11 +304,122 @@ mod tests {
         }
     }
 
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn provider_rebinding_refuses_conflicting_model_settings_atomically() {
+        for (key, value) in [
+            ("env_key", "\"OLD_PROVIDER_KEY\""),
+            ("env_key", r#"["ANTHROPIC_API_KEY", "OLD_PROVIDER_KEY"]"#),
+            ("api_key", "\"old-secret\""),
+            ("base_url", "\"https://old.example/v1\""),
+            ("api_base_url", "\"https://old.example/v1\""),
+            ("auth_provider", "\"old-helper\""),
+            ("auth_scheme", "\"bearer\""),
+            ("api_backend", "\"responses\""),
+            ("extra_headers", "{ Authorization = \"old-secret\" }"),
+            ("env_http_headers", "{ Authorization = \"OLD_KEY\" }"),
+            ("query_params", "{ api_key = \"old-secret\" }"),
+        ] {
+            let dir = tempdir().unwrap();
+            let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+            let path = dir.path().join("config.toml");
+            let original = format!("[model.existing]\n{key} = {value}\n");
+            fs::write(&path, &original).unwrap();
+            let result = write_provider_at(&path, &sample("anthropic", &["new", "existing"]));
+            let error =
+                result.expect_err("conflicting model settings must refuse the entire write");
+            assert!(error.to_string().contains(key), "{error}");
+            assert!(!error.to_string().contains("old-secret"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn provider_rebinding_accepts_matching_model_settings() {
+        let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[model.existing]\nenv_key = \"ANTHROPIC_API_KEY\"\nbase_url = \"https://api.anthropic.com/v1\"\ncontext_window = 123456\n").unwrap();
+        kept_of(write_provider_at(&path, &sample("anthropic", &["existing"])).unwrap());
+        assert_eq!(
+            parse(&path)["model"]["existing"]["context_window"].as_integer(),
+            Some(123456)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn provider_rebinding_accepts_single_element_env_key_array() {
+        let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[model.existing]\nenv_key = [\"ANTHROPIC_API_KEY\"]\n",
+        )
+        .unwrap();
+        kept_of(write_provider_at(&path, &sample("anthropic", &["existing"])).unwrap());
+        assert!(parse(&path)["model"]["existing"]["env_key"].is_array());
+    }
+
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn provider_rebinding_accepts_an_inline_key_owned_by_the_provider() {
+        let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[model_providers.anthropic]
+base_url = "https://api.anthropic.com/v1"
+env_key = "ANTHROPIC_API_KEY"
+api_key = "same-owned-key"
+[model.existing]
+base_url = "https://api.anthropic.com/v1"
+api_key = "same-owned-key"
+"#,
+        )
+        .unwrap();
+        kept_of(write_provider_at(&path, &sample("anthropic", &["existing"])).unwrap());
+        assert_eq!(
+            parse(&path)["model"]["existing"]["api_key"].as_str(),
+            Some("same-owned-key")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn provider_rebinding_checks_inherited_model_settings() {
+        let Some(dir) = fuigo_test_support::env::fresh_process_home(
+            "provider_config_edit::tests::provider_rebinding_checks_inherited_model_settings",
+        ) else {
+            return;
+        };
+        fs::write(
+            dir.as_path().join("managed_config.toml"),
+            "[model.existing]\nenv_key = \"CORPORATE_KEY\"\n",
+        )
+        .unwrap();
+        let path = dir.as_path().join("config.toml");
+        fs::write(&path, "# keep this file unchanged\n").unwrap();
+        let error = write_provider_at(&path, &sample("anthropic", &["existing"]))
+            .expect_err("effective managed model credential must be checked");
+        assert!(error.to_string().contains("env_key"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# keep this file unchanged\n"
+        );
+    }
+
     /// Req 1: the provider table carries base_url, env_key, both optional scalars,
     /// and every extra header in a nested `extra_headers` table.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn writes_provider_table_with_scalars_and_nested_extra_headers() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();
@@ -314,8 +442,10 @@ mod tests {
     /// empty string the resolver would have to special-case. An empty
     /// `extra_headers` slice likewise leaves no empty table behind.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn omits_optional_fields_when_none() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(
@@ -341,8 +471,10 @@ mod tests {
     /// Req 2: every model key gets `model_provider = "<id>"`. This is the half the
     /// agent's model resolver actually reads; the provider table alone arms nothing.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn binds_every_model_key_to_the_provider() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(
@@ -367,8 +499,10 @@ mod tests {
     /// anyway, leaving resolution to supply the default inference endpoint for
     /// the corporate credential. Nothing is written now.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_is_refused_and_writes_nothing() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("config.toml");
         // The user set only `env_key`; `base_url` is absent.
         let original = "[model_providers.anthropic]\nenv_key = \"CORP_ANTHROPIC_KEY\"\n";
@@ -407,8 +541,10 @@ mod tests {
     /// same defect facing the other way — a corporate host paired with whatever
     /// ambient credential resolution finds.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_is_refused_with_base_url_set_and_env_key_absent() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         let original = "[model_providers.anthropic]\nbase_url = \"https://claude-proxy.corp/v1\"\n";
         fs::write(&path, original).unwrap();
@@ -431,8 +567,10 @@ mod tests {
     /// and looks up `model_provider` there), so writing it is what arms the
     /// mispairing.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_gets_no_model_binding() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(
             &path,
@@ -469,8 +607,10 @@ mod tests {
     /// Post-fix there is no `[model.*]` entry at all, so resolution never sees
     /// this provider and no such pair exists.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_leaves_no_host_credential_pair_for_resolution_to_find() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(
             &path,
@@ -498,8 +638,10 @@ mod tests {
     /// Req 3: unrelated keys in a pre-existing `[model.<key>]` and
     /// `[model_providers.<id>]`, and unrelated sibling tables, all survive.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn merges_into_existing_tables_without_dropping_keys() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(
             &path,
@@ -509,6 +651,17 @@ mod tests {
         )
         .unwrap();
 
+        let original = fs::read_to_string(&path).unwrap();
+        let error = write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"]))
+            .expect_err("an existing model key must not be rebound");
+        assert!(error.to_string().contains("api_key"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            parse(&path)["model"]["claude-opus-4-6"]["api_key"].as_str(),
+            Some("pre-existing")
+        );
+        // After the user removes the conflicting auth override, unrelated keys survive.
+        fs::write(&path, original.replace("api_key = \"pre-existing\"\n", "")).unwrap();
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();
 
         let doc = parse(&path);
@@ -522,7 +675,7 @@ mod tests {
         );
         let model = doc["model"]["claude-opus-4-6"].clone();
         assert_eq!(model["context_window"].as_integer(), Some(100_000));
-        assert_eq!(model["api_key"].as_str(), Some("pre-existing"));
+        assert!(model.get("api_key").is_none());
         assert_eq!(model["model_provider"].as_str(), Some("anthropic"));
     }
 
@@ -531,8 +684,10 @@ mod tests {
     /// proxy and break the credential lookup, so both are kept, reported, and
     /// the model is bound to the provider as it stands.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn keeps_a_customised_base_url_and_env_key_and_reports_them() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(
             &path,
@@ -575,8 +730,10 @@ mod tests {
     /// F5 (negative): matching values are not "kept" — there is nothing the
     /// user would lose, so the outcome must not claim a customisation.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn reports_nothing_kept_when_the_existing_values_already_match() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         let entry = sample("anthropic", &["claude-opus-4-6"]);
@@ -591,8 +748,10 @@ mod tests {
     /// the rendered spelling (toml_edit quotes them) and that a full re-parse finds
     /// the key exactly as given — a dotted key would otherwise nest a sub-table.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn quoted_model_keys_round_trip_exactly() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(&path, &sample("mixed", &["openai/gpt-4o", "gpt-4.1"])).unwrap();
@@ -623,8 +782,10 @@ mod tests {
     /// secret to leak because [`ProviderWrite`] has no field holding a key value —
     /// `env_key` is the only credential-adjacent field and it names a variable.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn writes_env_var_name_and_has_no_field_for_a_secret() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(
@@ -653,8 +814,10 @@ mod tests {
     /// caller is told nothing was written, so `/provider` cannot report success
     /// for a write that did not happen.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn unparseable_config_is_reported_as_skipped_and_left_byte_identical() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         let bad = "this is [not valid toml\n";
         fs::write(&path, bad).unwrap();
@@ -671,8 +834,10 @@ mod tests {
     /// `flock` releases on close, and unlinking it would let the next writer
     /// create a fresh one and contend on nothing.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn leaves_no_temp_file_beside_the_target() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();
@@ -694,8 +859,10 @@ mod tests {
     /// behind. A directory at the target path lets the temp file be created and
     /// written, then fails the `rename` onto it.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn an_unreadable_config_is_skipped_without_writing_anything() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         // A directory where the config should be: readable as an entry, but not
         // as a file. This used to fall through to a write that failed at the
@@ -722,9 +889,11 @@ mod tests {
     /// a readable config whose directory cannot be written to.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_failed_write_leaves_no_temp_file_behind() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
 
@@ -750,8 +919,10 @@ mod tests {
 
     /// Req 8: a repeated write is a no-op on content — no duplicated tables or keys.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn second_write_produces_identical_content() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         let entry = sample("anthropic", &["claude-opus-4-6", "openai/gpt-4o"]);
@@ -765,8 +936,10 @@ mod tests {
 
     /// Req 9: a missing parent directory and a missing file are both created.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn creates_missing_parent_dir_and_file() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("nested/deeper/config.toml");
 
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();
@@ -781,8 +954,10 @@ mod tests {
     /// A hand-edited config where `model_providers` is not a table is reported
     /// rather than silently replaced, and the file is left untouched.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn non_table_model_providers_is_an_error_and_does_not_write() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         let original = "model_providers = 5\n";
         fs::write(&path, original).unwrap();
@@ -797,8 +972,10 @@ mod tests {
     /// own uniquely named temp file, so whichever rename lands last wins whole —
     /// the file always parses and always carries a complete provider table.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn concurrent_writes_never_produce_a_torn_file() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         std::thread::scope(|scope| {
@@ -846,8 +1023,10 @@ mod tests {
     /// description, so those handles contend with one another exactly as two
     /// processes would — the thing this proves is the lock, not thread-locality.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn concurrent_writes_of_different_providers_all_survive() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         let ids: Vec<String> = (0..8).map(|n| format!("vendor{n}")).collect();
 
@@ -896,8 +1075,10 @@ mod tests {
     /// actually exclude each other is asserted directly in `fs_atomic`'s own
     /// `a_second_holder_is_refused_until_the_first_drops`.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_provider_write_racing_a_settings_shaped_write_keeps_both() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
 
@@ -965,8 +1146,10 @@ mod tests {
     /// `/provider` must take the lock at the one name every other writer uses,
     /// or "the lock" is several locks and serializes nothing.
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn a_provider_write_takes_the_shared_config_lock() {
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();
@@ -982,9 +1165,11 @@ mod tests {
     /// `/provider` run — the file supports `[model.<key>].api_key`.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn preserves_an_existing_restrictive_mode() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(&path, "[ui]\ncompact_mode = false\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -999,9 +1184,11 @@ mod tests {
     /// would have produced, because it may come to hold an `api_key`.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(FUIGO_HOME)]
     fn creates_a_new_config_readable_only_by_its_owner() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();

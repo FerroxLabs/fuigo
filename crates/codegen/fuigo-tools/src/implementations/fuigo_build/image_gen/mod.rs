@@ -20,6 +20,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
+use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -66,6 +67,7 @@ pub struct ImageGenClient {
     edit_model: String,
     writer: super::storage::SessionFileWriter,
     api_key_provider: Option<SharedApiKeyProvider>,
+    configured_api_key: Option<String>,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
     /// Imagine API emits an `auth_401_attribution` event with
     /// `consumer == "ImageGen"` for unified auth-failure telemetry.
@@ -111,16 +113,7 @@ impl ImageGenClient {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        // Always bake the static api_key as the default Authorization header.
-        // The dynamic provider overrides per-request; this is the fallback.
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Invalid API key for header: {e}"
-                ))
-            })?,
-        );
+        let configured_api_key = (!api_key.trim().is_empty()).then(|| api_key.trim().to_owned());
 
         extra_headers.into_iter().try_for_each(|(key, value)| {
             let header_name =
@@ -134,7 +127,12 @@ impl ImageGenClient {
                     "Invalid header value for '{key}': {e}"
                 ))
             })?;
-            headers.insert(header_name, header_value);
+            // A live provider is authoritative. Keeping a constructor-time
+            // Authorization default would resurrect a credential after the
+            // provider denied or revoked it.
+            if api_key_provider.is_none() || header_name != AUTHORIZATION {
+                headers.insert(header_name, header_value);
+            }
             Ok::<(), fuigo_tool_runtime::ToolError>(())
         })?;
 
@@ -163,6 +161,7 @@ impl ImageGenClient {
             edit_model,
             writer: super::storage::SessionFileWriter::new(DEFAULT_IMAGE_DIR, "jpg"),
             api_key_provider,
+            configured_api_key,
             attribution_callback: None,
             tier_restricted: *tier_restricted,
             session_header: None,
@@ -199,8 +198,21 @@ impl ImageGenClient {
         self
     }
 
-    pub(crate) async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    pub(crate) async fn current_bearer(
+        &self,
+        purpose: CredentialPurpose,
+        recipient: &str,
+    ) -> Option<String> {
+        crate::types::api_key_provider::resolve_bearer(
+            self.api_key_provider.as_ref(),
+            CredentialRequest {
+                purpose,
+                recipient,
+                model: None,
+            },
+            self.configured_api_key.as_deref(),
+        )
+        .await
     }
 
     pub(crate) fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -256,10 +268,17 @@ impl ImageGenClient {
         // Capture the bearer once so the request and the 401-attribution
         // emit see the same value (even if the provider rotates between
         // the send and the response handling).
-        let sent_bearer = self.current_bearer().await;
-        let req = self.post_json(&url, &payload, sent_bearer.as_deref());
+        let sent_bearer = self
+            .current_bearer(CredentialPurpose::ImageGeneration, &url)
+            .await
+            .ok_or_else(|| {
+                fuigo_tool_runtime::ToolError::unauthorized(
+                    "No credential is available for the configured image generation endpoint",
+                )
+            })?;
+        let req = self.post_json(&url, &payload, Some(&sent_bearer));
 
-        let response = req.send().await.map_err(|e| {
+        let response = fuigo_extra_ca::dispatch::send(req).await.map_err(|e| {
             fuigo_tool_runtime::ToolError::invalid_arguments(format!(
                 "Image generation API request failed: {e}"
             ))
@@ -267,7 +286,7 @@ impl ImageGenClient {
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
+            self.record_401_attribution(ToolConsumer::ImageGen, Some(&sent_bearer));
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -312,7 +331,8 @@ impl ImageGenClient {
     }
 }
 
-/// `Enabled` means credentials are present; each tool has its own gate.
+/// `Enabled` means the client may be constructed; credentials can come from a
+/// live provider at operation time. Each tool has its own gate.
 #[derive(Debug, Clone, Default)]
 pub enum ImageGenConfig {
     #[default]
@@ -344,7 +364,7 @@ pub enum ImageGenConfig {
 pub const SESSION_ID_HEADER: &str = "x-fuigo-session-id";
 
 impl ImageGenConfig {
-    /// Credentials present — required to construct any of the clients.
+    /// Client configuration present — required to construct any of the clients.
     pub fn has_credentials(&self) -> bool {
         matches!(self, Self::Enabled { .. })
     }
@@ -513,6 +533,126 @@ impl fuigo_tool_runtime::Tool for ImageGenTool {
 mod tests {
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
+
+    struct DeniedProvider;
+
+    impl crate::types::ApiKeyProvider for DeniedProvider {
+        fn current_api_key(&self) -> Option<String> {
+            Some("generic-process-key".into())
+        }
+
+        fn credential_for(
+            &self,
+            _request: CredentialRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = crate::types::api_key_provider::CredentialResolution,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::ready(
+                crate::types::api_key_provider::CredentialResolution::Denied,
+            ))
+        }
+    }
+
+    struct ImageProvider;
+
+    impl crate::types::ApiKeyProvider for ImageProvider {
+        fn current_api_key(&self) -> Option<String> {
+            None
+        }
+
+        fn credential_for(
+            &self,
+            request: CredentialRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = crate::types::api_key_provider::CredentialResolution,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            let result = if request.purpose == CredentialPurpose::ImageGeneration {
+                crate::types::api_key_provider::CredentialResolution::Resolved(
+                    "live-image-key".into(),
+                )
+            } else {
+                crate::types::api_key_provider::CredentialResolution::Denied
+            };
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    #[tokio::test]
+    async fn t04_live_image_credential_reaches_the_matching_receiver() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .and(header("authorization", "Bearer live-image-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"b64_json": "YQ=="}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cfg = ImageGenConfig::Enabled {
+            api_key: "stale-constructor-key".into(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+        };
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(ImageProvider);
+        let bytes = ImageGenClient::new(&cfg, Some(provider))
+            .unwrap()
+            .generate("test", "1:1")
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"a");
+    }
+
+    #[tokio::test]
+    async fn t04_denied_live_image_credential_cannot_resurrect_static_authorization() {
+        let mut headers = indexmap::IndexMap::new();
+        headers.insert("authorization".into(), "Bearer stale-extra-header".into());
+        let cfg = ImageGenConfig::Enabled {
+            api_key: "stale-constructor-key".into(),
+            base_url: "https://image-owner.example/v1".into(),
+            extra_headers: headers,
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+        };
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(DeniedProvider);
+        let client = ImageGenClient::new(&cfg, Some(provider)).unwrap();
+        let url = "https://image-owner.example/v1/images/generations";
+        assert_eq!(
+            client
+                .current_bearer(CredentialPurpose::ImageGeneration, url)
+                .await,
+            None
+        );
+        let request = client
+            .post_json(url, &serde_json::json!({}), None)
+            .build()
+            .unwrap();
+        assert!(
+            request.headers().get(AUTHORIZATION).is_none(),
+            "a denied live credential must leave no constructor/default Authorization header"
+        );
+    }
 
     #[test]
     fn tool_name_and_description() {

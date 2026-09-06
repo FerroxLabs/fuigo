@@ -7,6 +7,7 @@ use super::super::{AuthMode, FuigoAuth};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use parking_lot::RwLock;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -278,6 +279,7 @@ pub(super) async fn discover(issuer: &str) -> anyhow::Result<Discovery> {
         async move { discover_once(&key).await }
     })
     .retry(discovery_retry_policy())
+    .when(|error: &anyhow::Error| !is_egress_policy_denial(error))
     .await?;
     DISCOVERY_CACHE
         .write()
@@ -300,7 +302,7 @@ async fn discover_once(issuer_key: &str) -> anyhow::Result<Discovery> {
             .timeout(StdDuration::from_secs(10)),
         &url,
     )
-    .send()
+    .send_checked()
     .await?;
     if !resp.status().is_success() {
         return Err(anyhow::Error::new(OidcError::DiscoveryHttp {
@@ -412,7 +414,7 @@ pub(super) async fn exchange_code(
             .timeout(std::time::Duration::from_secs(15)),
         token_endpoint,
     )
-    .send()
+    .send_checked()
     .await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -427,7 +429,19 @@ pub(super) async fn exchange_code(
 /// Retry gate for `refresh_tokens`.
 /// Defers to `classify_terminal` (the single source of truth): only a recognized terminal code (`invalid_grant`, `invalid_client`) stops retries.
 /// Everything else (5xx, 429, bare 4xx, or an unrecognized/RFC-transient code) is retried.
+fn is_egress_policy_denial(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<fuigo_extra_ca::dispatch::DispatchError>(),
+            Some(fuigo_extra_ca::dispatch::DispatchError::Denied(_))
+        )
+    })
+}
+
 fn is_transient_refresh_error(err: &anyhow::Error) -> bool {
+    if is_egress_policy_denial(err) {
+        return false;
+    }
     let Some(OidcError::TokenRefreshHttp { status, body }) = err.downcast_ref::<OidcError>() else {
         return true;
     };
@@ -522,7 +536,7 @@ async fn refresh_tokens_once(
             .timeout(StdDuration::from_secs(15)),
         token_endpoint,
     )
-    .send()
+    .send_checked()
     .await?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -643,7 +657,7 @@ pub(super) async fn validate_and_extract_user_info(
             .timeout(std::time::Duration::from_secs(10)),
         jwks_uri,
     )
-    .send()
+    .send_checked()
     .await?
     .error_for_status()?
     .json()
@@ -1291,5 +1305,17 @@ mod tests {
             !msg.contains("300s"),
             "should not mention raw seconds, got: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn egress_policy_denial_is_not_transient_oauth_failure() {
+        let error = anyhow::Error::new(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"))
+            .context("refresh request");
+        assert!(is_egress_policy_denial(&error));
+        assert!(!is_transient_refresh_error(&error));
     }
 }

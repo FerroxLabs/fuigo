@@ -180,10 +180,7 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     }
 
     if let Some(error) = status.error.as_deref() {
-        println!(
-            "Fuigo - v{} [{}]",
-            status.current_version, status.channel
-        );
+        println!("Fuigo - v{} [{}]", status.current_version, status.channel);
         println!("Update check failed: {error}");
         return Ok(());
     }
@@ -417,8 +414,7 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
         .await?;
         // The leader relaunches right after a successful converge and would die with the event still in flight
         // Failures keep it alive, so successes would under-report. The install is already done.
-        fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN)
-            .await;
+        fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN).await;
         outcome.installed = Some(target.clone());
     }
 
@@ -984,8 +980,8 @@ const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
 /// Tighter budgets abort slow-link transfers mid-body and restart them from zero.
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
-fn download_client() -> reqwest::Result<reqwest::Client> {
-    fuigo_extra_ca::build_reqwest_client(|builder| builder.timeout(DOWNLOAD_REQUEST_TIMEOUT))
+fn download_client() -> reqwest::Result<fuigo_extra_ca::public_download::PublicDownloadClient> {
+    fuigo_extra_ca::public_download::PublicDownloadClient::new(DOWNLOAD_REQUEST_TIMEOUT)
 }
 
 /// Unique temp path for an in-flight download of `dest`.
@@ -1045,7 +1041,7 @@ async fn try_parallel_download(
 ) -> Result<()> {
     let client = download_client()?;
 
-    let head = client.head(url).send().await?;
+    let head = client.head(url).await?;
     if !head.status().is_success() {
         anyhow::bail!("HEAD failed: HTTP {}", head.status());
     }
@@ -1124,18 +1120,14 @@ async fn try_parallel_download(
 /// A single `spawn_blocking` per chunk then does the open, seek, and write_all in `std::fs`.
 /// This avoids the per-write hop into tokio's blocking pool that `tokio::fs::File::write_all` performs on every ~8 KiB Bytes item.
 async fn download_range(
-    client: &reqwest::Client,
+    client: &fuigo_extra_ca::public_download::PublicDownloadClient,
     url: &str,
     dest: &std::path::Path,
     start: u64,
     end: u64,
     progress: Option<&ProgressBar>,
 ) -> Result<()> {
-    let resp = client
-        .get(url)
-        .header("Range", format!("bytes={}-{}", start, end))
-        .send()
-        .await?;
+    let resp = client.get_range(url, start, end).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         anyhow::bail!("range request rejected: HTTP {}", resp.status());
     }
@@ -1177,7 +1169,7 @@ pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result
     }
 
     let client = download_client()?;
-    let resp = client.get(url).send().await?;
+    let resp = client.get(url).await?;
 
     if !resp.status().is_success() {
         anyhow::bail!("Download failed: HTTP {}", resp.status());
@@ -1235,7 +1227,7 @@ pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
     }
 
     let client = download_client()?;
-    let resp = client.get(url).send().await?;
+    let resp = client.get(url).await?;
 
     if !resp.status().is_success() {
         anyhow::bail!("Download failed: HTTP {}", resp.status());
@@ -1650,7 +1642,10 @@ async fn regenerate_completions(binary: &std::path::Path, fuigo_home: &std::path
     let completions: &[(&str, std::path::PathBuf)] = &[
         ("bash", fuigo_home.join("completions/bash/fuigo.bash")),
         ("zsh", fuigo_home.join("completions/zsh/_fuigo")),
-        ("fish", user_home.join(".config/fish/completions/fuigo.fish")),
+        (
+            "fish",
+            user_home.join(".config/fish/completions/fuigo.fish"),
+        ),
     ];
 
     for (shell, dest) in completions {

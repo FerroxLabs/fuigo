@@ -53,6 +53,13 @@ impl StaticShellSnapshot {
     /// definitions between SOH markers. Returns an empty snapshot on any
     /// failure or timeout, degrading to a plain shell.
     pub async fn init(cwd: &Path) -> Self {
+        Self::init_with_policy(cwd, None).await
+    }
+
+    pub async fn init_with_policy(
+        cwd: &Path,
+        policy: Option<&crate::util::ShellEnvironmentPolicy>,
+    ) -> Self {
         let shell = fuigo_config::shell::detect_unix_shell_kind();
 
         let capture = match shell {
@@ -78,6 +85,7 @@ impl StaticShellSnapshot {
                 .kill_on_drop(true);
             crate::util::detach_command(&mut cmd);
             fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
+            crate::util::apply_shell_environment_policy(&mut cmd, policy);
             cmd.envs(crate::util::pager_env());
             #[allow(clippy::disallowed_methods)] // probe killed on drop
             let mut child = cmd.spawn().ok()?;

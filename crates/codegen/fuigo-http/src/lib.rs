@@ -18,6 +18,8 @@
 
 use std::sync::OnceLock;
 
+pub use fuigo_extra_ca::dispatch;
+
 use fuigo_workspace::permission::ClientType;
 
 /// Per-attempt ceiling for a startup `/settings` or `/v1/models` fetch; raising it delays how soon the background refresh gives up and retries.
@@ -308,6 +310,7 @@ pub fn with_auth_retry(
     credentials: std::sync::Arc<dyn fuigo_auth::AuthCredentialProvider>,
 ) -> reqwest_middleware::ClientWithMiddleware {
     reqwest_middleware::ClientBuilder::new(client)
+        .with(fuigo_auth::EgressMiddleware)
         .with(fuigo_auth::AuthRetryMiddleware::new(credentials, 1))
         .build()
 }

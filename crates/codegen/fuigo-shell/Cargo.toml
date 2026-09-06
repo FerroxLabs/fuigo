@@ -204,6 +204,7 @@ siphasher = { workspace = true }
 windows = { workspace = true }
 
 [dev-dependencies]
+rcgen = { workspace = true }
 # The fixture that builds a `[ui.status_line]` section field by field.
 fuigo-status-line = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }

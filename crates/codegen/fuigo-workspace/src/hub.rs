@@ -24,22 +24,22 @@
 use crate::error::{WorkspaceError, WorkspaceResult};
 use crate::handle::WorkspaceHandle;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::sync::Arc;
-use tokio::task::JoinHandle;
-use url::Url;
 use fuigo_computer_hub_sdk::{
     AuthProvider, CLOSE_CODE_SANDBOX_TERMINATED, ClientError, HubConnectionPool, ToolServer,
     ToolServerBuilder, ToolServerHandler,
 };
 use fuigo_diag_server::DiagHandle;
-use fuigo_tools::registry::types::ToolConfig;
 use fuigo_tool_protocol::ToolId;
 use fuigo_tool_runtime::{
     ToolCallContext, ToolError, ToolErrorKind, ToolStream, ToolStreamItem, TypedToolOutput,
     terminal_only,
 };
 use fuigo_tool_types::ToolDescription;
+use fuigo_tools::registry::types::ToolConfig;
+use serde_json::Value;
+use std::sync::Arc;
+use tokio::task::JoinHandle;
+use url::Url;
 /// Configuration for connecting to a server instance.
 ///
 /// Passed via [`WorkspaceConfig::hub_config`](crate::config::WorkspaceConfig::hub_config).
@@ -206,6 +206,10 @@ impl HubHandle {
         server_metadata: Option<serde_json::Value>,
         session_handler_resolver: Option<fuigo_computer_hub_sdk::SessionHandlerResolver>,
     ) -> Result<Self, ClientError> {
+        // The SDK's reconnect actor retains this immutable destination; query
+        // role enrichment does not change its origin. Re-admit every new config.
+        fuigo_extra_ca::dispatch::check_url(&config.url)
+            .map_err(|error| ClientError::InvalidConfig(error.to_string()))?;
         let pool = HubConnectionPool::new();
         let server_url = config.url.clone();
         let mut server_builder = ToolServerBuilder::default()
@@ -668,6 +672,37 @@ pub(crate) fn hub_result<T>(result: Result<T, ClientError>) -> WorkspaceResult<T
 mod tests {
     use super::*;
     use fuigo_tools::types::tool::ToolKind;
+
+    #[tokio::test]
+    async fn egress_policy_rejects_hub_before_auth_or_pool() {
+        #[derive(Debug)]
+        struct NoCredentialAccess;
+        impl AuthProvider for NoCredentialAccess {
+            fn current(&self) -> fuigo_computer_hub_sdk::AuthCredential {
+                panic!("policy must run before credential access or networking");
+            }
+        }
+        let config = HubConfig {
+            url: Url::parse("wss://code.grok.com/hub").unwrap(),
+            auth: Arc::new(NoCredentialAccess),
+            activity_tracker: None,
+            server_id: None,
+            alpha_test_key: None,
+            allow_insecure_ws: false,
+            diag: None,
+        };
+        let timing = HubWsTiming {
+            ping: std::time::Duration::from_secs(15),
+            reconnect_backoff: None,
+            liveness_deadline: None,
+        };
+        let error = HubHandle::connect(&config, timing, Vec::new(), None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ClientError::InvalidConfig(ref reason) if reason.contains("refuses to contact upstream vendor host"))
+        );
+    }
     #[test]
     fn hub_tool_ids_to_tool_configs_basic() {
         let ids = vec![
@@ -711,8 +746,8 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "hub:tool_a");
     }
-    use futures::StreamExt;
     use fuigo_tool_runtime::{SessionContext, ToolCallId};
+    use futures::StreamExt;
     fn make_handler(workspace: &WorkspaceHandle, tool_name: &str) -> SessionRoutedToolHandler {
         SessionRoutedToolHandler::new(
             tool_name.to_owned(),
@@ -976,7 +1011,9 @@ mod tests {
             )
             .expect("register_tool must succeed");
     }
-    async fn drain_counts<T>(mut stream: fuigo_tool_runtime::ToolStream<T>) -> (usize, usize, bool) {
+    async fn drain_counts<T>(
+        mut stream: fuigo_tool_runtime::ToolStream<T>,
+    ) -> (usize, usize, bool) {
         let mut progress = 0;
         let mut terminal = 0;
         let mut last_is_terminal = false;
@@ -1021,9 +1058,9 @@ mod tests {
     }
     use crate::capability::CapabilityMode;
     use crate::session::tool_config::test_support::tc;
-    use std::time::Duration;
     use fuigo_tools::notification::types::{ToolNotification, ToolNotificationHandle};
     use fuigo_tools::registry::types::ToolServerConfig;
+    use std::time::Duration;
     fn bg_config() -> ToolServerConfig {
         ToolServerConfig {
             tools: vec![
@@ -1085,9 +1122,7 @@ mod tests {
         }
     }
     fn bg_started_notif(task_id: &str) -> ToolNotification {
-        use fuigo_tools::notification::types::{
-            BashExecutionBackgrounded, BashNotificationBase,
-        };
+        use fuigo_tools::notification::types::{BashExecutionBackgrounded, BashNotificationBase};
         ToolNotification::BashExecutionBackgrounded(BashExecutionBackgrounded {
             base: BashNotificationBase {
                 tool_call_id: task_id.to_owned(),
@@ -1899,8 +1934,7 @@ mod tests {
             &self,
             _ctx: fuigo_tool_runtime::ToolCallContext,
             _input: serde_json::Value,
-        ) -> Result<fuigo_tools::types::output::ToolOutput, fuigo_tool_runtime::ToolError>
-        {
+        ) -> Result<fuigo_tools::types::output::ToolOutput, fuigo_tool_runtime::ToolError> {
             let stdout = "/workspace/conv-abc/out.txt";
             Ok(fuigo_tools::types::output::ToolOutput::Bash(
                 fuigo_tools::types::output::BashOutput {

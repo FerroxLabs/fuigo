@@ -18,7 +18,7 @@ pub(crate) fn suppress() {
     fuigo_telemetry::external::suppress_external_otel_until_settings();
 }
 
-/// Whether an Ferrox Labs fleet policy can govern this process.
+/// Whether a configured fleet policy can govern this process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PolicyChannel {
     Applies,
@@ -38,11 +38,14 @@ pub(crate) enum NoPolicy {
     ProxyRepointed,
 }
 
-pub(crate) fn policy_channel(remote_fetch_enabled: bool, proxy_is_fuigo: bool) -> PolicyChannel {
+pub(crate) fn policy_channel(
+    remote_fetch_enabled: bool,
+    policy_authority_available: bool,
+) -> PolicyChannel {
     if !remote_fetch_enabled {
         return PolicyChannel::Unavailable(NoPolicy::RemoteFetchDisabled);
     }
-    if !proxy_is_fuigo {
+    if !policy_authority_available {
         return PolicyChannel::Unavailable(NoPolicy::ProxyRepointed);
     }
     PolicyChannel::Applies
@@ -52,8 +55,24 @@ pub(crate) fn policy_channel(remote_fetch_enabled: bool, proxy_is_fuigo: bool) -
 pub(crate) fn policy_channel_for(proxy_url: &str) -> PolicyChannel {
     policy_channel(
         crate::util::config::resolve_remote_fetch_enabled(),
-        crate::util::is_cli_chat_proxy_url(proxy_url),
+        configured_policy_authority_matches(proxy_url)
+            || crate::util::is_cli_chat_proxy_url(proxy_url),
     )
+}
+
+// Policy authority is an explicit operator choice. It does not grant this
+// origin trust to receive inference credentials or session bearers.
+fn configured_policy_authority_matches(proxy_url: &str) -> bool {
+    let configured = crate::agent::config::EndpointsConfig::from_effective_config();
+    let Some(base) = configured.cli_chat_proxy_base_url.as_deref() else {
+        return false;
+    };
+    let (Ok(authority), Ok(actual)) = (url::Url::parse(base), url::Url::parse(proxy_url)) else {
+        return false;
+    };
+    authority.scheme() == "https"
+        && authority.host_str().is_some()
+        && authority.origin() == actual.origin()
 }
 
 /// [`policy_channel_for`] against the effective config, for startup call sites that run before an `AgentConfig` exists.
@@ -146,33 +165,64 @@ impl OtelGate {
 
 #[cfg(test)]
 mod tests {
-    /// Fuigo ships no auxiliary proxy, so no fleet policy can reach the process
-    /// and the external-OTEL gate opens at startup even for a session user.
-    ///
-    /// This is NOT a fail-open. The gate decides whether a FLEET ADMIN's policy
-    /// gets to override the user's own OTEL exporter config. With no policy
-    /// channel there is no admin to defer to, and holding the gate shut would
-    /// mean a user's own configuration never took effect. Configure
-    /// `endpoints.cli_chat_proxy_base_url` and the original wait-for-policy
-    /// behaviour returns.
+    // Exercise the same config loader and channel classifier used at startup.
     #[test]
-    fn no_proxy_means_no_fleet_policy_so_the_gate_opens() {
-        let channel = super::policy_channel(true, false);
-        assert_eq!(
+    #[serial_test::serial]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn configured_policy_authority_waits_and_rearms() {
+        use fuigo_test_support::env::EnvGuard;
+        let Some(home) = fuigo_test_support::env::fresh_process_home(
+            "agent::otel_gate::tests::configured_policy_authority_waits_and_rearms",
+        ) else {
+            return;
+        };
+        let _proxy = EnvGuard::unset("FUIGO_CLI_CHAT_PROXY_BASE_URL");
+        let _restore = RestoreGate;
+        let config = home.as_path().join("config.toml");
+        std::fs::write(&config, "[endpoints]\ncli_chat_proxy_base_url = \"\"\n").unwrap();
+        let no_proxy = policy_channel_for("");
+        assert!(no_proxy.is_unavailable());
+        assert!(should_open_at_startup(StartupGate {
+            channel: no_proxy,
+            has_session: true,
+            session_pending: false,
+        }));
+
+        std::fs::write(
+            &config,
+            "[endpoints]\ncli_chat_proxy_base_url = \"https://policy.example:8443\"\n",
+        )
+        .unwrap();
+        let proxy = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
+        assert_eq!(proxy, "https://policy.example:8443");
+        let channel = policy_channel_for(&proxy);
+        assert_eq!(channel, PolicyChannel::Applies);
+        assert!(!should_open_at_startup(StartupGate {
             channel,
-            super::PolicyChannel::Unavailable(super::NoPolicy::ProxyRepointed)
+            has_session: true,
+            session_pending: false,
+        }));
+        assert!(!should_open_at_startup(StartupGate {
+            channel,
+            has_session: false,
+            session_pending: true,
+        }));
+        let gate = OtelGate::default();
+        gate.resolve("alice", fetched(), Some("alice"));
+        assert!(is_settings_gate_open());
+        gate.rearm_on_switch("bob", channel);
+        assert!(!is_settings_gate_open());
+        assert!(policy_channel_for("https://other.example").is_unavailable());
+        assert!(policy_channel_for("https://policy.example:9443").is_unavailable());
+        assert!(
+            !crate::util::is_cli_chat_proxy_url(&proxy),
+            "policy configuration must not grant compiled-in host trust"
         );
-        assert!(super::should_open_at_startup(super::StartupGate {
-            channel,
-            has_session: true,
-            session_pending: false,
-        }));
-        // With a channel, a session user waits for policy as before.
-        assert!(!super::should_open_at_startup(super::StartupGate {
-            channel: super::policy_channel(true, true),
-            has_session: true,
-            session_pending: false,
-        }));
+        std::fs::write(&config, "[endpoints]\ncli_chat_proxy_base_url = \"https://policy.example:8443\"\n[features]\nremote_fetch = false\n").unwrap();
+        assert_eq!(
+            policy_channel_for(&proxy),
+            PolicyChannel::Unavailable(NoPolicy::RemoteFetchDisabled)
+        );
     }
 
     use super::*;
@@ -203,7 +253,7 @@ mod tests {
         assert_eq!(
             policy_channel(true, false),
             PolicyChannel::Unavailable(NoPolicy::ProxyRepointed),
-            "a non-Ferrox Labs proxy is not governed by Ferrox Labs fleet policy"
+            "an unconfigured proxy has no policy authority"
         );
         assert_eq!(
             policy_channel(false, false),
@@ -213,7 +263,7 @@ mod tests {
         assert_eq!(
             policy_channel(true, true),
             PolicyChannel::Applies,
-            "Ferrox Labs proxy + fetches allowed: a policy can arrive, so wait for it"
+            "configured authority + fetches allowed: a policy can arrive, so wait for it"
         );
     }
 

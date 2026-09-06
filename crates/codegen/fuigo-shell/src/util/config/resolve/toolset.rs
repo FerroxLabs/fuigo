@@ -35,23 +35,20 @@ pub(crate) fn resolve_search_tools_enabled(
     )
 }
 
-/// Parse `[shell_environment_policy]` from the merged effective config, or `None` when unset or unparseable.
-/// On `None` the child inherits the full environment.
+/// Parse `[shell_environment_policy]` from the merged effective config.
+/// Missing policy uses the safe default; malformed policy stops child creation.
 /// This is the authoritative parse; the `Config` field of the same name only feeds the unrecognized-key scan.
 pub(crate) fn resolve_shell_env_policy(
     effective_cfg: Option<&TomlValue>,
-) -> Option<fuigo_tools::util::ShellEnvironmentPolicy> {
-    let value = effective_cfg?.get("shell_environment_policy")?.clone();
-    match value.try_into::<fuigo_tools::util::ShellEnvironmentPolicy>() {
-        Ok(policy) => Some(policy),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "failed to parse [shell_environment_policy]; inheriting the full environment"
-            );
-            None
-        }
-    }
+) -> Result<Option<fuigo_tools::util::ShellEnvironmentPolicy>, &'static str> {
+    let Some(value) = effective_cfg.and_then(|cfg| cfg.get("shell_environment_policy")) else {
+        return Ok(None);
+    };
+    value
+        .clone()
+        .try_into::<fuigo_tools::util::ShellEnvironmentPolicy>()
+        .map(Some)
+        .map_err(|_| "invalid shell_environment_policy configuration")
 }
 
 /// Pure precedence for [`resolve_search_tools_enabled`].
@@ -964,33 +961,70 @@ mod shell_env_policy_tests {
     use fuigo_tools::util::{EnvironmentVariablePattern, ShellEnvironmentPolicyInherit};
 
     #[test]
-    fn resolve_shell_env_policy_absent_parsed_typo_and_typed_error() {
-        // An absent table yields None (the child inherits the full environment)
+    fn default_shell_policy_applies_to_missing_config() {
         let empty: TomlValue = toml::from_str("").unwrap();
-        assert!(resolve_shell_env_policy(Some(&empty)).is_none());
-        assert!(resolve_shell_env_policy(None).is_none());
+        for config in [None, Some(&empty)] {
+            let policy = resolve_shell_env_policy(config).unwrap();
+            let mut cmd = tokio::process::Command::new("true");
+            cmd.env("FUIGO_API_KEY", "stored-test-key");
+            cmd.env("FUIGO_CODE_API_KEY", "legacy-test-key");
+            fuigo_tools::util::apply_shell_environment_policy(&mut cmd, policy.as_ref());
+            assert!(cmd.as_std().get_envs().all(|(key, value)| {
+                value.is_none() || (key != "FUIGO_API_KEY" && key != "FUIGO_CODE_API_KEY")
+            }));
+        }
+    }
+
+    #[test]
+    fn resolve_shell_env_policy_absent_parsed_typo_and_typed_error() {
+        // An absent table yields None (spawn sites apply the default policy)
+        let empty: TomlValue = toml::from_str("").unwrap();
+        assert!(resolve_shell_env_policy(Some(&empty)).unwrap().is_none());
+        assert!(resolve_shell_env_policy(None).unwrap().is_none());
 
         // A well-formed table parses through.
         let cfg: TomlValue =
             toml::from_str("[shell_environment_policy]\ninherit = \"core\"\nexclude = [\"FOO\"]\n")
                 .unwrap();
-        let policy = resolve_shell_env_policy(Some(&cfg)).expect("policy parses");
+        let policy = resolve_shell_env_policy(Some(&cfg))
+            .expect("policy parses")
+            .unwrap();
         assert_eq!(policy.inherit, ShellEnvironmentPolicyInherit::Core);
         assert_eq!(
             policy.exclude,
             vec![EnvironmentVariablePattern::new_case_insensitive("FOO")]
         );
 
-        // An unknown sub-key is ignored; the known keys still apply (the load-time scan warns on the typo)
+        // Unknown sub-keys fail closed, including typos alongside valid keys.
         let typo: TomlValue =
             toml::from_str("[shell_environment_policy]\ninherit = \"none\"\ninhert = \"core\"\n")
                 .unwrap();
-        let policy = resolve_shell_env_policy(Some(&typo)).expect("known keys still parse");
-        assert_eq!(policy.inherit, ShellEnvironmentPolicyInherit::None);
+        assert!(resolve_shell_env_policy(Some(&typo)).is_err());
 
-        // A wrong-typed known key fails the parse, yielding None (full environment, logged), not a spawn abort
+        // Wrong-typed known keys fail without including configuration values.
         let bad: TomlValue =
             toml::from_str("[shell_environment_policy]\nexclude = \"not-an-array\"\n").unwrap();
-        assert!(resolve_shell_env_policy(Some(&bad)).is_none());
+        assert!(resolve_shell_env_policy(Some(&bad)).is_err());
+    }
+
+    #[test]
+    fn t05_invalid_policy_blocks_spawn() {
+        for body in [
+            "shell_environment_policy = 42",
+            "[shell_environment_policy]\ninherit = 'fake-secret'",
+            "[shell_environment_policy]\nunknown = 'fake-secret'",
+            "[shell_environment_policy]\nset = 42",
+        ] {
+            let cfg: TomlValue = toml::from_str(body).unwrap();
+            let mut spawned = false;
+            let result = resolve_shell_env_policy(Some(&cfg)).map(|_| {
+                spawned = true;
+            });
+            assert!(!spawned);
+            assert_eq!(
+                result.unwrap_err(),
+                "invalid shell_environment_policy configuration"
+            );
+        }
     }
 }

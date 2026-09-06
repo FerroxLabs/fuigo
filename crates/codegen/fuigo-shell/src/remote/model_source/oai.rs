@@ -65,7 +65,7 @@ impl ModelSource for OaiModelSource {
                 }
             }
         }
-        let response = request.send()?;
+        let response = fuigo_extra_ca::dispatch::send_blocking(request)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = response.text().unwrap_or_default();

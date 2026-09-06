@@ -15,7 +15,7 @@ use fuigo_agent::plugins::install_registry::{
 use fuigo_plugin_marketplace::git::{self, SourceCacheLease};
 use fuigo_plugin_marketplace::{
     MarketplaceEntry, MarketplaceRelativePath, MarketplaceSource, SourceKind, install_resolve,
-    installer, is_official_source_url, load_extra_sources_from_settings, load_sources,
+    installer, is_verified_official_source, load_extra_sources_from_settings, load_sources,
     scan_marketplace,
 };
 
@@ -893,8 +893,10 @@ fn plan_install(
                 }
             };
             let chosen_source_index = owned[selection.chosen].0;
-            let chosen_is_official = match &sources[chosen_source_index].kind {
-                SourceKind::Git { url, .. } => is_official_source_url(url),
+            let chosen_is_verified = match &sources[chosen_source_index].kind {
+                SourceKind::Git { url, .. } => {
+                    is_verified_official_source(&sources[chosen_source_index].name, url)
+                }
                 SourceKind::Local { .. } => false,
             };
             let other_copies_note = (selection.other_count > 0).then(|| {
@@ -905,7 +907,7 @@ fn plan_install(
                 )
             });
             drop(scanned);
-            if !chosen_is_official && !skipped_sources.is_empty() {
+            if !chosen_is_verified && !skipped_sources.is_empty() {
                 return Err(MarketplaceInstallError::PartialScan {
                     name: name.to_string(),
                     skipped_sources,
@@ -1930,20 +1932,14 @@ mod tests {
     }
 
     #[test]
-    fn plan_install_bare_name_official_priority_selects_official_and_sets_note() {
+    fn plan_install_bare_name_ferrox_collision_is_ambiguous() {
         let sources = [
             git_source("Third Party", "https://github.com/acme/x.git"),
             git_source("Ferrox Labs Official", OFFICIAL_URL),
         ];
-        let plan = plan_install(&sources, "sentry", None, |_| Ok(vec![mp_entry("sentry")]))
-            .expect("official source wins the tie");
-        assert_eq!(plan.source_index, 1);
-        assert_eq!(plan.entry.name, "sentry");
-        let note = plan
-            .other_copies_note
-            .expect("note set when other copies exist");
-        assert!(note.contains("also available from 1 other"), "{note}");
-        assert!(note.contains("sentry@<qualifier>"), "{note}");
+        let err = plan_install(&sources, "sentry", None, |_| Ok(vec![mp_entry("sentry")]))
+            .expect_err("configured Ferrox identity must not break a bare-name tie");
+        assert!(matches!(err, MarketplaceInstallError::NameAmbiguous { .. }));
     }
 
     #[test]
@@ -1990,22 +1986,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_install_bare_name_official_match_proceeds_despite_skip() {
+    fn plan_install_bare_name_unverified_match_fails_on_partial_scan() {
         let sources = [
             git_source("Ferrox Labs Official", OFFICIAL_URL),
             git_source("Flaky Remote", "https://github.com/acme/a.git"),
         ];
-        let plan = plan_install(&sources, "sentry", None, |source| {
+        let err = plan_install(&sources, "sentry", None, |source| {
             if source.name == "Ferrox Labs Official" {
                 Ok(vec![mp_entry("sentry")])
             } else {
                 Err("sync failed".to_string())
             }
         })
-        .expect("official match is decisive even when another source is skipped");
-        assert_eq!(plan.source_index, 0);
-        assert_eq!(plan.entry.name, "sentry");
-        assert_eq!(plan.skipped_sources, vec!["Flaky Remote".to_string()]);
+        .expect_err("configured Ferrox identity must not bypass a partial scan");
+        match err {
+            MarketplaceInstallError::PartialScan {
+                name,
+                skipped_sources,
+            } => {
+                assert_eq!(name, "sentry");
+                assert_eq!(skipped_sources, vec!["Flaky Remote".to_string()]);
+            }
+            other => panic!("expected PartialScan, got: {other}"),
+        }
     }
 
     #[test]

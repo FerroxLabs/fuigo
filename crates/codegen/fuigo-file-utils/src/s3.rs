@@ -119,7 +119,7 @@ pub(crate) async fn build_s3_client(
     );
 
     let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .http_client(http_client)
+        .http_client(crate::sdk_http_policy::checked_client(http_client))
         .region(aws_config::Region::new(region.to_owned()));
 
     let resolved_content = match (credentials_content, credentials_file) {

@@ -129,8 +129,10 @@ fn hook_group_sort_key<'a>(source_dir: &'a str, meta: &HookSourceMeta) -> HookGr
 fn is_official_marketplace_source(
     source: &fuigo_hooks_plugins_types::MarketplaceScanResult,
 ) -> bool {
-    source.source_name == fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME
-        || fuigo_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
+    fuigo_plugin_marketplace::is_verified_official_source(
+        &source.source_name,
+        &source.source_url_or_path,
+    )
 }
 
 /// One marketplace source in display order with plugins sorted A–Z.
@@ -140,7 +142,7 @@ pub(crate) struct MarketplaceSourceView {
     pub plugin_indices: Vec<usize>,
 }
 
-/// Official source first, then A–Z by `source_name`; plugins A–Z within each.
+/// Verified official source first, then A–Z by `source_name`; plugins A–Z within each.
 pub(crate) fn ordered_marketplace_view(
     sources: &[fuigo_hooks_plugins_types::MarketplaceScanResult],
 ) -> Vec<MarketplaceSourceView> {
@@ -7226,7 +7228,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_marketplace_view_pins_official_then_az() {
+    fn ordered_marketplace_view_does_not_pin_unverified_source() {
         let mp = |name: &str, url: &str, err: Option<&str>, plugins: &[&'static str]| {
             fuigo_hooks_plugins_types::MarketplaceScanResult {
                 source_name: name.into(),
@@ -7262,11 +7264,11 @@ mod tests {
             .iter()
             .map(|v| sources[v.source_index].source_name.as_str())
             .collect();
-        assert_eq!(names, ["Ferrox Labs Official", "alpha-mp", "zeta-mp"]);
-        let plugin_names: Vec<_> = view[0]
+        assert_eq!(names, ["alpha-mp", "Ferrox Labs Official", "zeta-mp"]);
+        let plugin_names: Vec<_> = view[1]
             .plugin_indices
             .iter()
-            .map(|&pi| sources[view[0].source_index].plugins[pi].name.as_str())
+            .map(|&pi| sources[view[1].source_index].plugins[pi].name.as_str())
             .collect();
         assert_eq!(plugin_names, ["alpha", "zeta"]);
     }

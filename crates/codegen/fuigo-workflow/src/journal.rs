@@ -7,6 +7,20 @@ pub const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_JOURNAL_ENTRIES: usize = crate::MAX_HOST_CALLS as usize;
 
 pub(crate) const HOST_ERROR_KEY: &str = "__fuigo_workflow_host_error";
+const V2_HEADER: &[u8] = b"{\"fuigo_workflow_journal_version\":2}\n";
+
+fn effect_bearing(kind: &str) -> bool {
+    matches!(kind, "spawn_agent" | "write_scratch_file")
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DispatchIntent {
+    seq: u64,
+    kind: String,
+    req_hash: String,
+    operation_id: String,
+    state: String,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JournalEntry {
@@ -19,6 +33,14 @@ pub struct JournalEntry {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
+    #[error(
+        "workflow operation {operation_id} has unknown outcome; explicit intervention required before any retry"
+    )]
+    UnknownOutcome { operation_id: String },
+    #[error(
+        "legacy workflow journal cannot safely continue beyond completed results; explicit migration/intervention required"
+    )]
+    LegacyBoundary,
     #[error("journal io: {0}")]
     Io(#[from] std::io::Error),
     #[error("journal parse at line {line}: {error}")]
@@ -49,6 +71,9 @@ pub struct Journal {
     path: Option<PathBuf>,
     bytes: u64,
     last_line_start: Option<u64>,
+    versioned: bool,
+    restored: bool,
+    dispatched: Vec<DispatchIntent>,
 }
 
 impl Journal {
@@ -58,6 +83,9 @@ impl Journal {
             path,
             bytes: 0,
             last_line_start: None,
+            versioned: false,
+            restored: false,
+            dispatched: Vec::new(),
         }
     }
 
@@ -74,7 +102,25 @@ impl Journal {
             Err(error) => return Err(error.into()),
         };
         let mut entries = Vec::new();
-        let mut offset = 0usize;
+        let versioned = content.starts_with(V2_HEADER);
+        let dispatched = if versioned {
+            let dispatch = read_journal_bounded(&path.with_extension("dispatch-v2.jsonl"))?;
+            dispatch
+                .split(|b| *b == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    serde_json::from_slice::<DispatchIntent>(line).map_err(|error| {
+                        JournalError::Parse {
+                            line: 0,
+                            error: format!("dispatch journal: {error}"),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        let mut offset = if versioned { V2_HEADER.len() } else { 0 };
         let mut line_number = 0usize;
         let mut bytes = content.len() as u64;
         let mut last_line_start = None;
@@ -142,6 +188,9 @@ impl Journal {
             path: Some(path),
             bytes,
             last_line_start,
+            versioned,
+            restored: true,
+            dispatched,
         })
     }
 
@@ -177,6 +226,14 @@ impl Journal {
             .ok()
             .and_then(|seq| self.entries.get(seq))
         else {
+            if let Some(intent) = self.dispatched.iter().find(|intent| intent.seq == seq) {
+                if !effect_bearing(kind) && intent.kind == kind && intent.req_hash == req_hash {
+                    return Ok(None);
+                }
+                return Err(JournalError::UnknownOutcome {
+                    operation_id: intent.operation_id.clone(),
+                });
+            }
             return Ok(None);
         };
         if entry.seq != seq || entry.kind != kind || entry.req_hash != req_hash {
@@ -186,6 +243,63 @@ impl Journal {
             });
         }
         Ok(Some(entry.result.clone()))
+    }
+
+    /// Persist the crash boundary before an effect can reach the host. Completed
+    /// entries are the completion state; unmatched intents become Unknown on load.
+    pub fn dispatch(&mut self, seq: u64, kind: &str, req_hash: &str) -> Result<(), JournalError> {
+        self.initialize_recovery()?;
+        let intent = DispatchIntent {
+            seq,
+            kind: kind.into(),
+            req_hash: req_hash.into(),
+            operation_id: format!("{seq}:{kind}:{req_hash}"),
+            state: "dispatched".into(),
+        };
+        if let Some(existing) = self.dispatched.iter().find(|intent| intent.seq == seq) {
+            if !effect_bearing(kind) && existing.kind == kind && existing.req_hash == req_hash {
+                return Ok(());
+            }
+            return Err(JournalError::UnknownOutcome {
+                operation_id: existing.operation_id.clone(),
+            });
+        }
+        if let Some(path) = &self.path {
+            let sidecar = path.with_extension("dispatch-v2.jsonl");
+            let mut line = serde_json::to_string(&intent)
+                .map_err(|e| JournalError::Io(std::io::Error::other(e)))?;
+            line.push('\n');
+            let length = match std::fs::metadata(&sidecar) {
+                Ok(meta) => meta.len(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(e) => return Err(e.into()),
+            };
+            if length.saturating_add(line.len() as u64) > MAX_JOURNAL_BYTES {
+                return Err(JournalError::Full {
+                    seq,
+                    limit: MAX_JOURNAL_BYTES,
+                });
+            }
+            append_line(&sidecar, &line)?;
+        }
+        self.dispatched.push(intent);
+        Ok(())
+    }
+
+    pub(crate) fn initialize_recovery(&mut self) -> Result<(), JournalError> {
+        if self.versioned {
+            return Ok(());
+        }
+        if self.restored || self.bytes != 0 {
+            return Err(JournalError::LegacyBoundary);
+        }
+        if let Some(path) = &self.path {
+            append_line(&path.with_extension("dispatch-v2.jsonl"), "")?;
+            append_line(path, std::str::from_utf8(V2_HEADER).expect("ASCII header"))?;
+            self.bytes = V2_HEADER.len() as u64;
+        }
+        self.versioned = true;
+        Ok(())
     }
 
     pub fn record(
@@ -231,6 +345,12 @@ impl Journal {
         let Some(last) = self.entries.last() else {
             return Ok(false);
         };
+        // A host failure may follow a partial effect. Never remove its durable
+        // completion and silently redispatch an effect-bearing operation.
+        if effect_bearing(&last.kind) && self.dispatched.iter().any(|intent| intent.seq == last.seq)
+        {
+            return Ok(false);
+        }
         let Some(message) = last.result.get(HOST_ERROR_KEY).and_then(|v| v.as_str()) else {
             return Ok(false);
         };
@@ -326,7 +446,12 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     file.write_all(line.as_bytes())?;
-    file.sync_data()
+    file.sync_all()?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
@@ -364,6 +489,91 @@ pub fn request_hash(kind: &str, payload: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_dispatch_unknown_completed_replay_and_rollback_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::new(Some(path.clone()));
+        journal.dispatch(0, "spawn_agent", "hash").unwrap();
+        let mut restored = Journal::load(path.clone()).unwrap();
+        assert!(matches!(
+            restored.replay(0, "spawn_agent", "hash"),
+            Err(JournalError::UnknownOutcome { .. })
+        ));
+        assert!(matches!(
+            restored.dispatch(0, "spawn_agent", "hash"),
+            Err(JournalError::UnknownOutcome { .. })
+        ));
+        restored
+            .record(0, "spawn_agent", "hash".into(), serde_json::json!("done"))
+            .unwrap();
+        assert_eq!(
+            Journal::load(path.clone())
+                .unwrap()
+                .replay(0, "spawn_agent", "hash")
+                .unwrap(),
+            Some(serde_json::json!("done"))
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            serde_json::from_str::<JournalEntry>(content.lines().next().unwrap()).is_err(),
+            "old readers must reject v2"
+        );
+        std::fs::remove_file(path.with_extension("dispatch-v2.jsonl")).unwrap();
+        assert!(
+            Journal::load(path).is_err(),
+            "missing recovery metadata must fail closed"
+        );
+    }
+
+    #[test]
+    fn legacy_completed_replays_but_cannot_cross_unprotected_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .record(0, "spawn_agent", "hash".into(), serde_json::json!("done"))
+            .unwrap();
+        let mut restored = Journal::load(path).unwrap();
+        assert!(restored.replay(0, "spawn_agent", "hash").unwrap().is_some());
+        assert!(matches!(
+            restored.dispatch(1, "spawn_agent", "next"),
+            Err(JournalError::LegacyBoundary)
+        ));
+    }
+
+    #[test]
+    fn process_exit_after_effect_preserves_unknown_dispatch() {
+        const CHILD_DIR: &str = "FUIGO_T08_CRASH_FIXTURE_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let dir = PathBuf::from(dir);
+            let mut journal = Journal::new(Some(dir.join("journal.jsonl")));
+            journal.dispatch(0, "spawn_agent", "crash-hash").unwrap();
+            append_line(&dir.join("effect.txt"), "effect\n").unwrap();
+            std::process::exit(77);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "journal::tests::process_exit_after_effect_preserves_unknown_dispatch",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, dir.path())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(77));
+        let journal = Journal::load(dir.path().join("journal.jsonl")).unwrap();
+        assert!(matches!(
+            journal.replay(0, "spawn_agent", "crash-hash"),
+            Err(JournalError::UnknownOutcome { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("effect.txt")).unwrap(),
+            "effect\n"
+        );
+    }
 
     #[test]
     fn record_and_replay_roundtrip() {

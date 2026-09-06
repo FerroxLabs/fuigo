@@ -20,6 +20,41 @@ pub fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     }
 }
 
+/// Run a config test with `FUIGO_HOME` set before the process-wide home cache initializes.
+/// Returns the temporary home in the child; the parent checks the child and returns `None`.
+pub fn fresh_process_home(test_name: &str) -> Option<PathBuf> {
+    const CASE: &str = "FUIGO_TEST_FRESH_HOME_CASE";
+    const FIXTURE: &str = ".fuigo-test-fixture";
+    const ENTERED: &str = ".fuigo-test-entered";
+    if std::env::var(CASE).ok().as_deref() == Some(test_name) {
+        let home = PathBuf::from(std::env::var_os("FUIGO_HOME").expect("child home"));
+        assert_eq!(
+            std::fs::read_to_string(home.join(FIXTURE)).unwrap(),
+            test_name
+        );
+        std::fs::write(home.join(ENTERED), test_name).unwrap();
+        return Some(home);
+    }
+    let home = tempfile::tempdir().expect("isolated test home");
+    std::fs::write(home.path().join(FIXTURE), test_name).unwrap();
+    let status = Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env("FUIGO_HOME", home.path())
+        .env(CASE, test_name)
+        .env_remove("FUIGO_CONFIG")
+        .env_remove("FUIGO_CONFIG_PATH")
+        .env_remove("FUIGO_CAMPAIGNS_OVERRIDE")
+        .status()
+        .expect("run isolated config test");
+    assert!(status.success(), "isolated config test failed: {test_name}");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(ENTERED)).unwrap_or_default(),
+        test_name,
+        "the filter must execute the intended child test"
+    );
+    None
+}
+
 /// RAII guard for a single environment variable in `#[serial]` tests.
 /// It snapshots the prior value, applies the change, and restores the prior value (or unsets it) on drop, even if an assertion panics.
 /// Restoring rather than always unsetting avoids clobbering vars a parent process/harness set (e.g. `RUST_LOG`).
@@ -119,13 +154,7 @@ fn ensure_local_fuigo_binary(binary: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(workspace_root())
-        .args([
-            "build",
-            "-p",
-            "fuigo-pager-bin",
-            "--bin",
-            "fuigo-pager",
-        ])
+        .args(["build", "-p", "fuigo-pager-bin", "--bin", "fuigo-pager"])
         .stdin(std::process::Stdio::null())
         .envs(fuigo_tty_utils::pager_env());
     fuigo_tty_utils::detach_std_command(&mut cmd);

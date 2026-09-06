@@ -5,21 +5,22 @@
 //! `min_refresh_interval` floors the gap after a successful refresh so a short TTL cannot hammer the IdP.
 //! It does not delay a cold-start refresh that is already due.
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
+use fuigo_computer_hub_sdk::{
+    AuthCredential, AuthIdentity, AuthProvider, OnRefreshCallback, PrincipalKey, RefreshEvent,
+};
 use prometheus::{
     Histogram, IntCounterVec, exponential_buckets, register_histogram, register_int_counter_vec,
 };
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
-use fuigo_computer_hub_sdk::{
-    AuthCredential, AuthIdentity, AuthProvider, OnRefreshCallback, PrincipalKey, RefreshEvent,
-};
 
 use crate::status_config::ProactiveRefreshConfig;
 
@@ -156,6 +157,17 @@ struct RefreshError {
 impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.error.fmt(f)
+    }
+}
+
+impl RefreshError {
+    fn is_policy_denial(&self) -> bool {
+        self.error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<fuigo_extra_ca::dispatch::DispatchError>(),
+                Some(fuigo_extra_ca::dispatch::DispatchError::Denied(_))
+            )
+        })
     }
 }
 
@@ -341,6 +353,10 @@ async fn refresh_loop(inner: Arc<Inner>, mut refresh_token: String, cancel: Canc
                 pending = Some(next);
             }
             Err(error) => {
+                if error.is_policy_denial() {
+                    tracing::error!(error = %error, "OIDC refresh blocked by local egress policy; stopping proactive loop without discarding credentials");
+                    return;
+                }
                 if let Some(rt) = error.new_refresh_token.clone() {
                     refresh_token = rt;
                 }
@@ -497,7 +513,7 @@ async fn do_refresh(inner: &Inner, refresh_token: &str) -> Result<RefreshOutcome
         client
             .get(format!("{issuer}/.well-known/openid-configuration"))
             .timeout(DISCOVERY_TIMEOUT)
-            .send()
+            .send_checked()
             .await
             .map_err(refresh_err)?,
     )
@@ -532,7 +548,7 @@ async fn do_refresh(inner: &Inner, refresh_token: &str) -> Result<RefreshOutcome
             .post(&disc.token_endpoint)
             .form(&params)
             .timeout(TOKEN_TIMEOUT)
-            .send()
+            .send_checked()
             .await
             .map_err(refresh_err)?,
     )
@@ -746,3 +762,19 @@ pub(crate) fn lock_metrics() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 #[path = "proactive_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+
+    #[test]
+    fn egress_policy_denial_is_not_token_rejection() {
+        let error = refresh_err(
+            anyhow::Error::new(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"))
+                .context("refresh request"),
+        );
+        assert!(error.is_policy_denial());
+        assert!(!error.terminal);
+        assert!(error.new_refresh_token.is_none());
+    }
+}

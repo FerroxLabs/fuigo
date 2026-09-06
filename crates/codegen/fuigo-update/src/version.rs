@@ -314,9 +314,8 @@ pub async fn fetch_gcs_version_from_base(channel: &str, base_url: &str) -> Resul
 
 async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<String> {
     let url = format!("{}/{}", base_url, channel);
-    let client = fuigo_extra_ca::build_reqwest_client(|builder| {
-        builder.timeout(Duration::from_secs(15))
-    })?;
+    let client =
+        fuigo_extra_ca::public_download::PublicDownloadClient::new(Duration::from_secs(15))?;
 
     let max_retries: u32 = 3;
     let mut last_err = None;
@@ -324,7 +323,7 @@ async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<Stri
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
         }
-        let resp = match client.get(&url).send().await {
+        let resp = match client.get(&url).await {
             Ok(r) => r,
             Err(e) => {
                 last_err = Some(anyhow::anyhow!(
@@ -620,19 +619,20 @@ mod tests {
     #[test]
     fn test_version_from_versioned_binary_name() {
         let cases: &[(&str, Option<&str>)] = &[
-            ("grok-0.2.46-darwin-arm64", Some("0.2.46")),
-            ("grok-0.1.220-linux-x86_64", Some("0.1.220")),
-            ("grok-0.2.5-windows-x86_64.exe", Some("0.2.5")),
+            ("fuigo-0.2.46-darwin-arm64", Some("0.2.46")),
+            ("fuigo-0.1.220-linux-x86_64", Some("0.1.220")),
+            ("fuigo-0.2.5-windows-x86_64.exe", Some("0.2.5")),
             // Pre-releases must round-trip whole
             // Truncating to "0.1.220" would make an alpha install masquerade as the release and mask updates from alpha to stable
-            ("grok-0.1.220-alpha.4-linux-x86_64", Some("0.1.220-alpha.4")),
-            ("grok-0.1.220-alpha.4", Some("0.1.220-alpha.4")), // npm layout
-            ("fuigo-pager-0.1.5-darwin-arm64", None),           // "pager" is not a version
-            ("fuigo-garbage-darwin-arm64", None),               // unparseable version
-            ("grok-0.2.46", Some("0.2.46")),                   // no platform suffix
+            ("fuigo-0.1.220-alpha.4-linux-x86_64", Some("0.1.220-alpha.4")),
+            ("fuigo-0.1.220-alpha.4", Some("0.1.220-alpha.4")), // npm layout
+            ("fuigo-pager-0.1.5-darwin-arm64", None),          // "pager" is not a version
+            ("fuigo-garbage-darwin-arm64", None),              // unparseable version
+            ("fuigo-0.2.46", Some("0.2.46")),                   // no platform suffix
             ("other-0.2.46-darwin-arm64", None),               // wrong prefix
-            ("fuigo-latest", None),                             // symlink alias, not a version
-            ("fuigo", None),                                    // bare name
+            ("grok-0.2.46-darwin-arm64", None),                // upstream is not Fuigo
+            ("fuigo-latest", None),                            // symlink alias, not a version
+            ("fuigo", None),                                   // bare name
             ("", None),
         ];
         for (name, expected) in cases {

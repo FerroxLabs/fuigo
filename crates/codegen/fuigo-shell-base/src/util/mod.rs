@@ -78,12 +78,19 @@ fn matches_configured_origin(url: &str) -> bool {
     let Ok(candidate) = reqwest::Url::parse(url) else {
         return false;
     };
+    // URL userinfo is a separate credential channel, not part of our configured
+    // provider credential contract. Never admit it through origin equality.
+    if !candidate.username().is_empty() || candidate.password().is_some() {
+        return false;
+    }
     let Some(candidate_host) = normalized_host(&candidate) else {
         return false;
     };
     trusted_api_origins().iter().any(|base| {
         reqwest::Url::parse(base).is_ok_and(|trusted| {
-            candidate.scheme() == trusted.scheme()
+            trusted.username().is_empty()
+                && trusted.password().is_none()
+                && candidate.scheme() == trusted.scheme()
                 && normalized_host(&trusted).is_some_and(|h| h == candidate_host)
                 && candidate.port_or_known_default() == trusted.port_or_known_default()
         })
@@ -196,16 +203,16 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
 /// The second difference is the scheme. A configured *remote* host must be
 /// reached over `https`: plaintext to another machine puts `FUIGO_API_KEY` on
 /// the wire, and it is a downgrade the user never asked for even when they did
-/// choose the host. A configured *loopback* host stays scheme-agnostic, so
+/// choose the host. A configured *loopback* origin may use HTTP, so
 /// someone running their own gateway on `http://localhost:8080/v1` -- an
 /// endpoint they configured deliberately, on traffic that never leaves the
 /// machine -- keeps working.
 ///
-/// Still port-agnostic: the host comparison is `host_matches_configured_origin`,
-/// which ignores both scheme and port, and the scheme check above is the only
-/// constraint layered on top of it.
+/// Scheme, normalized host and effective port must all match the configured
+/// origin. Choosing localhost:8080 does not authorize localhost:9999 or an
+/// HTTPS listener on that port. URL userinfo is rejected on both sides.
 pub fn is_configured_api_origin(url: &str) -> bool {
-    configured_origin_scheme_allows(url) && host_matches_configured_origin(url)
+    configured_origin_scheme_allows(url) && matches_configured_origin(url)
 }
 
 /// The scheme half of [`is_configured_api_origin`], split out so the loopback
@@ -213,11 +220,12 @@ pub fn is_configured_api_origin(url: &str) -> bool {
 /// an in-process test cannot install a loopback origin to exercise it through
 /// the public predicate.
 ///
-/// Consults no configuration: `https` passes anywhere, any scheme passes on a
+/// Consults no configuration: `https` passes anywhere, `http` passes on a
 /// loopback host, everything else fails. An unparseable URL fails.
 fn configured_origin_scheme_allows(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .is_ok_and(|parsed| parsed.scheme() == "https" || is_loopback_host(&parsed))
+    reqwest::Url::parse(url).is_ok_and(|parsed| {
+        parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_host(&parsed))
+    })
 }
 
 /// True for the CONFIGURED first-party API endpoints (see

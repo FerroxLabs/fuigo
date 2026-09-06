@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use url::Url;
 use fuigo_computer_hub_sdk::{
     AuthCredential, AuthIdentity, AuthProvider, OidcAuthProviderBuilder, OnRefreshCallback,
     RefreshEvent,
 };
+use url::Url;
 
 use crate::status_config::ProactiveRefreshConfig;
 
@@ -178,7 +178,11 @@ fn build_oidc_provider(
         ));
     }
 
-    let mut builder = OidcAuthProviderBuilder::new(&entry.key, refresh_token, issuer, client_id);
+    let client = fuigo_extra_ca::build_reqwest_client(|builder| builder)?;
+    let mut builder = OidcAuthProviderBuilder::new(&entry.key, refresh_token, issuer, client_id)
+        .http_transport(client, |url| {
+            fuigo_extra_ca::dispatch::check_url(url).map_err(|error| error.to_string())
+        });
 
     // The workspace derives `WorkspaceIdentity` from `AuthProvider::identity()`, so pass the owner identity along (no separate auth.json read)
     builder = builder.user_id(&entry.user_id);
@@ -750,6 +754,71 @@ mod tests {
             AuthCredential::Bearer { token } => assert_eq!(token, "eyJ.tok"),
             _ => panic!("expected Bearer"),
         }
+    }
+
+    #[test]
+    fn sdk_factory_egress_policy_blocks_legacy_refresh() {
+        const CHILD: &str = "FUIGO_SDK_FACTORY_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut entry = complete_oidc_entry();
+            entry.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+            let path = PathBuf::from(std::env::var_os("HOME").unwrap()).join("unused-auth.json");
+            let (provider, kind) = build_oidc_provider(
+                "oidc".into(),
+                &entry,
+                path.clone(),
+                &ProactiveRefreshConfig {
+                    enabled: false,
+                    ..ProactiveRefreshConfig::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(kind, OidcProviderKind::Sdk);
+            let started = std::time::Instant::now();
+            let _ = provider.current();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "policy denial must precede network timeout"
+            );
+            assert!(
+                !path.exists(),
+                "denied refresh must not persist credentials"
+            );
+            println!("sdk-factory-policy-child-entered");
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "hub_auth::tests::sdk_factory_egress_policy_blocks_legacy_refresh",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("HOME", home.path())
+            .env(CHILD, "1")
+            .env("HTTP_PROXY", &proxy)
+            .env("HTTPS_PROXY", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("NO_PROXY", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("sdk-factory-policy-child-entered")
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

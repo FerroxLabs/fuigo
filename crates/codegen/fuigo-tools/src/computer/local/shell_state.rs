@@ -75,6 +75,13 @@ fn sudo_alias_injection() -> String {
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
   set -euo pipefail
+  # The dump's function bodies and base64 buffers can be large. Under `set -a`,
+  # exporting these private assignments makes even base64/grep fail with E2BIG.
+  # Capture the user's option before disabling it for dump bookkeeping.
+  local __fuigo_dump_allexport=off
+  if [[ $- == *a* ]]; then __fuigo_dump_allexport=on; fi
+  builtin set +a
+  builtin export -n __fuigo_dump_allexport
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
     return 1
@@ -93,6 +100,9 @@ dump_bash_state() {
       builtin printf '\nFUIGO_SNAP_EOF_%s\n' "$var_name"
       builtin printf ')\n'
       builtin printf 'eval "$fuigo_snap_%s"\n' "$var_name"
+      # Replaying POSIX options can enable allexport before later blocks decode.
+      # Drop each private buffer before another external decoder is started.
+      builtin printf 'builtin unset fuigo_snap_%s\n' "$var_name"
     fi
   }
 
@@ -101,13 +111,18 @@ dump_bash_state() {
   _emit "$PWD"
 
   local env_vars
-  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|FUIGO_SANDBOX|FUIGO_AGENT=|SUDO_ASKPASS|FUIGO_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
+  env_vars=$(__FUIGO_CREDENTIAL_SCRUB__; builtin export -p 2>/dev/null | command grep -viE '_proxy=|FUIGO_SANDBOX|FUIGO_AGENT=|SUDO_ASKPASS|FUIGO_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
   # errexit/pipefail here are this function's own `set -euo pipefail` (set is
   # shell-global in bash); replaying them would abort later user commands.
   local posix_opts
-  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail|allexport)$' || true)
+  if [[ $__fuigo_dump_allexport == on ]]; then
+    posix_opts+=$'\nset -o allexport'
+  else
+    posix_opts+=$'\nset +o allexport'
+  fi
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
 
   local bash_opts
@@ -124,6 +139,7 @@ dump_bash_state() {
 
   _emit "# end of bash state dump"
   _emit "__FUIGO_BASH_STATE_END__"
+  if [[ $__fuigo_dump_allexport == on ]]; then builtin set -a; fi
 }
 "##;
 
@@ -157,7 +173,7 @@ function dump_zsh_state() {
   _emit "$PWD"
 
   local env_vars
-  env_vars=$(builtin typeset -xp 2>/dev/null | command grep -viE '_proxy=|FUIGO_SANDBOX|FUIGO_AGENT=|SUDO_ASKPASS|FUIGO_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
+  env_vars=$(__FUIGO_CREDENTIAL_SCRUB__; builtin typeset -xp 2>/dev/null | command grep -viE '_proxy=|FUIGO_SANDBOX|FUIGO_AGENT=|SUDO_ASKPASS|FUIGO_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
   # errreturn/pipefail here are this function's own `emulate -L` options
@@ -219,11 +235,35 @@ impl ShellKind {
         }
     }
 
-    fn dump_script(&self) -> &'static str {
-        match self {
+    fn dump_script(&self) -> String {
+        let script = match self {
             Self::Bash => DUMP_BASH_STATE_SCRIPT,
             Self::Zsh => DUMP_ZSH_STATE_SCRIPT,
-        }
+        };
+        let patterns = crate::util::shell_env_policy::PROVIDER_CREDENTIAL_NAMES
+            .iter()
+            .map(|name| {
+                name.chars()
+                    .map(|c| {
+                        if c.is_ascii_alphabetic() {
+                            format!("[{}{}]", c.to_ascii_lowercase(), c)
+                        } else {
+                            c.to_string()
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let names = match self {
+            Self::Bash => "$(builtin compgen -e)",
+            Self::Zsh => "${(k)parameters}",
+        };
+        // Scrub inside the capture subshell, before serialization. This handles
+        // mixed-case names and multiline values without parsing shell source.
+        script.replace("__FUIGO_CREDENTIAL_SCRUB__", &format!(
+            "for __fuigo_env_name in {names}; do case \"$__fuigo_env_name\" in {patterns}) builtin unset \"$__fuigo_env_name\" 2>/dev/null || builtin exit 1;; esac; done"
+        ))
     }
 
     fn dump_function_name(&self) -> &str {
@@ -299,20 +339,8 @@ impl ShellState {
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
         fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
-        // Apply the policy before the `export -p` snapshot so the replayed state
-        // is already filtered; otherwise the restore would undo it. No-op unless set.
-        //
-        // SECURITY: this filters the base env only. Variables an rc file exports
-        // during login are captured in the replay snapshot and are not
-        // re-filtered by `exclude`/`include_only` on the persistent backend, so
-        // warn when a policy is active. The non-persistent backend has no such
-        // gap (it filters login capture directly).
-        if shell_env_policy.is_some_and(|p| !p.is_noop()) {
-            tracing::warn!(
-                "shell_environment_policy filters the persistent shell's base env only; \
-                 variables exported by rc files enter the replay snapshot unfiltered"
-            );
-        }
+        // Filter helper entry and remove provider exports again during capture,
+        // including values supplied by startup files.
         crate::util::apply_shell_environment_policy(&mut cmd, shell_env_policy);
         cmd.envs(crate::util::pager_env());
         #[allow(clippy::disallowed_methods)] // one-shot init run, waited on here

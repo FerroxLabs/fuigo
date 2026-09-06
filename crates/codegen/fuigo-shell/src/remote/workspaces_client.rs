@@ -1,3 +1,4 @@
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -39,10 +40,21 @@ pub enum WsError {
     NoOauth,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
+    #[error("request blocked by egress policy: {0}")]
+    Policy(&'static str),
     #[error("request failed: {status}")]
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for WsError {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::Policy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::Network(error),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -118,7 +130,7 @@ impl WorkspacesClient {
         }
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
 
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(WsError::Http {
@@ -176,5 +188,15 @@ mod tests {
         assert!(w.create_time.is_none());
         assert!(w.kind.is_none());
         assert!(wire.next_page_token.is_none());
+    }
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn egress_policy_denial_preserves_its_category() {
+        let error = WsError::from(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"));
+        assert!(matches!(error, WsError::Policy("blocked")));
     }
 }

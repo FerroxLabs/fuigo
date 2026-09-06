@@ -240,7 +240,7 @@ async fn run_browser_auth_flow(
         build_authorization_url(server_name, auth_manager, byo_config, &redirect_uri).await?;
     let token_before_browser = stored_access_token(server_name, server_url).await;
 
-    open_consent_browser(server_name, &auth_url);
+    open_consent_browser(server_name, &auth_url)?;
     await_callback_or_disk_token(
         server_name,
         server_url,
@@ -406,13 +406,15 @@ async fn build_authorization_url(
         .map_err(|e| format!("Failed to get authorization URL: {e}"))
 }
 
-fn open_consent_browser(server_name: &str, auth_url: &str) {
+fn open_consent_browser(server_name: &str, auth_url: &str) -> Result<(), String> {
+    crate::http_policy::check_url(auth_url)?;
     tracing::info!(server = server_name, "Opening browser for OAuth consent");
     if let Err(e) = webbrowser::open(auth_url) {
         // eprintln! corrupts the TUI alternate screen (in-process, fd 2).
         // TODO: show the auth URL via ACP notification instead
         tracing::warn!(%e, url = %auth_url, "Failed to open browser for MCP OAuth; user must visit URL manually");
     }
+    Ok(())
 }
 
 /// Peeks the file directly: `initialize_from_store` would clobber the freshly registered client with stored values and break the pending exchange.
@@ -667,7 +669,7 @@ mod tests {
     }
 
     async fn manager_ready_for_exchange(token_endpoint: String) -> (AuthorizationManager, String) {
-        let mut mgr = AuthorizationManager::new("http://localhost/mcp")
+        let mut mgr = crate::http_policy::auth_manager("http://localhost/mcp")
             .await
             .unwrap();
         mgr.set_metadata(require_iss_metadata(token_endpoint));
@@ -778,7 +780,7 @@ mod tests {
 
         let server_url = format!("http://{addr}/mcp");
         let mgr = Arc::new(Mutex::new(
-            AuthorizationManager::new(server_url.as_str())
+            crate::http_policy::auth_manager(server_url.as_str())
                 .await
                 .unwrap(),
         ));

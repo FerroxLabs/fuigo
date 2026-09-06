@@ -11,7 +11,10 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 
+pub mod dispatch;
 pub mod egress;
+pub mod public_download;
+mod redirect;
 
 pub const MAX_EXTRA_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 
@@ -45,6 +48,9 @@ pub fn ensure_default_crypto_provider() {
 /// Builds a reqwest client with the fuigo TLS policy: the shared roots (OS store, Mozilla bundle, and any extra roots).
 /// The roots are read once per process instead of on each build.
 /// For HTTP/1.1 only, add `http1_only()` in `configure`.
+/// Redirects stay within the request's original origin by default. The trusted
+/// configure callback may tighten this with `Policy::none()`; do not install an
+/// unrestricted redirect policy on a client that can carry credentials/bodies.
 #[allow(clippy::disallowed_methods)] // the approved async build path
 pub fn build_reqwest_client(
     configure: impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
@@ -52,7 +58,7 @@ pub fn build_reqwest_client(
     ensure_default_crypto_provider();
     // The egress guard is installed AFTER `configure` so a caller cannot
     // replace it with its own resolver by accident.
-    let mut builder = configure(reqwest::Client::builder())
+    let mut builder = configure(reqwest::Client::builder().redirect(redirect::credential_policy()))
         .use_rustls_tls()
         .tls_built_in_native_certs(false)
         .tls_built_in_webpki_certs(true)
@@ -69,11 +75,12 @@ pub fn build_blocking_reqwest_client(
     configure: impl Fn(reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder,
 ) -> reqwest::Result<reqwest::blocking::Client> {
     ensure_default_crypto_provider();
-    let mut builder = configure(reqwest::blocking::Client::builder())
-        .use_rustls_tls()
-        .tls_built_in_native_certs(false)
-        .tls_built_in_webpki_certs(true)
-        .dns_resolver(egress::resolver());
+    let mut builder =
+        configure(reqwest::blocking::Client::builder().redirect(redirect::credential_policy()))
+            .use_rustls_tls()
+            .tls_built_in_native_certs(false)
+            .tls_built_in_webpki_certs(true)
+            .dns_resolver(egress::resolver());
     for cert in shared_reqwest_roots() {
         builder = builder.add_root_certificate(cert);
     }

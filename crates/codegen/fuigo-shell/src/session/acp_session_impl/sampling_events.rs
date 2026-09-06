@@ -49,6 +49,25 @@ impl SessionActor {
         }
 
         match event {
+            SamplingEvent::AttemptAccounting {
+                request_id,
+                accounting,
+            } => {
+                // Attempt accounting is deliberately independent of accepted output.
+                // The accepted aggregate is recorded through `Completed`; partial attempts
+                // remain observable here even when cancellation makes a response impossible.
+                fuigo_telemetry::unified_log::info(
+                    "shell.turn.attempt_accounting",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "sampler_request_id": request_id.as_str(),
+                        "prompt_tokens": accounting.usage.as_ref().map(|u| u.prompt_tokens),
+                        "completion_tokens": accounting.usage.as_ref().map(|u| u.completion_tokens),
+                        "cost_usd_ticks": accounting.cost_usd_ticks,
+                        "unknown_liability": accounting.unknown_liability,
+                    })),
+                );
+            }
             SamplingEvent::StreamStarted {
                 request_id,
                 timestamp_ms,

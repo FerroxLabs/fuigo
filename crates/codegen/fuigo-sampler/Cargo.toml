@@ -28,6 +28,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # Mock HTTP server for actor / request_task integration tests.
 axum = { workspace = true }
 # Shared SSE generators for the happy-path mock payloads.

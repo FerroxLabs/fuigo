@@ -4,6 +4,7 @@
 //! The pager and desktop use it to display credits and usage.
 
 use agent_client_protocol as acp;
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, to_raw_response};
@@ -211,7 +212,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             crate::http::process_client_mode(),
         )
         .timeout(std::time::Duration::from_secs(15))
-        .send()
+        .send_checked()
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "billing: upstream request failed");
@@ -301,7 +302,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
             crate::http::process_client_mode(),
         )
         .timeout(std::time::Duration::from_secs(10))
-        .send()
+        .send_checked()
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "auto-topup: upstream request failed");

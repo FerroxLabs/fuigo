@@ -256,6 +256,21 @@ jobs:
             *) echo "::error::unhandled macOS target ${{ matrix.target }}"; exit 1 ;;
           esac
 
+      - name: Security and recovery regression gate
+        if: matrix.npm_platform == 'linux-x64'
+        shell: bash
+        env:
+          RUST_MIN_STACK: "16777216"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_BUILD_JOBS: "4"
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fuigo-extra-ca -p fuigo-shell-base -p fuigo-update -p fuigo-workflow -p fuigo-secrets -p fuigo-telemetry --lib -- --test-threads=1
+          cargo test --locked -p fuigo-shell -p fuigo-tools -p fuigo-mcp -p fuigo-hooks --lib t05_ -- --test-threads=1
+          cargo test --locked -p fuigo-shell -p fuigo-tools --lib t04_ -- --test-threads=1
+          cargo test --locked -p fuigo-sampler --lib actor::request_task::tests -- --test-threads=1
+
       - uses: actions/upload-artifact@v4
         with:
           name: fuigo-${{ matrix.npm_platform }}
@@ -347,6 +362,18 @@ jobs:
             [ "$REF_NAME" = "v$V" ] || {
               echo "::error::tag $REF_NAME does not match version $V"; exit 1; }
           fi
+
+      - name: Verify release archives
+        working-directory: crates/codegen/fuigo-pager/npm/fuigo
+        run: node scripts/verify-package-archives.js "$RUNNER_TEMP/fuigo-release-packages"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages-${{ steps.v.outputs.version }}
+          path: ${{ runner.temp }}/fuigo-release-packages/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
 
       # ORDER IS LOAD-BEARING. The meta package pins its six
       # optionalDependencies to an EXACT version, so publishing it first leaves

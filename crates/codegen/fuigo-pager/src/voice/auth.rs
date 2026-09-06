@@ -1,47 +1,16 @@
-//! Bridge the shell's `AuthManager` onto the voice crate's bearer provider.
-//!
-//! The voice channel reuses the same bearer the agent uses for chat, so there
-//! is no separate env var. It is resolved per request: the agent's refreshing
-//! manager in direct-spawn mode; in leader mode, a non-refreshing one adopts
-//! the agent's rotated `auth.json` token under the file lock (see
-//! [`crate::acp`]).
-//!
-//! # This is where the voice credential is scoped to a destination
-//!
-//! `VoiceAuthProvider::bearer_for` is asked about a specific URL, and this
-//! implementation answers only for endpoints that pass
-//! [`fuigo_shell::util::is_fuigo_api_bearer_url`] — the same predicate that
-//! decides where a session bearer may be attached for chat.
-//!
-//! Before this check existed, voice resolved a bearer with no destination at
-//! all, so `[voice].api_base` could name any HTTPS host and the session token
-//! went there. With the batch transport the request body is the recording, so
-//! the microphone audio went with it, but the credential leak applied to the
-//! streaming transport just as much.
-//!
-//! The predicate is very nearly config-derived. Alongside the configured
-//! `[endpoints]` origins it has one arm that consults no configuration at all:
-//! `is_trusted_cli_chat_proxy_url`, the compiled-in production cli-chat-proxy
-//! base. That base is `fuigo_env::PROD_CLI_CHAT_PROXY_BASE_URL`, which is the
-//! empty string in this tree, and an empty base never parses as a URL, so the
-//! arm matches nothing here. What is left does fail closed: until
-//! `set_trusted_api_origins` has run, nothing is trusted and voice refuses
-//! rather than guessing. In the ordinary case `[voice].api_base` is either
-//! unset (and inherits `[endpoints].fuigo_api_base_url`, which is one of the
-//! installed origins) or set to that same host, so this changes nothing for a
-//! user who has not pointed voice somewhere else.
+//! Resolve voice credentials per request, bound to the configured inference origin.
+//! The current model may belong to another provider and must never supply the voice key.
 
 use std::future::{Future, ready};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use fuigo_tools::types::SharedApiKeyProvider;
 use fuigo_voice::{SharedVoiceAuth, VoiceAuthProvider};
 
 /// Adapts the shell's `ApiKeyProvider` onto [`VoiceAuthProvider`].
 ///
 /// Resolves a token per request (never a static snapshot), so a long session follows the `AuthManager` instead of pinning a token that 401s.
-struct AuthManagerVoiceAuth(SharedApiKeyProvider);
+struct AuthManagerVoiceAuth(Arc<fuigo_shell::auth::AuthManager>);
 
 impl std::fmt::Debug for AuthManagerVoiceAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,7 +33,8 @@ impl VoiceAuthProvider for AuthManagerVoiceAuth {
             return Box::pin(ready(None));
         }
         let provider = self.0.clone();
-        Box::pin(async move { provider.current_api_key_async().await })
+        let endpoint = endpoint.to_owned();
+        Box::pin(async move { provider.voice_api_key_for(&endpoint).await })
     }
 }
 
@@ -77,11 +47,9 @@ fn endpoint_may_receive_the_session_bearer(endpoint: &str) -> bool {
 
 /// Build the voice bearer provider from the connection's `AuthManager`.
 ///
-/// Works for every auth method: OAuth / grok.com / OIDC session tokens and `FUIGO_API_KEY` / per-model BYOK keys.
+/// Uses destination-owned session or global API-key credentials; unscoped model keys are excluded.
 pub fn build_voice_auth(auth_manager: Arc<fuigo_shell::auth::AuthManager>) -> SharedVoiceAuth {
-    Arc::new(AuthManagerVoiceAuth(
-        fuigo_shell::auth::shared_api_key_provider(auth_manager),
-    ))
+    Arc::new(AuthManagerVoiceAuth(auth_manager))
 }
 
 #[cfg(test)]

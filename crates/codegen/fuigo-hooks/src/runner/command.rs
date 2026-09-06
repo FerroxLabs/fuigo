@@ -14,8 +14,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncWriteExt;
 use fuigo_tools::util::ProcessGroup;
+use tokio::io::AsyncWriteExt;
 
 use crate::config::{HookSpec, RUNNER_ALWAYS_SET_ENV};
 use crate::event::{
@@ -147,6 +147,7 @@ pub async fn run_command_hook(
         tokio::process::Command::new(command_path)
     };
 
+    fuigo_tools::util::apply_shell_environment_policy(&mut cmd, None);
     fuigo_tools::util::detach_command(&mut cmd);
     fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
 
@@ -1915,6 +1916,40 @@ mod tests {
             source_dir: std::env::temp_dir(),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::File,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t05_mcp_hook_lsp_spawn_paths_hook() {
+        const NAME: &str = "t05_mcp_hook_lsp_spawn_paths_hook";
+        if std::env::var("T05_CHILD_TEST").as_deref() != Ok(NAME) {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.arg(NAME)
+                .arg("--test-threads=1")
+                .env("T05_CHILD_TEST", NAME)
+                .env("OPENAI_API_KEY", "fake-ambient")
+                .env("ANTHROPIC_API_KEY", "fake-ambient");
+            assert!(cmd.output().unwrap().status.success());
+            return;
+        }
+        for selected in [false, true] {
+            let check = if selected {
+                "test \"$OPENAI_API_KEY\" = fake-selected"
+            } else {
+                "test -z \"${OPENAI_API_KEY+x}\""
+            };
+            let mut spec = make_shell_spec(&format!(
+                "{check} && test -z \"${{ANTHROPIC_API_KEY+x}}\" && /bin/sh -c '{check} && test -z \"${{ANTHROPIC_API_KEY+x}}\"'"
+            ));
+            if selected {
+                spec.extra_env
+                    .insert("OPENAI_API_KEY".into(), "fake-selected".into());
+            }
+            let result = run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::Observe)
+                .await
+                .0;
+            assert!(matches!(result, HookRunnerResult::Success));
         }
     }
 

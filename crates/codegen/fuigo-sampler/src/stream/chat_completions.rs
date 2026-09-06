@@ -122,6 +122,14 @@ pub fn stream_chat_completions<'a>(
                     (prev, None) => prev,
                 };
                 usage = Some(u.into());
+                yield SamplingEvent::AttemptAccounting {
+                    request_id: request_id.clone(),
+                    accounting: fuigo_sampling_types::AttemptAccounting {
+                        usage: usage.clone(),
+                        cost_usd_ticks,
+                        unknown_liability: true,
+                    },
+                };
             }
 
             // Track whether this chunk carried meaningful content.
@@ -301,12 +309,12 @@ pub fn stream_chat_completions<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::stream;
-    use std::pin::pin;
     use fuigo_sampling_types::{
         ChatChunkChoice, ChatChunkDelta, FinishReason, Role, ToolCallDelta as ChunkToolCallDelta,
         ToolCallFunctionDelta, Usage, rs,
     };
+    use futures_util::stream;
+    use std::pin::pin;
 
     fn rid() -> RequestId {
         RequestId::from("test-req")
@@ -779,6 +787,14 @@ mod tests {
                 Duration::from_secs(60),
             ))
             .await;
+            let accounting = events.iter().find_map(|event| match event {
+                SamplingEvent::AttemptAccounting { accounting, .. } => Some(accounting),
+                _ => None,
+            });
+            let accounting = accounting.expect("usage chunk must surface attempt accounting");
+            assert_eq!(accounting.cost_usd_ticks, expected, "wire {wire:?}");
+            assert_eq!(accounting.usage.as_ref().map(|u| u.total_tokens), Some(15));
+            assert!(accounting.unknown_liability);
             match events.last().unwrap() {
                 SamplingEvent::Completed { response, .. } => {
                     assert_eq!(response.cost_usd_ticks, expected, "wire {wire:?}");

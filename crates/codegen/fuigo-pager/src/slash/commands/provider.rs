@@ -233,8 +233,8 @@ fn render_outcome(
 
     let mut out = format!(
         "Wrote [model_providers.{id}] and bound {model_id} to it.\n\
-         Endpoint: {effective_base_url}\n\
-         Credential: ${effective_env_key} (the value is not in config.toml).\n"
+         Provider base_url: {effective_base_url}\n\
+         Provider env_key: ${effective_env_key}. Other configured credentials may take precedence.\n"
     );
     for (key, existing) in &kept {
         out.push_str(&format!(
@@ -484,6 +484,17 @@ mod tests {
         );
         assert!(out.contains("Restart fuigo"), "{out}");
         assert!(!out.contains("Left ["), "nothing was kept: {out}");
+    }
+
+    #[test]
+    fn success_describes_provider_settings_without_claiming_effective_auth() {
+        let out = message(render(
+            "anthropic",
+            ProviderWriteOutcome::Written { kept: Vec::new() },
+        ));
+        assert!(out.contains("Provider env_key:"));
+        assert!(!out.contains("Credential:"));
+        assert!(!out.contains("the value is not in config.toml"));
     }
 
     /// A half-set provider pair is a refusal, not a success with a footnote.

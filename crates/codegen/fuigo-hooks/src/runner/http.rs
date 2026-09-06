@@ -215,12 +215,13 @@ pub async fn run_http_hook(
 
     let client = build_hook_client(spec.timeout_ms);
 
-    let response = match client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
+    let response = match fuigo_extra_ca::dispatch::send(
+        client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body),
+    )
+    .await
     {
         Ok(r) => r,
         Err(e) => {

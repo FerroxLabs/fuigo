@@ -1,4 +1,7 @@
-use super::{build_minimal_agent_for_tests, make_test_handle};
+use super::{
+    build_minimal_agent_for_tests, make_test_handle, t04_build_agent_from_spawn_inputs,
+    t04_call_tool, t04_next_request, t04_start_auxiliary_receiver,
+};
 use agent_client_protocol as acp;
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 #[tokio::test]
@@ -193,6 +196,117 @@ async fn subagent_spawn_context_inherits_parent_process_scope() {
         "the child sees the owner enrolled through the parent scope"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn t04_subagent_construction_preserves_live_credential_ownership() {
+    tokio::task::LocalSet::new().run_until(async {
+    use fuigo_test_support::EnvGuard;
+    use fuigo_tools::types::tool::ToolKind;
+
+    let Some(process_home) = fuigo_test_support::env::fresh_process_home(
+        "agent::mvp_agent::tests::subagent_spawn_context_tests::t04_subagent_construction_preserves_live_credential_ownership",
+    ) else {
+        return;
+    };
+    let _auth = EnvGuard::unset("FUIGO_AUTH");
+    let _auth_path = EnvGuard::unset("FUIGO_AUTH_PATH");
+    let _global = EnvGuard::unset("FUIGO_API_KEY");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+        let (base_url, mut requests, _tls_dir, _tls_roots) = t04_start_auxiliary_receiver().await;
+    let api_base = format!("{base_url}/v1");
+    std::fs::write(
+        process_home.as_path().join("config.toml"),
+        format!("[endpoints]\nfuigo_api_base_url = \"{api_base}\"\n"),
+    )
+    .unwrap();
+
+    let auth_dir = tempfile::tempdir_in(process_home.as_path()).unwrap();
+    crate::auth::store_api_key(auth_dir.path(), "child-aux-key-1").unwrap();
+    let manager = std::sync::Arc::new(crate::auth::AuthManager::new(
+        auth_dir.path(),
+        crate::auth::FuigoComConfig::default(),
+    ));
+    manager.set_process_static_api_key(Some("parent-inference-key".into()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let gateway = GatewaySender::new(tx);
+    let mut cfg = crate::agent::config::Config::default();
+    cfg.endpoints.fuigo_api_base_url = api_base;
+    let parent = super::MvpAgent::new(gateway, &cfg, manager.clone(), None)
+        .expect("parent agent config must be valid");
+    parent.sampling_config.borrow_mut().api_key = Some("parent-inference-key".into());
+    let parent_sid = acp::SessionId::new("t04-parent-live-ownership");
+    parent.insert_resident(
+        &parent_sid,
+        make_test_handle("parent-inference-model", false, None),
+    );
+
+    let ctx = parent
+        .try_build_subagent_spawn_context(parent_sid.0.as_ref())
+        .expect("production spawn context must be constructed from the live parent");
+    let child_provider = ctx
+        .api_key_provider
+        .clone()
+        .expect("spawn context must carry the parent's live credential provider");
+    let child_image_config = ctx.image_gen_config.clone();
+    let work = tempfile::tempdir().unwrap();
+    let child = t04_build_agent_from_spawn_inputs(
+        work.path(),
+        "t04-child-live-ownership",
+        child_provider,
+        child_image_config,
+        Default::default(),
+    )
+    .await;
+
+    t04_call_tool(&child, ToolKind::ImageGen).await;
+    let initial = t04_next_request(&mut requests).await;
+    assert_eq!(initial.path, "/v1/images/generations");
+    assert_eq!(
+        initial.authorization.as_deref(),
+        Some("Bearer child-aux-key-1")
+    );
+    assert_ne!(
+        initial.authorization.as_deref(),
+        Some("Bearer parent-inference-key")
+    );
+
+    crate::auth::store_api_key(auth_dir.path(), "child-aux-key-2").unwrap();
+    t04_call_tool(&child, ToolKind::ImageGen).await;
+    assert_eq!(
+        t04_next_request(&mut requests)
+            .await
+            .authorization
+            .as_deref(),
+        Some("Bearer child-aux-key-2"),
+        "the already-constructed child must resolve the rotated parent-owned credential live"
+    );
+
+    crate::auth::clear_api_key(auth_dir.path()).unwrap();
+    let image_name = child
+        .tool_bridge()
+        .tool_for_kind(ToolKind::ImageGen)
+        .await
+        .unwrap();
+    assert!(
+        child
+            .tool_bridge()
+            .call(
+                &image_name,
+                serde_json::json!({"prompt": "revoked child", "aspect_ratio": "1:1"}),
+                "t04-child-revoked",
+            )
+            .await
+            .is_err(),
+        "revocation must fail in the constructed child's real image client before dispatch"
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "the child must not resurrect its construction-time credential after revocation"
+    );
+    }).await;
+}
 fn model_entry_with_rate_limit(
     slug: &str,
     attempts: Option<u32>,
@@ -287,8 +401,8 @@ fn subagent_spawn_context_resolves_compaction_mode_like_parent() {
 fn run_shell_child_passes_parent_compaction_pins_into_spawn() {
     use crate::agent::subagent::SubagentSpawnContext;
     use crate::session::CompactionPins;
-    use fuigo_chat_state::CompactionMode;
     use fuigo_agent::prompt::user_message::UserMessageTemplate;
+    use fuigo_chat_state::CompactionMode;
     let default_child = UserMessageTemplate::Default;
     let mut ctx = crate::test_support::lsp_runtime::ctx_with_toggle(Default::default());
     ctx.parent_compaction = CompactionPins {

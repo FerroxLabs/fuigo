@@ -1026,6 +1026,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_scratch_effect_with_lost_reply_blocks_engine_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
+        let (mut params, _persist_rx) = test_host_params(
+            "wf-crash",
+            1,
+            "unused",
+            Arc::new(parking_lot::Mutex::new(WorkflowTracker::default())),
+            subagent_tx,
+        );
+        params.scratch_dir = dir.path().join("scratch");
+        let scratch = params.scratch_dir.clone();
+        let cancel = params.cancel.clone();
+        let (host_tx, host_rx) = mpsc::unbounded_channel();
+        let (handle, _) = spawn_workflow_host_service(params, host_rx);
+        let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
+        let bridge = tokio::spawn(async move {
+            let request = engine_rx.recv().await.unwrap();
+            let WorkflowHostRequest::WriteScratchFile {
+                name,
+                content,
+                reply,
+            } = request
+            else {
+                panic!("expected scratch effect")
+            };
+            let (actual_tx, actual_rx) = oneshot::channel();
+            host_tx
+                .send(WorkflowHostRequest::WriteScratchFile {
+                    name,
+                    content,
+                    reply: actual_tx,
+                })
+                .unwrap();
+            assert!(actual_rx.await.unwrap().is_ok());
+            // The actual shell host has committed the effect. Lose the reply at
+            // the engine boundary, exactly where process death loses completion.
+            drop(reply);
+        });
+        let run_params = fuigo_workflow::WorkflowRunParams {
+            script: r#"write_scratch_file("effect.txt", "effect"); complete("done");"#.into(),
+            args: serde_json::json!({}),
+            journal: fuigo_workflow::Journal::new(Some(path.clone())),
+            host_tx: engine_tx,
+            cancel: CancellationToken::new(),
+            max_ops: 100_000,
+        };
+        let first = tokio::task::spawn_blocking(move || fuigo_workflow::run_workflow(run_params))
+            .await
+            .unwrap();
+        bridge.await.unwrap();
+        assert!(matches!(
+            first,
+            fuigo_workflow::WorkflowOutcome::Failed { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("effect.txt")).unwrap(),
+            "effect"
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let restored = fuigo_workflow::Journal::load(path).unwrap();
+        let outcome = tokio::task::spawn_blocking(move || {
+            fuigo_workflow::run_workflow(fuigo_workflow::WorkflowRunParams {
+                script: r#"write_scratch_file("effect.txt", "effect"); complete("done");"#.into(),
+                args: serde_json::json!({}),
+                journal: restored,
+                host_tx: tx,
+                cancel: CancellationToken::new(),
+                max_ops: 100_000,
+            })
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, fuigo_workflow::WorkflowOutcome::Failed { ref error } if error.contains("unknown outcome"))
+        );
+        assert!(rx.try_recv().is_err());
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
     async fn reserve_agent_calls_rolls_back_on_persist_failure() {
         let run_id = "wf_reserve_rollback".to_string();
         let mut tracker = WorkflowTracker::default();

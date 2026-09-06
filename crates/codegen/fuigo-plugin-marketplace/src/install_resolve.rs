@@ -1,7 +1,7 @@
 //! Pure resolution logic for `fuigo plugin install <name>` marketplace refs.
 
 use crate::types::{MarketplaceEntry, MarketplaceSource, SourceKind};
-use crate::{canonical_github_owner_repo, is_official_source_url};
+use crate::{canonical_github_owner_repo, is_verified_official_source};
 
 /// A parsed marketplace install ref: a plugin `name` with an optional source `qualifier` (`owner/repo` for git, `local/<slug>` for local sources).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +135,7 @@ pub struct ScannedEntry<'a> {
 pub struct BareNameSelection {
     /// Index into the scanned slice of the entry to install.
     pub chosen: usize,
-    /// How many other copies of the name exist (non-zero only when official priority broke a tie).
+    /// How many other copies of the name exist (non-zero only when verified priority broke a tie).
     pub other_count: usize,
 }
 
@@ -151,7 +151,8 @@ pub enum BareNameError {
 /// Choose which scanned entry to install for a bare `<name>` (case-insensitive).
 ///
 /// One match wins outright.
-/// With several matches, a single official-source copy wins (reporting the others); otherwise the result is ambiguous.
+/// With several matches, a single explicitly verified-source copy wins (reporting the others);
+/// otherwise the result is ambiguous.
 pub fn select_bare_name(
     name: &str,
     scanned: &[ScannedEntry<'_>],
@@ -170,15 +171,17 @@ pub fn select_bare_name(
             other_count: 0,
         }),
         _ => {
-            let official: Vec<usize> = matched
+            let verified: Vec<usize> = matched
                 .iter()
                 .copied()
                 .filter(|&index| match &scanned[index].source.kind {
-                    SourceKind::Git { url, .. } => is_official_source_url(url),
+                    SourceKind::Git { url, .. } => {
+                        is_verified_official_source(&scanned[index].source.name, url)
+                    }
                     SourceKind::Local { .. } => false,
                 })
                 .collect();
-            match official.as_slice() {
+            match verified.as_slice() {
                 [index] => Ok(BareNameSelection {
                     chosen: *index,
                     other_count: matched.len() - 1,
@@ -260,10 +263,10 @@ mod tests {
     #[test]
     fn parse_name_with_owner_repo_qualifier() {
         assert_eq!(
-            parse_marketplace_ref("sentry@fuigo-org/plugin-marketplace"),
+            parse_marketplace_ref("sentry@FerroxLabs/plugin-marketplace"),
             Some(MarketplaceRef {
                 name: "sentry".into(),
-                qualifier: Some("fuigo-org/plugin-marketplace".into()),
+                qualifier: Some("FerroxLabs/plugin-marketplace".into()),
             })
         );
     }
@@ -316,7 +319,7 @@ mod tests {
     fn parse_rejects_fragment() {
         assert_eq!(parse_marketplace_ref("sentry#sub"), None);
         assert_eq!(
-            parse_marketplace_ref("sentry@fuigo-org/marketplace#sub"),
+            parse_marketplace_ref("sentry@FerroxLabs/marketplace#sub"),
             None
         );
     }
@@ -335,7 +338,7 @@ mod tests {
     #[test]
     fn slugify_lowercases_and_hyphenates_spaces() {
         assert_eq!(slugify("Local Dev"), "local-dev");
-        assert_eq!(slugify("Ferrox Labs Official"), "fuigo-official");
+        assert_eq!(slugify("Ferrox Labs Official"), "ferrox-labs-official");
     }
 
     #[test]
@@ -343,9 +346,9 @@ mod tests {
         assert_eq!(
             addressable_qualifier(&git_source(
                 "x",
-                "https://github.com/fuigo-org/plugin-marketplace.git"
+                "https://github.com/FerroxLabs/plugin-marketplace.git"
             )),
-            "fuigo-org/plugin-marketplace"
+            "ferroxlabs/plugin-marketplace"
         );
         assert_eq!(
             addressable_qualifier(&local_source("Local Dev", "/tmp/p")),
@@ -367,14 +370,14 @@ mod tests {
     #[test]
     fn resolve_qualifier_matches_git_owner_repo_across_url_forms() {
         for url in [
-            "https://github.com/fuigo-org/plugin-marketplace.git",
-            "git@github.com:fuigo-org/plugin-marketplace.git",
-            "ssh://git@github.com/fuigo-org/plugin-marketplace",
-            "https://GitHub.com/FUIGO-org/Plugin-Marketplace",
+            "https://github.com/FerroxLabs/plugin-marketplace.git",
+            "git@github.com:FerroxLabs/plugin-marketplace.git",
+            "ssh://git@github.com/FerroxLabs/plugin-marketplace",
+            "https://GitHub.com/FERROXLABS/Plugin-Marketplace",
         ] {
             let sources = [git_source("src", url)];
             assert_eq!(
-                resolve_qualified_source("fuigo-org/plugin-marketplace", &sources),
+                resolve_qualified_source("FerroxLabs/plugin-marketplace", &sources),
                 Ok(0),
                 "url: {url}"
             );
@@ -385,10 +388,10 @@ mod tests {
     fn resolve_qualifier_normalizes_dot_git_in_qualifier() {
         let sources = [git_source(
             "src",
-            "https://github.com/fuigo-org/plugin-marketplace",
+            "https://github.com/FerroxLabs/plugin-marketplace",
         )];
         assert_eq!(
-            resolve_qualified_source("fuigo-org/plugin-marketplace.git", &sources),
+            resolve_qualified_source("FerroxLabs/plugin-marketplace.git", &sources),
             Ok(0)
         );
     }
@@ -398,7 +401,7 @@ mod tests {
         let sources = [
             git_source(
                 "Ferrox Labs Official",
-                "https://github.com/fuigo-org/plugin-marketplace.git",
+                "https://github.com/FerroxLabs/plugin-marketplace.git",
             ),
             local_source("Local Dev", "/tmp/plugins"),
         ];
@@ -410,7 +413,7 @@ mod tests {
         let sources = [
             git_source(
                 "Ferrox Labs Official",
-                "https://github.com/fuigo-org/plugin-marketplace.git",
+                "https://github.com/FerroxLabs/plugin-marketplace.git",
             ),
             git_source("Self Hosted", "https://git.example.com/org/repo.git"),
         ];
@@ -441,7 +444,7 @@ mod tests {
         let sources = [
             git_source(
                 "Ferrox Labs Official",
-                "https://github.com/fuigo-org/plugin-marketplace.git",
+                "https://github.com/FerroxLabs/plugin-marketplace.git",
             ),
             local_source("Local Dev", "/tmp/plugins"),
         ];
@@ -460,12 +463,15 @@ mod tests {
         let sources = [
             git_source(
                 "Mirror A",
-                "https://github.com/fuigo-org/plugin-marketplace.git",
+                "https://github.com/FerroxLabs/plugin-marketplace.git",
             ),
-            git_source("Mirror B", "git@github.com:fuigo-org/plugin-marketplace.git"),
+            git_source(
+                "Mirror B",
+                "git@github.com:FerroxLabs/plugin-marketplace.git",
+            ),
         ];
         assert_eq!(
-            resolve_qualified_source("fuigo-org/plugin-marketplace", &sources),
+            resolve_qualified_source("FerroxLabs/plugin-marketplace", &sources),
             Err(QualifierResolveError::Ambiguous(vec![0, 1]))
         );
     }
@@ -513,15 +519,15 @@ mod tests {
         let sources = [
             git_source(
                 "Ferrox Labs Official",
-                "https://github.com/fuigo-org/plugin-marketplace.git",
+                "https://github.com/FerroxLabs/plugin-marketplace.git",
             ),
             git_source(
-                "fuigo-org/plugin-marketplace",
+                "FerroxLabs/plugin-marketplace",
                 "git@github.example.com:mirror/fuigo.git",
             ),
         ];
         assert_eq!(
-            resolve_qualified_source("fuigo-org/plugin-marketplace", &sources),
+            resolve_qualified_source("FerroxLabs/plugin-marketplace", &sources),
             Err(QualifierResolveError::Ambiguous(vec![0, 1]))
         );
     }
@@ -529,11 +535,11 @@ mod tests {
     #[test]
     fn resolve_qualifier_name_and_owner_repo_same_source_resolves() {
         let sources = [git_source(
-            "fuigo-org/plugin-marketplace",
-            "https://github.com/fuigo-org/plugin-marketplace.git",
+            "FerroxLabs/plugin-marketplace",
+            "https://github.com/FerroxLabs/plugin-marketplace.git",
         )];
         assert_eq!(
-            resolve_qualified_source("fuigo-org/plugin-marketplace", &sources),
+            resolve_qualified_source("FerroxLabs/plugin-marketplace", &sources),
             Ok(0)
         );
     }
@@ -583,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_name_official_priority_when_duplicate_in_official_and_third_party() {
+    fn unverified_source_gets_no_implicit_priority() {
         let pairs = [
             (
                 git_source("Third Party", "https://github.com/acme/marketplace.git"),
@@ -592,7 +598,7 @@ mod tests {
             (
                 git_source(
                     "Ferrox Labs Official",
-                    "https://github.com/fuigo-org/plugin-marketplace.git",
+                    "https://github.com/FerroxLabs/plugin-marketplace.git",
                 ),
                 entry("sentry"),
             ),
@@ -600,9 +606,8 @@ mod tests {
         let scanned = scanned_entries(&pairs);
         assert_eq!(
             select_bare_name("sentry", &scanned),
-            Ok(BareNameSelection {
-                chosen: 1,
-                other_count: 1,
+            Err(BareNameError::Ambiguous {
+                matched: vec![0, 1]
             })
         );
     }
@@ -634,14 +639,14 @@ mod tests {
             (
                 git_source(
                     "Official Mirror A",
-                    "https://github.com/fuigo-org/plugin-marketplace.git",
+                    "https://github.com/FerroxLabs/plugin-marketplace.git",
                 ),
                 entry("sentry"),
             ),
             (
                 git_source(
                     "Official Mirror B",
-                    "git@github.com:fuigo-org/plugin-marketplace.git",
+                    "git@github.com:FerroxLabs/plugin-marketplace.git",
                 ),
                 entry("sentry"),
             ),

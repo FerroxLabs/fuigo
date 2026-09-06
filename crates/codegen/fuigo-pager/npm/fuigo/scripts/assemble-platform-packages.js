@@ -100,6 +100,7 @@ async function packPlatform({ platform, arch, envVar, defaultSource, binName }) 
 }
 
 async function main() {
+    require('./package-notices').packageNotices();
     const targets = [
         {
             platform: 'darwin', arch: 'arm64', binName: 'fuigo',

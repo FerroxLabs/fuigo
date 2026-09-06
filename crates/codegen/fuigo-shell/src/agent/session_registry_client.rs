@@ -145,7 +145,9 @@ impl SessionRegistryClient {
         let http_client = crate::http::shared_client();
         Self {
             raw_client: http_client.clone(),
-            client: reqwest_middleware::ClientBuilder::new(http_client).build(),
+            client: reqwest_middleware::ClientBuilder::new(http_client)
+                .with(fuigo_auth::EgressMiddleware)
+                .build(),
             base_url: base_url.into(),
             credentials: crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(Some(
                 user_token.into(),

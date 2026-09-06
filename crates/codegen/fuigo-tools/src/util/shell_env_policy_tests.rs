@@ -40,12 +40,58 @@ fn apply_policy_reshapes_command_env() {
 }
 
 #[test]
-fn apply_noop_or_absent_policy_leaves_command_untouched() {
+fn apply_empty_exclusions_still_filters_credentials() {
     let mut cmd = tokio::process::Command::new("true");
-    apply_shell_environment_policy(&mut cmd, None);
-    apply_shell_environment_policy(&mut cmd, Some(&ShellEnvironmentPolicy::default()));
-    // No env_clear and no sets: the command carries no explicit env entries.
-    assert_eq!(cmd.as_std().get_envs().count(), 0);
+    let noop = ShellEnvironmentPolicy {
+        exclude: Vec::new(),
+        ..Default::default()
+    };
+    apply_shell_environment_policy(&mut cmd, Some(&noop));
+    assert!(!noop.is_noop());
+    assert!(
+        cmd.as_std()
+            .get_envs()
+            .all(|(key, _)| !super::is_provider_credential(&key.to_string_lossy()))
+    );
+}
+
+#[test]
+fn t05_known_names_and_policy_precedence() {
+    for exclude in [Vec::new(), patterns(&["CUSTOM_*"])] {
+        let policy = ShellEnvironmentPolicy {
+            exclude,
+            ..Default::default()
+        };
+        let mut input = vars(&[("PATH", "/bin"), ("BENIGN", "ok")]);
+        for name in super::PROVIDER_CREDENTIAL_NAMES {
+            input.push((name.to_string(), "fake-t05".into()));
+            input.push((name.to_ascii_lowercase(), "fake-t05".into()));
+        }
+        let env = create_env_from_vars(input, &policy);
+        assert_eq!(env.len(), 2);
+        assert_eq!(env["BENIGN"], "ok");
+    }
+}
+
+#[test]
+fn t05_deliberate_delivery() {
+    let mut policy = ShellEnvironmentPolicy::default();
+    policy
+        .set
+        .insert("OPENAI_API_KEY".into(), "fake-selected".into());
+    let env = create_env_from_vars(vars(&[("ANTHROPIC_API_KEY", "fake-ambient")]), &policy);
+    assert_eq!(
+        env.get("OPENAI_API_KEY").map(String::as_str),
+        Some("fake-selected")
+    );
+    assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+    assert!(!policy.allows("OPENAI_API_KEY"));
+    policy.include_only = patterns(&["PATH"]);
+    assert!(
+        create_env_from_vars(Vec::new(), &policy)
+            .get("OPENAI_API_KEY")
+            .is_none()
+    );
 }
 
 #[test]
@@ -135,7 +181,7 @@ fn allows_filters_by_name_case_insensitively() {
         ..Default::default()
     };
     assert!(!scrub.allows("my_api_key")); // `*KEY*` matches case-insensitively
-    assert!(ShellEnvironmentPolicy::default().allows("MY_API_KEY")); // default allows all
+    assert!(ShellEnvironmentPolicy::default().allows("MY_API_KEY")); // unrelated API keys retain their existing behavior
 }
 
 #[test]
@@ -163,4 +209,42 @@ fn allows_with_inherit_honors_inherit() {
     };
     assert!(all.allows_with_inherit("RANDOM_VAR"));
     assert!(!all.allows_with_inherit("AWS_SECRET"));
+}
+
+#[test]
+fn default_shell_policy_excludes_fuigo_credentials() {
+    let policy = ShellEnvironmentPolicy::default();
+    let env = create_env_from_vars(
+        vars(&[
+            ("PATH", "/bin"),
+            ("FUIGO_API_KEY", "secret"),
+            ("FUIGO_CODE_API_KEY", "legacy-secret"),
+            ("OTHER_VAR", "keep"),
+        ]),
+        &policy,
+    );
+    assert!(!env.contains_key("FUIGO_API_KEY"));
+    assert!(!env.contains_key("FUIGO_CODE_API_KEY"));
+    assert!(!policy.allows("FUIGO_API_KEY"));
+    assert_eq!(env.get("OTHER_VAR").map(String::as_str), Some("keep"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn default_shell_policy_keeps_credentials_out_of_child_processes() {
+    let default_policy = ShellEnvironmentPolicy::default();
+    for policy in [Some(&default_policy), None] {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "test -z \"${FUIGO_API_KEY+x}\" && test -z \"${FUIGO_CODE_API_KEY+x}\"",
+        ]);
+        cmd.env("FUIGO_API_KEY", "stored-test-credential");
+        cmd.env("FUIGO_CODE_API_KEY", "legacy-test-credential");
+        apply_shell_environment_policy(&mut cmd, policy);
+        assert!(
+            cmd.status().await.unwrap().success(),
+            "the child must not receive either Fuigo credential"
+        );
+    }
 }

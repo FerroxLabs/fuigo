@@ -27,6 +27,7 @@ use serde::Deserialize;
 
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
+use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -141,11 +142,12 @@ impl std::fmt::Debug for ZdrVideoOutputS3Config {
 #[derive(Clone)]
 pub struct VideoGenClient {
     http: reqwest::Client,
-    download_http: reqwest::Client,
+    download_http: fuigo_extra_ca::public_download::PublicDownloadClient,
     base_url: String,
     writer: super::storage::SessionFileWriter,
     zdr_video_output_s3: Option<ZdrVideoOutputS3Config>,
     api_key_provider: Option<SharedApiKeyProvider>,
+    configured_api_key: Option<String>,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
     /// Video Generation API emits an `auth_401_attribution` event with
     /// `consumer` of `"VideoGen.start"` (start request) or
@@ -184,16 +186,7 @@ impl VideoGenClient {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        // Always bake the static api_key as the default Authorization header.
-        // The dynamic provider overrides per-request; this is the fallback.
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Invalid API key for header: {e}"
-                ))
-            })?,
-        );
+        let configured_api_key = (!api_key.trim().is_empty()).then(|| api_key.trim().to_owned());
 
         extra_headers.into_iter().try_for_each(|(key, value)| {
             let header_name =
@@ -207,7 +200,9 @@ impl VideoGenClient {
                     "Invalid header value for '{key}': {e}"
                 ))
             })?;
-            headers.insert(header_name, header_value);
+            if api_key_provider.is_none() || header_name != AUTHORIZATION {
+                headers.insert(header_name, header_value);
+            }
             Ok::<(), fuigo_tool_runtime::ToolError>(())
         })?;
 
@@ -216,9 +211,7 @@ impl VideoGenClient {
             headers.contains_key(super::image_gen::SESSION_ID_HEADER);
         let key = crate::util::shared_http::cache_key("video_gen", &headers);
         let http = crate::util::shared_http::cached_client(key, || {
-            fuigo_extra_ca::build_reqwest_client(|builder| {
-                builder.default_headers(headers.clone())
-            })
+            fuigo_extra_ca::build_reqwest_client(|builder| builder.default_headers(headers.clone()))
         })
         .map_err(|e| {
             fuigo_tool_runtime::ToolError::invalid_arguments(format!(
@@ -226,17 +219,19 @@ impl VideoGenClient {
             ))
         })?;
 
-        // Distinct client (download timeout, no default headers); an empty
-        // header map routes it through the same `CacheKey` constructor.
-        let download_key = crate::util::shared_http::cache_key(
-            "video_gen_download",
-            &reqwest::header::HeaderMap::new(),
-        );
-        let download_http = crate::util::shared_http::cached_client(download_key, || {
-            fuigo_extra_ca::build_reqwest_client(|builder| {
-                builder.timeout(std::time::Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS))
-            })
-        })
+        // Separate, process-cached client whose API cannot attach provider
+        // headers or bodies, even when a presigned URL redirects to a CDN.
+        static DOWNLOAD_HTTP: std::sync::OnceLock<
+            fuigo_extra_ca::public_download::PublicDownloadClient,
+        > = std::sync::OnceLock::new();
+        let download_http = if let Some(client) = DOWNLOAD_HTTP.get() {
+            Ok(client.clone())
+        } else {
+            fuigo_extra_ca::public_download::PublicDownloadClient::new(
+                std::time::Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS),
+            )
+            .map(|client| DOWNLOAD_HTTP.get_or_init(|| client).clone())
+        }
         .map_err(|e| {
             fuigo_tool_runtime::ToolError::invalid_arguments(format!(
                 "Failed to build download client: {e}"
@@ -253,6 +248,7 @@ impl VideoGenClient {
                 .map(|c| (**c).clone())
                 .filter(ZdrVideoOutputS3Config::is_valid),
             api_key_provider,
+            configured_api_key,
             attribution_callback: None,
             tier_restricted: *tier_restricted,
             zdr_restricted: *zdr_restricted,
@@ -313,8 +309,17 @@ impl VideoGenClient {
         self
     }
 
-    async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    async fn current_bearer(&self, purpose: CredentialPurpose, recipient: &str) -> Option<String> {
+        crate::types::api_key_provider::resolve_bearer(
+            self.api_key_provider.as_ref(),
+            CredentialRequest {
+                purpose,
+                recipient,
+                model: None,
+            },
+            self.configured_api_key.as_deref(),
+        )
+        .await
     }
 
     fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -359,13 +364,20 @@ impl VideoGenClient {
             }),
         };
 
-        let sent_bearer = self.current_bearer().await;
+        let sent_bearer = self
+            .current_bearer(CredentialPurpose::VideoGeneration, &start_url)
+            .await
+            .ok_or_else(|| {
+                fuigo_tool_runtime::ToolError::unauthorized(
+                    "No credential is available for the configured video generation endpoint",
+                )
+            })?;
         let req = self
-            .request(reqwest::Method::POST, &start_url, sent_bearer.as_deref())
+            .request(reqwest::Method::POST, &start_url, Some(&sent_bearer))
             .timeout(std::time::Duration::from_secs(VIDEO_START_TIMEOUT_SECS))
             .json(&payload);
 
-        let response = req.send().await.map_err(|e| {
+        let response = fuigo_extra_ca::dispatch::send(req).await.map_err(|e| {
             fuigo_tool_runtime::ToolError::invalid_arguments(format!(
                 "Video generation API request failed: {e}"
             ))
@@ -373,7 +385,7 @@ impl VideoGenClient {
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(ToolConsumer::VideoGenStart, sent_bearer.as_deref());
+            self.record_401_attribution(ToolConsumer::VideoGenStart, Some(&sent_bearer));
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -426,23 +438,29 @@ impl VideoGenClient {
                 )));
             }
 
-            let poll_sent_bearer = self.current_bearer().await;
+            let poll_sent_bearer = self
+                .current_bearer(CredentialPurpose::VideoPoll, &poll_url)
+                .await
+                .ok_or_else(|| {
+                    fuigo_tool_runtime::ToolError::unauthorized(
+                        "No credential is available for the configured video polling endpoint",
+                    )
+                })?;
             let poll_req = self
-                .request(reqwest::Method::GET, &poll_url, poll_sent_bearer.as_deref())
+                .request(reqwest::Method::GET, &poll_url, Some(&poll_sent_bearer))
                 .timeout(poll_timeout);
 
-            let poll_response = poll_req.send().await.map_err(|e| {
-                fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Video poll request failed: {e}"
-                ))
-            })?;
+            let poll_response = fuigo_extra_ca::dispatch::send(poll_req)
+                .await
+                .map_err(|e| {
+                    fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Video poll request failed: {e}"
+                    ))
+                })?;
 
             let poll_status = poll_response.status();
             if poll_status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(
-                    ToolConsumer::VideoGenPoll,
-                    poll_sent_bearer.as_deref(),
-                );
+                self.record_401_attribution(ToolConsumer::VideoGenPoll, Some(&poll_sent_bearer));
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
                 let body = poll_response.text().await.unwrap_or_default();
@@ -519,8 +537,10 @@ impl VideoGenClient {
 
     /// Download video bytes from a pre-signed temporary URL (no auth headers).
     async fn download_video(&self, url: &str) -> Result<Vec<u8>, fuigo_tool_runtime::ToolError> {
-        let response = self.download_http.get(url).send().await.map_err(|e| {
-            fuigo_tool_runtime::ToolError::invalid_arguments(format!("Failed to download video: {e}"))
+        let response = self.download_http.get(url).await.map_err(|e| {
+            fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to download video: {e}"
+            ))
         })?;
 
         if !response.status().is_success() {
@@ -729,7 +749,8 @@ fn is_http_url(raw: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Session-level configuration. Same shape as [`ImageGenConfig`].
+/// Session-level configuration. Same shape as [`ImageGenConfig`]; an enabled
+/// client may resolve its credential from a live provider at operation time.
 ///
 /// [`ImageGenConfig`]: super::image_gen::ImageGenConfig
 #[derive(Debug, Clone, Default)]
@@ -879,7 +900,9 @@ async fn resolve_image_reference(value: &str) -> Result<String, fuigo_tool_runti
 
     if value.starts_with("data:image/") {
         let comma = value.find(',').ok_or_else(|| {
-            fuigo_tool_runtime::ToolError::invalid_arguments("malformed data URL in image reference")
+            fuigo_tool_runtime::ToolError::invalid_arguments(
+                "malformed data URL in image reference",
+            )
         })?;
         if !value[..comma].contains(";base64") {
             return Err(fuigo_tool_runtime::ToolError::invalid_arguments(
@@ -906,7 +929,9 @@ async fn resolve_image_reference(value: &str) -> Result<String, fuigo_tool_runti
 
     let (_w, _h, mime) =
         crate::util::image_validate::validate_image_bytes(&raw_bytes).map_err(|e| {
-            fuigo_tool_runtime::ToolError::invalid_arguments(format!("invalid image reference: {e}"))
+            fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+                "invalid image reference: {e}"
+            ))
         })?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
     Ok(format!("data:{mime};base64,{b64}"))
@@ -1325,6 +1350,86 @@ impl fuigo_tool_runtime::Tool for ReferenceToVideoTool {
 
 #[cfg(test)]
 mod tests {
+    struct PurposeProvider;
+
+    impl crate::types::ApiKeyProvider for PurposeProvider {
+        fn current_api_key(&self) -> Option<String> {
+            Some("generic-process-key".into())
+        }
+
+        fn credential_for(
+            &self,
+            request: crate::types::api_key_provider::CredentialRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = crate::types::api_key_provider::CredentialResolution,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            use crate::types::api_key_provider::{CredentialPurpose, CredentialResolution};
+            let result = match request.purpose {
+                CredentialPurpose::VideoGeneration => {
+                    CredentialResolution::Resolved("video-start-key".into())
+                }
+                CredentialPurpose::VideoPoll => {
+                    CredentialResolution::Resolved("video-poll-key".into())
+                }
+                _ => CredentialResolution::Denied,
+            };
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    #[tokio::test]
+    async fn t04_video_start_and_poll_resolve_their_live_credential_independently() {
+        let mut extra_headers = indexmap::IndexMap::new();
+        extra_headers.insert("authorization".into(), "Bearer stale-default".into());
+        let cfg = VideoGenConfig::Enabled {
+            api_key: "stale-constructor-key".into(),
+            base_url: "https://video-owner.example/v1".into(),
+            extra_headers,
+            zdr_video_output_s3: None,
+            tier_restricted: false,
+            zdr_restricted: false,
+        };
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(PurposeProvider);
+        let client = VideoGenClient::new(&cfg, Some(provider)).unwrap();
+        let start_url = "https://video-owner.example/v1/videos/generations";
+        let poll_url = "https://video-owner.example/v1/videos/request-7";
+        let start = client
+            .current_bearer(CredentialPurpose::VideoGeneration, start_url)
+            .await;
+        let poll = client
+            .current_bearer(CredentialPurpose::VideoPoll, poll_url)
+            .await;
+        assert_eq!(start.as_deref(), Some("video-start-key"));
+        assert_eq!(poll.as_deref(), Some("video-poll-key"));
+        let start_request = client
+            .request(reqwest::Method::POST, start_url, start.as_deref())
+            .build()
+            .unwrap();
+        assert_eq!(
+            start_request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer video-start-key")
+        );
+        let poll_request = client
+            .request(reqwest::Method::GET, poll_url, poll.as_deref())
+            .build()
+            .unwrap();
+        assert_eq!(
+            poll_request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer video-poll-key")
+        );
+    }
+
     // Mirrors image_gen's post_json pinning: every start/poll request must
     // route through request(), which attaches both bearer and session id.
     #[tokio::test]

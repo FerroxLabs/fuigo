@@ -385,6 +385,7 @@ impl FeedbackClient {
         // Those first wait for the proactive refresh to complete before falling back to active recovery
         // Otherwise the middleware's eager ServerRejected refresh would race every other auth consumer during token-expiry windows and amplify 401s
         reqwest_middleware::ClientBuilder::new(http.clone())
+            .with(fuigo_auth::EgressMiddleware)
             .with(fuigo_auth::AuthRetryMiddleware::new(provider, 0))
             .build()
     }

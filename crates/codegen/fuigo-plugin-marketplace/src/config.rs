@@ -4,7 +4,7 @@
 //! ```toml
 //! [[marketplace.sources]]
 //! name = "Ferrox Labs Official"
-//! git = "https://github.com/fuigo-org/fuigo-plugin-marketplace.git"
+//! git = "https://github.com/FerroxLabs/plugin-marketplace.git"
 //!
 //! [[marketplace.sources]]
 //! name = "Local Dev"
@@ -290,7 +290,7 @@ mod tests {
             r#"
             [[marketplace.sources]]
             name = "Ferrox Labs Official"
-            git = "https://github.com/fuigo-org/fuigo-plugin-marketplace.git"
+            git = "https://github.com/FerroxLabs/plugin-marketplace.git"
             branch = "main"
             "#,
         )
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].name, "Ferrox Labs Official");
         assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, branch } if url.contains("fuigo-org") && branch.as_deref() == Some("main"))
+            matches!(&sources[0].kind, SourceKind::Git { url, branch } if url.contains("FerroxLabs") && branch.as_deref() == Some("main"))
         );
     }
 
@@ -388,6 +388,77 @@ mod tests {
         )
         .unwrap();
         assert!(load_sources(&config).is_empty());
+    }
+
+    #[test]
+    fn persisted_sources_preserve_identity_and_pins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config_path = root.join("config.toml");
+        let settings_path = root.join("settings.json");
+        let known_path = root.join("plugins/known_marketplaces.json");
+        std::fs::create_dir_all(known_path.parent().unwrap()).unwrap();
+
+        let toml_raw = r#"[[marketplace.sources]]
+name = "Old Owner"
+git = "https://github.com/fuigo-org/plugin-marketplace.git"
+branch = "old-pin"
+
+[[marketplace.sources]]
+name = "Ferrox Labs Official"
+git = "https://github.com/FerroxLabs/plugin-marketplace.git"
+branch = "contributor-pin"
+
+[[marketplace.sources]]
+name = "Custom"
+git = "ssh://git.example.test/custom/plugins.git"
+branch = "custom-pin"
+"#;
+        let settings_raw = r#"{"extraKnownMarketplaces":{"Settings Source":{"source":{"source":"git","url":"https://settings.example.test/plugins.git"},"installedCommit":"1111111111111111111111111111111111111111"}}}"#;
+        let known_raw = r#"{"Known Source":{"source":{"source":"github","repo":"known-owner/plugins"},"installedCommit":"2222222222222222222222222222222222222222"}}"#;
+        std::fs::write(&config_path, toml_raw).unwrap();
+        std::fs::write(&settings_path, settings_raw).unwrap();
+        std::fs::write(&known_path, known_raw).unwrap();
+
+        let parsed: toml::Value = toml::from_str(toml_raw).unwrap();
+        let toml_sources = load_sources(&parsed);
+        let json_sources = load_extra_sources_from_settings_in(
+            &toml_sources,
+            std::slice::from_ref(&root.to_path_buf()),
+        );
+
+        assert_eq!(
+            toml_sources
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Old Owner", "Ferrox Labs Official", "Custom"]
+        );
+        assert!(matches!(
+            &toml_sources[0].kind,
+            SourceKind::Git { url, branch }
+                if url == "https://github.com/fuigo-org/plugin-marketplace.git"
+                    && branch.as_deref() == Some("old-pin")
+        ));
+        assert!(matches!(
+            &toml_sources[1].kind,
+            SourceKind::Git { url, branch }
+                if url == "https://github.com/FerroxLabs/plugin-marketplace.git"
+                    && branch.as_deref() == Some("contributor-pin")
+        ));
+        assert_eq!(
+            json_sources
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Settings Source", "Known Source"]
+        );
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), toml_raw);
+        assert_eq!(
+            std::fs::read_to_string(settings_path).unwrap(),
+            settings_raw
+        );
+        assert_eq!(std::fs::read_to_string(known_path).unwrap(), known_raw);
     }
 
     #[test]

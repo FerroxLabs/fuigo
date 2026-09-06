@@ -890,7 +890,10 @@ async fn handle_add_source(url: &str) -> fuigo_hooks_plugins_types::ActionOutcom
     }
 
     let is_official = matches!(&input, MarketplaceAddInput::GitUrl(u)
-        if fuigo_plugin_marketplace::is_official_source_url(u));
+    if fuigo_plugin_marketplace::is_verified_official_source(
+        fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME,
+        u,
+    ));
     let name = if is_official {
         fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME.to_string()
     } else {
@@ -1111,7 +1114,10 @@ fn remove_source_locked(source_url_or_path: &str) -> fuigo_hooks_plugins_types::
     // found, leaving a still-configured source with nothing on disk -- which the
     // next sync would simply reinstall.
     let config_path = fuigo_home.join("config.toml");
-    let is_official = fuigo_plugin_marketplace::is_official_source_url(source_url_or_path);
+    let is_official = fuigo_plugin_marketplace::is_verified_official_source(
+        fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME,
+        source_url_or_path,
+    );
     let removed_from_config =
         match remove_source_from_config(&config_path, source_url_or_path, is_official) {
             Ok(removed) => removed,
@@ -1387,91 +1393,10 @@ fn purge_default_skills_installs_impl(
     }
 }
 
-/// Auto-register the official Ferrox Labs marketplace source on first run.
-///
-/// Gated by the caller (`init_process`); see `Config::resolve_official_marketplace_auto_register`.
-/// No-op once `official_marketplace_auto_installed` is set.
-/// Under a process-wide flock it adds the source (or just sets the flag if it's already present in config.toml or a JSON store).
-/// Best-effort: errors are logged and never block startup.
-pub(crate) fn ensure_official_marketplace_source(fuigo_home: &std::path::Path) {
-    let config_path = fuigo_home.join("config.toml");
-
-    if read_official_marketplace_auto_installed(&config_path) {
-        return;
-    }
-
-    let _lock = match acquire_init_lock(fuigo_home) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %fuigo_home.join(".config-init.lock").display(),
-                "skipping official marketplace auto-register: failed to acquire init lock"
-            );
-            return;
-        }
-    };
-
-    // Re-check under the lock: another process may have registered meanwhile.
-    if read_official_marketplace_auto_installed(&config_path) {
-        return;
-    }
-
-    let raw = match crate::util::config::read_to_string_or_empty(&config_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "skipping official marketplace auto-register: cannot read config.toml");
-            return;
-        }
-    };
-    let parsed: toml::Value = match toml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "skipping official marketplace auto-register: invalid config.toml");
-            return;
-        }
-    };
-
-    // "Already present" means the official URL is in the config.toml sources or in a JSON store (settings.json, known_marketplaces.json) under fuigo_home
-    // The scan is scoped to fuigo_home only (not ~/.claude) to keep tests hermetic
-    // A user with the URL solely in ~/.claude gets one duplicate entry that the UI dedupes by URL
-    let toml_sources = fuigo_plugin_marketplace::load_sources(&parsed);
-    let json_sources = fuigo_plugin_marketplace::load_extra_sources_from_settings_in(
-        &toml_sources,
-        std::slice::from_ref(&fuigo_home.to_path_buf()),
-    );
-    let already_present = toml_sources.iter().chain(json_sources.iter()).any(|s| {
-        matches!(&s.kind, fuigo_plugin_marketplace::SourceKind::Git { url, .. }
-            if fuigo_plugin_marketplace::is_official_source_url(url))
-    });
-
-    let write_result = if already_present {
-        // Already present: just set the flag.
-        set_official_marketplace_auto_installed(&config_path)
-    } else {
-        add_marketplace_source(
-            &config_path,
-            fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME,
-            &crate::plugin::MarketplaceAddInput::GitUrl(
-                fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.to_string(),
-            ),
-            true,
-        )
-    };
-
-    match write_result {
-        Ok(()) if !already_present => {
-            tracing::info!(
-                url = fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL,
-                "auto-registered official Ferrox Labs marketplace source"
-            );
-        }
-        Ok(()) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to auto-register official marketplace source");
-        }
-    }
-}
+/// First-run marketplace registration is disabled until an official source is independently
+/// verified. Environment and remote feature flags may still invoke this compatibility hook, but
+/// it must not inspect or mutate any persisted marketplace state.
+pub(crate) fn ensure_official_marketplace_source(_fuigo_home: &std::path::Path) {}
 
 #[cfg(test)]
 mod official_source_tests {
@@ -1570,33 +1495,50 @@ mod official_source_tests {
     }
 
     #[test]
-    fn first_run_creates_source_and_sets_flag() {
+    fn unverified_source_never_auto_registers() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path();
+        let cases = [
+            ("fresh", None),
+            (
+                "populated",
+                Some(
+                    "[marketplace]\nofficial_marketplace_auto_installed = false\n\n\
+                     [[marketplace.sources]]\nname = \"Ferrox Labs Official\"\n\
+                     git = \"https://github.com/FerroxLabs/plugin-marketplace.git\"\n\
+                     branch = \"contributor-fix\"\n",
+                ),
+            ),
+            ("malformed", Some("[marketplace\nnot valid toml")),
+            (
+                "sticky-removed",
+                Some("[marketplace]\nofficial_marketplace_auto_installed = true\n"),
+            ),
+        ];
 
-        ensure_official_marketplace_source(home);
+        for (name, initial) in cases {
+            let home = tmp.path().join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            let config_path = home.join("config.toml");
+            if let Some(initial) = initial {
+                std::fs::write(&config_path, initial).unwrap();
+            }
+            let before = std::fs::read(&config_path).ok();
 
-        let config_path = home.join("config.toml");
-        assert!(config_path.exists(), "config.toml should be created");
+            ensure_official_marketplace_source(&home);
 
-        let sources = read_sources(&config_path);
-        assert_eq!(sources.len(), 1);
-        assert_eq!(
-            sources[0].name,
-            fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME
-        );
-        assert!(matches!(
-            &sources[0].kind,
-            fuigo_plugin_marketplace::SourceKind::Git { url, .. }
-                if url == fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL
-        ));
-        assert!(read_flag(&config_path));
+            assert_eq!(
+                std::fs::read(&config_path).ok(),
+                before,
+                "direct helper invocation mutated {name} configuration"
+            );
+        }
     }
 
     #[test]
     fn second_run_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
+        std::fs::write(home.join("config.toml"), "[ui]\ntheme = \"dark\"\n").unwrap();
 
         ensure_official_marketplace_source(home);
         let after_first = std::fs::read_to_string(home.join("config.toml")).unwrap();
@@ -1616,10 +1558,6 @@ mod official_source_tests {
         let home = tmp.path();
         let config_path = home.join("config.toml");
 
-        ensure_official_marketplace_source(home);
-        assert_eq!(read_sources(&config_path).len(), 1);
-
-        // Simulate removal: drop the source block, keep the flag.
         std::fs::write(
             &config_path,
             "[marketplace]\nofficial_marketplace_auto_installed = true\n",
@@ -1656,7 +1594,7 @@ mod official_source_tests {
 
         let sources = read_sources(&config_path);
         assert_eq!(sources.len(), 1, "must not duplicate existing source");
-        assert!(read_flag(&config_path));
+        assert!(!read_flag(&config_path));
     }
 
     #[test]
@@ -1681,10 +1619,7 @@ mod official_source_tests {
             read_sources(&config_path).is_empty(),
             "must not append to config.toml when the source is already present in known_marketplaces.json"
         );
-        assert!(
-            read_flag(&config_path),
-            "must set the auto-installed flag so subsequent restarts skip the append check"
-        );
+        assert!(!config_path.exists(), "must not create config.toml");
     }
 
     #[test]
@@ -1707,7 +1642,7 @@ mod official_source_tests {
             read_sources(&config_path).is_empty(),
             "must not append to config.toml when source is in extraKnownMarketplaces"
         );
-        assert!(read_flag(&config_path));
+        assert!(!config_path.exists(), "must not create config.toml");
     }
 
     #[test]
@@ -1737,7 +1672,7 @@ mod official_source_tests {
                 .contains("branch = \"some-branch\""),
             "branch override must survive registration"
         );
-        assert!(read_flag(&config_path));
+        assert!(!read_flag(&config_path));
     }
 
     #[test]
@@ -1760,8 +1695,8 @@ mod official_source_tests {
         );
         assert!(after.contains("Local"), "existing source preserved");
         let sources = read_sources(&config_path);
-        assert_eq!(sources.len(), 2);
-        assert!(read_flag(&config_path));
+        assert_eq!(sources.len(), 1);
+        assert!(!read_flag(&config_path));
     }
 }
 

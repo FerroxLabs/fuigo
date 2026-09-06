@@ -132,7 +132,9 @@ fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
         "superfuigo_heavy",
         "SuperGrokPlus"
     ));
-    assert!(!jwt_claim_matches_user_subscription_tier("free", "FuigoPro"));
+    assert!(!jwt_claim_matches_user_subscription_tier(
+        "free", "FuigoPro"
+    ));
     assert!(!jwt_claim_matches_user_subscription_tier("", "XPremium"));
     assert!(!jwt_claim_matches_user_subscription_tier(
         "superfuigo_heavy",
@@ -2100,6 +2102,357 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     let cfg = AgentConfig::default();
     MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
 }
+
+#[derive(Clone, Debug)]
+struct T04ObservedRequest {
+    path: String,
+    authorization: Option<String>,
+}
+
+async fn t04_start_auxiliary_receiver() -> (
+    String,
+    tokio::sync::mpsc::UnboundedReceiver<T04ObservedRequest>,
+    tempfile::TempDir,
+    fuigo_test_support::EnvGuard,
+) {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let key = KeyPair::generate().unwrap();
+    let cert = CertificateParams::new(vec!["127.0.0.1".into(), "localhost".into()])
+        .unwrap()
+        .signed_by(&key, &ca, &ca_key)
+        .unwrap();
+    let tls_dir = tempfile::tempdir().unwrap();
+    let ca_path = tls_dir.path().join("ca.pem");
+    std::fs::write(&ca_path, ca.pem()).unwrap();
+    let roots = fuigo_test_support::EnvGuard::set("FUIGO_EXTRA_CA_BUNDLE", &ca_path);
+    let tls = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![cert.der().clone(), ca.der().clone()],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+    )
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let tx = tx.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            let authorization = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let _ = tx.send(T04ObservedRequest {
+                path: path.clone(),
+                authorization,
+            });
+            if path.ends_with("/responses") {
+                axum::Json(serde_json::json!({
+                    "id": "resp_t04",
+                    "object": "response",
+                    "created_at": 1,
+                    "status": "completed",
+                    "model": "search-model",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_t04",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "owned search result",
+                            "annotations": []
+                        }]
+                    }]
+                }))
+            } else {
+                axum::Json(serde_json::json!({"data": [{"b64_json": "YQ=="}]}))
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind T04 receiver");
+    let backend = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("https://{}", tls_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = tls_listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let mut tls = acceptor.accept(socket).await.unwrap();
+                let mut upstream = tokio::net::TcpStream::connect(backend).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut tls, &mut upstream).await;
+            });
+        }
+    });
+    (base_url, rx, tls_dir, roots)
+}
+
+async fn t04_build_agent_from_spawn_inputs(
+    working_directory: &std::path::Path,
+    session_id: &str,
+    api_key_provider: fuigo_tools::types::SharedApiKeyProvider,
+    image_gen_config: fuigo_tools::implementations::fuigo_build::image_gen::ImageGenConfig,
+    web_search_config: fuigo_tools::implementations::web_search::WebSearchConfig,
+) -> fuigo_agent::Agent {
+    let mut spec = crate::session::agent_rebuild::test_rebuild_spec_default();
+    let inputs = std::sync::Arc::get_mut(&mut spec).expect("unique T04 rebuild spec");
+    inputs.working_directory = working_directory.to_owned();
+    inputs.bridge_state_path = working_directory.join(format!("{session_id}-tool-state.json"));
+    inputs.session_id_str = session_id.to_owned();
+    inputs.owner_session_id = Some(session_id.to_owned());
+    inputs.api_key_provider = Some(api_key_provider);
+    inputs.image_gen_config = image_gen_config;
+    inputs.web_search_config = web_search_config;
+    let mut definition = fuigo_agent::config::AgentDefinition::default_fuigo_build();
+    definition.discover_skills = false;
+    definition.agents_md = false;
+    spec.build_agent(definition)
+        .await
+        .expect("production AgentRebuildSpec must build T04 agent")
+}
+
+async fn t04_call_tool(agent: &fuigo_agent::Agent, kind: fuigo_tools::types::tool::ToolKind) {
+    let tool_name = agent
+        .tool_bridge()
+        .tool_for_kind(kind)
+        .await
+        .expect("T04 auxiliary tool must be installed");
+    let args = match kind {
+        fuigo_tools::types::tool::ToolKind::ImageGen => {
+            serde_json::json!({"prompt": "credential ownership", "aspect_ratio": "1:1"})
+        }
+        fuigo_tools::types::tool::ToolKind::WebSearch => {
+            serde_json::json!({"query": "credential ownership", "allowed_domains": null})
+        }
+        _ => panic!("unsupported T04 tool kind: {kind:?}"),
+    };
+    agent
+        .tool_bridge()
+        .call(&tool_name, args, "t04-call")
+        .await
+        .expect("T04 auxiliary request must succeed");
+}
+
+async fn t04_next_request(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<T04ObservedRequest>,
+) -> T04ObservedRequest {
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("T04 receiver timed out")
+        .expect("T04 receiver channel closed")
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn t04_concurrent_sessions_keep_auxiliary_and_search_credentials_separate() {
+    tokio::task::LocalSet::new().run_until(async {
+    use fuigo_test_support::EnvGuard;
+    use fuigo_tools::implementations::fuigo_build::image_gen::ImageGenConfig;
+    use fuigo_tools::implementations::web_search::WebSearchConfig;
+    use fuigo_tools::types::tool::ToolKind;
+
+    let Some(process_home) = fuigo_test_support::env::fresh_process_home(
+        "agent::mvp_agent::tests::t04_concurrent_sessions_keep_auxiliary_and_search_credentials_separate",
+    ) else {
+        return;
+    };
+    let _auth = EnvGuard::unset("FUIGO_AUTH");
+    let _auth_path = EnvGuard::unset("FUIGO_AUTH_PATH");
+    let _global = EnvGuard::unset("FUIGO_API_KEY");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+        let (base_url, mut requests, _tls_dir, _tls_roots) = t04_start_auxiliary_receiver().await;
+    let api_base = format!("{base_url}/v1");
+    let config_path = process_home.as_path().join("config.toml");
+    let write_config = |search_a: &str| {
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[endpoints]
+fuigo_api_base_url = "{api_base}"
+
+[models]
+web_search = "search-a"
+
+[model.search-a]
+model = "search-a"
+base_url = "{api_base}"
+api_key = "{search_a}"
+context_window = 256000
+api_backend = "responses"
+
+[model.search-b]
+model = "search-b"
+base_url = "{api_base}"
+api_key = "search-b-key"
+context_window = 256000
+api_backend = "responses"
+"#,
+            ),
+        )
+        .unwrap();
+    };
+    write_config("search-a-key-1");
+
+    let auth_a = tempfile::tempdir_in(process_home.as_path()).unwrap();
+    let auth_b = tempfile::tempdir_in(process_home.as_path()).unwrap();
+    crate::auth::store_api_key(auth_a.path(), "aux-a-key-1").unwrap();
+    crate::auth::store_api_key(auth_b.path(), "aux-b-key").unwrap();
+    let manager_a = std::sync::Arc::new(crate::auth::AuthManager::new(
+        auth_a.path(),
+        crate::auth::FuigoComConfig::default(),
+    ));
+    let manager_b = std::sync::Arc::new(crate::auth::AuthManager::new(
+        auth_b.path(),
+        crate::auth::FuigoComConfig::default(),
+    ));
+    manager_a.set_process_static_api_key(Some("inference-a-key".into()));
+    manager_b.set_process_static_api_key(Some("inference-b-key".into()));
+
+    let image_config = || ImageGenConfig::Enabled {
+        api_key: String::new(),
+        base_url: api_base.clone(),
+        extra_headers: indexmap::IndexMap::new(),
+        image_gen_enabled: true,
+        image_edit_enabled: true,
+        model_override: None,
+        edit_model_override: None,
+        tier_restricted: false,
+    };
+    let search_config = |model: &str| WebSearchConfig::Enabled {
+        api_key: String::new(),
+        base_url: api_base.clone(),
+        model: model.into(),
+        extra_headers: indexmap::IndexMap::new(),
+        alpha_test_key: None,
+        allowed_domains: None,
+        excluded_domains: None,
+    };
+    let work_a = tempfile::tempdir().unwrap();
+    let work_b = tempfile::tempdir().unwrap();
+    let (session_a, session_b) = tokio::join!(
+        t04_build_agent_from_spawn_inputs(
+            work_a.path(),
+            "t04-session-a",
+            std::sync::Arc::new(crate::auth::manager::SharedAuthKeyProvider(
+                manager_a.clone()
+            )),
+            image_config(),
+            search_config("search-a"),
+        ),
+        t04_build_agent_from_spawn_inputs(
+            work_b.path(),
+            "t04-session-b",
+            std::sync::Arc::new(crate::auth::manager::SharedAuthKeyProvider(
+                manager_b.clone()
+            )),
+            image_config(),
+            search_config("search-b"),
+        ),
+    );
+    tokio::join!(
+        t04_call_tool(&session_a, ToolKind::ImageGen),
+        t04_call_tool(&session_b, ToolKind::ImageGen),
+        t04_call_tool(&session_a, ToolKind::WebSearch),
+        t04_call_tool(&session_b, ToolKind::WebSearch),
+    );
+    let mut first = Vec::new();
+    for _ in 0..4 {
+        let request = t04_next_request(&mut requests).await;
+        first.push((request.path, request.authorization));
+    }
+    assert!(first.contains(&(
+        "/v1/images/generations".into(),
+        Some("Bearer aux-a-key-1".into())
+    )));
+    assert!(first.contains(&(
+        "/v1/images/generations".into(),
+        Some("Bearer aux-b-key".into())
+    )));
+    assert!(first.contains(&("/v1/responses".into(), Some("Bearer search-a-key-1".into()))));
+    assert!(first.contains(&("/v1/responses".into(), Some("Bearer search-b-key".into()))));
+
+    crate::auth::store_api_key(auth_a.path(), "aux-a-key-2").unwrap();
+    write_config("search-a-key-2");
+    manager_a.set_process_static_api_key(Some("inference-a-swapped-model-key".into()));
+    let swapped_a = t04_build_agent_from_spawn_inputs(
+        work_a.path(),
+        "t04-session-a-model-swap",
+        std::sync::Arc::new(crate::auth::manager::SharedAuthKeyProvider(
+            manager_a.clone(),
+        )),
+        image_config(),
+        search_config("search-a"),
+    )
+    .await;
+    t04_call_tool(&swapped_a, ToolKind::ImageGen).await;
+    t04_call_tool(&swapped_a, ToolKind::WebSearch).await;
+    assert_eq!(
+        t04_next_request(&mut requests)
+            .await
+            .authorization
+            .as_deref(),
+        Some("Bearer aux-a-key-2")
+    );
+    assert_eq!(
+        t04_next_request(&mut requests)
+            .await
+            .authorization
+            .as_deref(),
+        Some("Bearer search-a-key-2")
+    );
+
+    crate::auth::clear_api_key(auth_a.path()).unwrap();
+    let image_name = swapped_a
+        .tool_bridge()
+        .tool_for_kind(ToolKind::ImageGen)
+        .await
+        .unwrap();
+    assert!(
+        swapped_a
+            .tool_bridge()
+            .call(
+                &image_name,
+                serde_json::json!({"prompt": "revoked", "aspect_ratio": "1:1"}),
+                "t04-revoked",
+            )
+            .await
+            .is_err(),
+        "revoked session A auxiliary credential must fail before dispatch"
+    );
+    t04_call_tool(&session_b, ToolKind::ImageGen).await;
+    t04_call_tool(&session_b, ToolKind::WebSearch).await;
+    let unaffected_b = t04_next_request(&mut requests).await;
+    assert_eq!(unaffected_b.path, "/v1/images/generations");
+    assert_eq!(
+        unaffected_b.authorization.as_deref(),
+        Some("Bearer aux-b-key")
+    );
+    let unaffected_search_b = t04_next_request(&mut requests).await;
+    assert_eq!(unaffected_search_b.path, "/v1/responses");
+    assert_eq!(
+        unaffected_search_b.authorization.as_deref(),
+        Some("Bearer search-b-key")
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "revoked A emitted an HTTP request"
+    );
+    }).await;
+}
 fn session_usage_request(session_id: &str) -> acp::ExtRequest {
     acp::ExtRequest::new(
         "fuigo/session/usage",
@@ -2269,8 +2622,10 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
     )
     .unwrap();
     let auth_home = tempfile::tempdir().unwrap();
-    let auth_manager =
-        std::sync::Arc::new(AuthManager::new(auth_home.path(), FuigoComConfig::default()));
+    let auth_manager = std::sync::Arc::new(AuthManager::new(
+        auth_home.path(),
+        FuigoComConfig::default(),
+    ));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
@@ -2966,7 +3321,7 @@ async fn cached_token_fallthrough_prefers_api_key_for_deployment_key() {
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn cached_token_fallthrough_respects_kill_switch() {
-    use crate::agent::auth_method::{FUIGO_COM_METHOD_ID, FUIGO_API_KEY_ENV_VAR};
+    use crate::agent::auth_method::{FUIGO_API_KEY_ENV_VAR, FUIGO_COM_METHOD_ID};
     use fuigo_test_support::EnvGuard;
     let _lockdown = EnvGuard::unset("FUIGO_DISABLE_API_KEY_AUTH");
     let _key = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "test-deployment-key");
@@ -2987,7 +3342,7 @@ async fn cached_token_fallthrough_respects_kill_switch() {
 #[serial_test::serial]
 async fn cached_token_fallthrough_falls_to_fuigo_com_without_credentials() {
     use crate::agent::auth_method::{
-        FUIGO_COM_METHOD_ID, LEGACY_FUIGO_API_KEY_ENV_VAR, FUIGO_API_KEY_ENV_VAR,
+        FUIGO_API_KEY_ENV_VAR, FUIGO_COM_METHOD_ID, LEGACY_FUIGO_API_KEY_ENV_VAR,
     };
     use fuigo_test_support::EnvGuard;
     let _lockdown = EnvGuard::unset("FUIGO_DISABLE_API_KEY_AUTH");
@@ -3083,6 +3438,39 @@ async fn prepare_video_gen_config_respects_feature_flag() {
         agent.prepare_video_gen_config(),
         VideoGenConfig::Disabled
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t04_media_configs_do_not_copy_the_inference_model_credential() {
+    use fuigo_tools::implementations::fuigo_build::image_gen::ImageGenConfig;
+    use fuigo_tools::implementations::fuigo_build::video_gen::VideoGenConfig;
+
+    let agent = build_minimal_agent_for_tests();
+    agent.sampling_config.borrow_mut().api_key = Some("inference-only-key".into());
+    let ImageGenConfig::Enabled { api_key: image, .. } = agent.prepare_image_gen_config() else {
+        panic!("image generation should be configured for live credential resolution");
+    };
+    let VideoGenConfig::Enabled { api_key: video, .. } = agent.prepare_video_gen_config() else {
+        panic!("video generation should be configured for live credential resolution");
+    };
+    assert!(
+        image.is_empty(),
+        "image config must not snapshot the inference key"
+    );
+    assert!(
+        video.is_empty(),
+        "video config must not snapshot the inference key"
+    );
+
+    agent.sampling_config.borrow_mut().api_key = Some("swapped-inference-key".into());
+    let ImageGenConfig::Enabled { api_key: image, .. } = agent.prepare_image_gen_config() else {
+        panic!("image generation should remain live-bound after a model swap");
+    };
+    let VideoGenConfig::Enabled { api_key: video, .. } = agent.prepare_video_gen_config() else {
+        panic!("video generation should remain live-bound after a model swap");
+    };
+    assert!(image.is_empty());
+    assert!(video.is_empty());
 }
 /// The imagine tier gate fails **open**: with no resolved auth we can't confirm a restricted personal tier.
 /// The tools stay advertised and un-flagged.
@@ -5430,7 +5818,10 @@ async fn access_gate_does_not_leak_verdict_across_identities() {
         user_id: "user-b".into(),
         ..FuigoAuth::test_default()
     };
-    assert!(auth_b.is_fuigo_auth(), "precondition: first-party Ferrox Labs auth");
+    assert!(
+        auth_b.is_fuigo_auth(),
+        "precondition: first-party Ferrox Labs auth"
+    );
     agent.enforce_fuigo_code_access(&auth_b).await;
     assert!(
         agent.tier_allowed.get(),
@@ -5459,7 +5850,10 @@ async fn post_auth_settings_fuigo_upgrades_writeback_emits_and_opens_gate() {
         oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
         ..FuigoAuth::test_default()
     };
-    assert!(fuigo_auth.is_fuigo_auth(), "precondition: first-party Ferrox Labs auth");
+    assert!(
+        fuigo_auth.is_fuigo_auth(),
+        "precondition: first-party Ferrox Labs auth"
+    );
     let (agent, mut rx) =
         build_agent_with_auth_and_proxy(fuigo_auth, server.url(), AgentMode::Leader);
     assert_eq!(
@@ -6129,7 +6523,10 @@ fn interactive_trust_prompt_dedups_same_workspace() {
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
         let first = tokio::time::timeout(std::time::Duration::from_secs(2), gw_rx.recv()).await;
         assert!(
-            matches!(first, Ok(Some(fuigo_acp_lib::AcpClientMessage::ExtMethod(_)))),
+            matches!(
+                first,
+                Ok(Some(fuigo_acp_lib::AcpClientMessage::ExtMethod(_)))
+            ),
             "first prompt for an untrusted workspace must emit a request"
         );
         agent.maybe_spawn_interactive_trust_prompt(&sid, &repo_path, Some(&remote));
@@ -6245,8 +6642,8 @@ fn interactive_trust_prompt_reloads_all_same_workspace_sessions() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_reprompts_after_untrust() {
-    use fuigo_test_support::EnvGuard;
     use fuigo_hooks_plugins_types::HooksAction;
+    use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let _sim = EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0-sim");

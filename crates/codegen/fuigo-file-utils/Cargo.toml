@@ -7,6 +7,10 @@ description = "Local data collection: upload queueing and blob storage"
 authors = ["Ferrox Labs"]
 
 [dependencies]
+async-trait = { workspace = true }
+http = { workspace = true }
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "stream"] }
+reqwest-middleware05 = { package = "reqwest-middleware", version = "0.5" }
 anyhow = { workspace = true }
 base64.workspace = true
 dunce = { workspace = true }
@@ -21,6 +25,8 @@ aws-config = { version = "1", default-features = false, features = [
     "credentials-process",
 ] }
 aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
+aws-smithy-runtime-api = { version = "1", features = ["client"] }
+aws-smithy-types = "1"
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

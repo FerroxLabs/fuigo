@@ -173,6 +173,25 @@ fn record_stream_request_failure(err: &reqwest::Error) {
     span.record("error", err.to_string().as_str());
 }
 
+/// Local egress denial is configuration policy, not a retryable network outage.
+fn dispatch_error(
+    error: fuigo_extra_ca::dispatch::DispatchError,
+    streaming: bool,
+) -> SamplingError {
+    tracing::debug!("HTTP dispatch failed: {}", error);
+    match error {
+        fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => {
+            SamplingError::InvalidConfiguration(reason)
+        }
+        fuigo_extra_ca::dispatch::DispatchError::Transport(error) => {
+            if streaming {
+                record_stream_request_failure(&error);
+            }
+            SamplingError::Http(error)
+        }
+    }
+}
+
 /// Splice the raw-JSON hosted-tool entries for `web_search` and `x_search` into a serialized Responses request body's `tools` array.
 /// `x_search` has no `rs::Tool` variant, and `web_search`'s typed filters cannot carry `excluded_domains`, so both travel as raw JSON.
 /// Neither may also be emitted as a typed `rs::Tool`; the API rejects the duplicate.
@@ -925,11 +944,9 @@ impl SamplingClient {
         } = self.post(self.endpoint("chat/completions"));
         let http_request = fuigo_headers.apply(builder).json(&payload);
 
-        let response = http_request.send().await.map_err(|e| {
-            // Debug level; the error is returned to the caller
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+        let response = fuigo_extra_ca::dispatch::send(http_request)
+            .await
+            .map_err(|error| dispatch_error(error, false))?;
 
         self.handle_response(response, sent_bearer.as_deref()).await
     }
@@ -999,11 +1016,9 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "chat/completions");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = fuigo_extra_ca::dispatch::execute(&self.http, built_request)
+            .await
+            .map_err(|error| dispatch_error(error, true))?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1195,10 +1210,9 @@ impl SamplingClient {
         } = self.post(self.endpoint("responses"));
         let http_request = fuigo_headers.apply(builder).json(&request_body);
 
-        let response = http_request.send().await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+        let response = fuigo_extra_ca::dispatch::send(http_request)
+            .await
+            .map_err(|error| dispatch_error(error, false))?;
 
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
@@ -1350,11 +1364,9 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "responses");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = fuigo_extra_ca::dispatch::execute(&self.http, built_request)
+            .await
+            .map_err(|error| dispatch_error(error, true))?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1529,10 +1541,9 @@ impl SamplingClient {
         } = self.post(self.endpoint("messages"));
         let http_request = fuigo_headers.apply(builder).json(&request.inner);
 
-        let response = http_request.send().await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+        let response = fuigo_extra_ca::dispatch::send(http_request)
+            .await
+            .map_err(|error| dispatch_error(error, false))?;
 
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
@@ -1653,11 +1664,9 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "messages");
 
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
+        let response = fuigo_extra_ca::dispatch::execute(&self.http, built_request)
+            .await
+            .map_err(|error| dispatch_error(error, true))?;
 
         let status = response.status();
         let span = tracing::Span::current();

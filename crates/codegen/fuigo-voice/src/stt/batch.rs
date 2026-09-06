@@ -221,21 +221,23 @@ impl BatchSttClient {
             request = request.header("User-Agent", &config.user_agent);
         }
 
-        let response = request.multipart(form).send().await.map_err(|e| {
-            // `reqwest`'s Display for a timeout is opaque; name it, because
-            // "the endpoint never answered" and "the endpoint refused" need
-            // different things from the user.
-            if e.is_timeout() {
-                VoiceError::Stt(format!(
-                    "transcription timed out after {}s",
-                    REQUEST_TIMEOUT.as_secs()
-                ))
-            } else if e.is_connect() {
-                VoiceError::Stt(format!("could not reach the voice endpoint: {e}"))
-            } else {
-                VoiceError::Stt(format!("transcription request failed: {e}"))
-            }
-        })?;
+        let response = fuigo_extra_ca::dispatch::send(request.multipart(form))
+            .await
+            .map_err(|e| {
+                // `reqwest`'s Display for a timeout is opaque; name it, because
+                // "the endpoint never answered" and "the endpoint refused" need
+                // different things from the user.
+                if e.is_timeout() {
+                    VoiceError::Stt(format!(
+                        "transcription timed out after {}s",
+                        REQUEST_TIMEOUT.as_secs()
+                    ))
+                } else if e.is_connect() {
+                    VoiceError::Stt(format!("could not reach the voice endpoint: {e}"))
+                } else {
+                    VoiceError::Stt(format!("transcription request failed: {e}"))
+                }
+            })?;
 
         let status = response.status();
         let body = read_bounded(response).await?;
