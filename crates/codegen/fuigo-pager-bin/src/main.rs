@@ -1079,11 +1079,15 @@ async fn replay_acp_state_after_reconnect(
         .cloned()
         .or_else(|| restored.last().cloned())
 }
-/// Flush observability, then exit. Used by the agent/headless signal handler.
+/// Reap owned child trees, flush observability, then exit.
+/// Used by the agent/headless signal handler.
 ///
 /// Does NOT write terminal escape codes; agent mode never enables TUI modes.
 /// The TUI has its own signal handler (`app::signal_handler`) that does the full crossterm teardown.
 fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
+    // Match TUI teardown. process::exit skips Drop; detached terminal children
+    // otherwise survive SIGTERM/HUP. Reap before a telemetry drain can stall.
+    fuigo_tty_utils::global_process_scope().kill_all();
     fuigo_telemetry::sentry::flush_on_shutdown();
     fuigo_telemetry::otel_layer::shutdown_otel();
     fuigo_telemetry::debug_log::flush();

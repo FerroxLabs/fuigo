@@ -1,5 +1,6 @@
 //! Background `/user` enrichment spawned by `AuthManager::update()`.
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -66,7 +67,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
         )
-        .send()
+        .send_checked()
         .await;
 
     match response {

@@ -1,3 +1,4 @@
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -60,10 +61,21 @@ pub enum ConvError {
     NoOauth,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
+    #[error("request blocked by egress policy: {0}")]
+    Policy(&'static str),
     #[error("request failed: {status}")]
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for ConvError {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::Policy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::Network(error),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -164,7 +176,7 @@ impl ConversationsClient {
 
         let builder = self.apply_auth_headers(self.http.get(&url).query(&query), &auth);
 
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ConvError::Http {
@@ -210,7 +222,7 @@ impl ConversationsClient {
             .apply_auth_headers(self.http.put(&url), &auth)
             .json(body);
 
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ConvError::Http {
@@ -233,7 +245,7 @@ impl ConversationsClient {
         );
         let builder = self.apply_auth_headers(self.http.delete(&url), &auth);
 
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         // A 404 means already soft-deleted; keep deletion idempotent like the build path's `classify_remote_delete`
         if !status.is_success() && status.as_u16() != 404 {
@@ -305,5 +317,15 @@ mod tests {
             serde_json::to_value(&both).unwrap(),
             serde_json::json!({ "title": "T", "starred": true })
         );
+    }
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn egress_policy_denial_preserves_its_category() {
+        let error = ConvError::from(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"));
+        assert!(matches!(error, ConvError::Policy("blocked")));
     }
 }

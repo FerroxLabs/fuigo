@@ -25,7 +25,8 @@ impl HttpClient for BlockingOtlpClient {
         request: http::Request<Bytes>,
     ) -> Result<http::Response<Bytes>, HttpError> {
         let request = request.try_into()?;
-        let mut response = self.0.execute(request)?.error_for_status()?;
+        let mut response =
+            fuigo_extra_ca::dispatch::execute_blocking(&self.0, request)?.error_for_status()?;
         let headers = std::mem::take(response.headers_mut());
         let mut http_response = http::Response::builder()
             .status(response.status())

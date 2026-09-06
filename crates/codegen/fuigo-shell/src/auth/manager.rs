@@ -2253,7 +2253,7 @@ pub(crate) fn compute_proactive_sleep(this: &AuthManager) -> StdDuration {
     }
 }
 
-/// Bearer for tools and pager voice. Static precedence: env, then process model key, then disk.
+/// Bearer for tools. Static precedence: env, then process model key, then disk.
 /// Kill-switch / `preferred_method = oidc` block static keys.
 pub(crate) struct SharedAuthKeyProvider(pub Arc<AuthManager>);
 
@@ -2283,6 +2283,28 @@ impl fuigo_tools::types::ApiKeyProvider for SharedAuthKeyProvider {
                 .await
                 .ok()
                 .or_else(|| resolve_static_api_key(&am))
+        })
+    }
+
+    fn credential_for(
+        &self,
+        request: fuigo_tools::types::api_key_provider::CredentialRequest<'_>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = fuigo_tools::types::api_key_provider::CredentialResolution,
+                > + Send
+                + '_,
+        >,
+    > {
+        let manager = self.0.clone();
+        let purpose = request.purpose;
+        let recipient = request.recipient.to_owned();
+        let model = request.model.map(str::to_owned);
+        Box::pin(async move {
+            manager
+                .auxiliary_credential_for(purpose, &recipient, model.as_deref())
+                .await
         })
     }
 }
@@ -2363,6 +2385,157 @@ impl AuthManager {
         *self.process_static_api_key.write() = key;
     }
 
+    /// Resolve the session/global credential without consulting the process
+    /// model key. Auxiliary services are owned by their destination, not by the
+    /// currently selected inference model.
+    async fn live_destination_key(self: &Arc<Self>) -> Option<String> {
+        let static_key = || {
+            if self.fuigo_com_config.api_key_auth_disabled()
+                || matches!(
+                    self.fuigo_com_config.preferred_method,
+                    Some(super::config::PreferredAuthMethod::Oidc)
+                )
+            {
+                return None;
+            }
+            non_empty_key(crate::agent::auth_method::read_fuigo_api_key_env().ok())
+                .or_else(|| self.cached_disk_api_key())
+        };
+        if prefers_static_api_key(self) {
+            return static_key();
+        }
+        self.get_valid_token().await.ok().or_else(static_key)
+    }
+
+    async fn auxiliary_credential_for(
+        self: &Arc<Self>,
+        purpose: fuigo_tools::types::api_key_provider::CredentialPurpose,
+        recipient: &str,
+        model: Option<&str>,
+    ) -> fuigo_tools::types::api_key_provider::CredentialResolution {
+        use fuigo_tools::types::api_key_provider::{CredentialPurpose, CredentialResolution};
+
+        let raw = match crate::config::load_effective_config() {
+            Ok(raw) => raw,
+            Err(_) => return CredentialResolution::Denied,
+        };
+        let cfg = match crate::agent::config::Config::new_from_toml_cfg(&raw) {
+            Ok(cfg) => cfg,
+            Err(_) => return CredentialResolution::Denied,
+        };
+        match purpose {
+            CredentialPurpose::WebSearch => {
+                let Some(model) = model else {
+                    return CredentialResolution::Denied;
+                };
+                let models = crate::agent::config::resolve_model_list(&cfg, None);
+                let explicitly_paired = crate::agent::config::find_model_by_id(&models, model)
+                    .is_some_and(|entry| {
+                        entry.own_credential().is_some()
+                            || entry.effective_auth_provider().is_some()
+                    });
+                let disable_first_party_static = cfg.fuigo_com_config.api_key_auth_disabled()
+                    || matches!(
+                        cfg.fuigo_com_config.preferred_method,
+                        Some(super::config::PreferredAuthMethod::Oidc)
+                    );
+                let Some(route) = crate::agent::config::resolve_web_search_sampling_config(
+                    model,
+                    &models,
+                    None,
+                    disable_first_party_static,
+                    cfg.endpoints.alpha_test_key.clone(),
+                    cfg.client_version.clone(),
+                    &cfg.endpoints,
+                ) else {
+                    return CredentialResolution::Denied;
+                };
+                if !credential_recipient_matches(
+                    &route.base_url,
+                    recipient,
+                    explicitly_paired,
+                ) {
+                    return CredentialResolution::Denied;
+                }
+
+                // Resolve the bearer only after the route has been admitted,
+                // then apply that live value through the same model resolver.
+                drop(models);
+                drop(cfg);
+                let live_destination_key = self.live_destination_key().await;
+                let cfg = match crate::agent::config::Config::new_from_toml_cfg(&raw) {
+                    Ok(cfg) => cfg,
+                    Err(_) => return CredentialResolution::Denied,
+                };
+                let models = crate::agent::config::resolve_model_list(&cfg, None);
+                let explicitly_paired = crate::agent::config::find_model_by_id(&models, model)
+                    .is_some_and(|entry| {
+                        entry.own_credential().is_some()
+                            || entry.effective_auth_provider().is_some()
+                    });
+                let disable_first_party_static = cfg.fuigo_com_config.api_key_auth_disabled()
+                    || matches!(
+                        cfg.fuigo_com_config.preferred_method,
+                        Some(super::config::PreferredAuthMethod::Oidc)
+                    );
+                let Some(search) = crate::agent::config::resolve_web_search_sampling_config(
+                    model,
+                    &models,
+                    live_destination_key.as_deref(),
+                    disable_first_party_static,
+                    cfg.endpoints.alpha_test_key.clone(),
+                    cfg.client_version.clone(),
+                    &cfg.endpoints,
+                ) else {
+                    return CredentialResolution::Denied;
+                };
+                if !credential_recipient_matches(
+                    &search.base_url,
+                    recipient,
+                    explicitly_paired,
+                ) {
+                    return CredentialResolution::Denied;
+                }
+                search
+                    .api_key
+                    .and_then(|key| non_empty_key(Some(key)))
+                    .map(CredentialResolution::Resolved)
+                    .unwrap_or(CredentialResolution::Denied)
+            }
+            CredentialPurpose::Voice
+            | CredentialPurpose::ImageGeneration
+            | CredentialPurpose::ImageEdit
+            | CredentialPurpose::VideoGeneration
+            | CredentialPurpose::VideoPoll => {
+                if !credential_recipient_matches(
+                    &cfg.endpoints.fuigo_api_base_url,
+                    recipient,
+                    false,
+                ) {
+                    return CredentialResolution::Denied;
+                }
+                drop(cfg);
+                self.live_destination_key()
+                    .await
+                    .map(CredentialResolution::Resolved)
+                    .unwrap_or(CredentialResolution::Denied)
+            }
+        }
+    }
+
+    /// Voice uses the credential owned by the configured API origin, never an
+    /// unscoped process model key (which may belong to another provider).
+    pub async fn voice_api_key_for(self: &Arc<Self>, endpoint: &str) -> Option<String> {
+        use fuigo_tools::types::api_key_provider::{CredentialPurpose, CredentialResolution};
+        match self
+            .auxiliary_credential_for(CredentialPurpose::Voice, endpoint, None)
+            .await
+        {
+            CredentialResolution::Resolved(key) => Some(key),
+            CredentialResolution::UseConfigured | CredentialResolution::Denied => None,
+        }
+    }
+
     /// Static/BYOK key for export paths (e.g. desktop `getBearerToken`).
     /// Never a session JWT; respects kill-switch and preferred-method pin.
     pub(crate) fn static_api_key_for_export(&self) -> Option<String> {
@@ -2370,11 +2543,33 @@ impl AuthManager {
     }
 }
 
+fn credential_recipient_matches(
+    owner: &str,
+    recipient: &str,
+    allow_explicit_non_https: bool,
+) -> bool {
+    let Ok(owner) = url::Url::parse(owner) else {
+        return false;
+    };
+    let Ok(recipient) = url::Url::parse(recipient) else {
+        return false;
+    };
+    (allow_explicit_non_https || owner.scheme() == "https")
+        && owner.host_str().is_some()
+        && owner.username().is_empty()
+        && owner.password().is_none()
+        && (allow_explicit_non_https || recipient.scheme() == "https")
+        && recipient.host_str().is_some()
+        && recipient.username().is_empty()
+        && recipient.password().is_none()
+        && owner.origin() == recipient.origin()
+}
+
 fn non_empty_key(key: Option<String>) -> Option<String> {
     key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
 }
 
-/// Per-request bearer for out-of-crate consumers (e.g. pager voice).
+/// Per-request bearer for out-of-crate tools. Voice uses destination-bound resolution.
 pub fn shared_api_key_provider(
     auth_manager: Arc<AuthManager>,
 ) -> fuigo_tools::types::SharedApiKeyProvider {

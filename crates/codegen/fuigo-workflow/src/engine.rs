@@ -75,6 +75,7 @@ impl Ctx {
         hash: String,
         value: serde_json::Value,
     ) -> ScriptResult<()> {
+        self.journal.initialize_recovery().map_err(journal_fatal)?;
         self.journal
             .record(seq, kind, hash, value)
             .map_err(journal_fatal)
@@ -294,6 +295,10 @@ fn host_call<T>(
         Err(error) => return Err(journal_fatal(error)),
     }
 
+    ctx.borrow_mut()
+        .journal
+        .dispatch(seq, kind, &hash)
+        .map_err(journal_fatal)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     ctx.borrow()
         .host_tx
@@ -558,9 +563,16 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 let seq = c.borrow_mut().next_seq().inspect_err(|_| {
                     drain_parallel_replies(std::mem::take(&mut pending));
                 })?;
-                match replay_spawn_agent(&c.borrow().journal, seq, &payload, &hash) {
+                let replayed = replay_spawn_agent(&c.borrow().journal, seq, &payload, &hash);
+                match replayed {
                     Ok(Some(value)) => pending.push(PendingAgent::Replayed(value)),
                     Ok(None) => {
+                        if let Err(error) =
+                            c.borrow_mut().journal.dispatch(seq, "spawn_agent", &hash)
+                        {
+                            drain_parallel_replies(pending);
+                            return Err(journal_fatal(error));
+                        }
                         let (reply_tx, reply_rx) = oneshot::channel();
                         if c.borrow()
                             .host_tx
@@ -1224,6 +1236,9 @@ mod tests {
             }
         });
         let mut journal = Journal::new(None);
+        // This fixture models a current run approaching the call cap, not a
+        // legacy journal crossing its unprotected recovery boundary.
+        journal.initialize_recovery().unwrap();
         let hash = request_hash("budget", &serde_json::Value::Null);
         for seq in 0..MAX_HOST_CALLS - 1 {
             journal
@@ -1255,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_budget_exceeded_leaves_panel_unjournaled_for_raised_cap_resume() {
+    fn parallel_budget_exceeded_blocks_ambiguous_panel_resume() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1302,8 +1317,10 @@ mod tests {
         });
         let replay = run_workflow(params(script, journal, tx));
         drop(host);
-        assert!(matches!(replay, WorkflowOutcome::Completed { .. }));
-        assert_eq!(live_again.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            matches!(replay, WorkflowOutcome::Failed { ref error } if error.contains("unknown outcome"))
+        );
+        assert_eq!(live_again.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1358,15 +1375,13 @@ mod tests {
             ));
             drop(host);
             match outcome {
-                WorkflowOutcome::Completed { result } => {
-                    assert_eq!(result, serde_json::json!("after resume"));
-                }
-                other => panic!("expected Completed after resume, got {other:?}"),
+                WorkflowOutcome::Failed { error } => assert!(error.contains("unknown outcome")),
+                other => panic!("expected ambiguous outcome after cancellation, got {other:?}"),
             }
             assert_eq!(
                 agents_used.load(Ordering::SeqCst),
-                1,
-                "resume must not double-charge a slot left over from cancelled first run"
+                0,
+                "ambiguous cancellation must not dispatch again"
             );
         }
     }
@@ -1418,11 +1433,13 @@ mod tests {
                 tx,
             ));
             drop(host);
-            assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+            assert!(
+                matches!(outcome, WorkflowOutcome::Failed { ref error } if error.contains("unknown outcome"))
+            );
             assert_eq!(
                 agents_used.load(Ordering::SeqCst),
-                2,
-                "resume must charge exactly live_count, not leftover + live_count"
+                0,
+                "ambiguous panel must not dispatch again"
             );
         }
     }
@@ -1475,15 +1492,13 @@ mod tests {
             ));
             drop(host);
             match outcome {
-                WorkflowOutcome::Completed { result } => {
-                    assert_eq!(result, serde_json::json!("after raise"));
-                }
-                other => panic!("expected Completed after resume, got {other:?}"),
+                WorkflowOutcome::Failed { error } => assert!(error.contains("unknown outcome")),
+                other => panic!("expected ambiguous outcome after budget terminal, got {other:?}"),
             }
             assert_eq!(
                 agents_used.load(Ordering::SeqCst),
-                1,
-                "resume after budget terminal must not double-charge"
+                0,
+                "ambiguous budget terminal must not dispatch again"
             );
         }
     }
@@ -1821,6 +1836,41 @@ mod tests {
         assert_eq!(second["spent"], serde_json::json!(123));
         assert_eq!(second["reserved"], serde_json::json!(100));
         assert_eq!(second["remaining"], serde_json::json!(777));
+    }
+
+    #[test]
+    fn lost_effect_reply_never_redispatches_serial_or_parallel_agents() {
+        for script in [
+            r#"agent("effect");"#,
+            r#"parallel([#{prompt: "effect"}, #{prompt: "effect2"}]);"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.jsonl");
+            let effects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = effects.clone();
+            let (tx, rx) = mpsc::unbounded_channel();
+            let host = spawn_mock_host(rx, move |req| {
+                if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(reply);
+                }
+            });
+            assert!(matches!(
+                run_workflow(params(script, Journal::new(Some(path.clone())), tx)),
+                WorkflowOutcome::Failed { .. }
+            ));
+            drop(host);
+            let count = effects.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(count > 0);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let outcome = run_workflow(params(script, Journal::load(path).unwrap(), tx));
+            assert!(matches!(outcome, WorkflowOutcome::Failed { .. }));
+            assert!(
+                rx.try_recv().is_err(),
+                "ambiguous replay must not reach host"
+            );
+            assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), count);
+        }
     }
 
     #[test]

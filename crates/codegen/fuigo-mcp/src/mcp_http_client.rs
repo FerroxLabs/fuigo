@@ -162,6 +162,8 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
+        crate::http_policy::check_url(&uri)
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         let plan = {
             let mut st = self.state.lock();
             st.plan_on_get_stream(now())
@@ -213,6 +215,8 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        crate::http_policy::check_url(&uri)
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         self.inner
             .post_message(uri, message, session_id, auth_token, custom_headers)
             .await
@@ -225,6 +229,8 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
+        crate::http_policy::check_url(&uri)
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         self.inner
             .delete_session(uri, session_id, auth_token, custom_headers)
             .await
@@ -234,6 +240,35 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn egress_policy_rejects_all_streamable_methods_before_delegation() {
+        let client = McpHttpClient::new(MockInner, "fake", WarnBudget::default());
+        let uri: Arc<str> = "https://api.x.ai/mcp".into();
+        let stream = client
+            .get_stream(uri.clone(), "session".into(), None, None, HashMap::new())
+            .await;
+        assert!(
+            matches!(stream, Err(StreamableHttpError::Io(ref error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        let message: ClientJsonRpcMessage =
+            serde_json::from_value(serde_json::json!({"jsonrpc":"2.0","method":"ping","id":1}))
+                .unwrap();
+        let post = client
+            .post_message(uri.clone(), message, None, None, HashMap::new())
+            .await;
+        assert!(
+            matches!(post, Err(StreamableHttpError::Io(ref error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        let delete = client
+            .delete_session(uri, "session".into(), None, HashMap::new())
+            .await;
+        assert!(
+            matches!(delete, Err(StreamableHttpError::Io(ref error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        // MockInner's POST/DELETE panic if delegated; denial leaves throttle untouched.
+        assert!(client.state.lock().last_established.is_none());
+    }
 
     /// Simulates rapid stream deaths starting at `start` until the throttle engages (attempt 2).
     /// Returns the throttle-entry time and its plan.
@@ -399,9 +434,7 @@ mod tests {
 
     impl tracing::Subscriber for LogCapture {
         fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            metadata
-                .target()
-                .starts_with("fuigo_mcp::mcp_http_client")
+            metadata.target().starts_with("fuigo_mcp::mcp_http_client")
         }
         fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
             tracing::span::Id::from_u64(1)

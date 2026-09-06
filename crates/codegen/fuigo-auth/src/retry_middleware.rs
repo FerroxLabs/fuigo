@@ -16,6 +16,24 @@ use crate::bearer_fragment::bearer_suffix;
 #[derive(Clone, Debug)]
 pub struct StampedBearerSuffix(pub String);
 
+/// Initial-request policy for middleware clients, including unauthenticated
+/// clients. Redirect hops are additionally checked by the shared TLS builder.
+pub struct EgressMiddleware;
+
+#[async_trait::async_trait]
+impl Middleware for EgressMiddleware {
+    async fn handle(
+        &self,
+        req: Request,
+        extensions: &mut http::Extensions,
+        next: Next<'_>,
+    ) -> Result<Response, Error> {
+        fuigo_extra_ca::dispatch::check_url(req.url())
+            .map_err(|error| Error::Middleware(error.into()))?;
+        next.run(req, extensions).await
+    }
+}
+
 /// Execute `req` on a middleware-wrapped client and return the response plus the [`StampedBearerSuffix`] the auth middleware recorded, if any.
 /// This is how 401-attribution call sites learn what was actually sent on the wire.
 pub async fn execute_with_stamp(
@@ -62,6 +80,8 @@ impl Middleware for AuthRetryMiddleware {
         extensions: &mut http::Extensions,
         next: Next<'_>,
     ) -> Result<Response, Error> {
+        fuigo_extra_ca::dispatch::check_url(req.url())
+            .map_err(|error| Error::Middleware(error.into()))?;
         if let Some(ref token) = self.credentials.snapshot().token {
             apply_auth_header(&mut req, token, extensions);
         }
@@ -173,6 +193,46 @@ mod tests {
         assert_eq!(resp.status(), 401);
         assert_eq!(p.refresh_count(), 1);
         m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn middleware_paths_reject_before_proxy_connection_or_auth_refresh() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        for with_auth in [false, true] {
+            let raw = fuigo_extra_ca::build_reqwest_client(|builder| {
+                builder
+                    .no_proxy()
+                    .proxy(reqwest::Proxy::all(&proxy).unwrap())
+                    .timeout(std::time::Duration::from_millis(500))
+            })
+            .unwrap();
+            let provider = Arc::new(MockProvider::new(Some("fake-key"), true));
+            let builder = ClientBuilder::new(raw);
+            let client = if with_auth {
+                // AuthRetryMiddleware also enforces policy when used on its own.
+                builder
+                    .with(AuthRetryMiddleware::new(provider.clone(), 1))
+                    .build()
+            } else {
+                builder.with(EgressMiddleware).build()
+            };
+            for url in ["http://api.x.ai/v1", "https://api.x.ai/v1"] {
+                let error = client.get(url).send().await.unwrap_err();
+                assert!(matches!(error, Error::Middleware(_)));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("refuses to contact upstream vendor host")
+                );
+            }
+            assert_eq!(provider.refresh_count(), 0);
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     /// Simulates a real auth manager: starts with a stale token, and a refresh swaps in the fresh one.

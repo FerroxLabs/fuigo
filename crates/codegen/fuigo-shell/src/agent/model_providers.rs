@@ -174,6 +174,107 @@ pub(crate) fn parse_model_providers(
     (providers, warnings)
 }
 
+/// Resolve model and provider defaults before refusing conflicting model overrides.
+/// Report names only: these fields may contain credentials.
+pub fn validate_provider_binding(
+    raw: &toml::Value,
+    provider_id: &str,
+    model_ids: &[&str],
+) -> Result<(), String> {
+    use super::config::{Config, resolve_model_list};
+    const KEYS: &[&str] = &[
+        "base_url",
+        "api_base_url",
+        "api_key",
+        "env_key",
+        "auth_provider",
+        "api_backend",
+        "auth_scheme",
+        "extra_headers",
+        "env_http_headers",
+        "query_params",
+    ];
+    let cfg = Config::new_from_toml_cfg(raw)
+        .map_err(|_| "Cannot resolve model configuration".to_owned())?;
+    let resolved = resolve_model_list(&cfg, None);
+    let mut provider_only = raw.clone();
+    for id in model_ids {
+        let model = provider_only
+            .get_mut("model")
+            .and_then(|m| m.get_mut(*id))
+            .and_then(toml::Value::as_table_mut)
+            .ok_or_else(|| format!("Cannot resolve [model.{id}]"))?;
+        if model.get("model_provider").and_then(toml::Value::as_str) != Some(provider_id) {
+            return Err(format!(
+                "Nothing was written. [model.{id}] has conflicting keys: model_provider"
+            ));
+        }
+        for key in KEYS {
+            model.remove(*key);
+        }
+    }
+    let defaults = Config::new_from_toml_cfg(&provider_only)
+        .map_err(|_| "Cannot resolve provider configuration".to_owned())?;
+    if !defaults.model_providers.contains_key(provider_id) {
+        return Err(format!("Cannot resolve [model_providers.{provider_id}]"));
+    }
+    let expected = resolve_model_list(&defaults, None);
+    for id in model_ids {
+        let actual = resolved
+            .get(*id)
+            .ok_or_else(|| format!("Cannot resolve [model.{id}]"))?;
+        let wanted = expected
+            .get(*id)
+            .ok_or_else(|| format!("Cannot resolve [model.{id}]"))?;
+        // Credential overrides can suppress an unused provider fallback. Compare
+        // the settings the model actually supplies, using their resolved values.
+        let configured = raw
+            .get("model")
+            .and_then(|models| models.get(*id))
+            .ok_or_else(|| format!("Cannot resolve [model.{id}]"))?;
+        let conflicts: Vec<_> = [
+            ("base_url", actual.info.base_url != wanted.info.base_url),
+            ("api_base_url", actual.api_base_url != wanted.api_base_url),
+            ("api_key", actual.api_key != wanted.api_key),
+            ("env_key", actual.env_key != wanted.env_key),
+            (
+                "auth_provider",
+                actual.auth_provider != wanted.auth_provider,
+            ),
+            (
+                "api_backend",
+                actual.info.api_backend != wanted.info.api_backend,
+            ),
+            (
+                "auth_scheme",
+                actual.info.auth_scheme != wanted.info.auth_scheme,
+            ),
+            (
+                "extra_headers",
+                actual.info.extra_headers != wanted.info.extra_headers,
+            ),
+            (
+                "env_http_headers",
+                actual.info.env_http_headers != wanted.info.env_http_headers,
+            ),
+            (
+                "query_params",
+                actual.info.query_params != wanted.info.query_params,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, differs)| (differs && configured.get(key).is_some()).then_some(key))
+        .collect();
+        if !conflicts.is_empty() {
+            return Err(format!(
+                "Nothing was written. [model.{id}] has conflicting keys: {}. Remove or reconcile them with [model_providers.{provider_id}] before using /provider.",
+                conflicts.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl ConfigModelOverride {
     pub(crate) fn with_provider_defaults(
         &self,

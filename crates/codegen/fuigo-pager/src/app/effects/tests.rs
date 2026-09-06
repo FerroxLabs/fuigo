@@ -2849,3 +2849,45 @@ fn rewind_execute_params_sends_conversation_only_with_force() {
     assert_eq!(params["mode"], REWIND_MODE_WIRE);
     assert_eq!(params["mode"], "conversation_only");
 }
+
+#[tokio::test]
+async fn submitted_api_key_waits_for_acp_authentication() {
+    use fuigo_acp_lib::AcpAgentMessage;
+    use std::sync::Arc;
+    for (store_ok, auth_ok) in [(true, true), (true, false), (false, false)] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        execute(
+            Effect::SubmitApiKey { request_seq: 42, key: crate::app::actions::SecretKey("test-key".into()) },
+            &mut tasks, &tx, Path::new("."), &SessionFlags::default(), &progress_tx,
+        );
+        let AcpAgentMessage::ExtMethod(store) = rx.recv().await.unwrap() else { panic!("store first") };
+        assert_eq!(store.request.method.as_ref(), "fuigo/setApiKey");
+        if store_ok {
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({"result": {"ok": true}})).unwrap();
+            store.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw)))).unwrap();
+            let authenticate = tokio::select! {
+                message = rx.recv() => message.expect("ACP authentication request"),
+                result = tasks.join_next() => panic!("reported completion before ACP authentication: {result:?}"),
+            };
+            let AcpAgentMessage::Authenticate(auth) = authenticate else { panic!("authenticate after storage") };
+            assert_eq!(auth.request.method_id.0.as_ref(), "fuigo.api_key");
+            assert!(!tasks.is_empty());
+            if auth_ok {
+                auth.response_tx.send(Ok(acp::AuthenticateResponse::new())).unwrap();
+            } else {
+                auth.response_tx.send(Err(acp::Error::auth_required())).unwrap();
+            }
+        } else {
+            store.response_tx.send(Err(acp::Error::internal_error())).unwrap();
+        }
+        let result = tasks.join_next().await.unwrap().unwrap();
+        if store_ok && auth_ok {
+            assert!(matches!(result, TaskResult::AuthComplete { request_seq: 42, .. }));
+        } else {
+            assert!(matches!(result, TaskResult::AuthFailed { request_seq: 42, .. }));
+        }
+        assert!(rx.try_recv().is_err());
+    }
+}

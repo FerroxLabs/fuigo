@@ -602,31 +602,31 @@ async fn test_cleanup_old_downloads_keeps_current_plus_one() {
     for v in ["0.1.140", "0.1.141", "0.1.142", "0.1.143", "0.1.144"] {
         std::fs::write(d.join(format!("fuigo-{}-macos-aarch64", v)), v).unwrap();
     }
-    std::fs::write(d.join("grok-0.1.145-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.145-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.145").await;
 
     // Current must survive.
-    assert!(d.join("grok-0.1.145-macos-aarch64").exists(), "current");
+    assert!(d.join("fuigo-0.1.145-macos-aarch64").exists(), "current");
     // Newest old version (0.1.144) must survive.
-    assert!(d.join("grok-0.1.144-macos-aarch64").exists(), "N-1");
+    assert!(d.join("fuigo-0.1.144-macos-aarch64").exists(), "N-1");
     // Everything else should be deleted.
     assert!(
-        !d.join("grok-0.1.143-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.143-macos-aarch64").exists(),
         "0.1.143 should be deleted"
     );
     assert!(
-        !d.join("grok-0.1.142-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.142-macos-aarch64").exists(),
         "0.1.142 should be deleted"
     );
     assert!(
-        !d.join("grok-0.1.141-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.141-macos-aarch64").exists(),
         "0.1.141 should be deleted"
     );
     assert!(
-        !d.join("grok-0.1.140-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.140-macos-aarch64").exists(),
         "0.1.140 should be deleted"
     );
 }
@@ -637,18 +637,19 @@ async fn test_cleanup_old_downloads_does_not_touch_other_binaries() {
     let d = dir.path();
 
     // fuigo and fuigo-pager should not interfere with each other.
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "old-fuigo").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current-fuigo").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "old-fuigo").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current-fuigo").unwrap();
     std::fs::write(d.join("fuigo-pager-0.1.140-macos-aarch64"), "old-pager").unwrap();
     std::fs::write(d.join("fuigo-pager-0.1.141-macos-aarch64"), "current-pager").unwrap();
+    std::fs::write(d.join("grok-0.1.100-macos-aarch64"), "upstream-owned").unwrap();
 
     // Cleanup only fuigo; pager files must be untouched
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists());
-    assert!(d.join("grok-0.1.140-macos-aarch64").exists()); // only old, kept as N-1
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.140-macos-aarch64").exists()); // only old, kept as N-1
     assert!(
         d.join("fuigo-pager-0.1.140-macos-aarch64").exists(),
         "pager untouched"
@@ -657,6 +658,7 @@ async fn test_cleanup_old_downloads_does_not_touch_other_binaries() {
         d.join("fuigo-pager-0.1.141-macos-aarch64").exists(),
         "pager untouched"
     );
+    assert!(d.join("grok-0.1.100-macos-aarch64").exists(), "upstream-owned binary untouched");
 }
 
 /// Backdate a file's mtime past [`STALE_TMP_AGE`] so cleanup treats it as an abandoned download / genuinely old binary.
@@ -685,24 +687,24 @@ async fn test_cleanup_old_downloads_removes_stale_tmp_keeps_fresh_tmp() {
     let d = dir.path();
 
     // Stale tmp: abandoned by a crashed updater, so it is swept
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64.tmp"), "partial").unwrap();
-    make_stale(&d.join("grok-0.1.140-macos-aarch64.tmp"));
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64.tmp"), "partial").unwrap();
+    make_stale(&d.join("fuigo-0.1.140-macos-aarch64.tmp"));
     // Fresh tmp: a concurrent updater's in-flight download is kept, or its atomic rename would fail with ENOENT
-    std::fs::write(d.join("grok-0.1.142-macos-aarch64.77-0.tmp"), "inflight").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.142-macos-aarch64.77-0.tmp"), "inflight").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
     assert!(
-        !d.join("grok-0.1.140-macos-aarch64.tmp").exists(),
+        !d.join("fuigo-0.1.140-macos-aarch64.tmp").exists(),
         "stale tmp cleaned up"
     );
     assert!(
-        d.join("grok-0.1.142-macos-aarch64.77-0.tmp").exists(),
+        d.join("fuigo-0.1.142-macos-aarch64.77-0.tmp").exists(),
         "fresh in-flight tmp must NOT be swept"
     );
     assert!(
-        d.join("grok-0.1.141-macos-aarch64").exists(),
+        d.join("fuigo-0.1.141-macos-aarch64").exists(),
         "current kept"
     );
 }
@@ -718,21 +720,21 @@ async fn test_cleanup_old_downloads_keeps_fresh_versioned_binary() {
     for v in ["0.1.138", "0.1.139", "0.1.140"] {
         std::fs::write(d.join(format!("fuigo-{v}-macos-aarch64")), v).unwrap();
     }
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
     make_all_stale(d);
     // .138 is re-written NOW, simulating a racer that just renamed its download into place (e.g. a rollback install racing an upgrade).
-    std::fs::write(d.join("grok-0.1.138-macos-aarch64"), "in-flight").unwrap();
+    std::fs::write(d.join("fuigo-0.1.138-macos-aarch64"), "in-flight").unwrap();
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists(), "current");
-    assert!(d.join("grok-0.1.140-macos-aarch64").exists(), "N-1 kept");
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists(), "current");
+    assert!(d.join("fuigo-0.1.140-macos-aarch64").exists(), "N-1 kept");
     assert!(
-        d.join("grok-0.1.138-macos-aarch64").exists(),
+        d.join("fuigo-0.1.138-macos-aarch64").exists(),
         "fresh just-renamed binary must NOT be deleted"
     );
     assert!(
-        !d.join("grok-0.1.139-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.139-macos-aarch64").exists(),
         "genuinely old binary still swept"
     );
 }
@@ -744,7 +746,7 @@ async fn test_cleanup_old_downloads_skips_symlinks() {
     let d = dir.path();
 
     // fuigo-latest is a symlink, so it must be skipped
-    let target = d.join("grok-0.1.141-macos-aarch64");
+    let target = d.join("fuigo-0.1.141-macos-aarch64");
     std::fs::write(&target, "current").unwrap();
     std::os::unix::fs::symlink(&target, d.join("fuigo-latest")).unwrap();
 
@@ -764,10 +766,10 @@ async fn test_cleanup_old_downloads_version_prefix_collision() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
-    std::fs::write(d.join("grok-0.1.14-macos-aarch64"), "current").unwrap();
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "old-140").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "old-141").unwrap();
-    std::fs::write(d.join("grok-0.1.13-macos-aarch64"), "old-13").unwrap();
+    std::fs::write(d.join("fuigo-0.1.14-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "old-140").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "old-141").unwrap();
+    std::fs::write(d.join("fuigo-0.1.13-macos-aarch64"), "old-13").unwrap();
 
     make_all_stale(d);
 
@@ -775,19 +777,19 @@ async fn test_cleanup_old_downloads_version_prefix_collision() {
 
     // Current must survive.
     assert!(
-        d.join("grok-0.1.14-macos-aarch64").exists(),
+        d.join("fuigo-0.1.14-macos-aarch64").exists(),
         "current 0.1.14"
     );
     assert!(
-        d.join("grok-0.1.141-macos-aarch64").exists(),
+        d.join("fuigo-0.1.141-macos-aarch64").exists(),
         "N-1 is 0.1.141"
     );
     assert!(
-        !d.join("grok-0.1.140-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.140-macos-aarch64").exists(),
         "0.1.140 should be deleted"
     );
     assert!(
-        !d.join("grok-0.1.13-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.13-macos-aarch64").exists(),
         "0.1.13 should be deleted"
     );
 }
@@ -828,30 +830,30 @@ async fn test_cleanup_old_downloads_npm_layout() {
     for v in ["0.1.138", "0.1.139", "0.1.140"] {
         std::fs::write(d.join(format!("fuigo-{}", v)), v).unwrap();
     }
-    std::fs::write(d.join("grok-0.1.141"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
-    assert!(d.join("grok-0.1.141").exists(), "current");
-    assert!(d.join("grok-0.1.140").exists(), "N-1 kept");
-    assert!(!d.join("grok-0.1.139").exists(), "0.1.139 deleted");
-    assert!(!d.join("grok-0.1.138").exists(), "0.1.138 deleted");
+    assert!(d.join("fuigo-0.1.141").exists(), "current");
+    assert!(d.join("fuigo-0.1.140").exists(), "N-1 kept");
+    assert!(!d.join("fuigo-0.1.139").exists(), "0.1.139 deleted");
+    assert!(!d.join("fuigo-0.1.138").exists(), "0.1.138 deleted");
 }
 
 #[tokio::test]
 async fn test_cleanup_old_downloads_alpha_versions() {
     // Alpha version filenames include pre-release tags:
-    //   grok-0.1.150-alpha.1-macos-aarch64
+    //   fuigo-0.1.150-alpha.1-macos-aarch64
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
-    std::fs::write(d.join("grok-0.1.148-alpha.1-macos-aarch64"), "alpha-148-1").unwrap();
-    std::fs::write(d.join("grok-0.1.148-alpha.2-macos-aarch64"), "alpha-148-2").unwrap();
-    std::fs::write(d.join("grok-0.1.149-alpha.1-macos-aarch64"), "alpha-149-1").unwrap();
+    std::fs::write(d.join("fuigo-0.1.148-alpha.1-macos-aarch64"), "alpha-148-1").unwrap();
+    std::fs::write(d.join("fuigo-0.1.148-alpha.2-macos-aarch64"), "alpha-148-2").unwrap();
+    std::fs::write(d.join("fuigo-0.1.149-alpha.1-macos-aarch64"), "alpha-149-1").unwrap();
     // Current version is the newest alpha.
-    std::fs::write(d.join("grok-0.1.150-alpha.1-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.150-alpha.1-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
@@ -859,21 +861,21 @@ async fn test_cleanup_old_downloads_alpha_versions() {
 
     // Current must survive.
     assert!(
-        d.join("grok-0.1.150-alpha.1-macos-aarch64").exists(),
+        d.join("fuigo-0.1.150-alpha.1-macos-aarch64").exists(),
         "current alpha"
     );
     // Newest old (0.1.149-alpha.1) kept as N-1.
     assert!(
-        d.join("grok-0.1.149-alpha.1-macos-aarch64").exists(),
+        d.join("fuigo-0.1.149-alpha.1-macos-aarch64").exists(),
         "N-1 alpha"
     );
     // Older alphas deleted.
     assert!(
-        !d.join("grok-0.1.148-alpha.2-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.148-alpha.2-macos-aarch64").exists(),
         "0.1.148-alpha.2 deleted"
     );
     assert!(
-        !d.join("grok-0.1.148-alpha.1-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.148-alpha.1-macos-aarch64").exists(),
         "0.1.148-alpha.1 deleted"
     );
 }
@@ -884,30 +886,30 @@ async fn test_cleanup_old_downloads_mixed_stable_and_alpha() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
-    std::fs::write(d.join("grok-0.1.148-macos-aarch64"), "stable-148").unwrap();
-    std::fs::write(d.join("grok-0.1.149-alpha.1-macos-aarch64"), "alpha-149").unwrap();
-    std::fs::write(d.join("grok-0.1.149-macos-aarch64"), "stable-149").unwrap();
+    std::fs::write(d.join("fuigo-0.1.148-macos-aarch64"), "stable-148").unwrap();
+    std::fs::write(d.join("fuigo-0.1.149-alpha.1-macos-aarch64"), "alpha-149").unwrap();
+    std::fs::write(d.join("fuigo-0.1.149-macos-aarch64"), "stable-149").unwrap();
     // Current is a stable release.
-    std::fs::write(d.join("grok-0.1.150-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.150-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.150").await;
 
     // Current must survive.
-    assert!(d.join("grok-0.1.150-macos-aarch64").exists(), "current");
+    assert!(d.join("fuigo-0.1.150-macos-aarch64").exists(), "current");
     // Newest old is 0.1.149 stable (semver: 0.1.149 > 0.1.149-alpha.1).
     assert!(
-        d.join("grok-0.1.149-macos-aarch64").exists(),
+        d.join("fuigo-0.1.149-macos-aarch64").exists(),
         "N-1 is stable 0.1.149"
     );
     // The rest should be deleted.
     assert!(
-        !d.join("grok-0.1.149-alpha.1-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.149-alpha.1-macos-aarch64").exists(),
         "alpha 0.1.149-alpha.1 deleted"
     );
     assert!(
-        !d.join("grok-0.1.148-macos-aarch64").exists(),
+        !d.join("fuigo-0.1.148-macos-aarch64").exists(),
         "stable 0.1.148 deleted"
     );
 }
@@ -1442,15 +1444,15 @@ fn test_corrected_arch() {
 async fn test_cleanup_old_downloads_invalid_current_version_is_no_op() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "v140").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "v141").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "v140").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "v141").unwrap();
 
     // An invalid version string makes cleanup early-return without deleting
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "not-a-version").await;
-    assert!(d.join("grok-0.1.140-macos-aarch64").exists());
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.140-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists());
 }
 #[tokio::test]
 async fn test_cleanup_old_downloads_files_with_non_digit_suffix_skipped() {
@@ -1459,8 +1461,8 @@ async fn test_cleanup_old_downloads_files_with_non_digit_suffix_skipped() {
     // Files matching prefix but with a non-digit-leading suffix must be ignored (e.g. fuigo-latest, fuigo-pager-* when prefix is fuigo).
     std::fs::write(d.join("fuigo-latest"), "alias").unwrap();
     std::fs::write(d.join("fuigo-pager-0.1.141-macos-aarch64"), "pager").unwrap();
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "v140").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "v140").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
@@ -1476,47 +1478,47 @@ async fn test_cleanup_old_downloads_unparseable_version_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     // Files with the prefix and a leading digit but unparseable as semver are ignored (not deleted, not counted)
-    std::fs::write(d.join("grok-9garbage-macos-aarch64"), "junk").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-9garbage-macos-aarch64"), "junk").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
     assert!(
-        d.join("grok-9garbage-macos-aarch64").exists(),
+        d.join("fuigo-9garbage-macos-aarch64").exists(),
         "unparseable file must be ignored, not deleted"
     );
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists());
 }
 
 #[tokio::test]
 async fn test_cleanup_old_downloads_only_current_present_no_op() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists());
 }
 
 #[tokio::test]
 async fn test_cleanup_old_downloads_only_one_old_keeps_it() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "v140").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "v140").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
     // Only one old version, so it is kept as N-1
-    assert!(d.join("grok-0.1.140-macos-aarch64").exists(), "N-1 kept");
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists(), "current");
+    assert!(d.join("fuigo-0.1.140-macos-aarch64").exists(), "N-1 kept");
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists(), "current");
 }
 
 #[tokio::test]
@@ -1527,8 +1529,8 @@ async fn test_cleanup_old_downloads_unrelated_files_untouched() {
     std::fs::write(d.join("README.md"), "readme").unwrap();
     std::fs::write(d.join("config.toml"), "config").unwrap();
     std::fs::write(d.join("other-tool-0.1.0"), "other").unwrap();
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "v140").unwrap();
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "v140").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
@@ -1545,21 +1547,21 @@ async fn test_cleanup_old_downloads_multiplatform_in_same_dir() {
     let d = dir.path();
     // Same version, multiple platforms (uncommon, but possible).
     // Both should be considered "current" via the version equality check.
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "mac").unwrap();
-    std::fs::write(d.join("grok-0.1.141-linux-x86_64"), "linux").unwrap();
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "old-mac").unwrap();
-    std::fs::write(d.join("grok-0.1.139-macos-aarch64"), "older-mac").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "mac").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-linux-x86_64"), "linux").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64"), "old-mac").unwrap();
+    std::fs::write(d.join("fuigo-0.1.139-macos-aarch64"), "older-mac").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
     // Both platform variants of current must survive.
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists());
-    assert!(d.join("grok-0.1.141-linux-x86_64").exists());
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.141-linux-x86_64").exists());
     // N-1 (0.1.140) kept, older deleted.
-    assert!(d.join("grok-0.1.140-macos-aarch64").exists());
-    assert!(!d.join("grok-0.1.139-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.140-macos-aarch64").exists());
+    assert!(!d.join("fuigo-0.1.139-macos-aarch64").exists());
 }
 
 #[tokio::test]
@@ -1569,9 +1571,9 @@ async fn test_cleanup_old_downloads_tmp_files_deleted_even_when_unparseable() {
     // Stale tmp files are deleted regardless of version-parseability.
     std::fs::write(d.join("fuigo-junk.tmp"), "partial").unwrap();
     make_stale(&d.join("fuigo-junk.tmp"));
-    std::fs::write(d.join("grok-0.1.140-macos-aarch64.tmp"), "partial2").unwrap();
-    make_stale(&d.join("grok-0.1.140-macos-aarch64.tmp"));
-    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-macos-aarch64.tmp"), "partial2").unwrap();
+    make_stale(&d.join("fuigo-0.1.140-macos-aarch64.tmp"));
+    std::fs::write(d.join("fuigo-0.1.141-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
 
@@ -1579,25 +1581,25 @@ async fn test_cleanup_old_downloads_tmp_files_deleted_even_when_unparseable() {
 
     assert!(!d.join("fuigo-junk.tmp").exists(), "junk tmp deleted");
     assert!(
-        !d.join("grok-0.1.140-macos-aarch64.tmp").exists(),
+        !d.join("fuigo-0.1.140-macos-aarch64.tmp").exists(),
         "versioned tmp deleted"
     );
-    assert!(d.join("grok-0.1.141-macos-aarch64").exists());
+    assert!(d.join("fuigo-0.1.141-macos-aarch64").exists());
 }
 #[tokio::test]
 async fn test_cleanup_old_downloads_darwin_platform_recognized() {
     // The `darwin` alias for macOS is in PLATFORM_OS; versions on fuigo-X.Y.Z-darwin-* layouts must split correctly
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    std::fs::write(d.join("grok-0.1.140-darwin-arm64"), "v140").unwrap();
-    std::fs::write(d.join("grok-0.1.141-darwin-arm64"), "current").unwrap();
+    std::fs::write(d.join("fuigo-0.1.140-darwin-arm64"), "v140").unwrap();
+    std::fs::write(d.join("fuigo-0.1.141-darwin-arm64"), "current").unwrap();
 
     make_all_stale(d);
 
     cleanup_old_downloads(d, "fuigo", "0.1.141").await;
 
-    assert!(d.join("grok-0.1.141-darwin-arm64").exists(), "current");
-    assert!(d.join("grok-0.1.140-darwin-arm64").exists(), "N-1");
+    assert!(d.join("fuigo-0.1.141-darwin-arm64").exists(), "current");
+    assert!(d.join("fuigo-0.1.140-darwin-arm64").exists(), "N-1");
 }
 
 // ──────────────────────────────────────────────────────────────────────

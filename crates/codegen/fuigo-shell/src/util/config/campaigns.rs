@@ -210,11 +210,15 @@ fn resolve_dismissable_campaigns() -> Vec<CampaignEntry> {
 
 /// Effective config with the remote/override-aware campaign overlay, from one `ConfigLayers::load`.
 pub fn load_effective_config() -> std::io::Result<toml::Value> {
-    let layers = ConfigLayers::load()?;
+    effective_config_from_layers(&ConfigLayers::load()?)
+}
+
+/// Resolve a prospective user-config edit with the same layers and campaigns as runtime.
+pub fn effective_config_from_layers(layers: &ConfigLayers) -> std::io::Result<toml::Value> {
     let dismissed = load_dismissed_ids();
     let remote = cached_remote_campaigns();
     let mut effective = layers.effective_config_base();
-    let active = resolve_active_campaigns_from_layers(&layers, &effective, &remote, &dismissed);
+    let active = resolve_active_campaigns_from_layers(layers, &effective, &remote, &dismissed);
     layers.apply_campaign_overrides(&mut effective, &active);
     Ok(effective)
 }

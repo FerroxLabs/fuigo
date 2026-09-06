@@ -6,6 +6,7 @@
 //! Only the `track` API is implemented since that's all we use.
 
 use base64::Engine;
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::collections::HashMap;
 
 /// Mixpanel client for sending track events.
@@ -22,17 +23,28 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("request blocked by egress policy: {0}")]
+    EgressPolicy(&'static str),
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for Error {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::EgressPolicy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::Http(error),
+        }
+    }
 }
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Mixpanel {
     /// Create a new Mixpanel client with the given project token.
-    #[allow(clippy::disallowed_methods)] // transport-neutral crate; the fuigo CLI injects a policy client via with_client
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
-            client: reqwest::Client::new(),
+            client: fuigo_extra_ca::build_reqwest_client(|builder| builder)
+                .expect("failed to build Mixpanel HTTP client"),
         }
     }
 
@@ -79,7 +91,7 @@ impl Mixpanel {
             .post("https://api.mixpanel.com/track")
             .timeout(REQUEST_TIMEOUT)
             .form(&[("data", &encoded)])
-            .send()
+            .send_checked()
             .await?;
 
         Ok(())
@@ -111,7 +123,7 @@ impl Mixpanel {
             .post("https://api.mixpanel.com/engage")
             .timeout(REQUEST_TIMEOUT)
             .form(&[("data", &encoded)])
-            .send()
+            .send_checked()
             .await?;
 
         Ok(())
@@ -121,6 +133,32 @@ impl Mixpanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn egress_policy_blocks_track_and_engage_before_proxy_contact() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let http = fuigo_extra_ca::build_reqwest_client(|builder| {
+            builder
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(&proxy).unwrap())
+        })
+        .unwrap();
+        let client = Mixpanel::with_client("fake-project-token", http);
+        assert!(matches!(
+            client.track("fake-event", None).await,
+            Err(Error::EgressPolicy(_))
+        ));
+        assert!(matches!(
+            client.engage("fake-user", HashMap::new()).await,
+            Err(Error::EgressPolicy(_))
+        ));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     /// Project token is deliberately Bearer-shaped: it would be redacted
     /// if `prepare_properties` ran the scrubber after token injection.

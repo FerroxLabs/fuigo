@@ -20,16 +20,37 @@ pub use error::MarketplaceError;
 pub use scanner::scan_marketplace;
 pub use types::*;
 
-/// Display name of the official Ferrox Labs marketplace source.
+/// Contributor-configured display name retained for compatibility.
+///
+/// This is source identity, not evidence that the source is verified or official.
 pub const OFFICIAL_SOURCE_NAME: &str = "Ferrox Labs Official";
 
-/// Git URL of the official Ferrox Labs marketplace source, auto-registered on first run.
-pub const OFFICIAL_SOURCE_GIT_URL: &str = "https://github.com/fuigo-org/plugin-marketplace.git";
+/// Contributor-configured git URL retained for compatibility.
+///
+/// This is source identity, not evidence that the source is verified or official.
+pub const OFFICIAL_SOURCE_GIT_URL: &str = "https://github.com/FerroxLabs/plugin-marketplace.git";
 
-/// Whether `url` is the official Ferrox Labs marketplace source.
-/// Case, a `www.` prefix, a trailing `/` or `.git`, and HTTPS/SSH forms are normalized before comparing.
+/// The independently verified official source, when ownership has been established.
+///
+/// No marketplace currently has that status. Persisted names and URLs never populate this
+/// decision implicitly.
+pub const VERIFIED_OFFICIAL_SOURCE: Option<(&str, &str)> = None;
+
+/// Whether a source has the explicit verified-official designation.
+pub fn is_verified_official_source(source_name: &str, source_url_or_path: &str) -> bool {
+    VERIFIED_OFFICIAL_SOURCE.is_some_and(|(verified_name, verified_url)| {
+        source_name == verified_name
+            && canonical_github_owner_repo(source_url_or_path)
+                == canonical_github_owner_repo(verified_url)
+    })
+}
+
+/// Whether `url` matches the contributor-configured Ferrox source identity.
+///
+/// This compatibility helper does not confer verified or official status. Privileged decisions
+/// must use [`is_verified_official_source`].
 pub fn is_official_source_url(url: &str) -> bool {
-    canonical_github_owner_repo(url).as_deref() == Some("fuigo-org/plugin-marketplace")
+    canonical_github_owner_repo(url).as_deref() == Some("ferroxlabs/plugin-marketplace")
 }
 
 /// Normalized lowercase `owner/repo` from a GitHub URL (HTTPS/http/ssh/scp, `www.`, trailing `.git`/`/`), or `None` if not a GitHub URL.
@@ -60,26 +81,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_official_matches_canonical_https() {
-        assert!(is_official_source_url(OFFICIAL_SOURCE_GIT_URL));
-        assert!(is_official_source_url(
-            "https://github.com/fuigo-org/plugin-marketplace"
-        ));
+    fn configured_identity_is_retained_but_not_verified() {
+        assert_eq!(
+            OFFICIAL_SOURCE_GIT_URL,
+            "https://github.com/FerroxLabs/plugin-marketplace.git"
+        );
+        assert_eq!(VERIFIED_OFFICIAL_SOURCE, None);
+    }
+
+    #[test]
+    fn persisted_names_and_url_forms_never_self_verify() {
+        for (name, url) in [
+            (OFFICIAL_SOURCE_NAME, OFFICIAL_SOURCE_GIT_URL),
+            (
+                OFFICIAL_SOURCE_NAME,
+                "git@github.com:FerroxLabs/plugin-marketplace.git",
+            ),
+            (
+                "fuigo-org/plugin-marketplace",
+                "https://github.com/fuigo-org/plugin-marketplace.git",
+            ),
+        ] {
+            assert!(!is_verified_official_source(name, url), "{name} {url}");
+        }
     }
 
     #[test]
     fn is_official_matches_ssh_form() {
         assert!(is_official_source_url(
-            "git@github.com:fuigo-org/plugin-marketplace.git"
+            "git@github.com:FerroxLabs/plugin-marketplace.git"
         ));
         assert!(is_official_source_url(
-            "git@github.com:fuigo-org/plugin-marketplace"
+            "git@github.com:FerroxLabs/plugin-marketplace"
         ));
         assert!(is_official_source_url(
-            "ssh://git@github.com/fuigo-org/plugin-marketplace.git"
+            "ssh://git@github.com/FerroxLabs/plugin-marketplace.git"
         ));
         assert!(is_official_source_url(
-            "ssh://git@github.com/fuigo-org/plugin-marketplace"
+            "ssh://git@github.com/FerroxLabs/plugin-marketplace"
         ));
     }
 
@@ -89,7 +128,7 @@ mod tests {
             "https://github.com/anthropics/claude-plugins-official.git"
         ));
         assert!(!is_official_source_url(
-            "https://github.com/fuigo-org/some-other-repo.git"
+            "https://github.com/FerroxLabs/some-other-repo.git"
         ));
         assert!(!is_official_source_url(""));
     }
@@ -97,22 +136,22 @@ mod tests {
     #[test]
     fn is_official_matches_noncanonical_forms() {
         assert!(is_official_source_url(
-            "https://GitHub.com/FUIGO-org/Plugin-Marketplace"
+            "https://GitHub.com/FERROXLABS/Plugin-Marketplace"
         ));
         assert!(is_official_source_url(
-            "https://github.com/fuigo-org/plugin-marketplace/"
+            "https://github.com/FerroxLabs/plugin-marketplace/"
         ));
         assert!(is_official_source_url(
-            "https://github.com/fuigo-org/plugin-marketplace.git/"
+            "https://github.com/FerroxLabs/plugin-marketplace.git/"
         ));
         assert!(is_official_source_url(
-            "http://github.com/fuigo-org/plugin-marketplace"
+            "http://github.com/FerroxLabs/plugin-marketplace"
         ));
         assert!(is_official_source_url(
-            "https://www.github.com/fuigo-org/plugin-marketplace.git"
+            "https://www.github.com/FerroxLabs/plugin-marketplace.git"
         ));
         assert!(is_official_source_url(
-            "git@github.com:FUIGO-org/plugin-marketplace.git"
+            "git@github.com:FERROXLABS/plugin-marketplace.git"
         ));
     }
 }

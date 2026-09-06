@@ -99,8 +99,29 @@ impl Scrubber {
         redact_username_segments(out.as_ref(), &self.usernames)
     }
 
-    fn scrub_value(&self, val: &mut Value) {
-        fuigo_secrets::walk_json_strings(val, &mut |s| *s = self.scrub(s));
+    fn scrub_values<'a>(&self, values: impl Iterator<Item = &'a mut Value>) {
+        let mut values: Vec<_> = values.collect();
+        // Diagnostic fields may contain successive fragments of one credential.
+        // Scrubbing each fragment in isolation misses the reconstructed token.
+        let mut joined = String::new();
+        for val in &mut values {
+            fuigo_secrets::walk_json_strings(val, &mut |s| {
+                joined.push_str(fuigo_secrets::redact_secrets(s).as_ref());
+            });
+        }
+        if fuigo_secrets::redact_secrets(&joined).as_ref() != joined {
+            // Preserve the JSON shape and non-string metadata, but do not export
+            // a group whose string fields collectively disclose a credential.
+            for val in &mut values {
+                fuigo_secrets::walk_json_strings(val, &mut |s| {
+                    *s = "[REDACTED_SECRET]".to_owned();
+                });
+            }
+            return;
+        }
+        for val in values {
+            fuigo_secrets::walk_json_strings(val, &mut |s| *s = self.scrub(s));
+        }
     }
 }
 
@@ -215,19 +236,28 @@ fn before_send(mut event: Event<'static>, scrubber: &Scrubber) -> Option<Event<'
         }
     }
 
+    let joined_breadcrumbs: String = event
+        .breadcrumbs
+        .values
+        .iter()
+        .filter_map(|bc| bc.message.as_deref())
+        .map(|s| fuigo_secrets::redact_secrets(s).into_owned())
+        .collect();
+    let fragmented_breadcrumb_secret =
+        fuigo_secrets::redact_secrets(&joined_breadcrumbs).as_ref() != joined_breadcrumbs;
     for bc in &mut event.breadcrumbs.values {
         if let Some(ref msg) = bc.message {
-            bc.message = Some(scrubber.scrub(msg));
+            bc.message = Some(if fragmented_breadcrumb_secret {
+                "[REDACTED_SECRET]".to_owned()
+            } else {
+                scrubber.scrub(msg)
+            });
         }
-        for val in bc.data.values_mut() {
-            scrubber.scrub_value(val);
-        }
+        scrubber.scrub_values(bc.data.values_mut());
     }
 
     event.extra.remove("cwd");
-    for val in event.extra.values_mut() {
-        scrubber.scrub_value(val);
-    }
+    scrubber.scrub_values(event.extra.values_mut());
 
     for tag in event.tags.values_mut() {
         *tag = scrubber.scrub(tag);
@@ -396,6 +426,65 @@ mod tests {
             out.tags.get("workspace").map(String::as_str),
             Some("/srv/<user>/x")
         );
+    }
+
+    #[test]
+    fn before_send_redacts_secret_fragments_across_diagnostic_fields() {
+        let secret = format!("sk-{}", "a".repeat(32));
+        for split in 1..secret.len() {
+            let mut event = Event::default();
+            event.message = Some(secret.clone());
+            event.breadcrumbs.values = vec![
+                Breadcrumb {
+                    message: Some(secret[..split].into()),
+                    ..Default::default()
+                },
+                Breadcrumb {
+                    message: Some(secret[split..].into()),
+                    ..Default::default()
+                },
+            ];
+            event.extra.insert(
+                "chunks".into(),
+                serde_json::json!([&secret[..split], &secret[split..]]),
+            );
+            let out = before_send(event, &make_scrubber()).unwrap();
+            assert_eq!(out.message.as_deref(), Some("[REDACTED_SECRET]"));
+            let breadcrumbs: String = out
+                .breadcrumbs
+                .values
+                .iter()
+                .filter_map(|b| b.message.as_deref())
+                .collect();
+            let chunks: String = out.extra["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_ne!(
+                breadcrumbs, secret,
+                "breadcrumb split {split} disclosed key"
+            );
+            assert_ne!(chunks, secret, "JSON split {split} disclosed key");
+        }
+        let mut event = Event::default();
+        event.extra.insert("left".into(), secret[..10].into());
+        event.extra.insert("right".into(), secret[10..].into());
+        event.extra.insert("status".into(), 503.into());
+        let out = before_send(event, &make_scrubber()).unwrap();
+        assert_eq!(out.extra["left"], "[REDACTED_SECRET]");
+        assert_eq!(out.extra["right"], "[REDACTED_SECRET]");
+        assert_eq!(out.extra["status"], 503);
+    }
+
+    #[test]
+    fn before_send_preserves_benign_fragmented_diagnostics() {
+        let original = serde_json::json!({"chunks": ["hello ", "world"], "count": 2});
+        let mut event = Event::default();
+        event.extra.insert("details".into(), original.clone());
+        let out = before_send(event, &make_scrubber()).unwrap();
+        assert_eq!(out.extra["details"], original);
     }
 
     /// `/Users/bob` must not partial-match the prefix of `/Users/bobby/...`.

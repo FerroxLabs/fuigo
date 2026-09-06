@@ -3271,6 +3271,74 @@ fn apply_stdio_env_session_id_cannot_be_shadowed() {
     assert_eq!(value.as_deref(), Some("sess-real"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn t05_mcp_hook_lsp_spawn_paths_mcp() {
+    const NAME: &str = "t05_mcp_hook_lsp_spawn_paths_mcp";
+    if std::env::var("T05_CHILD_TEST").as_deref() != Ok(NAME) {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.arg(NAME)
+            .arg("--test-threads=1")
+            .env("T05_CHILD_TEST", NAME)
+            .env("OPENAI_API_KEY", "fake-ambient")
+            .env("ANTHROPIC_API_KEY", "fake-ambient");
+        let output = cmd.output().unwrap();
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .replace("fake-ambient", "[redacted]")
+        .replace("fake-selected", "[redacted]");
+        assert!(
+            output.status.success(),
+            "isolated MCP probe failed: {diagnostics}"
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let events = fuigo_session_events::EventWriter::noop();
+    let ctx = session_test_ctx(&events);
+    for selected in [false, true] {
+        let marker = dir
+            .path()
+            .join(if selected { "selected" } else { "default" });
+        let check = if selected {
+            "test \"$OPENAI_API_KEY\" = fake-selected"
+        } else {
+            "test -z \"${OPENAI_API_KEY+x}\""
+        };
+        let script = format!(
+            "{check} && test -z \"${{ANTHROPIC_API_KEY+x}}\" && /bin/sh -c '{check} && test -z \"${{ANTHROPIC_API_KEY+x}}\"' && printf 1 > \"$T05_MARKER\""
+        );
+        let mut server = acp::McpServerStdio::new("t05", PathBuf::from("/bin/sh"));
+        server.args = vec!["-c".into(), script];
+        server.env = vec![acp::EnvVariable::new(
+            "T05_MARKER",
+            marker.to_string_lossy().into_owned(),
+        )];
+        if selected {
+            server
+                .env
+                .push(acp::EnvVariable::new("OPENAI_API_KEY", "fake-selected"));
+        }
+        // This entrypoint creates the transport without performing a handshake.
+        // Keep it alive until the real child and grandchild record their checks.
+        let client = start_mcp_server(acp::McpServer::Stdio(server), None, None, None, &ctx)
+            .await
+            .expect("local MCP probe should spawn");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&marker).is_ok_and(|contents| contents == "1") {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("MCP child/grandchild did not record successful credential checks");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "1");
+        drop(client);
+    }
+}
+
 #[test]
 fn mcp_icon_from_rmcp_drops_empty_and_disallowed_src() {
     assert!(McpIcon::from_rmcp(rmcp::model::Icon::new("   ")).is_none());

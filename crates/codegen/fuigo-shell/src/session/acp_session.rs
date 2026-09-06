@@ -541,12 +541,28 @@ fn managed_gateway_error_to_tool_error(
         crate::session::managed_mcp::ManagedMcpFetchError::NoAuth => {
             fuigo_tool_runtime::ToolError::unauthorized("no auth token available")
         }
+        crate::session::managed_mcp::ManagedMcpFetchError::EgressPolicy(reason) => {
+            fuigo_tool_runtime::ToolError::permission_denied(format!(
+                "Managed MCP gateway blocked by local egress policy: {reason}"
+            )).with_details(serde_json::json!({"reason": "egress_policy"}))
+        }
     }
 }
 #[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod managed_gateway_error_tests {
     use super::*;
+    #[test]
+    fn egress_policy_maps_to_local_permission_denial_without_http_status() {
+        let error = managed_gateway_error_to_tool_error(
+            crate::session::managed_mcp::ManagedMcpFetchError::EgressPolicy("blocked"),
+            "use_tool",
+        );
+        assert_eq!(error.kind, fuigo_tool_runtime::ToolErrorKind::PermissionDenied);
+        let details = error.details.unwrap();
+        assert_eq!(details.get("reason"), Some(&serde_json::json!("egress_policy")));
+        assert!(details.get(HTTP_STATUS_DETAILS_KEY).is_none());
+    }
     fn status_error(code: u16, message: &str) -> crate::session::managed_mcp::ManagedMcpFetchError {
         crate::session::managed_mcp::ManagedMcpFetchError::Status {
             status: reqwest::StatusCode::from_u16(code).unwrap(),

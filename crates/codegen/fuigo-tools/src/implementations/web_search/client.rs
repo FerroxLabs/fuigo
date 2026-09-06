@@ -1,6 +1,7 @@
 use super::types::WebSearchConfig;
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
+use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 use async_openai::types::responses as rs;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 /// A minimal, purpose-built HTTP client for calling the Responses API
@@ -20,6 +21,7 @@ pub struct WebSearchClient {
     /// `allowed_domains`. Mutually exclusive with `default_allowed_domains`.
     default_excluded_domains: Option<Vec<String>>,
     api_key_provider: Option<SharedApiKeyProvider>,
+    configured_api_key: Option<String>,
     /// Optional 401-attribution hook. Callers can wire this so a 401
     /// from the Responses API emits an `auth_401_attribution` event
     /// with `consumer == "WebSearch"`.
@@ -50,15 +52,7 @@ impl WebSearchClient {
         };
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                fuigo_tool_runtime::ToolError::execution(
-                    fuigo_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Invalid API key for header: {e}"),
-                )
-            })?,
-        );
+        let configured_api_key = (!api_key.trim().is_empty()).then(|| api_key.trim().to_owned());
         for (key, value) in extra_headers {
             let header_name = HeaderName::from_bytes(key.as_bytes()).map_err(|e| {
                 fuigo_tool_runtime::ToolError::execution(
@@ -72,14 +66,14 @@ impl WebSearchClient {
                     format!("Invalid header value for '{key}': {e}"),
                 )
             })?;
-            headers.insert(header_name, header_value);
+            if api_key_provider.is_none() || header_name != AUTHORIZATION {
+                headers.insert(header_name, header_value);
+            }
         }
         let _ = alpha_test_key;
         let key = crate::util::shared_http::cache_key("web_search", &headers);
         let http = crate::util::shared_http::cached_client(key, || {
-            fuigo_extra_ca::build_reqwest_client(|builder| {
-                builder.default_headers(headers.clone())
-            })
+            fuigo_extra_ca::build_reqwest_client(|builder| builder.default_headers(headers.clone()))
         })
         .map_err(|e| {
             fuigo_tool_runtime::ToolError::execution(
@@ -94,6 +88,7 @@ impl WebSearchClient {
             default_allowed_domains: allowed_domains.clone(),
             default_excluded_domains: excluded_domains.clone(),
             api_key_provider,
+            configured_api_key,
             attribution_callback: None,
         })
     }
@@ -189,8 +184,17 @@ impl WebSearchClient {
         self.attribution_callback = callback;
         self
     }
-    async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    async fn current_bearer(&self, recipient: &str) -> Option<String> {
+        crate::types::api_key_provider::resolve_bearer(
+            self.api_key_provider.as_ref(),
+            CredentialRequest {
+                purpose: CredentialPurpose::WebSearch,
+                recipient,
+                model: Some(&self.model),
+            },
+            self.configured_api_key.as_deref(),
+        )
+        .await
     }
     fn record_401_attribution(&self, sent_bearer: Option<&str>) {
         crate::attribution::emit_401(
@@ -211,12 +215,17 @@ impl WebSearchClient {
         let (allowed, excluded) = self.resolve_filters(allowed_domains);
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(&request);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-        let response = req.send().await.map_err(|e| {
+        let sent_bearer = self.current_bearer(&url).await.ok_or_else(|| {
+            fuigo_tool_runtime::ToolError::unauthorized(
+                "No credential is available for the configured web search endpoint",
+            )
+        })?;
+        let req = self
+            .http
+            .post(&url)
+            .json(&request)
+            .header(AUTHORIZATION, format!("Bearer {sent_bearer}"));
+        let response = fuigo_extra_ca::dispatch::send(req).await.map_err(|e| {
             fuigo_tool_runtime::ToolError::execution(
                 fuigo_tool_protocol::ToolId::new("web_search").expect("valid"),
                 format!("HTTP request failed: {e}"),
@@ -224,7 +233,7 @@ impl WebSearchClient {
         })?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(sent_bearer.as_deref());
+            self.record_401_attribution(Some(&sent_bearer));
             let body = response
                 .text()
                 .await
@@ -280,12 +289,17 @@ impl WebSearchClient {
         let (allowed, excluded) = self.resolve_filters(allowed_domains);
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(&request);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-        let response = req.send().await.map_err(|e| {
+        let sent_bearer = self.current_bearer(&url).await.ok_or_else(|| {
+            fuigo_tool_runtime::ToolError::unauthorized(
+                "No credential is available for the configured web search endpoint",
+            )
+        })?;
+        let req = self
+            .http
+            .post(&url)
+            .json(&request)
+            .header(AUTHORIZATION, format!("Bearer {sent_bearer}"));
+        let response = fuigo_extra_ca::dispatch::send(req).await.map_err(|e| {
             fuigo_tool_runtime::ToolError::execution(
                 fuigo_tool_protocol::ToolId::new("web_search").expect("valid"),
                 format!("HTTP request failed: {e}"),
@@ -293,7 +307,7 @@ impl WebSearchClient {
         })?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(sent_bearer.as_deref());
+            self.record_401_attribution(Some(&sent_bearer));
             let body = response
                 .text()
                 .await
@@ -766,12 +780,62 @@ mod tests {
             None
         }
     }
+
+    struct DeniedProvider;
+
+    impl crate::types::ApiKeyProvider for DeniedProvider {
+        fn current_api_key(&self) -> Option<String> {
+            Some("generic-process-key".into())
+        }
+
+        fn credential_for(
+            &self,
+            _request: CredentialRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = crate::types::api_key_provider::CredentialResolution,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(std::future::ready(
+                crate::types::api_key_provider::CredentialResolution::Denied,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn t04_denied_live_search_credential_cannot_use_configured_snapshot() {
+        let mut extra_headers = IndexMap::new();
+        extra_headers.insert("authorization".into(), "Bearer stale-extra-header".into());
+        let config = WebSearchConfig::Enabled {
+            api_key: "stale-configured-key".into(),
+            base_url: "https://search-owner.example/v1".into(),
+            model: "paired-search".into(),
+            extra_headers,
+            alpha_test_key: None,
+            allowed_domains: None,
+            excluded_domains: None,
+        };
+        let provider: SharedApiKeyProvider = std::sync::Arc::new(DeniedProvider);
+        let client = WebSearchClient::new(&config, Some(provider)).unwrap();
+        let url = "https://search-owner.example/v1/responses";
+        assert_eq!(client.current_bearer(url).await, None);
+        let request = client
+            .http
+            .post(url)
+            .json(&serde_json::json!({}))
+            .build()
+            .unwrap();
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+    }
     /// When the dynamic provider returns `None`, the static `api_key`
     /// from config must still be sent as the Authorization header.
     /// This is a regression scenario: API-key users
     /// past the 30-day client TTL saw 401 because no auth was sent.
     #[tokio::test]
-    async fn static_api_key_is_fallback_when_provider_returns_none() {
+    async fn t04_explicit_static_search_pair_reaches_matching_receiver() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;

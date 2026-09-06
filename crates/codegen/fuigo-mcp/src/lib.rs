@@ -43,6 +43,7 @@ pub mod acp_transport;
 mod auth_status;
 pub mod credentials;
 pub mod elicitation;
+mod http_policy;
 pub mod liveness;
 pub mod mcp_http_client;
 pub mod oauth;

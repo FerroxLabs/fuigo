@@ -6,11 +6,12 @@
 //! The HTTP client is injected via [`init`]/[`init_if_needed`].
 //! That keeps this crate from depending on shell's `User-Agent` builder, which couples to the `permission` module.
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{Local, SecondsFormat};
-use serde_json::json;
 use fuigo_mixpanel::Mixpanel;
+use serde_json::json;
 
 use crate::config::{TelemetryConfig, TelemetryMode, deployment_id_from_key};
 use crate::http::OriginClientInfo;
@@ -348,7 +349,7 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
             .header("x-api-key", api_key.as_str())
             .timeout(std::time::Duration::from_secs(10))
             .json(&body)
-            .send()
+            .send_checked()
             .await;
     }
 

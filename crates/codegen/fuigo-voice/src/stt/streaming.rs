@@ -35,6 +35,8 @@ impl StreamingSttSession {
     /// Connect and wait for `transcript.created` before sending audio.
     pub async fn connect(config: &VoiceConfig, bearer: &str) -> Result<Self, VoiceError> {
         let url = build_stt_ws_url(config)?;
+        fuigo_extra_ca::dispatch::check_url(&url)
+            .map_err(|error| VoiceError::WebSocket(error.to_string()))?;
         let mut request = url
             .as_str()
             .into_client_request()
@@ -250,6 +252,33 @@ fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn egress_policy_rejects_voice_before_credentials_or_connect() {
+        let config = VoiceConfig {
+            api_base: "https://api.x.ai".into(),
+            ..VoiceConfig::default()
+        };
+        // Invalid header is a no-network backstop if the policy check regresses.
+        let error = StreamingSttSession::connect(&config, "fake\ninvalid")
+            .await
+            .err()
+            .expect("forbidden recipient");
+        assert!(
+            error
+                .to_string()
+                .contains("refuses to contact upstream vendor host")
+        );
+        let allowed = VoiceConfig {
+            api_base: "https://voice.example".into(),
+            ..VoiceConfig::default()
+        };
+        let error = StreamingSttSession::connect(&allowed, "fake\ninvalid")
+            .await
+            .err()
+            .expect("invalid-header no-network control");
+        assert!(error.to_string().contains("auth header"));
+    }
 
     #[test]
     fn stt_url_includes_query_params() {

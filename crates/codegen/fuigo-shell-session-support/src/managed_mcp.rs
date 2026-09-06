@@ -5,6 +5,7 @@
 //!
 //! The config-file and plugin merge reads shell's config system, so it lives in shell's `session::managed_mcp`, which re-exports everything here.
 
+use fuigo_http::dispatch::AsyncRequestBuilderExt as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -138,8 +139,19 @@ pub enum ManagedMcpFetchError {
     },
     #[error("transport: {0}")]
     Transport(#[from] reqwest::Error),
+    #[error("request blocked by egress policy: {0}")]
+    EgressPolicy(&'static str),
     #[error("no auth token available")]
     NoAuth,
+}
+
+impl From<fuigo_http::dispatch::DispatchError> for ManagedMcpFetchError {
+    fn from(error: fuigo_http::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_http::dispatch::DispatchError::Denied(reason) => Self::EgressPolicy(reason),
+            fuigo_http::dispatch::DispatchError::Transport(error) => Self::Transport(error),
+        }
+    }
 }
 
 async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
@@ -155,7 +167,7 @@ async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
         .header("Authorization", format!("Bearer {auth_key}"))
         .header("X-XAI-Token-Auth", "xai-grok-cli")
         .header("x-fuigo-client-version", fuigo_version::VERSION)
-        .send()
+        .send_checked()
         .await
     {
         Ok(r) if r.status().is_success() => r,
@@ -209,7 +221,7 @@ pub async fn call_gateway_tool(
         .header("X-XAI-Token-Auth", "xai-grok-cli")
         .header("x-fuigo-client-version", fuigo_version::VERSION)
         .json(&request)
-        .send()
+        .send_checked()
         .await
     {
         Ok(r) if r.status().is_success() => r,
@@ -361,6 +373,20 @@ pub fn normalize_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn egress_policy_blocks_managed_catalog_without_auth_rejection() {
+        let error = get_authenticated_json::<serde_json::Value>(
+            "https://api.x.ai/v1/mcp/servers",
+            "fake-key",
+            "unavailable",
+            "fetch failed",
+            "parse failed",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ManagedMcpFetchError::EgressPolicy(_)));
+    }
 
     #[test]
     fn normalize_url_strips_trailing_slash() {

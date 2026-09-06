@@ -44,10 +44,9 @@ pub(super) fn cta_settle_installed(
 /// `None` means no CTA source was present.
 /// One source wins so the candidates and the install target always come from it.
 /// With `cta_marketplace` set (the `[marketplace].plugin_cta_marketplace` override), the first source whose name exactly equals it wins.
-/// The Ferrox Labs Official source is excluded unless it is the named one.
-/// Unset (the default) is two-tier: a URL-verified official source beats any name-only "Ferrox Labs Official" match regardless of order.
-/// (The URL check stops a source from spoofing the official name: the scanned URL is the install root.)
-/// A name-only match then keeps mirrors registered under the official name working; first registered wins within a tier.
+/// Unset (the default) selects only an explicitly verified official source. No source currently has
+/// that designation, so default CTA discovery is disabled. Persisted names and URLs cannot obtain
+/// this privilege.
 pub(super) fn plugin_cta_candidates(
     response: fuigo_hooks_plugins_types::MarketplaceListResponse,
     cta_marketplace: Option<&str>,
@@ -58,14 +57,12 @@ pub(super) fn plugin_cta_candidates(
     let mut sources = response.sources;
     let winner = match cta_marketplace {
         Some(name) => sources.iter().position(|s| s.source_name == name),
-        None => sources
-            .iter()
-            .position(|s| fuigo_plugin_marketplace::is_official_source_url(&s.source_url_or_path))
-            .or_else(|| {
-                sources
-                    .iter()
-                    .position(|s| s.source_name == fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME)
-            }),
+        None => sources.iter().position(|s| {
+            fuigo_plugin_marketplace::is_verified_official_source(
+                &s.source_name,
+                &s.source_url_or_path,
+            )
+        }),
     };
     let Some(idx) = winner else {
         return (Vec::new(), None);

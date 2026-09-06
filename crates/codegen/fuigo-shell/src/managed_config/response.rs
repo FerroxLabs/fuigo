@@ -28,6 +28,8 @@ impl ManagedConfigSource {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedConfigError {
+    #[error("The configuration request was blocked by egress policy.\n  ({0})")]
+    EgressPolicy(&'static str),
     #[error("Can't reach the server. Check your network connection and try again.\n  ({0})")]
     Network(String),
     #[error(
@@ -231,6 +233,13 @@ pub(super) fn verify_signed_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egress_policy_is_neither_retryable_nor_auth_rejection() {
+        let error = ManagedConfigError::EgressPolicy("blocked");
+        assert!(!error.is_retryable());
+        assert!(!error.is_auth_rejection());
+    }
 
     #[test]
     fn pick_trusted_envelope_prefers_trusted_then_falls_back() {

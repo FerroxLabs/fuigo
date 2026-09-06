@@ -26,6 +26,13 @@ struct TokenState {
     expires_at: Option<DateTime<Utc>>,
 }
 
+type UrlPolicy = Arc<dyn Fn(&reqwest::Url) -> Result<(), String> + Send + Sync>;
+
+struct HttpTransport {
+    client: reqwest::Client,
+    check_url: UrlPolicy,
+}
+
 pub struct OidcAuthProvider {
     state: Mutex<TokenState>,
     issuer: String,
@@ -34,6 +41,7 @@ pub struct OidcAuthProvider {
     principal_type: Option<String>,
     principal_id: Option<String>,
     on_refresh: Option<OnRefreshCallback>,
+    http_transport: Option<HttpTransport>,
 }
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
@@ -57,6 +65,7 @@ pub struct OidcAuthProviderBuilder {
     principal_type: Option<String>,
     principal_id: Option<String>,
     on_refresh: Option<OnRefreshCallback>,
+    http_transport: Option<HttpTransport>,
 }
 
 impl OidcAuthProviderBuilder {
@@ -76,6 +85,7 @@ impl OidcAuthProviderBuilder {
             principal_type: None,
             principal_id: None,
             on_refresh: None,
+            http_transport: None,
         }
     }
 
@@ -106,6 +116,21 @@ impl OidcAuthProviderBuilder {
         self
     }
 
+    /// Inject the application's TLS/redirect client and initial-recipient check.
+    /// The callback checks discovery and token requests; the injected client must
+    /// also enforce the application's policy on any automatically followed hop.
+    pub fn http_transport(
+        mut self,
+        client: reqwest::Client,
+        check_url: impl Fn(&reqwest::Url) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.http_transport = Some(HttpTransport {
+            client,
+            check_url: Arc::new(check_url),
+        });
+        self
+    }
+
     pub fn build(self) -> OidcAuthProvider {
         OidcAuthProvider {
             state: Mutex::new(TokenState {
@@ -119,6 +144,7 @@ impl OidcAuthProviderBuilder {
             principal_type: self.principal_type,
             principal_id: self.principal_id,
             on_refresh: self.on_refresh,
+            http_transport: self.http_transport,
         }
     }
 }
@@ -203,15 +229,23 @@ impl OidcAuthProvider {
         // fallibly so a broken OS certificate store surfaces as Err, not a panic.
         #[allow(clippy::disallowed_methods)]
         // common-layer crate; the fuigo TLS policy helper is out of reach
-        let client = reqwest::Client::builder().build()?;
+        let client = match &self.http_transport {
+            Some(transport) => transport.client.clone(),
+            None => reqwest::Client::builder().build()?,
+        };
 
         #[derive(serde::Deserialize)]
         struct Discovery {
             token_endpoint: String,
         }
 
+        let discovery_url =
+            reqwest::Url::parse(&format!("{issuer}/.well-known/openid-configuration"))?;
+        if let Some(transport) = &self.http_transport {
+            (transport.check_url)(&discovery_url)?;
+        }
         let disc: Discovery = client
-            .get(format!("{issuer}/.well-known/openid-configuration"))
+            .get(discovery_url)
             .timeout(Duration::from_secs(10))
             .send()
             .await?
@@ -242,8 +276,12 @@ impl OidcAuthProvider {
             expires_in: Option<u64>,
         }
 
+        let token_url = reqwest::Url::parse(&disc.token_endpoint)?;
+        if let Some(transport) = &self.http_transport {
+            (transport.check_url)(&token_url)?;
+        }
         let tokens: Tokens = client
-            .post(&disc.token_endpoint)
+            .post(token_url)
             .form(&params)
             .timeout(Duration::from_secs(15))
             .send()
@@ -277,6 +315,103 @@ impl OidcAuthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(clippy::disallowed_methods)] // injected client only targets local test observers
+    #[tokio::test]
+    async fn injected_transport_denies_discovery_before_contact() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let provider = OidcAuthProviderBuilder::new("old-access", "old-refresh", base, "client")
+            .http_transport(client, |_| Err("policy denied".to_string()))
+            .build();
+        assert!(
+            provider
+                .do_refresh()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("policy denied")
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(provider.state.lock().access_token, "old-access");
+    }
+
+    #[allow(clippy::disallowed_methods)] // injected client only targets local test observers
+    #[tokio::test]
+    async fn injected_transport_checks_discovered_recipient_before_refresh_or_callback() {
+        use axum::{
+            Router,
+            routing::{get, post},
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for deny_token in [true, false] {
+            let token_calls = Arc::new(AtomicUsize::new(0));
+            let callbacks = Arc::new(AtomicUsize::new(0));
+            let sink = token_calls.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let token_url = format!("{base}/token");
+            let app = Router::new()
+                .route("/.well-known/openid-configuration", get(move || {
+                    let token_url = token_url.clone();
+                    async move { axum::Json(serde_json::json!({"token_endpoint": token_url})) }
+                }))
+                .route("/token", post(move || {
+                    let sink = sink.clone();
+                    async move {
+                        sink.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}))
+                    }
+                }));
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let seen = callbacks.clone();
+            let provider =
+                OidcAuthProviderBuilder::new("old-access", "old-refresh", base, "client")
+                    .on_refresh(Arc::new(move |_| {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }))
+                    .http_transport(client, move |url| {
+                        if deny_token && url.path() == "/token" {
+                            Err("token recipient denied".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .build();
+            let result = provider.do_refresh().await;
+            task.abort();
+            if deny_token {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("token recipient denied")
+                );
+                assert_eq!(token_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+                assert_eq!(provider.state.lock().access_token, "old-access");
+                assert_eq!(provider.state.lock().refresh_token, "old-refresh");
+            } else {
+                result.unwrap();
+                assert_eq!(token_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+                assert_eq!(provider.state.lock().access_token, "new-access");
+                assert_eq!(provider.state.lock().refresh_token, "new-refresh");
+            }
+        }
+    }
 
     #[test]
     fn current_returns_token_when_not_expired() {

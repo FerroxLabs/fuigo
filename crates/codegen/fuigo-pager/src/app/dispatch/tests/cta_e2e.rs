@@ -1,10 +1,12 @@
 //! Tests for plugin CTA phases, including the end-to-end cta_e2e suite.
 
 use super::*;
+use crate::app::dispatch::cta::plugin_cta_candidates;
 
 #[test]
 fn plugin_cta_catalog_loaded_sanitizes_components_at_ingestion() {
     let mut app = test_app_with_agent();
+    app.plugin_cta_marketplace = Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME.into());
     let id = AgentId(0);
 
     let mut entry = cta_entry("dirty", "not_installed");
@@ -54,7 +56,7 @@ fn cta_outcome_reload(
 }
 
 #[test]
-fn plugin_cta_catalog_keeps_official_not_installed_only() {
+fn plugin_cta_default_rejects_configured_identity() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
@@ -99,24 +101,16 @@ fn plugin_cta_catalog_keeps_official_not_installed_only() {
 
     let cta = &app.agents[&id].plugin_cta;
     let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
-    // One source wins: both the first source and "Custom Mirror" are URL-verified official
-    // The first-registered one supplies the candidates and the install target
-    assert_eq!(names, vec!["keep-me"]);
-    assert_eq!(cta.candidates[0].install_status, "not_installed");
-    assert_eq!(
-        cta.source_url_or_path.as_deref(),
-        Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL),
-        "without an override the install target stays the official source"
-    );
+    assert!(names.is_empty());
+    assert!(cta.source_url_or_path.is_none());
 }
 
 #[test]
-fn plugin_cta_default_prefers_url_verified_official_over_impostor() {
+fn plugin_cta_default_rejects_url_and_name_spoofs() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    // A first-listed source that merely calls itself "Ferrox Labs Official" must not become the install root
-    // The URL-verified official source wins even when registered later
+    // Neither the configured name nor URL establishes verified ownership.
     let response = fuigo_hooks_plugins_types::MarketplaceListResponse {
         sources: vec![
             fuigo_hooks_plugins_types::MarketplaceScanResult {
@@ -144,20 +138,16 @@ fn plugin_cta_default_prefers_url_verified_official_over_impostor() {
     );
 
     let cta = &app.agents[&id].plugin_cta;
-    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, vec!["genuine"]);
-    assert_eq!(
-        cta.source_url_or_path.as_deref(),
-        Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL)
-    );
+    assert!(cta.candidates.is_empty());
+    assert!(cta.source_url_or_path.is_none());
 }
 
 #[test]
-fn plugin_cta_default_name_only_official_mirror_selected() {
+fn plugin_cta_default_rejects_name_only_mirror() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
-    // No URL-verified official source in the scan: a mirror registered under the official name (e.g. an on-prem path source) still feeds the CTA.
+    // A mirror registered under the contributor-configured display name remains unverified.
     let response = fuigo_hooks_plugins_types::MarketplaceListResponse {
         sources: vec![fuigo_hooks_plugins_types::MarketplaceScanResult {
             source_name: fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME.into(),
@@ -176,11 +166,43 @@ fn plugin_cta_default_name_only_official_mirror_selected() {
     );
 
     let cta = &app.agents[&id].plugin_cta;
-    let names: Vec<&str> = cta.candidates.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, vec!["mirrored"]);
+    assert!(cta.candidates.is_empty());
+    assert!(cta.source_url_or_path.is_none());
+}
+
+#[test]
+fn cta_requires_explicit_source_selection() {
+    let response = |source_name: &str, source_url_or_path: &str| {
+        fuigo_hooks_plugins_types::MarketplaceListResponse {
+            sources: vec![fuigo_hooks_plugins_types::MarketplaceScanResult {
+                source_name: source_name.into(),
+                source_kind: "git".into(),
+                source_url_or_path: source_url_or_path.into(),
+                plugins: vec![cta_entry("candidate", "not_installed")],
+                error: None,
+            }],
+        }
+    };
+
+    let (implicit, implicit_source) = plugin_cta_candidates(
+        response(
+            fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME,
+            fuigo_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL,
+        ),
+        None,
+    );
+    assert!(implicit.is_empty());
+    assert!(implicit_source.is_none());
+
+    let (explicit, explicit_source) = plugin_cta_candidates(
+        response("Configured", "/srv/configured-marketplace"),
+        Some("Configured"),
+    );
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].name, "candidate");
     assert_eq!(
-        cta.source_url_or_path.as_deref(),
-        Some("/srv/onprem-mirror")
+        explicit_source.as_deref(),
+        Some("/srv/configured-marketplace")
     );
 }
 
@@ -513,6 +535,7 @@ fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
     // Uses a unique name so the cached dismissed-set read can't suppress it
     let mut app = test_app_with_agent();
     app.plugin_cta_enabled = true;
+    app.plugin_cta_marketplace = Some(fuigo_plugin_marketplace::OFFICIAL_SOURCE_NAME.into());
     let id = AgentId(0);
     app.agents
         .get_mut(&id)

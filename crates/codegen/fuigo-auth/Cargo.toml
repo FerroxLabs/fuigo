@@ -7,9 +7,10 @@ description = "Auth dependency-inversion seam: HttpAuth + AuthCredentialProvider
 authors = ["Ferrox Labs"]
 
 [features]
-middleware = ["dep:reqwest-middleware", "dep:http"]
+middleware = ["dep:reqwest-middleware", "dep:http", "dep:fuigo-extra-ca"]
 
 [dependencies]
+fuigo-extra-ca = { workspace = true, optional = true }
 async-trait = { workspace = true }
 http = { workspace = true, optional = true }
 reqwest = { workspace = true }

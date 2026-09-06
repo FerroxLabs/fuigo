@@ -15,8 +15,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use fuigo_sampling_types::{
-    ApiErrorCode, ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
-    SentCredential, error::Result as SamplingResult,
+    ApiErrorCode, AttemptAccounting, ConversationRequest, ConversationResponse,
+    EmptyResponseContext, SamplingError, SentCredential, TokenUsage,
+    error::Result as SamplingResult,
 };
 
 use crate::actor::request_metadata::{
@@ -39,6 +40,96 @@ use crate::types::RequestId;
 /// Matches the shell's session-level default of 5 minutes.
 /// That is long enough for cold-start reasoning and short enough to detect dead streams before the user gives up.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Provider reports are cumulative within an attempt, additive between attempts.
+#[derive(Default)]
+struct AccountingLedger {
+    prior: AttemptAccounting,
+    current: AttemptAccounting,
+}
+
+impl AccountingLedger {
+    fn begin_attempt(&mut self) {
+        self.prior = self.snapshot();
+        self.current = AttemptAccounting {
+            unknown_liability: true,
+            ..Default::default()
+        };
+    }
+
+    fn observe(&mut self, report: &AttemptAccounting) {
+        if let Some(usage) = &report.usage {
+            self.current.usage = Some(usage.clone());
+        }
+        if report.cost_usd_ticks.is_some() {
+            self.current.cost_usd_ticks = report.cost_usd_ticks;
+        }
+        // Only a provider terminal with usage can resolve this attempt's liability.
+    }
+
+    fn terminal(&mut self, response: &ConversationResponse) {
+        self.observe(&AttemptAccounting {
+            usage: response.usage.clone(),
+            cost_usd_ticks: response.cost_usd_ticks,
+            unknown_liability: false,
+        });
+        self.current.unknown_liability = response.usage.is_none();
+    }
+
+    fn snapshot(&self) -> AttemptAccounting {
+        let mut total = self.prior.clone();
+        merge_attempt_usage(&mut total.usage, self.current.usage.clone());
+        total.cost_usd_ticks = sum_cost_ticks(total.cost_usd_ticks, self.current.cost_usd_ticks);
+        total.unknown_liability |= self.current.unknown_liability;
+        total
+    }
+}
+
+struct AccountingEvents {
+    tx: mpsc::UnboundedSender<SamplingEvent>,
+    ledger: Mutex<AccountingLedger>,
+}
+
+impl AccountingEvents {
+    fn new(tx: mpsc::UnboundedSender<SamplingEvent>) -> Self {
+        Self {
+            tx,
+            ledger: Mutex::new(AccountingLedger::default()),
+        }
+    }
+
+    fn snapshot(&self) -> AttemptAccounting {
+        self.ledger.lock().expect("accounting ledger").snapshot()
+    }
+
+    fn send(&self, event: SamplingEvent) -> Result<(), mpsc::error::SendError<SamplingEvent>> {
+        match event {
+            SamplingEvent::AttemptAccounting {
+                request_id,
+                accounting,
+            } => {
+                let accounting = {
+                    let mut ledger = self.ledger.lock().expect("accounting ledger");
+                    ledger.observe(&accounting);
+                    ledger.snapshot()
+                };
+                self.tx.send(SamplingEvent::AttemptAccounting {
+                    request_id,
+                    accounting,
+                })
+            }
+            SamplingEvent::Failed { ref request_id, .. }
+            | SamplingEvent::Completed { ref request_id, .. } => {
+                self.tx.send(SamplingEvent::AttemptAccounting {
+                    request_id: request_id.clone(),
+                    accounting: self.snapshot(),
+                })?;
+                self.tx.send(event)
+            }
+            other => self.tx.send(other),
+        }
+    }
+}
 
 /// Public result returned by `SamplerHandle::submit_and_collect`.
 pub type CompletionResult = Result<(ConversationResponse, InferenceLatencyStats), SamplingError>;
@@ -84,6 +175,7 @@ pub(crate) async fn run_request_task(
     cancel_token: CancellationToken,
     completion: Option<oneshot::Sender<CollectedSamplingResult>>,
 ) -> RequestId {
+    let event_tx = AccountingEvents::new(event_tx);
     let mut completion = CompletionState::new(completion);
     let idle_timeout = Duration::from_secs(
         config
@@ -135,6 +227,11 @@ pub(crate) async fn run_request_task(
 
         // Once the resample budget is spent, the attempt runs with the abort disarmed so it can complete and be accepted as-is
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
+        event_tx
+            .ledger
+            .lock()
+            .expect("accounting ledger")
+            .begin_attempt();
         let outcome = run_one_attempt(
             &client,
             request.clone(),
@@ -157,9 +254,12 @@ pub(crate) async fn run_request_task(
 
         match outcome {
             AttemptOutcome::Completed {
-                response,
+                mut response,
                 mut metrics,
             } => {
+                let accounting = event_tx.snapshot();
+                response.usage = accounting.usage;
+                response.cost_usd_ticks = accounting.cost_usd_ticks;
                 completion.merge_doom_loop_signals(
                     response
                         .doom_loop_signals
@@ -202,6 +302,7 @@ pub(crate) async fn run_request_task(
             AttemptOutcome::Empty {
                 context,
                 doom_loop_signals,
+                ..
             } => {
                 completion.merge_doom_loop_signals(doom_loop_signals);
                 tracing::warn!(
@@ -345,7 +446,7 @@ async fn apply_retry_decision(
     retry_count: &mut u32,
     max_retries: u32,
     retry_policy: &RetryPolicy,
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    event_tx: &AccountingEvents,
     request_id: &RequestId,
     request: &mut ConversationRequest,
     client: &mut SamplingClient,
@@ -535,7 +636,7 @@ async fn run_one_attempt(
     request: ConversationRequest,
     request_id: RequestId,
     idle_timeout: Duration,
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    event_tx: &AccountingEvents,
     cancel_token: &CancellationToken,
     doom_check: Option<fuigo_sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
@@ -659,7 +760,7 @@ fn tee_errors<'a, T: Send + 'a>(
 async fn drive_l2(
     l2: impl futures_util::Stream<Item = SamplingEvent>,
     request_id: RequestId,
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    event_tx: &AccountingEvents,
     cancel_token: &CancellationToken,
     captured: ErrorCell,
     doom_check: Option<fuigo_sampling_types::DoomLoopRecoveryPolicy>,
@@ -678,6 +779,7 @@ async fn drive_l2(
             }
             next = l2.next() => match next {
                 Some(SamplingEvent::Completed { response, metrics, .. }) => {
+                    event_tx.ledger.lock().expect("accounting ledger").terminal(&response);
                     output_observed.store(true, Ordering::Relaxed);
                     await_first_output_span.take();
                     let mut all_triggers = Vec::new();
@@ -758,6 +860,15 @@ async fn drive_l2(
                     });
                 }
                 Some(other) => {
+                    if matches!(other, SamplingEvent::StreamStarted { .. }) {
+                        let _ = event_tx.send(SamplingEvent::AttemptAccounting {
+                            request_id: request_id.clone(),
+                            accounting: AttemptAccounting {
+                                unknown_liability: true,
+                                ..Default::default()
+                            },
+                        });
+                    }
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -784,6 +895,22 @@ async fn drive_l2(
                 }
             }
         }
+    }
+}
+
+fn merge_attempt_usage(total: &mut Option<TokenUsage>, attempt: Option<TokenUsage>) {
+    let Some(attempt) = attempt else { return };
+    match total {
+        Some(total) => total.saturating_add_assign(&attempt),
+        None => *total = Some(attempt),
+    }
+}
+
+fn sum_cost_ticks(total: Option<i64>, attempt: Option<i64>) -> Option<i64> {
+    match (total, attempt) {
+        (Some(total), Some(attempt)) => Some(total.saturating_add(attempt)),
+        (known @ Some(_), None) | (None, known @ Some(_)) => known,
+        (None, None) => None,
     }
 }
 
@@ -891,11 +1018,7 @@ fn build_empty_context(
     }
 }
 
-fn emit_failed(
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
-    request_id: &RequestId,
-    err: &SamplingError,
-) -> bool {
+fn emit_failed(event_tx: &AccountingEvents, request_id: &RequestId, err: &SamplingError) -> bool {
     let info = SamplingErrorInfo::from(err);
     event_tx
         .send(SamplingEvent::Failed {
@@ -906,7 +1029,7 @@ fn emit_failed(
 }
 
 fn emit_retrying(
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    event_tx: &AccountingEvents,
     request_id: &RequestId,
     attempt: u32,
     max_retries: u32,
@@ -925,7 +1048,7 @@ fn emit_retrying(
 }
 
 fn emit_images_stripped(
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    event_tx: &AccountingEvents,
     request_id: &RequestId,
     stripped_urls: Vec<std::sync::Arc<str>>,
     reason: StripReason,
@@ -938,7 +1061,7 @@ fn emit_images_stripped(
 }
 
 fn handle_cancellation(
-    event_tx: &mpsc::UnboundedSender<SamplingEvent>,
+    event_tx: &AccountingEvents,
     request_id: &RequestId,
     completion: &mut CompletionState,
 ) {
@@ -982,17 +1105,169 @@ fn send_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::stream;
     use fuigo_sampling_types::ApiErrorCode;
+    use futures_util::stream;
+
+    fn accounting_report(request_id: &RequestId, tokens: u32) -> SamplingEvent {
+        SamplingEvent::AttemptAccounting {
+            request_id: request_id.clone(),
+            accounting: AttemptAccounting {
+                usage: Some(TokenUsage {
+                    total_tokens: tokens,
+                    ..Default::default()
+                }),
+                cost_usd_ticks: Some(i64::from(tokens)),
+                unknown_liability: true,
+            },
+        }
+    }
+
+    async fn drive_accounting_attempt(
+        events: Vec<SamplingEvent>,
+        tx: &AccountingEvents,
+        cancel: &CancellationToken,
+    ) -> AttemptOutcome {
+        tx.ledger.lock().unwrap().begin_attempt();
+        drive_l2(
+            stream::iter(events),
+            RequestId::from("accounting"),
+            tx,
+            cancel,
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            fuigo_sampling_types::LengthPolicy::Fail,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn accounting_failed_retries_keep_latest_snapshots_before_terminal_failure() {
+        let id = RequestId::from("accounting");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tx = AccountingEvents::new(tx);
+        for (first, latest) in [(10, 20), (30, 40)] {
+            let outcome = drive_accounting_attempt(
+                vec![
+                    accounting_report(&id, first),
+                    accounting_report(&id, latest),
+                ],
+                &tx,
+                &CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(outcome, AttemptOutcome::Failed { .. }));
+        }
+        assert!(emit_failed(
+            &tx,
+            &id,
+            &SamplingError::EventStreamError("final".into())
+        ));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let SamplingEvent::AttemptAccounting { accounting, .. } = &events[events.len() - 2] else {
+            panic!("aggregate must immediately precede Failed");
+        };
+        assert_eq!(accounting.usage.as_ref().unwrap().total_tokens, 60);
+        assert_eq!(accounting.cost_usd_ticks, Some(60));
+        assert!(accounting.unknown_liability);
+        assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
+    }
+
+    #[tokio::test]
+    async fn accounting_partial_then_success_retains_prior_and_accepted_identity() {
+        let id = RequestId::from("accounting");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tx = AccountingEvents::new(tx);
+        drive_accounting_attempt(
+            vec![accounting_report(&id, 20)],
+            &tx,
+            &CancellationToken::new(),
+        )
+        .await;
+        let mut response = completed_response(None, "accepted");
+        response.usage = Some(TokenUsage {
+            total_tokens: 40,
+            ..Default::default()
+        });
+        response.cost_usd_ticks = Some(40);
+        response.message_id = Some("accepted-id".into());
+        let outcome = drive_accounting_attempt(
+            vec![
+                accounting_report(&id, 30),
+                SamplingEvent::Completed {
+                    request_id: id,
+                    response: Box::new(response),
+                    metrics: Default::default(),
+                },
+            ],
+            &tx,
+            &CancellationToken::new(),
+        )
+        .await;
+        let AttemptOutcome::Completed { response, .. } = outcome else {
+            panic!("accepted response");
+        };
+        assert_eq!(response.message_id.as_deref(), Some("accepted-id"));
+        assert_eq!(response.assistant().unwrap().content.as_ref(), "accepted");
+        let total = tx.snapshot();
+        assert_eq!(total.usage.unwrap().total_tokens, 60);
+        assert_eq!(total.cost_usd_ticks, Some(60));
+        assert!(total.unknown_liability);
+    }
+
+    #[tokio::test]
+    async fn accounting_cancellation_retains_prior_and_partial_and_missing_usage() {
+        let id = RequestId::from("accounting");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tx = AccountingEvents::new(tx);
+        drive_accounting_attempt(
+            vec![accounting_report(&id, 20)],
+            &tx,
+            &CancellationToken::new(),
+        )
+        .await;
+        tx.ledger.lock().unwrap().begin_attempt();
+        tx.send(accounting_report(&id, 30)).unwrap();
+        tx.send(accounting_report(&id, 40)).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = drive_l2(
+            stream::pending(),
+            id.clone(),
+            &tx,
+            &cancel,
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            fuigo_sampling_types::LengthPolicy::Fail,
+        )
+        .await;
+        assert!(matches!(outcome, AttemptOutcome::Cancelled));
+        handle_cancellation(&tx, &id, &mut CompletionState::new(None));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let SamplingEvent::AttemptAccounting { accounting, .. } = &events[events.len() - 2] else {
+            panic!("final accounting");
+        };
+        assert_eq!(accounting.cost_usd_ticks, Some(60));
+        assert_eq!(accounting.usage.as_ref().unwrap().total_tokens, 60);
+        assert!(accounting.unknown_liability);
+        assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
+
+        let mut ledger = AccountingLedger::default();
+        ledger.begin_attempt();
+        ledger.terminal(&completed_response(None, "usage missing"));
+        assert!(ledger.snapshot().unknown_liability);
+        assert!(ledger.snapshot().usage.is_none());
+    }
 
     fn completed_response(
         stop_reason: Option<fuigo_sampling_types::StopReason>,
         content: &str,
     ) -> ConversationResponse {
         ConversationResponse {
-            items: vec![fuigo_sampling_types::ConversationItem::assistant(
-                content,
-            )],
+            items: vec![fuigo_sampling_types::ConversationItem::assistant(content)],
             stop_reason,
             usage: None,
             cost_usd_ticks: None,
@@ -1008,8 +1283,7 @@ mod tests {
     }
 
     fn length_completed_event(text: &str) -> SamplingEvent {
-        let mut response =
-            completed_response(Some(fuigo_sampling_types::StopReason::Length), text);
+        let mut response = completed_response(Some(fuigo_sampling_types::StopReason::Length), text);
         response.doom_loop_signals.clear();
         SamplingEvent::Completed {
             request_id: RequestId::random(),
@@ -1023,6 +1297,7 @@ mod tests {
         policy: fuigo_sampling_types::LengthPolicy,
     ) -> AttemptOutcome {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let event_tx = AccountingEvents::new(event_tx);
         drive_l2(
             stream::iter([event]),
             RequestId::random(),
@@ -1039,6 +1314,7 @@ mod tests {
 
     async fn terminal_outcome(response: ConversationResponse) -> AttemptOutcome {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let event_tx = AccountingEvents::new(event_tx);
         drive_l2(
             stream::iter([SamplingEvent::Completed {
                 request_id: RequestId::from("terminal-signals"),
@@ -1086,10 +1362,8 @@ mod tests {
     async fn terminal_detector_signals_are_bounded_before_forwarding() {
         use crate::doom_loop::{MAX_COLLECTED_DOOM_LOOP_SIGNALS, MAX_DOOM_LOOP_SIGNAL_BYTES};
 
-        let mut response = completed_response(
-            Some(fuigo_sampling_types::StopReason::Length),
-            "truncated",
-        );
+        let mut response =
+            completed_response(Some(fuigo_sampling_types::StopReason::Length), "truncated");
         response.doom_loop_signals =
             std::iter::once(fuigo_sampling_types::doom_loop::DoomLoopSignal::parse(
                 &"x".repeat(MAX_DOOM_LOOP_SIGNAL_BYTES + 1),
@@ -1102,6 +1376,7 @@ mod tests {
             .collect();
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let event_tx = AccountingEvents::new(event_tx);
         let outcome = drive_l2(
             stream::iter([SamplingEvent::Completed {
                 request_id: RequestId::from("bounded-terminal-signals"),
@@ -1176,8 +1451,7 @@ mod tests {
         let SamplingEvent::Completed { response, .. } = &mut event else {
             unreachable!("helper builds Completed");
         };
-        let Some(fuigo_sampling_types::ConversationItem::Assistant(a)) =
-            response.items.last_mut()
+        let Some(fuigo_sampling_types::ConversationItem::Assistant(a)) = response.items.last_mut()
         else {
             unreachable!("helper builds a trailing Assistant item");
         };
@@ -1408,6 +1682,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let event_tx = AccountingEvents::new(event_tx);
         let (completion_tx, completion_rx) = oneshot::channel();
         let mut completion = CompletionState::new(Some(completion_tx));
         let mut retry_count = 0;
@@ -1442,6 +1717,10 @@ mod tests {
         ));
         assert!(matches!(
             event_rx.recv().await,
+            Some(SamplingEvent::AttemptAccounting { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
             Some(SamplingEvent::Failed { .. })
         ));
         assert!(
@@ -1468,5 +1747,33 @@ mod tests {
             SamplingError::EventStreamError(msg) => assert_eq!(msg, "first"),
             other => panic!("expected EventStreamError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn distinct_attempt_accounting_saturating_adds_known_values() {
+        let mut usage = Some(TokenUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            ..Default::default()
+        });
+        merge_attempt_usage(
+            &mut usage,
+            Some(TokenUsage {
+                prompt_tokens: 20,
+                completion_tokens: 7,
+                total_tokens: 27,
+                reasoning_tokens: 2,
+                ..Default::default()
+            }),
+        );
+
+        let usage = usage.expect("known usage retained");
+        assert_eq!(usage.prompt_tokens, 30);
+        assert_eq!(usage.completion_tokens, 12);
+        assert_eq!(usage.total_tokens, 42);
+        assert_eq!(usage.reasoning_tokens, 2);
+        assert_eq!(sum_cost_ticks(Some(100), Some(200)), Some(300));
+        assert_eq!(sum_cost_ticks(Some(100), None), Some(100));
     }
 }

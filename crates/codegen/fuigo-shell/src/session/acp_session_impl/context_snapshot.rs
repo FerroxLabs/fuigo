@@ -4,6 +4,7 @@
 //! Category texts are sent in parallel; the session-metrics event only receives the resulting counts.
 
 use super::*;
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 
 impl SessionActor {
     /// Record itemized context occupancy for this session.
@@ -290,7 +291,7 @@ async fn tokenize_one(
             "text": text,
             "model": model,
         }))
-        .send()
+        .send_checked()
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "tokenize-text request failed");

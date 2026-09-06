@@ -25,7 +25,7 @@ pub const MULTIPART_UPLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
 /// `StaticFuigoAuth` carrying the inline user / deployment keys from
 /// `UploadMethod::Proxy`. The optional `http_client` lets the caller pass a
 /// shell-tuned client (HTTP/2 keep-alive, conn pool tuning); when `None` we
-/// fall back to `reqwest::Client::new()`.
+/// fall back to the shared TLS/redirect-policy builder.
 fn build_proxy_client_with_fallback(
     proxy_base_url: &str,
     user_token: &str,
@@ -40,7 +40,10 @@ fn build_proxy_client_with_fallback(
         let bearer = creds.wire_bearer();
         Arc::new(StaticAuthCredentialProvider::new(Box::new(creds), bearer))
     });
-    let http_client = http_client.unwrap_or_default();
+    let http_client = http_client.unwrap_or_else(|| {
+        fuigo_extra_ca::build_reqwest_client(|builder| builder)
+            .expect("failed to build storage HTTP client")
+    });
     let mut client = StorageClient::with_provider(proxy_base_url, http_client, provider);
     if let Some(cb) = attribution {
         client = client.with_attribution(cb);
@@ -84,7 +87,7 @@ pub trait StorageConfig {
         None
     }
     /// Optional HTTP client for proxy-mode uploads. `None` falls back to
-    /// `reqwest::Client::new()` (used by bins/tests). Production callers
+    /// the shared TLS/redirect-policy builder (used by bins/tests). Production callers
     /// should return shell's tuned `shared_upload_client()` -- HTTP/2
     /// keep-alive + aggressive connection pool eviction. The trace upload
     /// queue, feedback uploads, share uploads, and subagent metadata
@@ -491,8 +494,15 @@ async fn build_gcs_client(
 ) -> anyhow::Result<gcloud_storage::client::Client> {
     use gcloud_storage::client::{Client as GcsClient, ClientConfig as GcsClientConfig};
 
+    // Protect storage/IAM requests. gcloud-auth's separate token-source HTTP
+    // clients are not controlled by this field and require a separate adapter.
+    let config = GcsClientConfig {
+        http: Some(crate::gcs_http_policy::client()?),
+        ..GcsClientConfig::default()
+    };
+
     let gcs_config = if let Some(key_json) = service_account_key {
-        GcsClientConfig::default()
+        config
             .with_credentials(
                 gcloud_storage::client::google_cloud_auth::credentials::CredentialsFile::new_from_str(key_json)
                     .await
@@ -501,7 +511,7 @@ async fn build_gcs_client(
             .await
             .context("Failed to configure GCS client with service account")?
     } else {
-        GcsClientConfig::default()
+        config
             .with_auth()
             .await
             .context("Failed to authenticate GCS client")?
@@ -665,6 +675,67 @@ pub async fn upload_bytes_via_signed_url(
 mod tests {
     use super::*;
     use crate::{TraceExportConfig, UploadMethod};
+
+    #[tokio::test]
+    async fn proxy_fallback_rejects_cross_origin_redirect() {
+        use axum::{Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let received = Arc::new(AtomicUsize::new(0));
+        let sink = received.clone();
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!(
+            "http://{}/storage/limits",
+            destination.local_addr().unwrap()
+        );
+        let destination_task = tokio::spawn(async move {
+            axum::serve(
+                destination,
+                Router::new().route(
+                    "/storage/limits",
+                    get(move || {
+                        let sink = sink.clone();
+                        async move {
+                            sink.fetch_add(1, Ordering::SeqCst);
+                            "{}"
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", source.local_addr().unwrap());
+        let source_task = tokio::spawn(async move {
+            axum::serve(
+                source,
+                Router::new().route(
+                    "/storage/limits",
+                    get(move || {
+                        let target = target.clone();
+                        async move {
+                            (
+                                axum::http::StatusCode::TEMPORARY_REDIRECT,
+                                [("location", target)],
+                            )
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = build_proxy_client_with_fallback(&base, "fake-token", None, None, None, None);
+        let result = client.get_upload_limits().await;
+        source_task.abort();
+        destination_task.abort();
+        assert!(result.is_err());
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            0,
+            "fallback client followed cross-origin redirect"
+        );
+    }
 
     fn proxy_config() -> TraceExportConfig {
         proxy_config_with_url("https://proxy.example.com/v1".to_string())

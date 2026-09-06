@@ -279,6 +279,46 @@ fn abort_transport(handle: &tokio::task::JoinHandle<()>, child: &mut Option<std:
 
 // ── LspClient ───────────────────────────────────────────────────────────
 
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn t05_mcp_hook_lsp_spawn_paths_lsp() {
+    if crate::util::shell_env_policy::t05_fresh_process("t05_mcp_hook_lsp_spawn_paths_lsp") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for selected in [false, true] {
+        let marker = dir
+            .path()
+            .join(if selected { "selected" } else { "default" });
+        let check = if selected {
+            "test \"$OPENAI_API_KEY\" = fake-selected"
+        } else {
+            "test -z \"${OPENAI_API_KEY+x}\""
+        };
+        let script = format!(
+            "{check} && test -z \"${{ANTHROPIC_API_KEY+x}}\" && /bin/sh -c '{check} && test -z \"${{ANTHROPIC_API_KEY+x}}\"' && printf 1 > \"$T05_MARKER\""
+        );
+        let mut env = std::collections::HashMap::from([(
+            "T05_MARKER".to_string(),
+            marker.to_string_lossy().into_owned(),
+        )]);
+        if selected {
+            env.insert("OPENAI_API_KEY".into(), "fake-selected".into());
+        }
+        let config: LspServerConfig = serde_json::from_value(serde_json::json!({"command":"/bin/sh", "args":["-c",script], "env":env, "startupTimeout":1000})).unwrap();
+        let result = LspClient::start(
+            "t05".into(),
+            1,
+            config,
+            dir.path(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
+        assert!(result.is_err()); // Probe exits deliberately before protocol initialization.
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "1");
+    }
+}
+
 impl LspClient {
     pub async fn start(
         server_name: String,
@@ -429,6 +469,10 @@ impl LspClient {
         LspError,
     > {
         let mut cmd = std::process::Command::new(&config.command);
+        cmd.env_clear()
+            .envs(crate::util::shell_env_policy::create_env(
+                &crate::util::ShellEnvironmentPolicy::default(),
+            ));
         cmd.args(&config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

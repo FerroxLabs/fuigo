@@ -7,12 +7,15 @@
 )]
 //! Local data collection: upload queueing and S3-compatible blob storage.
 pub(crate) mod circuit_breaker_observer;
+mod gcs_http_policy;
+mod sdk_http_policy;
 /// Wrap a raw client with [`fuigo_auth::AuthRetryMiddleware`] for automatic 401 retry.
 pub fn with_auth_retry(
     client: reqwest::Client,
     credentials: std::sync::Arc<dyn fuigo_auth::AuthCredentialProvider>,
 ) -> reqwest_middleware::ClientWithMiddleware {
     reqwest_middleware::ClientBuilder::new(client)
+        .with(fuigo_auth::EgressMiddleware)
         .with(fuigo_auth::AuthRetryMiddleware::new(credentials, 1))
         .build()
 }

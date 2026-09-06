@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use fuigo_sampling_types::{
-    ApiErrorCode, ConversationResponse, EmptyResponseContext, ResponseModelMetadata, SamplingError,
-    SentCredential,
+    ApiErrorCode, AttemptAccounting, ConversationResponse, EmptyResponseContext,
+    ResponseModelMetadata, SamplingError, SentCredential,
 };
 
 use crate::metrics::InferenceLatencyStats;
@@ -49,6 +49,14 @@ pub enum SamplingEvent {
     StreamStarted {
         request_id: RequestId,
         timestamp_ms: i64,
+    },
+
+    /// Latest known usage/cost snapshot, independent of accepted output.
+    /// Backend transforms report the current attempt; the retry owner publishes
+    /// cumulative request totals, including discarded attempts, before terminal events.
+    AttemptAccounting {
+        request_id: RequestId,
+        accounting: AttemptAccounting,
     },
 
     /// First content token received for a request.
@@ -173,6 +181,7 @@ impl SamplingEvent {
     pub fn request_id(&self) -> &RequestId {
         match self {
             Self::StreamStarted { request_id, .. }
+            | Self::AttemptAccounting { request_id, .. }
             | Self::FirstToken { request_id }
             | Self::ChannelToken { request_id, .. }
             | Self::ToolCallDelta { request_id, .. }
@@ -374,8 +383,8 @@ impl From<&SamplingError> for SamplingErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::StatusCode;
     use fuigo_sampling_types::ApiErrorCode;
+    use reqwest::StatusCode;
 
     #[test]
     fn from_sampling_error_carries_should_retry_header() {

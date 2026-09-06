@@ -1,10 +1,10 @@
 # Releasing Fuigo
 
-Fuigo ships to npm as seven packages: a meta package `fuigo`
-and six per-platform binary packages (`fuigo-darwin-arm64` and friends) listed
-as its `optionalDependencies`. All seven are unscoped — an earlier revision
-used an `@fuigo-official` scope, which is not an npm org that exists and could
-never have been published to. `fuigo` itself is already ours. npm
+Fuigo ships to npm as seven packages: the meta package `fuigo`
+and six platform binary packages under `@fuigo` (for example,
+`@fuigo/darwin-arm64`) listed as its exact-version `optionalDependencies`.
+Local platform directories retain names such as `fuigo-darwin-arm64`; their
+package manifests define the scoped published names. npm
 downloads only the one matching the host's `os`/`cpu`, so a user pulls one
 ~42 MB package, not six.
 
@@ -115,9 +115,15 @@ first leaves a window where `npm i` resolves nothing installable:
 
 ```sh
 cd ../fuigo-darwin-arm64 && npm publish --access public
-# … the other five …
+# … the other five platform directories, published as @fuigo/<platform> …
 cd ../fuigo             && npm publish --access public
 ```
+
+Assembly also copies the repository LICENSE, NOTICE and comprehensive
+THIRD-PARTY-NOTICES, tool attribution and vendored notices into all seven
+packages. `node scripts/package-notices.js --check` verifies exact source
+bytes before meta publication. Keep these files in each manifest's `files`
+list; the release archives must contain them alongside their actual binaries.
 
 No `--provenance`. npm has refused provenance attestations from private source
 repositories since 2023-07-25, and `FerroxLabs/fuigo` is private; asking for

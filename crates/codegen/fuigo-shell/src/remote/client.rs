@@ -92,17 +92,18 @@ pub async fn fetch_subagent_bundle(
     alpha_test_key: Option<&str>,
 ) -> Result<SubagentBundle, BackendError> {
     let url = format!("{}/subagents/bundle", cli_chat_proxy_base_url);
-    let response = add_bundle_fetch_headers(
-        crate::http::shared_client()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10)),
-        auth_manager,
-        deployment_key,
-        alpha_test_key,
-        &url,
+    let response = fuigo_extra_ca::dispatch::send(
+        add_bundle_fetch_headers(
+            crate::http::shared_client()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(10)),
+            auth_manager,
+            deployment_key,
+            alpha_test_key,
+            &url,
+        )
+        .await,
     )
-    .await
-    .send()
     .await?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -158,7 +159,9 @@ async fn fetch_bundle_inner(
         );
         crate::http::with_auth_retry(raw_client, provider)
     } else {
-        reqwest_middleware::ClientBuilder::new(raw_client).build()
+        reqwest_middleware::ClientBuilder::new(raw_client)
+            .with(fuigo_auth::EgressMiddleware)
+            .build()
     };
     let mut request = client
         .get(&archive_url)
@@ -258,6 +261,8 @@ pub struct SessionUpdate {
 pub enum BackendError {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
+    #[error("Request blocked by egress policy: {0}")]
+    Policy(&'static str),
     #[error("Request failed: {status} - {body}")]
     RequestFailed { status: u16, body: String },
     #[error("Serialization error: {0}")]
@@ -271,6 +276,15 @@ pub enum BackendError {
     },
     #[error("Auth error: {0}")]
     Auth(String),
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for BackendError {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::Policy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::Network(error),
+        }
+    }
 }
 pub struct BackendClient {
     reqwest_client: reqwest::Client,
@@ -296,7 +310,9 @@ impl BackendClient {
     pub fn new() -> Self {
         let reqwest_client = Self::build_default_client();
         Self {
-            client: reqwest_middleware::ClientBuilder::new(reqwest_client.clone()).build(),
+            client: reqwest_middleware::ClientBuilder::new(reqwest_client.clone())
+                .with(fuigo_auth::EgressMiddleware)
+                .build(),
             reqwest_client,
             base_url: std::env::var("FUIGO_CODE_BACKEND_URL")
                 .unwrap_or_else(|_| FUIGO_CODE_BACKEND_URL.to_string()),
@@ -306,7 +322,9 @@ impl BackendClient {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         let reqwest_client = Self::build_default_client();
         Self {
-            client: reqwest_middleware::ClientBuilder::new(reqwest_client.clone()).build(),
+            client: reqwest_middleware::ClientBuilder::new(reqwest_client.clone())
+                .with(fuigo_auth::EgressMiddleware)
+                .build(),
             reqwest_client,
             base_url: base_url.into(),
             auth_manager: None,
@@ -580,7 +598,7 @@ fn fetch_settings_blocking_with_attempts(
         }
         let request =
             add_cli_chat_proxy_headers_blocking(client.get(&url), auth, alpha_test_key, &url);
-        match request.send() {
+        match fuigo_extra_ca::dispatch::send_blocking(request) {
             Ok(resp) if resp.status().is_success() => match resp.json() {
                 Ok(settings) => {
                     tracing::debug!("Fetched remote settings from cli-chat-proxy");
@@ -613,7 +631,12 @@ fn fetch_settings_blocking_with_attempts(
                 );
                 return SettingsFetch::Retry;
             }
-            Err(e) => {
+            Err(fuigo_extra_ca::dispatch::DispatchError::Denied(reason)) => {
+                tracing::warn!("Settings fetch blocked by egress policy: {reason}");
+                // Keep existing cached settings; policy denial is not a 401.
+                return SettingsFetch::Retry;
+            }
+            Err(fuigo_extra_ca::dispatch::DispatchError::Transport(e)) => {
                 tracing::warn!(attempt, "Settings fetch network error: {e}");
                 continue;
             }
@@ -639,21 +662,22 @@ pub async fn fetch_login_device_flow(cli_chat_proxy_base_url: &str) -> Option<bo
         .ok()?;
     let client = crate::http::shared_client();
     let url = format!("{}/login-config", cli_chat_proxy_base_url);
-    let response = client
-        .get(&url)
-        .timeout(std::time::Duration::from_millis(1500))
-        .header("x-fuigo-agent-id", agent_id)
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
-        .header(
-            "x-fuigo-client-identifier",
-            crate::http::process_client_identifier(),
-        )
-        .header(
-            crate::http::CLIENT_MODE_HEADER,
-            crate::http::process_client_mode(),
-        )
-        .send()
-        .await;
+    let response = fuigo_extra_ca::dispatch::send(
+        client
+            .get(&url)
+            .timeout(std::time::Duration::from_millis(1500))
+            .header("x-fuigo-agent-id", agent_id)
+            .header("x-fuigo-client-version", fuigo_version::VERSION)
+            .header(
+                "x-fuigo-client-identifier",
+                crate::http::process_client_identifier(),
+            )
+            .header(
+                crate::http::CLIENT_MODE_HEADER,
+                crate::http::process_client_mode(),
+            ),
+    )
+    .await;
     let resp = match response {
         Ok(resp) if resp.status().is_success() => resp,
         Ok(resp) => {
@@ -941,3 +965,13 @@ fn get_string_map(
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn egress_policy_denial_preserves_its_category() {
+        let error = BackendError::from(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"));
+        assert!(matches!(error, BackendError::Policy("blocked")));
+    }
+}

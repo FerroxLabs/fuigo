@@ -1,5 +1,6 @@
 //! HTTP client for managing sandbox sessions and environments via the cli-chat-proxy REST API.
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 
 use crate::auth::{AuthManager, FuigoComConfig};
@@ -112,7 +113,7 @@ impl SandboxClient {
             .auth_headers(self.client.post(&url))
             .await?
             .json(request)
-            .send()
+            .send_checked()
             .await
             .context("failed to send fork session request")?;
         Self::parse_response(response, "fork session").await
@@ -131,7 +132,7 @@ impl SandboxClient {
         let response = self
             .auth_headers(self.client.delete(&url))
             .await?
-            .send()
+            .send_checked()
             .await
             .context("failed to send terminate session request")?;
 
@@ -162,7 +163,7 @@ impl SandboxClient {
             builder = builder.query(&[("pageSize", page_size)]);
         }
         let response = builder
-            .send()
+            .send_checked()
             .await
             .context("failed to send list environments request")?;
         Self::parse_response(response, "list environments").await
@@ -177,7 +178,7 @@ impl SandboxClient {
             .auth_headers(self.client.post(&url))
             .await?
             .json(request)
-            .send()
+            .send_checked()
             .await
             .context("failed to send create environment request")?;
         Self::parse_response(response, "create environment").await
@@ -193,7 +194,7 @@ impl SandboxClient {
             .auth_headers(self.client.put(&url))
             .await?
             .json(request)
-            .send()
+            .send_checked()
             .await
             .context("failed to send update environment request")?;
         Self::parse_response(response, "update environment").await
@@ -204,7 +205,7 @@ impl SandboxClient {
         let response = self
             .auth_headers(self.client.delete(&url))
             .await?
-            .send()
+            .send_checked()
             .await
             .context("failed to send delete environment request")?;
         Self::check_response(response, "delete environment").await

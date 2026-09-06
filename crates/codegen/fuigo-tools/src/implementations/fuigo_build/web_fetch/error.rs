@@ -36,6 +36,9 @@ pub enum WebFetchError {
     #[error("HTTP request failed: {0}")]
     HttpRequest(#[from] reqwest::Error),
 
+    #[error("request blocked by egress policy: {0}")]
+    EgressPolicy(&'static str),
+
     #[error("invalid redirect URL: {0}")]
     InvalidRedirect(String),
 
@@ -56,6 +59,15 @@ pub enum WebFetchError {
 
     #[error("content body does not match claimed content type {content_type} from {url}")]
     ContentTypeMismatch { content_type: String, url: String },
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for WebFetchError {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::EgressPolicy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::HttpRequest(error),
+        }
+    }
 }
 
 /// Extra recovery guidance appended to an [`WebFetchError::SsrfBlocked`] message.

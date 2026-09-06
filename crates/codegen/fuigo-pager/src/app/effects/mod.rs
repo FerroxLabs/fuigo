@@ -2341,16 +2341,15 @@ pub(crate) fn execute(
                             .into(),
                     );
                     match acp_send(req, &tx).await {
-                        // No `meta`: an API key carries no account identity, so
-                        // there is nothing for `apply_auth_meta` to apply. Reusing
-                        // AuthComplete means the key path gets the same
-                        // become-authenticated handling as an interactive login
-                        // (view restore, stashed-prompt retry, bundle status)
-                        // rather than a second, subtly different copy of it.
-                        Ok(_) => TaskResult::AuthComplete {
+                        // Storage alone does not establish the agent's ACP auth
+                        // method. Typed and discovered keys both finish here.
+                        Ok(_) => send_authenticate(
+                            &tx,
                             request_seq,
-                            meta: None,
-                        },
+                            acp::AuthMethodId::new(fuigo_shell::agent::auth_method::FUIGO_API_KEY_METHOD_ID),
+                            false,
+                            false,
+                        ).await,
                         Err(e) => {
                             let error = e.to_string();
                             ulog::error(

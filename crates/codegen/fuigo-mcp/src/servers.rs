@@ -1,11 +1,11 @@
 //! MCP server integration using the official rmcp SDK.
 
+use fuigo_telemetry::region;
+use fuigo_telemetry::region::Parent;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
-use fuigo_telemetry::region;
-use fuigo_telemetry::region::Parent;
 
 use agent_client_protocol as acp;
 use regex::Regex;
@@ -49,19 +49,8 @@ use fuigo_tools::util::{ProcessGroup, ProcessScope};
 pub use fuigo_workspace_types::MCP_TOOL_NAME_DELIMITER;
 
 /// Reqwest 0.13 twin of the 0.12 adapters in `fuigo_extra_ca`.
-fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    fuigo_extra_ca::ensure_default_crypto_provider();
-    builder = builder.tls_backend_rustls();
-    for der in fuigo_extra_ca::extra_root_ders() {
-        match reqwest::Certificate::from_der(der) {
-            Ok(cert) => builder = builder.add_root_certificate(cert),
-            Err(e) => tracing::warn!(
-                error = %e,
-                "extra CA bundle: validated DER rejected by reqwest 0.13; skipping cert"
-            ),
-        }
-    }
-    builder
+fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    crate::http_policy::configure(builder)
 }
 
 /// Regex for strictest cross-provider tool name validation.
@@ -2006,7 +1995,7 @@ async fn discover_and_prepare_auth(
         crate::credentials::McpCredentialStoreAdapter::new(server_name.to_string(), parsed_url);
     let observed = adapter.observed();
 
-    let mut manager = match rmcp::transport::auth::AuthorizationManager::new(server_url).await {
+    let mut manager = match crate::http_policy::auth_manager(server_url).await {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(server = server_name, %e, "Failed to create OAuth manager");
@@ -2077,6 +2066,10 @@ async fn probe_anonymous_access(
     url: &str,
     headers: &[(String, String)],
 ) -> AnonymousAccess {
+    if let Err(reason) = crate::http_policy::check_url(url) {
+        tracing::warn!(server = server_name, %reason, "MCP probe blocked by egress policy");
+        return AnonymousAccess::Unreachable;
+    }
     // Redirects are not followed: a gateway that redirects an anonymous POST to a login page is challenging, not accepting
     // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
     #[allow(clippy::disallowed_methods)]
@@ -3707,12 +3700,11 @@ impl McpClient {
                 .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
                 // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow
                 // The struct is non_exhaustive, so build with a throwaway manager and swap in the shared one
-                let placeholder_manager =
-                    rmcp::transport::auth::AuthorizationManager::new(config.url.as_str())
-                        .await
-                        .map_err(|e| {
-                            McpError::ClientError(format!("Failed to build OAuth client: {e}"))
-                        })?;
+                let placeholder_manager = crate::http_policy::auth_manager(config.url.as_str())
+                    .await
+                    .map_err(|e| {
+                        McpError::ClientError(format!("Failed to build OAuth client: {e}"))
+                    })?;
                 let mut auth_client =
                     rmcp::transport::auth::AuthClient::new(http_client, placeholder_manager);
                 auth_client.auth_manager = auth_manager.clone();
@@ -4093,8 +4085,7 @@ impl McpClient {
         &self,
         mcp_state: Arc<Mutex<McpState>>,
     ) -> Result<Vec<McpToolRegistration>, McpError> {
-        let _ensure_init_timer =
-            fuigo_telemetry::instrumentation::timer("mcp_ensure_initialized");
+        let _ensure_init_timer = fuigo_telemetry::instrumentation::timer("mcp_ensure_initialized");
         let mcp_service = self.ensure_initialized().await?;
 
         let mut all_tools = Vec::new();
@@ -4398,6 +4389,7 @@ fn stdio_path_override(env: &[acp::EnvVariable]) -> Option<&str> {
 }
 
 fn apply_stdio_env(cmd: &mut Command, env: &[acp::EnvVariable], session_id: Option<&str>) {
+    fuigo_tools::util::apply_shell_environment_policy(cmd, None);
     for env_variable in env {
         cmd.env(&env_variable.name, &env_variable.value);
     }
@@ -4497,14 +4489,12 @@ pub async fn start_mcp_server(
             .await
             .map_err(|e| {
                 tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
-                fuigo_telemetry::session_ctx::log_event(
-                    fuigo_telemetry::events::McpServerFailed {
-                        server_name: name.clone(),
-                        error_type: fuigo_telemetry::events::McpErrorType::SpawnFailed,
-                        duration_ms: spawn_start.elapsed().as_millis() as u64,
-                        timeout_sec: startup_timeout,
-                    },
-                );
+                fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::McpServerFailed {
+                    server_name: name.clone(),
+                    error_type: fuigo_telemetry::events::McpErrorType::SpawnFailed,
+                    duration_ms: spawn_start.elapsed().as_millis() as u64,
+                    timeout_sec: startup_timeout,
+                });
                 McpError::SpawnFailed {
                     server: name.clone(),
                     source: e,

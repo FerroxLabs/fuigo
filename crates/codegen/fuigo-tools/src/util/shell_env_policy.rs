@@ -1,5 +1,5 @@
 //! Controls which environment variables agent subprocesses (bash tool,
-//! terminals) inherit. Default is a no-op (inherit everything); enforced at the
+//! terminals) inherit. Always excludes ambient known provider credentials; enforced at the
 //! shell spawn sites on macOS, Linux, and Windows.
 
 use serde::Deserialize;
@@ -39,7 +39,7 @@ pub enum ShellEnvironmentPolicyInherit {
 /// `include_only` is non-empty, keep only those. Patterns are case-insensitive
 /// globs (`*`, `?`).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ShellEnvironmentPolicy {
     pub inherit: ShellEnvironmentPolicyInherit,
     /// Skip the built-in secret excludes (default `true`).
@@ -59,7 +59,10 @@ impl Default for ShellEnvironmentPolicy {
         Self {
             inherit: ShellEnvironmentPolicyInherit::All,
             ignore_default_excludes: true,
-            exclude: Vec::new(),
+            exclude: ["FUIGO_API_KEY", "FUIGO_CODE_API_KEY"]
+                .into_iter()
+                .map(EnvironmentVariablePattern::new_case_insensitive)
+                .collect(),
             set: HashMap::new(),
             include_only: Vec::new(),
         }
@@ -67,13 +70,9 @@ impl Default for ShellEnvironmentPolicy {
 }
 
 impl ShellEnvironmentPolicy {
-    /// True when the policy leaves the inherited environment untouched.
+    /// The mandatory credential baseline means no policy is a no-op.
     pub fn is_noop(&self) -> bool {
-        self.inherit == ShellEnvironmentPolicyInherit::All
-            && self.ignore_default_excludes
-            && self.exclude.is_empty()
-            && self.set.is_empty()
-            && self.include_only.is_empty()
+        false // The mandatory credential baseline always applies.
     }
 
     /// True if `name` matches a built-in secret exclude and those are enabled.
@@ -95,7 +94,8 @@ impl ShellEnvironmentPolicy {
     /// in after the policy base, e.g. login-shell capture. Shares its matchers
     /// with [`create_env_from_vars`] so the two cannot drift.
     pub fn allows(&self, name: &str) -> bool {
-        !self.matches_default_exclude(name)
+        !is_provider_credential(name)
+            && !self.matches_default_exclude(name)
             && !self.matches_exclude(name)
             && self.matches_include_only(name)
     }
@@ -117,6 +117,28 @@ impl ShellEnvironmentPolicy {
         }
         self.allows(name)
     }
+}
+
+/// Ambient provider credentials never cross a subprocess boundary implicitly.
+pub const PROVIDER_CREDENTIAL_NAMES: &[&str] = &[
+    "FUIGO_API_KEY",
+    "FUIGO_CODE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
+    "GROK_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MISTRAL_API_KEY",
+];
+
+pub fn is_provider_credential(name: &str) -> bool {
+    PROVIDER_CREDENTIAL_NAMES
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(name))
 }
 
 /// Built-in secret excludes applied when `ignore_default_excludes` is false.
@@ -192,7 +214,7 @@ where
     // Order matters: default excludes, then `exclude`, then `set`, then
     // `include_only`. `set` lands before `include_only` so an unmatched set name
     // is still dropped. The matchers are shared with `allows`.
-    env.retain(|k, _| !policy.matches_default_exclude(k));
+    env.retain(|k, _| !is_provider_credential(k) && !policy.matches_default_exclude(k));
     env.retain(|k, _| !policy.matches_exclude(k));
     for (k, v) in &policy.set {
         env.insert(k.clone(), v.clone());
@@ -223,13 +245,42 @@ pub(crate) fn install_policy_base_env(
 }
 
 /// Install the policy-derived base env on `cmd` (clearing inherited env first);
-/// a `None` or no-op policy leaves it untouched. Call before any other
+/// `None` uses the default policy. Call before any other
 /// `.env`/`.envs`.
 pub fn apply_shell_environment_policy(
     cmd: &mut tokio::process::Command,
     policy: Option<&ShellEnvironmentPolicy>,
 ) {
-    install_policy_base_env(cmd, policy.filter(|p| !p.is_noop()));
+    let default_policy = ShellEnvironmentPolicy::default();
+    let policy = policy.unwrap_or(&default_policy);
+    install_policy_base_env(cmd, Some(policy).filter(|p| !p.is_noop()));
+}
+
+#[cfg(test)]
+pub(crate) fn t05_fresh_process(test_name: &str) -> bool {
+    if std::env::var("T05_CHILD_TEST").as_deref() == Ok(test_name) {
+        return false;
+    }
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".bashrc"), "export OpEnAi_ApI_KeY=fake-rc\nexport T05_BENIGN=kept\nalias t05_alias='printf alias-ok'\nt05_fn() { printf function-ok; }\n").unwrap();
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.arg(test_name)
+        .args(["--test-threads=1", "--nocapture"])
+        .env("T05_CHILD_TEST", test_name)
+        .env("HOME", home.path())
+        .env("FUIGO_HOME", home.path().join(".fuigo"))
+        .env("SHELL", "/bin/bash")
+        .env("FUIGO_LOGIN_ENV", "1");
+    for name in PROVIDER_CREDENTIAL_NAMES {
+        cmd.env(name, "fake-t05-ambient");
+    }
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "isolated T05 child test failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    true
 }
 
 #[cfg(test)]

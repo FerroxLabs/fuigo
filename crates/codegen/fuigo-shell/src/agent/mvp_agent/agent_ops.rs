@@ -2108,17 +2108,13 @@ impl MvpAgent {
             .or_else(|| jwt_tier_claim(&auth.key));
         tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
     }
-    /// Both BYOK and session (OAuth) users go direct to `fuigo_api_base_url`.
-    /// `sampling_config.api_key` carries the OAuth bearer for session users (the `api_key_provider` refreshes it per request).
-    /// So IC authenticates and meters Imagine usage per-user.
+    /// Imagine tools go direct to `fuigo_api_base_url`. Their live provider
+    /// resolves the destination-owned credential per operation; the inference
+    /// model credential is intentionally not copied into this config.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> fuigo_tools::implementations::fuigo_build::image_gen::ImageGenConfig {
         use fuigo_tools::implementations::fuigo_build::image_gen::ImageGenConfig;
-        let sampling_config = self.sampling_config.borrow();
-        let Some(ref api_key) = sampling_config.api_key else {
-            return ImageGenConfig::Disabled;
-        };
         let tier_restricted = self.is_tier_restricted_capability();
         let cfg = self.cfg.borrow();
         let base_url = cfg.endpoints.fuigo_api_base_url.clone();
@@ -2136,7 +2132,7 @@ impl MvpAgent {
             &base_url,
         );
         ImageGenConfig::Enabled {
-            api_key: api_key.clone(),
+            api_key: String::new(),
             base_url,
             extra_headers: headers,
             image_gen_enabled: cfg.resolve_image_gen().value,
@@ -2162,9 +2158,6 @@ impl MvpAgent {
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
-        let Some(api_key) = self.sampling_config.borrow().api_key.clone() else {
-            return VideoGenConfig::Disabled;
-        };
         let tier_restricted = self.is_tier_restricted_capability();
         let zdr_video_output_s3 = cfg
             .disable_zdr_incompatible_tools
@@ -2191,7 +2184,7 @@ impl MvpAgent {
             &base_url,
         );
         VideoGenConfig::Enabled {
-            api_key,
+            api_key: String::new(),
             base_url,
             extra_headers: headers,
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),

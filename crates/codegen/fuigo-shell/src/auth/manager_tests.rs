@@ -4574,3 +4574,190 @@ async fn devbox_recovery_short_circuits_on_a_credential_someone_else_landed() {
         .expect("a different live credential is a recovery");
     assert_eq!(auth.key, "landed-by-a-sibling-task");
 }
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn voice_credential_is_owned_by_the_destination() {
+    use fuigo_test_support::EnvGuard;
+    let Some(dir) = fuigo_test_support::env::fresh_process_home(
+        "auth::manager::tests::voice_credential_is_owned_by_the_destination",
+    ) else {
+        return;
+    };
+    let _auth = EnvGuard::unset("FUIGO_AUTH");
+    let _auth_path = EnvGuard::unset("FUIGO_AUTH_PATH");
+    let _env = EnvGuard::unset("FUIGO_API_KEY");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    std::fs::write(
+        dir.as_path().join("config.toml"),
+        "[endpoints]\nfuigo_api_base_url = \"https://voice-owner.example/v1\"\n",
+    )
+    .unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.as_path(), FuigoComConfig::default()));
+    mgr.set_process_static_api_key(Some("another-provider-secret".into()));
+    let endpoint = "https://voice-owner.example/v1/audio/transcriptions";
+    assert_eq!(
+        mgr.voice_api_key_for(endpoint).await,
+        None,
+        "a model credential with no destination ownership must never reach voice"
+    );
+    crate::auth::store_api_key(dir.as_path(), "owned-key").unwrap();
+    assert_eq!(
+        mgr.voice_api_key_for(endpoint).await.as_deref(),
+        Some("owned-key")
+    );
+    for other in [
+        "https://other.example/v1",
+        "http://voice-owner.example/v1",
+        "https://voice-owner.example:8443/v1",
+    ] {
+        assert_eq!(mgr.voice_api_key_for(other).await, None, "{other}");
+    }
+    let blocked = Arc::new(AuthManager::new(
+        dir.as_path(),
+        FuigoComConfig {
+            disable_api_key_auth: Some(true),
+            ..FuigoComConfig::default()
+        },
+    ));
+    assert_eq!(blocked.voice_api_key_for(endpoint).await, None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn t04_auxiliary_credentials_are_live_and_never_borrow_the_process_model_key() {
+    use fuigo_test_support::EnvGuard;
+    use fuigo_tools::types::ApiKeyProvider as _;
+    use fuigo_tools::types::api_key_provider::{
+        CredentialPurpose, CredentialRequest, CredentialResolution,
+    };
+
+    let Some(dir) = fuigo_test_support::env::fresh_process_home(
+        "auth::manager::tests::t04_auxiliary_credentials_are_live_and_never_borrow_the_process_model_key",
+    ) else {
+        return;
+    };
+    let _auth = EnvGuard::unset("FUIGO_AUTH");
+    let _auth_path = EnvGuard::unset("FUIGO_AUTH_PATH");
+    let _env = EnvGuard::unset("FUIGO_API_KEY");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    std::fs::write(
+        dir.as_path().join("config.toml"),
+        "[endpoints]\nfuigo_api_base_url = \"https://media-owner.example/v1\"\n",
+    )
+    .unwrap();
+    let manager = Arc::new(AuthManager::new(dir.as_path(), FuigoComConfig::default()));
+    manager.set_process_static_api_key(Some("inference-model-secret".into()));
+    let provider = SharedAuthKeyProvider(manager);
+    let request = || CredentialRequest {
+        purpose: CredentialPurpose::ImageGeneration,
+        recipient: "https://media-owner.example/v1/images/generations",
+        model: None,
+    };
+
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Denied,
+        "the process inference key must not authenticate image generation"
+    );
+    crate::auth::store_api_key(dir.as_path(), "destination-key-1").unwrap();
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Resolved("destination-key-1".into())
+    );
+    crate::auth::store_api_key(dir.as_path(), "destination-key-2").unwrap();
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Resolved("destination-key-2".into()),
+        "each operation must observe credential rotation"
+    );
+    crate::auth::clear_api_key(dir.as_path()).unwrap();
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Denied,
+        "revocation must not fall back to the process key"
+    );
+    assert_eq!(
+        provider
+            .credential_for(CredentialRequest {
+                purpose: CredentialPurpose::VideoPoll,
+                recipient: "https://other.example/v1/videos/7",
+                model: None,
+            })
+            .await,
+        CredentialResolution::Denied
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn t04_web_search_keeps_its_model_credential_pair_live() {
+    use fuigo_test_support::EnvGuard;
+    use fuigo_tools::types::ApiKeyProvider as _;
+    use fuigo_tools::types::api_key_provider::{
+        CredentialPurpose, CredentialRequest, CredentialResolution,
+    };
+
+    let Some(dir) = fuigo_test_support::env::fresh_process_home(
+        "auth::manager::tests::t04_web_search_keeps_its_model_credential_pair_live",
+    ) else {
+        return;
+    };
+    let _auth = EnvGuard::unset("FUIGO_AUTH");
+    let _auth_path = EnvGuard::unset("FUIGO_AUTH_PATH");
+    let _legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    let _global = EnvGuard::set("FUIGO_API_KEY", "global-auxiliary-key");
+    let config_path = dir.as_path().join("config.toml");
+    let write_search_key = |key: &str| {
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[models]
+web_search = "paired-search"
+
+[model.paired-search]
+model = "paired-search"
+base_url = "https://search-owner.example/v1"
+api_key = "{key}"
+context_window = 256000
+api_backend = "responses"
+"#,
+            ),
+        )
+        .unwrap();
+    };
+    write_search_key("search-key-1");
+    let manager = Arc::new(AuthManager::new(dir.as_path(), FuigoComConfig::default()));
+    manager.set_process_static_api_key(Some("inference-model-key".into()));
+    let provider = SharedAuthKeyProvider(manager);
+    let request = || CredentialRequest {
+        purpose: CredentialPurpose::WebSearch,
+        recipient: "https://search-owner.example/v1/responses",
+        model: Some("paired-search"),
+    };
+
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Resolved("search-key-1".into())
+    );
+    write_search_key("search-key-2");
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Resolved("search-key-2".into()),
+        "web search must resolve its paired model credential on every operation"
+    );
+    std::fs::write(
+        &config_path,
+        "[endpoints]\nfuigo_api_base_url = \"https://api-owner.example/v1\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        provider.credential_for(request()).await,
+        CredentialResolution::Denied,
+        "removing the search pairing must not expose the global or process credential"
+    );
+}

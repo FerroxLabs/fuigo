@@ -792,3 +792,73 @@ fn auth_complete_preserves_show_resolved_model_when_absent() {
 
     assert!(!app.show_resolved_model);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn typed_and_discovered_keys_complete_acp_authentication() {
+    use fuigo_acp_lib::AcpAgentMessage;
+    use fuigo_test_support::EnvGuard;
+    let _key = EnvGuard::set("FUIGO_API_KEY", "sk-test-first-run-key");
+    for discovered in [false, true] {
+        let mut app = test_app_with_agent();
+        let effects = if discovered {
+            dispatch(Action::UseDetectedKey("FUIGO_API_KEY".into()), &mut app)
+        } else {
+            dispatch(Action::EnterApiKey, &mut app);
+            dispatch(
+                Action::SubmitApiKey(crate::app::actions::SecretKey(
+                    "sk-test-first-run-key".into(),
+                )),
+                &mut app,
+            )
+        };
+        assert!(matches!(
+            app.auth_state,
+            crate::app::app_view::AuthState::Authenticating { .. }
+        ));
+        let effect = effects
+            .into_iter()
+            .find(|e| matches!(e, Effect::SubmitApiKey { .. }))
+            .expect("key submission");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        crate::app::effects::execute(
+            effect,
+            &mut tasks,
+            &tx,
+            std::path::Path::new("."),
+            &Default::default(),
+            &progress_tx,
+        );
+        let AcpAgentMessage::ExtMethod(store) = rx.recv().await.unwrap() else {
+            panic!("store first")
+        };
+        let raw =
+            serde_json::value::to_raw_value(&serde_json::json!({"result": {"ok": true}})).unwrap();
+        store
+            .response_tx
+            .send(Ok(agent_client_protocol::ExtResponse::new(
+                std::sync::Arc::from(raw),
+            )))
+            .unwrap();
+        let message = tokio::select! {
+            message = rx.recv() => message.expect("authenticate request"),
+            result = tasks.join_next() => panic!("UI completed before authentication: {result:?}"),
+        };
+        let AcpAgentMessage::Authenticate(auth) = message else {
+            panic!("authenticate next")
+        };
+        assert_eq!(auth.request.method_id.0.as_ref(), "fuigo.api_key");
+        auth.response_tx
+            .send(Ok(agent_client_protocol::AuthenticateResponse::new()))
+            .unwrap();
+        let result = tasks.join_next().await.unwrap().unwrap();
+        assert!(matches!(result, TaskResult::AuthComplete { .. }));
+        dispatch(Action::TaskComplete(result), &mut app);
+        assert!(matches!(
+            app.auth_state,
+            crate::app::app_view::AuthState::Done
+        ));
+    }
+}

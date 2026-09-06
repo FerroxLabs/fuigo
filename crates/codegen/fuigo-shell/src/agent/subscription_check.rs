@@ -11,6 +11,7 @@ use crate::auth::AuthManager;
 use crate::auth::UserInfo;
 use crate::auth::manager::{BEST_EFFORT_REFRESH_TIMEOUT, BoundedRefresh, RefreshReason};
 use crate::auth::token_type::TokenType;
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 use std::time::Duration;
 /// Any active subscription qualifies: the proxy only returns a tier when an active subscription exists (`None` otherwise).
@@ -53,7 +54,7 @@ async fn fetch_user_info(
             crate::http::process_client_mode(),
         );
     let _ = alpha_test_key;
-    match request.send().await {
+    match request.send_checked().await {
         Ok(resp) if resp.status().is_success() => {
             resp.json::<UserInfo>().await.map_err(|_| "parse")
         }

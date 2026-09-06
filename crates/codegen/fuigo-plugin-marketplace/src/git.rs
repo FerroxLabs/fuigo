@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn cache_hash_is_deterministic() {
-        let url = "https://github.com/fuigo-org/fuigo-plugin-marketplace.git";
+        let url = "https://github.com/FerroxLabs/plugin-marketplace.git";
         let h1 = cache_hash(url);
         let h2 = cache_hash(url);
         assert_eq!(h1, h2);

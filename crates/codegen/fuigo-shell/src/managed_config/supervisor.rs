@@ -115,7 +115,7 @@ async fn fetch_managed_config_once(
             value,
         );
     }
-    let resp = match request.send().await {
+    let resp = match fuigo_extra_ca::dispatch::send(request).await {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
             let status = r.status().as_u16();
@@ -126,7 +126,10 @@ async fn fetch_managed_config_once(
                 ManagedConfigError::ServerError { status }
             });
         }
-        Err(e) => {
+        Err(fuigo_extra_ca::dispatch::DispatchError::Denied(reason)) => {
+            return Err(ManagedConfigError::EgressPolicy(reason));
+        }
+        Err(fuigo_extra_ca::dispatch::DispatchError::Transport(e)) => {
             let err = map_send_error(&e);
             tracing::debug!(error = %err, "managed config fetch error");
             return Err(err);

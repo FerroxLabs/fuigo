@@ -1,6 +1,7 @@
 //! The grok.com chat model catalog (`POST /rest/modes`): the models fuigo-web's chat picker shows, distinct from the CLI `/v1/models` build catalog.
 //! Transport only; the cache and the ACP mapping live in [`crate::agent::chat_modes`].
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -65,10 +66,21 @@ pub enum ChatModelsError {
     Timeout,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
+    #[error("request blocked by egress policy: {0}")]
+    Policy(&'static str),
     #[error("request failed: {status}")]
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+}
+
+impl From<fuigo_extra_ca::dispatch::DispatchError> for ChatModelsError {
+    fn from(error: fuigo_extra_ca::dispatch::DispatchError) -> Self {
+        match error {
+            fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => Self::Policy(reason),
+            fuigo_extra_ca::dispatch::DispatchError::Transport(error) => Self::Network(error),
+        }
+    }
 }
 
 /// Stateless transport for `POST /rest/modes`; caching lives in [`crate::agent::chat_modes::ChatModesManager`].
@@ -140,7 +152,7 @@ impl ChatModelsClient {
         }
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
 
-        let response = builder.send().await?;
+        let response = builder.send_checked().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ChatModelsError::Http {
@@ -201,5 +213,16 @@ mod tests {
         // With no availability field on the wire, the mode is not selectable
         assert!(!m.is_available());
         assert!(resp.default_mode_id.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn egress_policy_denial_preserves_its_category() {
+        let error =
+            ChatModelsError::from(fuigo_extra_ca::dispatch::DispatchError::Denied("blocked"));
+        assert!(matches!(error, ChatModelsError::Policy("blocked")));
     }
 }

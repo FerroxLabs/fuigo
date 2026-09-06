@@ -808,6 +808,33 @@ impl TokenUsage {
         span.record("reasoning_tokens", self.reasoning_tokens);
         span.record("cached_prompt_tokens", self.cached_prompt_tokens);
     }
+
+    /// Add usage reported by a distinct provider attempt.
+    pub fn saturating_add_assign(&mut self, other: &Self) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
+        self.cached_prompt_tokens = self
+            .cached_prompt_tokens
+            .saturating_add(other.cached_prompt_tokens);
+        self.cache_creation_prompt_tokens = self
+            .cache_creation_prompt_tokens
+            .saturating_add(other.cache_creation_prompt_tokens);
+    }
+}
+
+/// Latest provider-reported accounting snapshot for one dispatched attempt.
+///
+/// `unknown_liability` is conservative: it remains true until the attempt reaches a
+/// provider terminal with a usage report. Cancellation never implies a refund.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AttemptAccounting {
+    pub usage: Option<TokenUsage>,
+    pub cost_usd_ticks: Option<i64>,
+    pub unknown_liability: bool,
 }
 
 impl From<Usage> for TokenUsage {

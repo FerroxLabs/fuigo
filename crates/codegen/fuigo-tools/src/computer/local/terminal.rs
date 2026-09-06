@@ -640,7 +640,7 @@ impl LocalTerminalActor {
 
         #[cfg(unix)]
         if self.login_env.is_none() {
-            self.login_env = Some(capture_login_env().await);
+            self.login_env = Some(capture_login_env(self.shell_env_policy.as_ref()).await);
         }
 
         #[cfg(unix)]
@@ -671,14 +671,20 @@ impl LocalTerminalActor {
         let (snapshot, login_env) = tokio::join!(
             async {
                 if self.static_shell.is_none() {
-                    Some(super::static_shell::StaticShellSnapshot::init(cwd).await)
+                    Some(
+                        super::static_shell::StaticShellSnapshot::init_with_policy(
+                            cwd,
+                            self.shell_env_policy.as_ref(),
+                        )
+                        .await,
+                    )
                 } else {
                     None
                 }
             },
             async {
                 if self.login_env.is_none() {
-                    Some(capture_login_env().await)
+                    Some(capture_login_env(self.shell_env_policy.as_ref()).await)
                 } else {
                     None
                 }
@@ -1040,7 +1046,7 @@ impl LocalTerminalActor {
                 } else if self.login_shell_capture && login_env_capture_enabled() {
                     self.ensure_static_shell_initialized(&cwd).await;
                 } else if self.login_env.is_none() {
-                    self.login_env = Some(capture_login_env().await);
+                    self.login_env = Some(capture_login_env(self.shell_env_policy.as_ref()).await);
                 }
                 #[cfg(not(unix))]
                 let _ = cwd;
@@ -3020,6 +3026,7 @@ fn parse_login_env_capture(stdout: &str) -> (Option<String>, HashMap<String, Str
                 && !key.is_empty()
                 && key != "PATH"
                 && !login_env_var_excluded(key)
+                && !crate::util::shell_env_policy::is_provider_credential(key)
             {
                 env_map.insert(key.to_string(), value.to_string());
             }
@@ -3029,7 +3036,9 @@ fn parse_login_env_capture(stdout: &str) -> (Option<String>, HashMap<String, Str
 }
 
 #[cfg(unix)]
-async fn capture_login_env() -> HashMap<String, String> {
+async fn capture_login_env(
+    policy: Option<&crate::util::ShellEnvironmentPolicy>,
+) -> HashMap<String, String> {
     use tokio::io::AsyncReadExt;
 
     let shell = shell_state::ShellKind::detect();
@@ -3050,6 +3059,7 @@ async fn capture_login_env() -> HashMap<String, String> {
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
         fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
+        crate::util::apply_shell_environment_policy(&mut cmd, policy);
         cmd.envs(crate::util::pager_env());
         #[allow(clippy::disallowed_methods)] // probe killed on drop
         let mut child = cmd.spawn().ok()?;
@@ -3081,6 +3091,8 @@ async fn capture_login_env() -> HashMap<String, String> {
             .filter(|e| !e.is_empty() && seen.insert(*e))
             .collect();
         env_map.insert("PATH".to_string(), merged.join(":"));
+        let default_policy = crate::util::ShellEnvironmentPolicy::default();
+        env_map.retain(|key, _| policy.unwrap_or(&default_policy).allows_with_inherit(key));
 
         Some(env_map)
     })
@@ -3157,7 +3169,8 @@ fn apply_child_env(
     login_env: Option<&HashMap<String, String>>,
     request_env: &HashMap<String, String>,
 ) {
-    let active_policy = policy.filter(|p| !p.is_noop());
+    let default_policy = crate::util::ShellEnvironmentPolicy::default();
+    let active_policy = Some(policy.unwrap_or(&default_policy)).filter(|p| !p.is_noop());
     crate::util::shell_env_policy::install_policy_base_env(cmd, active_policy);
     layer_login_env_vars(cmd, login_env, active_policy);
     cmd.envs(shell_state::shell_env_overrides());
@@ -3232,7 +3245,9 @@ fn spawn_shell_command(
 
         // Mirrors the unix `apply_child_env` order; `inv.env` is fuigo's trusted
         // shell setup, so it is not filtered.
-        let active_policy = shell_env_policy.filter(|p| !p.is_noop());
+        let default_policy = crate::util::ShellEnvironmentPolicy::default();
+        let active_policy =
+            Some(shell_env_policy.unwrap_or(&default_policy)).filter(|p| !p.is_noop());
         crate::util::shell_env_policy::install_policy_base_env(&mut cmd, active_policy);
         cmd.envs(inv.env);
         layer_request_env(&mut cmd, env, active_policy);
@@ -3311,6 +3326,75 @@ mod tests {
     use super::*;
     use crate::computer::types::TaskKind;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t05_terminal_children_and_grandchildren() {
+        if crate::util::shell_env_policy::t05_fresh_process(
+            "t05_terminal_children_and_grandchildren",
+        ) {
+            return;
+        }
+        let check = "test -z \"${OPENAI_API_KEY+x}${ANTHROPIC_API_KEY+x}${OpEnAi_ApI_KeY+x}${FUIGO_API_KEY+x}\" && /bin/sh -c 'test -z \"${OPENAI_API_KEY+x}${ANTHROPIC_API_KEY+x}${OpEnAi_ApI_KeY+x}${FUIGO_API_KEY+x}\"' && printf absent";
+        for route in 0..3 {
+            let backend = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+                persistent_shell: route == 2,
+                login_shell_capture: route == 1,
+                ..Default::default()
+            });
+            let result = backend.run(make_request(check)).await.unwrap();
+            assert_eq!(result.exit_code, Some(0));
+            assert_eq!(result.combined_output.trim(), "absent");
+            let task = backend.run_background(make_request(check)).await.unwrap();
+            assert!(
+                poll_until_task_completed(&backend, &task.task_id, Duration::from_secs(10)).await
+            );
+            let task = backend.get_task(&task.task_id).await.unwrap();
+            assert_eq!(task.exit_code, Some(0));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t05_login_capture_and_replay() {
+        if crate::util::shell_env_policy::t05_fresh_process("t05_login_capture_and_replay") {
+            return;
+        }
+        let login = capture_login_env(None).await;
+        assert!(
+            login
+                .keys()
+                .all(|key| !crate::util::shell_env_policy::is_provider_credential(key))
+        );
+        let backend = LocalTerminalBackend::with_persistent_shell();
+        assert_eq!(backend.run(make_request("export OPENAI_API_KEY=fake-user; export T05_BENIGN=kept; t05_fn() { printf function-ok; }")).await.unwrap().exit_code, Some(0));
+        let result = backend.run(make_request("test -z \"${OPENAI_API_KEY+x}${OpEnAi_ApI_KeY+x}\" && test \"$T05_BENIGN\" = kept && t05_fn && /bin/sh -c 'test -z \"${OPENAI_API_KEY+x}\"'")).await.unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.combined_output.trim(), "function-ok");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t05_compatibility_and_diagnostics() {
+        let policy = crate::util::ShellEnvironmentPolicy {
+            set: HashMap::from([("OPENAI_API_KEY".into(), "fake-selected".into())]),
+            ..Default::default()
+        };
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.args(["-c", "test \"$OPENAI_API_KEY\" = fake-selected && test \"$FUIGO_AGENT\" = 1 && test -n \"$PATH\" && /bin/sh -c 'test \"$OPENAI_API_KEY\" = fake-selected' && exit 7"]);
+        apply_child_env(
+            &mut cmd,
+            Some(&policy),
+            None,
+            &HashMap::from([
+                ("OPENAI_API_KEY".into(), "fake-denied".into()),
+                ("FUIGO_AGENT".into(), "spoof".into()),
+            ]),
+        );
+        let result = cmd.output().await.unwrap();
+        assert_eq!(result.status.code(), Some(7));
+        assert!(result.stdout.is_empty() && result.stderr.is_empty());
+    }
 
     fn make_request(command: &str) -> TerminalRunRequest {
         let output_file = std::env::temp_dir().join(format!(
@@ -3424,6 +3508,38 @@ mod tests {
         assert_eq!(applied.get("SAFE_FLAG").map(String::as_str), Some("1"));
         assert!(!applied.contains_key("AWS_SECRET"));
         assert!(!applied.contains_key("OTHER"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_env_policy_excludes_captured_credentials() {
+        let login = HashMap::from([
+            ("FUIGO_API_KEY".to_owned(), "captured-secret".to_owned()),
+            ("FUIGO_TEST_LOGIN".to_owned(), "keep-login".to_owned()),
+        ]);
+        let request = HashMap::from([
+            ("FUIGO_CODE_API_KEY".to_owned(), "request-secret".to_owned()),
+            ("FUIGO_TEST_REQUEST".to_owned(), "keep-request".to_owned()),
+        ]);
+        let mut cmd = tokio::process::Command::new("true");
+        apply_child_env(&mut cmd, None, Some(&login), &request);
+        let env: HashMap<String, String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned()))
+            })
+            .collect();
+        assert!(!env.contains_key("FUIGO_API_KEY"));
+        assert!(!env.contains_key("FUIGO_CODE_API_KEY"));
+        assert_eq!(
+            env.get("FUIGO_TEST_LOGIN").map(String::as_str),
+            Some("keep-login")
+        );
+        assert_eq!(
+            env.get("FUIGO_TEST_REQUEST").map(String::as_str),
+            Some("keep-request")
+        );
     }
 
     #[cfg(unix)]

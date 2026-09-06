@@ -14,6 +14,8 @@ use std::fs::File as StdFile;
 // Positional read traits live in different modules per platform; the
 // methods we use (read_at on Unix, seek_read on Windows) have the same
 // signature, so the call site cfg-branches on the method name only.
+use fuigo_auth::AuthCredentialProvider;
+use fuigo_circuit_breaker::{BreakerConfig, BreakerOpen, CircuitBreaker, Outcome, RetryPolicy};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 #[cfg(windows)]
@@ -26,8 +28,6 @@ use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::io::ReaderStream;
-use fuigo_circuit_breaker::{BreakerConfig, BreakerOpen, CircuitBreaker, Outcome, RetryPolicy};
-use fuigo_auth::AuthCredentialProvider;
 
 use crate::circuit_breaker_observer::TracingObserver;
 
@@ -426,8 +426,7 @@ mod static_fuigo_auth_tests {
 /// `crate::http::shared_upload_client()`) to `with_provider`.
 fn default_upload_client() -> Client {
     #[expect(clippy::expect_used)]
-    fuigo_extra_ca::build_reqwest_client(|builder| builder)
-        .expect("default reqwest client builds")
+    fuigo_extra_ca::build_reqwest_client(|builder| builder).expect("default reqwest client builds")
 }
 
 /// Client for uploading files to GCS via cli-chat-proxy.
@@ -1065,12 +1064,10 @@ impl StorageClient {
         // Step 2: fetch the object via the signed URL, streaming to dest.
         // Use the raw client — signed URLs carry their own auth and must
         // NOT go through the AuthRetryMiddleware.
-        let object_resp = self
-            .raw_http_client
-            .get(&download_resp.signed_url)
-            .send()
-            .await
-            .context("Failed to fetch blob from signed URL")?;
+        let object_resp =
+            fuigo_extra_ca::dispatch::send(self.raw_http_client.get(&download_resp.signed_url))
+                .await
+                .context("Failed to fetch blob from signed URL")?;
 
         if !object_resp.status().is_success() {
             let status = object_resp.status();
@@ -1916,14 +1913,14 @@ impl StorageClient {
         data: &[u8],
         content_type: &str,
     ) -> Result<()> {
-        let response = self
-            .raw_http_client
-            .put(signed_url)
-            .header("Content-Type", content_type)
-            .body(data.to_vec())
-            .send()
-            .await
-            .context("Failed to upload via signed URL")?;
+        let response = fuigo_extra_ca::dispatch::send(
+            self.raw_http_client
+                .put(signed_url)
+                .header("Content-Type", content_type)
+                .body(data.to_vec()),
+        )
+        .await
+        .context("Failed to upload via signed URL")?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -2076,13 +2073,14 @@ async fn upload_part_direct(
         );
 
         let send_start = std::time::Instant::now();
-        match client
-            .put(signed_url)
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Length", length.to_string())
-            .body(body)
-            .send()
-            .await
+        match fuigo_extra_ca::dispatch::send(
+            client
+                .put(signed_url)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", length.to_string())
+                .body(body),
+        )
+        .await
         {
             Ok(response) => {
                 let send_elapsed = send_start.elapsed();

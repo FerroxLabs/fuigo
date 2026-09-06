@@ -6,6 +6,7 @@ edition.workspace = true
 description = "Lightweight Mixpanel HTTP tracking client (replaces mixpanel-rs to avoid pulling reqwest 0.11)"
 
 [dependencies]
+fuigo-extra-ca = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
@@ -13,4 +14,5 @@ thiserror = { workspace = true }
 fuigo-secrets = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }

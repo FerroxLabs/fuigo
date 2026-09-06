@@ -118,7 +118,9 @@ async fn resolve_to_data_url(value: &str) -> Result<String, fuigo_tool_runtime::
 
     let raw_bytes = if value.starts_with("data:image/") {
         let comma = value.find(',').ok_or_else(|| {
-            fuigo_tool_runtime::ToolError::invalid_arguments("malformed data URL in image reference")
+            fuigo_tool_runtime::ToolError::invalid_arguments(
+                "malformed data URL in image reference",
+            )
         })?;
         if !value[..comma].contains(";base64") {
             return Err(fuigo_tool_runtime::ToolError::invalid_arguments(
@@ -374,10 +376,20 @@ impl fuigo_tool_runtime::Tool for ImageEditTool {
             payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
         }
 
-        let sent_bearer = client.current_bearer().await;
-        let req = client.post_json(&url, &payload, sent_bearer.as_deref());
+        let sent_bearer = client
+            .current_bearer(
+                crate::types::api_key_provider::CredentialPurpose::ImageEdit,
+                &url,
+            )
+            .await
+            .ok_or_else(|| {
+                fuigo_tool_runtime::ToolError::unauthorized(
+                    "No credential is available for the configured image editing endpoint",
+                )
+            })?;
+        let req = client.post_json(&url, &payload, Some(&sent_bearer));
 
-        let response = req.send().await.map_err(|e| {
+        let response = fuigo_extra_ca::dispatch::send(req).await.map_err(|e| {
             fuigo_tool_runtime::ToolError::invalid_arguments(format!(
                 "Image edit API request failed: {e}"
             ))
@@ -385,7 +397,7 @@ impl fuigo_tool_runtime::Tool for ImageEditTool {
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            client.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
+            client.record_401_attribution(ToolConsumer::ImageGen, Some(&sent_bearer));
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -452,6 +464,70 @@ impl fuigo_tool_runtime::Tool for ImageEditTool {
 mod tests {
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
+
+    struct ImageEditOnlyProvider;
+
+    impl crate::types::ApiKeyProvider for ImageEditOnlyProvider {
+        fn current_api_key(&self) -> Option<String> {
+            Some("generic-process-key".into())
+        }
+
+        fn credential_for(
+            &self,
+            request: crate::types::api_key_provider::CredentialRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = crate::types::api_key_provider::CredentialResolution,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            use crate::types::api_key_provider::{CredentialPurpose, CredentialResolution};
+            let result = if request.purpose == CredentialPurpose::ImageEdit {
+                CredentialResolution::Resolved("image-edit-key".into())
+            } else {
+                CredentialResolution::Denied
+            };
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    #[tokio::test]
+    async fn t04_image_edit_requests_the_image_edit_credential() {
+        let cfg = super::super::image_gen::ImageGenConfig::Enabled {
+            api_key: "stale-image-key".into(),
+            base_url: "https://image-owner.example/v1".into(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+        };
+        let provider: crate::types::SharedApiKeyProvider =
+            std::sync::Arc::new(ImageEditOnlyProvider);
+        let client = ImageGenClient::new(&cfg, Some(provider)).unwrap();
+        let url = "https://image-owner.example/v1/images/edits";
+        let bearer = client
+            .current_bearer(
+                crate::types::api_key_provider::CredentialPurpose::ImageEdit,
+                url,
+            )
+            .await;
+        assert_eq!(bearer.as_deref(), Some("image-edit-key"));
+        let request = client
+            .post_json(url, &serde_json::json!({}), bearer.as_deref())
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer image-edit-key")
+        );
+    }
 
     #[test]
     fn tool_name_and_description() {

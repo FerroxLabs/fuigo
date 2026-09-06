@@ -300,7 +300,7 @@ uuid = { version = "1", features = ["serde", "v4", "v5"] }
 vte = "0.15.0"
 wait-timeout = "0.2"
 walkdir = "2"
-webbrowser = { version = "1.0.4" }
+webbrowser = { version = "1.2.2" }
 webpki-roots = "0.26"
 which = "8"
 whoami = "1.4"

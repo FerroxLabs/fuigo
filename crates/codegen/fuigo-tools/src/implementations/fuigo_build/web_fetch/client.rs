@@ -1,6 +1,7 @@
 //! `WebFetchClient` - shared HTTP client with cache, HTML-to-markdown
 //! conversion, URL validation, and SSRF protection.
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -369,6 +370,7 @@ async fn fetch_url(
 
     // Loop to follow redirects under the same host.
     loop {
+        fuigo_extra_ca::dispatch::check_url(&current_url)?;
         // Re-check on every hop (including the first) so a rebinding name that
         // was public at the pre-fetch check cannot become loopback/private here.
         ssrf::check_ssrf(&current_url, allow_local).await?;
@@ -381,7 +383,7 @@ async fn fetch_url(
                 "text/markdown,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             )
             .header(ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-            .send()
+            .send_checked()
             .await?;
 
         let status = resp.status();

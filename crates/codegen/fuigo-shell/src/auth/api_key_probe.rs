@@ -10,6 +10,7 @@
 //! The probe retries once within the wall budget on 429, 5xx, or transport errors.
 //! The default timeout is 400ms for the whole probe including retries; live round trips run about 250ms at p95.
 
+use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt as _;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -153,13 +154,17 @@ async fn probe_fuigo_api_key_at_url(key: &str, url: &str, timeout: Duration) -> 
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))
             .timeout(remaining);
 
-        let outcome = match request.send().await {
+        let outcome = match request.send_checked().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 let body = resp.bytes().await.unwrap_or_default();
                 classify_probe_attempt(status, &body)
             }
-            Err(_) => AttemptOutcome::Retry,
+            // A locally blocked destination says nothing about key validity.
+            Err(fuigo_extra_ca::dispatch::DispatchError::Denied(_)) => {
+                return ApiKeyProbeVerdict::Unknown;
+            }
+            Err(fuigo_extra_ca::dispatch::DispatchError::Transport(_)) => AttemptOutcome::Retry,
         };
 
         match outcome {
@@ -218,6 +223,21 @@ pub(crate) async fn first_party_env_key_allows_advertise(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn egress_policy_denial_is_unknown_without_probe_retries() {
+        let verdict = tokio::time::timeout(
+            Duration::from_secs(2),
+            probe_fuigo_api_key_at_url(
+                "fake-key",
+                "https://api.x.ai/v1/api-key",
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("policy denial must not enter network retry backoff");
+        assert_eq!(verdict, ApiKeyProbeVerdict::Unknown);
+    }
 
     #[test]
     fn probes_only_when_env_key_alone_would_suppress_login() {
