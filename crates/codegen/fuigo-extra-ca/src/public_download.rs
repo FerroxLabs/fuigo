@@ -113,6 +113,7 @@ impl PublicDownloadClient {
         self.request(Method::GET, url, Some((start, end))).await
     }
 
+    #[allow(clippy::disallowed_methods)] // Restricted methods/headers; parsed URL and redirect policy enforce admission.
     async fn request(
         &self,
         method: Method,
@@ -142,6 +143,7 @@ impl BlockingPublicDownloadClient {
         .map(Self)
     }
 
+    #[allow(clippy::disallowed_methods)] // parsed URL and redirect policy enforce public-download admission.
     pub fn get(&self, url: &str) -> Result<reqwest::blocking::Response, DownloadError> {
         self.0
             .get(parsed(url)?)

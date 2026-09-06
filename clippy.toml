@@ -32,6 +32,10 @@ large-error-threshold = 256
 # `just lint-rs` only: the Bazel lint aspect pins the repo-root config, which
 # does not carry them.
 disallowed-methods = [
+    { path = "reqwest::RequestBuilder::send", reason = "use fuigo_extra_ca::dispatch::send or send_checked so destination policy runs before proxy contact" },
+    { path = "reqwest::blocking::RequestBuilder::send", reason = "use fuigo_extra_ca::dispatch::send_blocking or send_checked so destination policy runs before proxy contact" },
+    { path = "reqwest::Client::execute", reason = "use fuigo_extra_ca::dispatch::execute; approved policy adapters require a narrow documented exception" },
+    { path = "reqwest::blocking::Client::execute", reason = "use fuigo_extra_ca::dispatch::execute_blocking; approved policy adapters require a narrow documented exception" },
     { path = "reqwest::Client::new", reason = "bypasses the fuigo TLS policy (backend pin, OS roots, FUIGO_EXTRA_CA_BUNDLE); build through fuigo_extra_ca; localhost-only clients allow with a reason" },
     { path = "reqwest::blocking::Client::new", reason = "bypasses the fuigo TLS policy (backend pin, OS roots, FUIGO_EXTRA_CA_BUNDLE); build through fuigo_extra_ca; localhost-only clients allow with a reason" },
     { path = "reqwest::ClientBuilder::build", reason = "use fuigo_extra_ca::build_reqwest_client: it applies the fuigo TLS policy and survives a broken OS store; localhost/test clients allow with a reason" },

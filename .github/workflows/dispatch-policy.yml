@@ -1,0 +1,56 @@
+name: checked HTTP dispatch
+on:
+  push:
+    branches: [main, release/audit-1.0.6]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dispatch-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '4'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare pinned tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup component add clippy
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: checked-dispatch
+          cache-on-failure: true
+      - name: Prove dispatch lint controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dispatch-receipts
+          cargo clippy --locked -p fuigo-extra-ca --example dispatch_lint_control --no-deps -- -D clippy::disallowed_methods
+          if cargo clippy --locked -p fuigo-extra-ca --example dispatch_lint_control --no-deps -- --cfg f06_raw_dispatch -D clippy::disallowed_methods >dispatch-receipts/negative.log 2>&1; then
+            echo 'Unchecked dispatch unexpectedly compiled'; exit 1
+          fi
+          for method in 'reqwest::RequestBuilder::send' 'reqwest::Client::execute' 'reqwest::blocking::RequestBuilder::send' 'reqwest::blocking::Client::execute'; do
+            grep -F "error: use of a disallowed method \`$method\`" dispatch-receipts/negative.log
+          done
+      - name: Check shipping libraries and binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --workspace --lib --bins --no-deps -- -D clippy::disallowed_methods 2>&1 | tee dispatch-receipts/shipping.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dispatch-policy-receipts
+          path: dispatch-receipts/
+          if-no-files-found: error
