@@ -1,0 +1,55 @@
+name: F13 focused test reliability
+on:
+  push:
+    branches: [release/audit-1.0.6]
+    paths:
+      - .github/workflows/f13-test-reliability.yml
+      - crates/codegen/fuigo-shell/src/session/acp_session_tests/auto_wake_suppression_tests.rs
+      - crates/codegen/fuigo-shell/src/session/acp_session_tests/prompt_queue_actor_tests.rs
+      - crates/codegen/fuigo-shell/src/leader/mod.rs
+      - crates/codegen/fuigo-workspace/src/hub_server_tests.rs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '4'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare pinned protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: f13-focused-debug
+          cache-on-failure: true
+      - name: Run recorded failures and focused controls
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p f13-receipts
+          failed=0
+          for filter in auto_wake_suppression_tests drain_at_safe_point_with_steer_ policy_reclaim_requires_client_spawn_marker; do
+            cargo test --locked -p fuigo-shell --lib "$filter" -- --test-threads=1 2>&1 | tee "f13-receipts/$filter.log" || failed=1
+          done
+          cargo test --locked -p fuigo-workspace --lib tasks_snapshot_excludes_foreground_and_completed_processes -- --test-threads=1 2>&1 | tee f13-receipts/workspace-snapshot.log || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: f13-focused-receipts
+          path: f13-receipts/
+          if-no-files-found: error
