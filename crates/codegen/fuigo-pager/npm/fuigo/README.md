@@ -2,7 +2,7 @@
 
 **An engine for AI that can act, collaborate, and remember.**
 
-Fuigo is a general-purpose, multi-provider AI agent engine for research, analysis, creation, and work across connected tools. Its Rust runtime provides execution, persistent sessions, subagents, permission controls, and optional cross-session memory. Built-in tools work with files, search, and terminal commands; configured MCP servers extend its reach into external services.
+Fuigo is a general-purpose, multi-provider AI agent engine for research, analysis, creation, and work across connected tools. Its Rust runtime provides execution, persistent sessions, subagents, permission controls, and workspace-scoped cross-session memory. Built-in tools work with files, search, and terminal commands; configured MCP servers extend its reach into external services.
 
 Work alongside it in the terminal, request files or structured outputs from a script, or use ACP to build your own application interface. Specialized document formats and external operations depend on the tools you connect.
 
@@ -83,7 +83,7 @@ fuigo agent --model chatgpt-subscription stdio
 
 For Grok subscriptions, Flux Router, and compatible gateways, follow the [full setup guide](https://github.com/FerroxLabs/fuigo#connect-a-model). The [custom-model guide](https://github.com/FerroxLabs/fuigo/blob/main/crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md) also includes local Ollama configuration. Features depend on the selected model and protocol. Subscription login does not import other applications' credentials, and a subscription denial does not silently fall back to a paid API key.
 
-Memory is disabled by default. Enable `[memory] enabled = true` in your configuration, then use `/remember`, `/flush`, `/dream`, and `/memory`. Lexical memory search needs no embedding service.
+Fuigo 1.0.8 enables local workspace memory by default. Global sharing, remote embeddings and automatic background model processing are opt-in. Use `/remember`, `/flush`, `/dream`, and `/memory` to manage it; set `[memory] enabled = false` to disable it. Applications can choose their own policy. Lexical search needs no embedding service.
 
 ## Update
 

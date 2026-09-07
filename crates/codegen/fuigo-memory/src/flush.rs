@@ -282,43 +282,43 @@ pub async fn is_semantically_duplicate(
 mod tests {
     use super::*;
 
-    fn default_flush_config() -> MemoryFlushConfig {
-        MemoryFlushConfig::default()
+    fn enabled_flush_config() -> MemoryFlushConfig {
+        MemoryFlushConfig { enabled: true, ..MemoryFlushConfig::default() }
     }
 
     #[test]
     fn test_should_flush_disabled() {
         let config = MemoryFlushConfig {
             enabled: false,
-            ..default_flush_config()
+            ..enabled_flush_config()
         };
         assert!(!should_flush(90_000, 100_000, 85, &config, 0, 1));
     }
 
     #[test]
     fn test_should_flush_already_flushed_this_cycle() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         // Equal counters mean the flush already ran this cycle
         assert!(!should_flush(90_000, 100_000, 85, &config, 1, 1));
     }
 
     #[test]
     fn test_should_flush_below_threshold() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         // 85% of the 100K window is 85K; minus the default 4K soft threshold, the flush point is 81K
         assert!(!should_flush(50_000, 100_000, 85, &config, 0, 1));
     }
 
     #[test]
     fn test_should_flush_at_threshold() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         // 85% of the 100K window is 85K; minus the default 4K soft threshold, the flush point is 81K
         assert!(should_flush(81_000, 100_000, 85, &config, 0, 1));
     }
 
     #[test]
     fn test_should_flush_above_threshold() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         assert!(should_flush(83_000, 100_000, 85, &config, 0, 1));
     }
 
@@ -326,7 +326,7 @@ mod tests {
     fn test_should_flush_custom_soft_threshold() {
         let config = MemoryFlushConfig {
             soft_threshold_tokens: 10_000,
-            ..default_flush_config()
+            ..enabled_flush_config()
         };
         // 85% of the 100K window is 85K; minus the 10K soft threshold, the flush point is 75K
         assert!(!should_flush(74_000, 100_000, 85, &config, 0, 1));
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_should_flush_different_compaction_cycles() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         // The counter is pre-incremented to 1 in run_compact, so the first cycle sees (0, 1)
         assert!(should_flush(82_000, 100_000, 85, &config, 0, 1));
         // After the flush the counters match, blocking a second flush this cycle
@@ -349,7 +349,7 @@ mod tests {
         // With cw=10_001, pct=85, soft=4_000, the scaled boundary is used*100 >= 10_001*85 - 4_000*100 = 450_085, so the flush starts at used 4_501
         let config = MemoryFlushConfig {
             soft_threshold_tokens: 4_000,
-            ..default_flush_config()
+            ..enabled_flush_config()
         };
         assert!(!should_flush(4_499, 10_001, 85, &config, 0, 1));
         assert!(!should_flush(4_500, 10_001, 85, &config, 0, 1));
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_should_flush_same_counter_values_blocks() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         // Equal counters fire the "already flushed this cycle" guard
         // Both at 0 is the initial state; the pre-increment in maybe_pre_compaction_flush() keeps this from blocking the first flush
         assert!(!should_flush(82_000, 100_000, 85, &config, 0, 0));
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_flush_response_empty() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         assert_eq!(
             process_flush_response("", &config),
             FlushResult::NothingToStore
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_flush_response_no_reply_variants() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         assert_eq!(
             process_flush_response("NO_REPLY", &config),
             FlushResult::NothingToStore
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_flush_response_accepted() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         let content = "## Key Decisions\n\nWe chose Rust for performance.";
         assert_eq!(
             process_flush_response(content, &config),
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_flush_response_rejected_no_headers() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         let content = "Just some plain text without any markdown headers at all.";
         assert!(matches!(
             process_flush_response(content, &config),
@@ -435,7 +435,7 @@ mod tests {
     fn test_flush_response_truncated() {
         let config = MemoryFlushConfig {
             max_flush_write_chars: 50,
-            ..default_flush_config()
+            ..enabled_flush_config()
         };
         let content = format!("# Title\n\n{}", "x".repeat(100));
         let result = process_flush_response(&content, &config);
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_flush_response_h1_header_accepted() {
-        let config = default_flush_config();
+        let config = enabled_flush_config();
         let content = "# Top Level\n\nSome content.";
         assert!(matches!(
             process_flush_response(content, &config),

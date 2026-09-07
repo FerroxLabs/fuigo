@@ -1937,7 +1937,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Save a remember note to global MEMORY.md (async file write).
+    /// Save a remember note to workspace MEMORY.md (async file write).
     SaveMemoryNote {
         agent_id: AgentId,
         text: String,
@@ -2801,7 +2801,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         error: Option<String>,
     },
-    /// Memory note saved to global MEMORY.md.
+    /// Memory note saved to workspace MEMORY.md.
     MemoryNoteSaved {
         agent_id: AgentId,
         result: Result<(), String>,

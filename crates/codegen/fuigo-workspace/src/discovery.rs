@@ -261,6 +261,7 @@ mod tests {
         .unwrap();
 
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![],
             ignore: vec![tmp.path().to_string_lossy().to_string()],
             disabled: vec![],

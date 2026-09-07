@@ -433,11 +433,25 @@ impl MvpAgent {
         self.supervisor_spawn_count
             .set(self.supervisor_spawn_count.get() + 1);
         let agent_ref = LocalRef::new(self);
+        let execution_budget = fuigo_sampler::execution_budget::process_budget().ok().flatten();
         tokio::task::spawn_local(async move {
+            let mut budget_cancelled = std::collections::HashSet::new();
             loop {
                 tokio::time::sleep(SESSION_SUPERVISOR_TICK).await;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     agent_ref.get().sweep_dead_sessions();
+                    if execution_budget.as_ref().is_some_and(|budget| budget.expired()) {
+                        agent_ref.get().session_registry.for_each_resident(|id, handle| {
+                            if budget_cancelled.insert(id.clone()) {
+                                let _ = handle.cmd_tx.send(SessionCommand::Cancel(CancelOptions {
+                                    cancel_subagents: true,
+                                    kill_background_tasks: true,
+                                    trigger: Some(CancelTrigger::Client("execution_budget_exhausted".into())),
+                                    ..Default::default()
+                                }));
+                            }
+                        });
+                    }
                 }));
                 if result.is_err() {
                     tracing::error!("session supervisor sweep panicked; continuing supervision");

@@ -19,6 +19,9 @@ use fuigo_tools::implementations::skills::discovery::{
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct SkillsConfig {
+    /// Disable implicit workspace/home discovery; explicit and injected paths remain.
+    #[serde(default)]
+    pub auto_discover: Option<bool>,
     /// Additional skill locations to load.
     /// Each entry is a `SKILL.md` file or a directory walked recursively.
     /// Supports `~` expansion.
@@ -83,13 +86,17 @@ pub async fn list_skills_with_plugins(
     let _skill_discovery_timer = crate::timing::timer("skill_discovery");
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
 
-    let mut skills = list_skills_with_options(
-        working_directory,
-        workspace_user_dir.as_deref(),
-        &fuigo_tools::util::fuigo_home::fuigo_home(),
-        compat,
-    )
-    .await;
+    let mut skills = if config.auto_discover == Some(false) {
+        Vec::new()
+    } else {
+        list_skills_with_options(
+            working_directory,
+            workspace_user_dir.as_deref(),
+            &fuigo_tools::util::fuigo_home::fuigo_home(),
+            compat,
+        )
+        .await
+    };
 
     let git_root = working_directory.and_then(|wd| {
         git2::Repository::discover(wd)
@@ -694,6 +701,33 @@ mod tests {
             "---\nname: {name}\ndescription: A test skill called {name}\n---\n\nSkill body here.\n"
         );
         fs::write(dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_discovery_excludes_ambient_skills_and_keeps_admitted_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        init_git_repo(&project);
+        write_skill_md(&project.join(".agents/skills/ambient"), "ambient");
+        let explicit = tmp.path().join("explicit");
+        write_skill_md(&explicit.join("admitted"), "admitted");
+        let injected = tmp.path().join("injected");
+        write_skill_md(&injected.join("host-skill"), "host-skill");
+        let config = SkillsConfig {
+            auto_discover: Some(false),
+            paths: vec![explicit.to_string_lossy().into_owned()],
+            server_skill_dirs: vec![injected.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let skills = list_skills(
+            Some(project.to_str().unwrap()),
+            &config,
+            CompatConfig::default(),
+        )
+        .await;
+        let names: HashSet<_> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, HashSet::from(["admitted", "host-skill"]));
     }
 
     // ── Server-synced skills (injected server_skill_dirs) ────────────────
@@ -1714,6 +1748,7 @@ mod tests {
         write_skill_md(&custom_dir.join("custom-skill"), "custom-skill");
 
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![custom_dir.to_str().unwrap().to_string()],
             ignore: vec![],
             disabled: vec![],
@@ -1747,6 +1782,7 @@ mod tests {
         let unwanted_path = custom_dir.join("unwanted");
 
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![custom_dir.to_str().unwrap().to_string()],
             ignore: vec![unwanted_path.to_str().unwrap().to_string()],
             disabled: vec![],
@@ -1780,6 +1816,7 @@ mod tests {
 
         // Add the same auto-discovered skills root as a config path.
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![
                 repo_root
                     .join(".fuigo")
@@ -1901,6 +1938,7 @@ mod tests {
 
         // Ignore the local skill path. Repo fallback should remain visible.
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![],
             ignore: vec![
                 cwd.join(".fuigo")
@@ -1955,6 +1993,7 @@ mod tests {
         );
 
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![],
             ignore: vec![],
             disabled: vec!["commit".to_string()],
@@ -1999,6 +2038,7 @@ mod tests {
         );
 
         let config = SkillsConfig {
+            auto_discover: None,
             paths: vec![],
             ignore: vec![],
             disabled: vec![],

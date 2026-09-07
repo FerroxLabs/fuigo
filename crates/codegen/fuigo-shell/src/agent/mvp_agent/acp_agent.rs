@@ -945,6 +945,11 @@ impl acp::Agent for MvpAgent {
         &self,
         mut arguments: acp::PromptRequest,
     ) -> Result<acp::PromptResponse, acp::Error> {
+        let budget = fuigo_sampler::execution_budget::process_budget()
+            .map_err(|message| acp::Error::invalid_params().data(message))?;
+        if budget.is_some_and(|budget| budget.expired()) {
+            return Err(acp::Error::invalid_params().data(fuigo_sampler::execution_budget::WALL_LIMIT));
+        }
         use crate::session::plan_mode::PromptMode;
         if let Some(meta) = arguments.meta.as_ref() {
             fuigo_file_utils::trace_context::link_current_span_to_meta(

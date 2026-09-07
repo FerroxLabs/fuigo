@@ -7763,3 +7763,15 @@ fn subscription_auxiliary_selection_does_not_fall_back_to_api_key() {
     stamp_session_local_sampler_fields(&mut auxiliary,&active,None,None);
     assert_eq!(auxiliary.model,active.model);assert_eq!(auxiliary.base_url,active.base_url);assert_eq!(auxiliary.subscription,active.subscription);assert!(auxiliary.api_key.is_none());
 }
+
+#[test]
+fn explicit_discovery_config_propagates_without_claude_enable_import() {
+    let mut config: PluginsConfig =
+        toml::from_str("auto_discover = false\npaths = []\nenabled = ['host-owned']\n").unwrap();
+    config.merge_claude_enabled_plugins(None);
+    assert_eq!(config.enabled, vec!["host-owned"]);
+    assert_eq!(config.to_discovery_config().auto_discover, Some(false));
+    let skills: fuigo_agent::prompt::skills::SkillsConfig =
+        toml::from_str("auto_discover = false").unwrap();
+    assert_eq!(skills.auto_discover, Some(false));
+}

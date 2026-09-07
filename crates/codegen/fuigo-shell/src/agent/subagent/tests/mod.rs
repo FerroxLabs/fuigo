@@ -629,8 +629,10 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
     assert_eq!(persisted_id, broadcast_id);
 }
 #[test]
-fn subagent_max_turns_definition_wins_else_inherits_parent() {
+fn subagent_max_turns_definition_can_tighten_parent_limit() {
     assert_eq!(super::resolve_subagent_max_turns(Some(2), Some(5)), Some(2));
+    assert_eq!(super::resolve_subagent_max_turns(Some(100), Some(5)), Some(5));
+    assert_eq!(super::resolve_subagent_max_turns(Some(7), None), Some(7));
     assert_eq!(super::resolve_subagent_max_turns(None, Some(5)), Some(5));
 }
 #[test]

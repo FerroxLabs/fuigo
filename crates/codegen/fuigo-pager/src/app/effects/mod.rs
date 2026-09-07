@@ -3854,7 +3854,7 @@ pub(crate) fn execute(
                             );
                             storage
                                 .append_to_memory(
-                                    fuigo_shell::session::memory::MemoryScope::Global,
+                                    fuigo_shell::session::memory::MemoryScope::Workspace,
                                     &text,
                                 )
                         })

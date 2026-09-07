@@ -83,6 +83,33 @@ A plugin's skills appear in the slash menu. When a skill name is ambiguous, Fuig
 
 ## Manage plugins
 
+### Explicit discovery for application hosts
+
+An application can restrict plugin discovery to the paths it supplies:
+
+```toml
+[plugins]
+auto_discover = false
+paths = []
+
+[skills]
+auto_discover = false
+paths = []
+```
+
+The plugin setting skips implicit project/user plugin directories, marketplace
+and install registries, and Claude's enabled-plugin import. Explicit `paths` and
+`--plugin-dir` still work, subject to their existing trust rules. The skills
+setting skips implicit workspace/home skills; explicit paths, injected skills,
+and skills from admitted plugins remain available. Omitted settings preserve
+normal automatic discovery.
+
+These controls are separate from `[compat.claude]` and `[compat.cursor]`, which
+control direct vendor imports. A restricted host should also disable unwanted
+compatibility imports and managed MCP discovery, and use its own `FUIGO_HOME`.
+Explicit native configuration, project instructions and host-supplied MCP servers
+are separate sources; these settings are not an OS sandbox.
+
 ### From the command line
 
 ```bash

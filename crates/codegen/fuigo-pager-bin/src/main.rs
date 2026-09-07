@@ -1136,13 +1136,21 @@ const PLUGIN_DIR_LEADER_WARNING: &str = "fuigo: --plugin-dir is ignored in leade
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn run_agent_command(
-    agent_args: Box<fuigo_pager::app::AgentArgs>,
+    mut agent_args: Box<fuigo_pager::app::AgentArgs>,
     permission_mode_flag: Option<String>,
+    max_turns: Option<u32>,
+    memory_enabled_override: Option<bool>,
     trust: bool,
     no_auto_update: bool,
     disable_web_search: bool,
     update_config: &UpdateConfig,
 ) -> Result<()> {
+    if fuigo_shell::sampling::execution_budget::process_budget().map_err(anyhow::Error::msg)?.is_some() {
+        if agent_args.leader || matches!(agent_args.mode, Some(AgentCmd::Leader(_))) {
+            anyhow::bail!("execution budgets require a private agent process, not leader mode");
+        }
+        agent_args.no_leader = true;
+    }
     let _signal_flush = tokio::spawn(async {
         #[cfg(unix)]
         {
@@ -1234,6 +1242,7 @@ async fn run_agent_command(
         .agent_profile
         .as_deref()
         .map(resolve_agent_profile_path);
+    agent_config.cli_agent_overrides.max_turns = max_turns;
     agent_config.client_version = Some(PAGER_CLIENT_VERSION.to_string());
     if is_leader && !agent_args.plugin_dirs.is_empty() {
         eprintln!("{PLUGIN_DIR_LEADER_WARNING}");
@@ -1249,7 +1258,7 @@ async fn run_agent_command(
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        memory_enabled_override: None,
+        memory_enabled_override,
         disable_web_search,
         todo_gate: false,
         laziness_debug_log: None,
@@ -2166,6 +2175,8 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 return run_agent_command(
                     agent_args,
                     args.permission_mode_flag.clone(),
+                    args.max_turns,
+                    args.memory_enabled_override(),
                     args.trust,
                     args.no_auto_update,
                     args.disable_web_search,

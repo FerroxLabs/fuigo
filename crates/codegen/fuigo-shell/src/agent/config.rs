@@ -880,6 +880,9 @@ pub use fuigo_telemetry::config::{TelemetryConfig, TelemetryMode};
 /// ```
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PluginsConfig {
+    /// Disable implicit discovery/import while retaining explicitly supplied paths.
+    #[serde(default)]
+    pub auto_discover: Option<bool>,
     /// Additional plugin directory paths to load.
     #[serde(default)]
     pub paths: Vec<String>,
@@ -904,6 +907,9 @@ impl PluginsConfig {
     /// That would enable attacker-controlled hooks (e.g. a SessionStart hook running arbitrary code).
     /// Native `.fuigo/config.toml` entries already present take precedence: a name is only added if it isn't already in the opposite list.
     pub(crate) fn merge_claude_enabled_plugins(&mut self, _cwd: Option<&std::path::Path>) {
+        if self.auto_discover == Some(false) {
+            return;
+        }
         if crate::claude_import::is_claude_import_marked_with_log("merge_claude_enabled_plugins") {
             return;
         }
@@ -928,6 +934,7 @@ impl PluginsConfig {
     }
     pub(crate) fn to_discovery_config(&self) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
         fuigo_agent::plugins::discovery::DiscoveryConfig {
+            auto_discover: self.auto_discover,
             cli_plugin_dirs: self.cli_plugin_dirs.clone(),
             config_paths: self.paths.iter().map(std::path::PathBuf::from).collect(),
             disabled: self.disabled.clone(),

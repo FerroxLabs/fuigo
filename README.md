@@ -6,7 +6,7 @@
 
 </div>
 
-Fuigo is a general-purpose, multi-provider AI agent engine. It gives models the machinery to work: tools, persistent sessions, permission controls, optional memory, and other agents to collaborate with. Use it to research and analyze information, create documents and code, produce structured outputs, or coordinate work across connected systems.
+Fuigo is a general-purpose, multi-provider AI agent engine. It gives models the machinery to work: tools, persistent sessions, permission controls, workspace memory, and other agents to collaborate with. Use it to research and analyze information, create documents and code, produce structured outputs, or coordinate work across connected systems.
 
 The Rust runtime handles execution, context, and collaboration. Its built-in tools work with files, search, and terminal commands; MCP servers and other configured tools extend what it can do in external services. Run it directly in a terminal, call it from a script, or put an application in front of it through ACP.
 
@@ -48,7 +48,7 @@ Choose your model and authentication route: direct OpenAI and Anthropic API keys
 - **Model selection:** named model configurations, per-model authentication, and supported reasoning-effort controls.
 - **Delegation and workflows:** subagents, background tasks, follow-up messages, scheduled work, and workflow reminders that survive compaction.
 - **MCP integration:** external tools, OAuth authentication, elicitation, and configured servers attached during workspace binding.
-- **Persistent context:** resumable conversations, compaction, and optional cross-session memory with source provenance.
+- **Persistent context:** resumable conversations, compaction, and workspace-scoped cross-session memory with source provenance.
 - **Extensibility and controls:** skills, plugins, hooks, project rules, tool permissions, and sandbox profiles.
 
 ## Get started
@@ -199,11 +199,14 @@ For an unattended harness, use `fuigo agent --model chatgpt-subscription --alway
 
 ## Memory that carries forward
 
-Memory is optional and **disabled by default**. Enable it in your user config:
+Fuigo 1.0.8 enables local workspace memory by default. Global sharing, remote
+embeddings, and background model processing remain explicit choices. Applications
+can choose their own policy. The local defaults are:
 
 ```toml
 [memory]
 enabled = true
+global_enabled = false
 ```
 
 ![Terminal report from a Fuigo memory verification receipt](docs/assets/fuigo-memory.png)

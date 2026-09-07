@@ -121,11 +121,41 @@ fn with_fuigo_memory<T>(value: &str, f: impl FnOnce() -> T) -> T {
     with_env_var_opt("FUIGO_MEMORY", Some(value), f)
 }
 #[test]
-fn memory_config_default_disabled() {
+fn memory_config_default_enabled_locally() {
     without_fuigo_memory(|| {
         let config = toml::Value::Table(toml::map::Map::new());
         let mem = MemoryConfig::resolve(false, false, &config, None);
-        assert!(!mem.enabled);
+        assert!(mem.enabled);
+        assert!(!mem.global_enabled);
+        assert!(mem.embedding.model.is_none());
+        assert!(!mem.dream.enabled);
+        assert!(!mem.flush.enabled);
+    });
+}
+
+#[test]
+fn memory_config_remote_settings_do_not_opt_into_background_inference() {
+    without_fuigo_memory(|| {
+        let remote = crate::util::config::RemoteSettings {
+            memory_embedding_model: Some("remote-embedding".into()),
+            dream_enabled: Some(true),
+            flush_enabled: Some(true),
+            ..Default::default()
+        };
+        let config = toml::Value::Table(toml::map::Map::new());
+        let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
+        assert!(mem.enabled);
+        assert!(mem.embedding.model.is_none());
+        assert!(!mem.dream.enabled);
+        assert!(!mem.flush.enabled);
+        let config: toml::Value = toml::from_str(
+            "[memory]\nenabled=false\nglobal_enabled=true\n[memory.embedding]\nmodel='chosen-model'\n[memory.dream]\nenabled=true\n[compaction.memory_flush]\nenabled=true",
+        ).unwrap();
+        let chosen = MemoryConfig::resolve(false, false, &config, Some(&remote));
+        assert!(!chosen.enabled, "host opt-out beats the standalone default");
+        assert!(chosen.global_enabled);
+        assert_eq!(chosen.embedding.model.as_deref(), Some("chosen-model"));
+        assert!(chosen.dream.enabled && chosen.flush.enabled);
     });
 }
 #[test]
@@ -381,11 +411,11 @@ fn memory_config_defaults_are_correct() {
         assert!(mem.initial_injection.enabled);
         assert_eq!(mem.initial_injection.min_score, Some(0.9));
         assert!(mem.session.save_on_end);
-        assert!(mem.flush.enabled);
+        assert!(!mem.flush.enabled);
         assert_eq!(mem.flush.soft_threshold_tokens, 4000);
         assert!(mem.flush.flush_model.is_none());
         assert_eq!(mem.flush.max_flush_write_chars, 8000);
-        assert_eq!(mem.flush.idle_timeout_secs, Some(300));
+        assert_eq!(mem.flush.idle_timeout_secs, None);
         assert!(mem.pruning.enabled);
         assert_eq!(mem.pruning.keep_last_n_turns, 3);
         assert_eq!(mem.pruning.soft_trim_threshold, 4000);
@@ -394,7 +424,7 @@ fn memory_config_defaults_are_correct() {
         assert_eq!(mem.pruning.hard_clear_age_turns, 10);
         assert!(mem.watcher.enabled);
         assert_eq!(mem.watcher.stale_claim_secs, 60);
-        assert!(mem.dream.enabled);
+        assert!(!mem.dream.enabled);
         assert_eq!(mem.dream.min_hours, 24);
         assert_eq!(mem.dream.min_sessions, 5);
         assert_eq!(mem.dream.stale_lock_secs, 3600);
@@ -515,7 +545,7 @@ max_chunk_chars = 3200
         assert_eq!(mem.index.chunk_overlap_chars, 320);
         assert_eq!(mem.embedding.dimensions, 1024);
         assert_eq!(mem.search.max_results, 6);
-        assert!(mem.flush.enabled);
+        assert!(!mem.flush.enabled);
         assert!(mem.pruning.enabled);
     });
 }
@@ -718,7 +748,7 @@ fn memory_dream_config_defaults() {
     without_fuigo_memory(|| {
         let config = toml::Value::Table(toml::map::Map::new());
         let mem = MemoryConfig::resolve(false, false, &config, None);
-        assert!(mem.dream.enabled);
+        assert!(!mem.dream.enabled);
         assert_eq!(mem.dream.min_hours, 24);
         assert_eq!(mem.dream.min_sessions, 5);
         assert_eq!(mem.dream.stale_lock_secs, 3600);
@@ -757,7 +787,7 @@ fn memory_dream_config_remote_override_when_toml_absent() {
             ..Default::default()
         };
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
-        assert!(mem.dream.enabled);
+        assert!(!mem.dream.enabled);
         assert_eq!(mem.dream.min_hours, 48);
         assert_eq!(mem.dream.min_sessions, 10);
         assert_eq!(mem.dream.stale_lock_secs, 3600);

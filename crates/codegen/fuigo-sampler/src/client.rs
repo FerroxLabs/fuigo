@@ -698,7 +698,14 @@ impl SamplingClient {
         })
     }
 
-    async fn dispatch_request(&self, request: reqwest::Request, streaming: bool) -> Result<reqwest::Response> {
+    async fn dispatch_request(&self, mut request: reqwest::Request, streaming: bool) -> Result<reqwest::Response> {
+        if let Some(budget) = crate::execution_budget::process_budget().map_err(SamplingError::InvalidConfiguration)? {
+            budget.admit().map_err(SamplingError::InvalidConfiguration)?;
+            if let Some(remaining) = budget.remaining() {
+                let timeout = request.timeout().copied().map_or(remaining, |timeout| timeout.min(remaining));
+                *request.timeout_mut() = Some(timeout);
+            }
+        }
         if let Some(kind) = self.subscription {
             return crate::subscription::dispatch(kind, self.subscription_resolver.as_ref(), request).await;
         }

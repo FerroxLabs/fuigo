@@ -6,6 +6,8 @@ pub(crate) struct SessionMemory {
     /// Memory storage handle for writing flush output (None when memory disabled).
     /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Arc<SessionActor>`.
     pub storage: RefCell<Option<crate::session::memory::MemoryStorage>>,
+    /// Preserve the exact root and sharing policy across a session-local off/on toggle.
+    pub suspended_storage: RefCell<Option<crate::session::memory::MemoryStorage>>,
     /// Whether to write a session summary to memory on session end.
     pub save_on_end: bool,
     /// `None` when memory is disabled.
