@@ -742,10 +742,12 @@ impl SessionActor {
                 );
                 let msg = if enabled && !self.memory.is_enabled() {
                     if let Some(ref params) = self.memory.backend_params {
-                        let storage = crate::session::memory::MemoryStorage::new(
-                            std::path::Path::new(&self.session_info.cwd),
-                            None,
-                        );
+                        let storage = self.memory.suspended_storage.borrow().clone().unwrap_or_else(|| {
+                            crate::session::memory::MemoryStorage::new(
+                                std::path::Path::new(&self.session_info.cwd),
+                                None,
+                            ).with_global_enabled(false)
+                        });
                         if let Err(e) = storage.ensure_initialized() {
                             tracing::warn!(error = %e, "failed to initialize memory storage on re-enable");
                             format!("Memory could not be enabled: {e}")
@@ -783,7 +785,7 @@ impl SessionActor {
                     ) {
                         tracing::debug!("memory_get tool was not registered during unregister");
                     }
-                    *self.memory.storage.borrow_mut() = None;
+                    *self.memory.suspended_storage.borrow_mut() = self.memory.storage.borrow_mut().take();
                     *self.memory.search_counter.borrow_mut() = None;
                     "Memory disabled for this session.".to_owned()
                 } else {

@@ -125,10 +125,9 @@ packages. `node scripts/package-notices.js --check` verifies exact source
 bytes before meta publication. Keep these files in each manifest's `files`
 list; the release archives must contain them alongside their actual binaries.
 
-No `--provenance`. npm has refused provenance attestations from private source
-repositories since 2023-07-25, and `FerroxLabs/fuigo` is private; asking for
-one fails the publish. If the repo is ever made public, add the flag back
-along with `id-token: write` in the workflow.
+The current workflow publishes with the configured npm token and does not request
+provenance attestations. `FerroxLabs/fuigo` is public. Enabling provenance requires
+both `--provenance` and `id-token: write`; the existing release does not claim it.
 
 ---
 

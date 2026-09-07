@@ -44,6 +44,33 @@ The [Agent Client Protocol (ACP)](https://agentclientprotocol.com) defines how c
 
 ## stdio transport
 
+### Bounded private jobs (development version)
+
+For a host-owned job, launch a private process with explicit limits:
+
+```bash
+FUIGO_MAX_MODEL_CALLS=20 FUIGO_MAX_RUNTIME_SECS=300 \
+  fuigo --max-turns 8 agent --no-leader stdio
+```
+
+The aggregate dispatch counter is shared across this process's sessions, model
+switches, subagents and auxiliary model requests through the sampler. Failed
+attempts consume admissions; retries do not refund them. `--max-turns` separately
+limits primary turns, and a subagent can tighten but cannot raise its parent's
+turn ceiling.
+
+The monotonic wall deadline starts when the private agent initializes. Expiry
+blocks new prompts and model dispatches and cancels resident sessions, including
+their subagents and background commands, through normal cancellation. Cancellation
+is asynchronous; allow a short cleanup grace after the deadline.
+
+Both variables require positive integers. Unset means no corresponding aggregate
+limit. Configured budgets force a private agent and reject explicit leader mode.
+They last for the process lifetime, not across restarts: the host must authorize a
+new job before starting another budgeted process. Do not treat these as dollar
+caps, persistent accounting, or limits on embedding, image, and external-tool API
+charges outside the model sampler. Those need separate host policy.
+
 stdio is the common local integration path. The agent speaks JSON-RPC on stdin and stdout:
 
 ```bash

@@ -167,6 +167,8 @@ impl DiscoveredPlugin {
 /// Configuration for plugin discovery.
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveryConfig {
+    /// When false, discover only explicit CLI and config paths.
+    pub auto_discover: Option<bool>,
     /// CLI `--plugin-dir` paths.
     pub cli_plugin_dirs: Vec<PathBuf>,
     /// `[plugins].paths` from config.
@@ -285,122 +287,124 @@ pub fn discover_plugins(
         }
     }
 
-    // 2-3. Project plugins (.fuigo/plugins/, .claude/plugins/).
-    // Scan the same dirs the folder-trust gate detects, via the shared `project_plugin_dirs` walk, so discovery and gating can never drift
-    if let Some(cwd) = cwd {
-        let (project_dirs, git_root) = project_plugin_dirs(Some(cwd));
-        for plugins_dir in project_dirs {
-            let origin = project_plugins_dir_origin(&plugins_dir);
-            scan_plugin_dir(
-                &plugins_dir,
-                PluginScope::Project,
-                origin,
-                trust_store,
-                project_trusted,
-                &mut seen_paths,
-                &mut candidates,
-            );
-        }
-
-        // 3b. Marketplace plugins (extraKnownMarketplaces in .claude/settings.json).
-        // Reuse the git root resolved above instead of walking the repo again
-        if let Some(ref root) = git_root {
-            for marketplace in &super::marketplace::resolve(root) {
-                for dir in &marketplace.plugin_dirs {
-                    collect_plugin(
-                        dir,
-                        PluginScope::Project,
-                        PluginOrigin::ClaudeMarketplace {
-                            marketplace: marketplace.name.clone(),
-                        },
-                        trust_store,
-                        project_trusted,
-                        &mut seen_paths,
-                        &mut candidates,
-                    );
-                }
-            }
-        }
-    }
-
-    // 4-5. User plugins: $FUIGO_HOME/plugins, legacy ~/.fuigo/plugins, ~/.claude/plugins.
-    // Gate the fuigo plugins dir on user_fuigo_home() so a project's .fuigo/plugins is never scanned as user-global when no home resolves
-    let fuigo = fuigo_config::user_fuigo_home();
-    let plugin_dirs = user_plugin_dirs(fuigo_dirs::home_dir().as_deref(), fuigo.as_deref());
-    for (plugins_dir, origin) in plugin_dirs {
-        if plugins_dir.is_dir() {
-            scan_plugin_dir(
-                &plugins_dir,
-                PluginScope::User,
-                origin,
-                trust_store,
-                project_trusted,
-                &mut seen_paths,
-                &mut candidates,
-            );
-        }
-    }
-
-    // 5a. Known marketplaces (~/.claude/plugins/known_marketplaces.json).
-    // Marketplace repos are cloned locally and registered here.
-    // Each marketplace has a plugins/ (and optionally external_plugins/) subdirectory.
-    for marketplace in &super::marketplace::resolve_known_marketplaces() {
-        for dir in &marketplace.plugin_dirs {
-            collect_plugin(
-                dir,
-                PluginScope::User,
-                PluginOrigin::ClaudeMarketplace {
-                    marketplace: marketplace.name.clone(),
-                },
-                trust_store,
-                project_trusted,
-                &mut seen_paths,
-                &mut candidates,
-            );
-        }
-    }
-
-    // 5b. Installed plugins (from install registry's managed directory)
-    {
-        // Installed plugins are always User scope (auto-trusted).
-        // The user explicitly installed them via marketplace or CLI, so they should be trusted regardless of install_dir location
-        let registry = super::install_registry::InstallRegistry::load();
-        collect_installed_plugins(
-            &registry,
-            PluginScope::User,
-            trust_store,
-            project_trusted,
-            &mut seen_paths,
-            &mut candidates,
-        );
-    }
-
-    // 5c. Installed plugins (~/.claude/plugins/installed_plugins.json).
-    // Entries carry explicit installPath dirs (nested under cache/<marketplace>/<plugin>/<version>/)
-    // The plugin name is extracted from the JSON key ("name@marketplace").
-    if let Some(home) = fuigo_dirs::home_dir() {
-        let installed_json = home
-            .join(".claude")
-            .join("plugins")
-            .join("installed_plugins.json");
-        for (name, marketplace, path) in read_claude_installed_plugins(&installed_json, cwd) {
-            if path.is_dir() {
-                let before = candidates.len();
-                collect_plugin(
-                    &path,
-                    PluginScope::User,
-                    PluginOrigin::ClaudeInstalled { marketplace },
+    if config.auto_discover != Some(false) {
+        // 2-3. Project plugins (.fuigo/plugins/, .claude/plugins/).
+        // Scan the same dirs the folder-trust gate detects, via the shared `project_plugin_dirs` walk, so discovery and gating can never drift
+        if let Some(cwd) = cwd {
+            let (project_dirs, git_root) = project_plugin_dirs(Some(cwd));
+            for plugins_dir in project_dirs {
+                let origin = project_plugins_dir_origin(&plugins_dir);
+                scan_plugin_dir(
+                    &plugins_dir,
+                    PluginScope::Project,
+                    origin,
                     trust_store,
                     project_trusted,
                     &mut seen_paths,
                     &mut candidates,
                 );
-                // Override dirname-derived name with the real name from the JSON key.
-                if candidates.len() > before {
-                    let plugin = candidates.last_mut().unwrap();
-                    if plugin.manifest.name != name {
-                        plugin.id = PluginId::new(plugin.scope, &plugin.canonical_root, &name);
-                        plugin.manifest.name = name;
+            }
+
+            // 3b. Marketplace plugins (extraKnownMarketplaces in .claude/settings.json).
+            // Reuse the git root resolved above instead of walking the repo again
+            if let Some(ref root) = git_root {
+                for marketplace in &super::marketplace::resolve(root) {
+                    for dir in &marketplace.plugin_dirs {
+                        collect_plugin(
+                            dir,
+                            PluginScope::Project,
+                            PluginOrigin::ClaudeMarketplace {
+                                marketplace: marketplace.name.clone(),
+                            },
+                            trust_store,
+                            project_trusted,
+                            &mut seen_paths,
+                            &mut candidates,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 4-5. User plugins: $FUIGO_HOME/plugins, legacy ~/.fuigo/plugins, ~/.claude/plugins.
+        // Gate the fuigo plugins dir on user_fuigo_home() so a project's .fuigo/plugins is never scanned as user-global when no home resolves
+        let fuigo = fuigo_config::user_fuigo_home();
+        let plugin_dirs = user_plugin_dirs(fuigo_dirs::home_dir().as_deref(), fuigo.as_deref());
+        for (plugins_dir, origin) in plugin_dirs {
+            if plugins_dir.is_dir() {
+                scan_plugin_dir(
+                    &plugins_dir,
+                    PluginScope::User,
+                    origin,
+                    trust_store,
+                    project_trusted,
+                    &mut seen_paths,
+                    &mut candidates,
+                );
+            }
+        }
+
+        // 5a. Known marketplaces (~/.claude/plugins/known_marketplaces.json).
+        // Marketplace repos are cloned locally and registered here.
+        // Each marketplace has a plugins/ (and optionally external_plugins/) subdirectory.
+        for marketplace in &super::marketplace::resolve_known_marketplaces() {
+            for dir in &marketplace.plugin_dirs {
+                collect_plugin(
+                    dir,
+                    PluginScope::User,
+                    PluginOrigin::ClaudeMarketplace {
+                        marketplace: marketplace.name.clone(),
+                    },
+                    trust_store,
+                    project_trusted,
+                    &mut seen_paths,
+                    &mut candidates,
+                );
+            }
+        }
+
+        // 5b. Installed plugins (from install registry's managed directory)
+        {
+            // Installed plugins are always User scope (auto-trusted).
+            // The user explicitly installed them via marketplace or CLI, so they should be trusted regardless of install_dir location
+            let registry = super::install_registry::InstallRegistry::load();
+            collect_installed_plugins(
+                &registry,
+                PluginScope::User,
+                trust_store,
+                project_trusted,
+                &mut seen_paths,
+                &mut candidates,
+            );
+        }
+
+        // 5c. Installed plugins (~/.claude/plugins/installed_plugins.json).
+        // Entries carry explicit installPath dirs (nested under cache/<marketplace>/<plugin>/<version>/)
+        // The plugin name is extracted from the JSON key ("name@marketplace").
+        if let Some(home) = fuigo_dirs::home_dir() {
+            let installed_json = home
+                .join(".claude")
+                .join("plugins")
+                .join("installed_plugins.json");
+            for (name, marketplace, path) in read_claude_installed_plugins(&installed_json, cwd) {
+                if path.is_dir() {
+                    let before = candidates.len();
+                    collect_plugin(
+                        &path,
+                        PluginScope::User,
+                        PluginOrigin::ClaudeInstalled { marketplace },
+                        trust_store,
+                        project_trusted,
+                        &mut seen_paths,
+                        &mut candidates,
+                    );
+                    // Override dirname-derived name with the real name from the JSON key.
+                    if candidates.len() > before {
+                        let plugin = candidates.last_mut().unwrap();
+                        if plugin.manifest.name != name {
+                            plugin.id = PluginId::new(plugin.scope, &plugin.canonical_root, &name);
+                            plugin.manifest.name = name;
+                        }
                     }
                 }
             }
@@ -879,6 +883,31 @@ mod tests {
         let plugin_dir = tmp.join(name);
         std::fs::create_dir_all(plugin_dir.join("skills")).unwrap();
         plugin_dir
+    }
+
+    #[test]
+    fn explicit_discovery_excludes_ambient_plugins_and_keeps_admitted_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        git2::Repository::init(&project).unwrap();
+        make_manifest_plugin(&project.join(".claude/plugins"), "ambient-claude");
+        make_manifest_plugin(&project.join(".fuigo/plugins"), "ambient-fuigo");
+        let cli = make_manifest_plugin(tmp.path(), "admitted-cli");
+        let configured = make_manifest_plugin(tmp.path(), "admitted-config");
+        let config = DiscoveryConfig {
+            auto_discover: Some(false),
+            cli_plugin_dirs: vec![cli],
+            config_paths: vec![configured],
+            ..Default::default()
+        };
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let discovered = discover_plugins(Some(&project), &config, &trust, true);
+        let names: HashSet<_> = discovered.iter().map(|p| p.plugin_name()).collect();
+        assert_eq!(names, HashSet::from(["admitted-cli", "admitted-config"]));
+        assert!(discovered.iter().find(|p| p.plugin_name() == "admitted-cli").unwrap().trusted);
+        assert!(!discovered.iter().find(|p| p.plugin_name() == "admitted-config").unwrap().trusted);
+        assert_eq!(DiscoveryConfig::default().auto_discover, None);
     }
 
     #[test]

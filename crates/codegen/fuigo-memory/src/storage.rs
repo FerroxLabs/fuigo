@@ -30,6 +30,7 @@ pub struct MemoryStorage {
     workspace_path: PathBuf,
     /// When true, workspace writes are silently skipped (temp-dir CWDs).
     ephemeral: bool,
+    global_enabled: bool,
 }
 
 impl MemoryStorage {
@@ -65,6 +66,7 @@ impl MemoryStorage {
             workspace_dir,
             workspace_path: cwd.to_path_buf(),
             ephemeral,
+            global_enabled: true,
         }
     }
 
@@ -76,11 +78,23 @@ impl MemoryStorage {
             workspace_dir,
             workspace_path: PathBuf::from("/test/workspace"),
             ephemeral: false,
+            global_enabled: true,
         }
     }
 
     pub fn global_dir(&self) -> &Path {
         &self.global_dir
+    }
+
+    /// Session policy for deliberate cross-project sharing. Raw storage callers
+    /// retain their existing behavior until they supply a policy.
+    pub fn with_global_enabled(mut self, enabled: bool) -> Self {
+        self.global_enabled = enabled;
+        self
+    }
+
+    pub fn global_enabled(&self) -> bool {
+        self.global_enabled
     }
 
     pub fn workspace_dir(&self) -> &Path {
@@ -136,7 +150,7 @@ impl MemoryStorage {
             .is_ok_and(|m| m.file_type().is_symlink()))
         .then(|| dunce::canonicalize(&self.workspace_dir).ok())
         .flatten();
-        global.as_ref() == Some(&path)
+        (self.global_enabled && global.as_ref() == Some(&path))
             || workspace.is_some_and(|root| {
                 path.strip_prefix(root).is_ok_and(|relative| {
                     !relative
@@ -226,6 +240,9 @@ impl MemoryStorage {
     ///
     /// Creates parent directories as needed. Overwrites any existing content.
     pub fn write_long_term(&self, scope: MemoryScope, content: &str) -> std::io::Result<()> {
+        if scope == MemoryScope::Global && !self.global_enabled {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "global memory is disabled; set memory.global_enabled = true to share"));
+        }
         if self.ephemeral && scope == MemoryScope::Workspace {
             tracing::debug!("MEMORY_EPHEMERAL_SKIP: workspace long-term write skipped");
             return Ok(());
@@ -287,6 +304,9 @@ impl MemoryStorage {
     /// Creates parent directories and the file if they don't exist.
     /// Empty/whitespace-only content is silently ignored.
     pub fn append_to_memory(&self, scope: MemoryScope, content: &str) -> std::io::Result<()> {
+        if scope == MemoryScope::Global && !self.global_enabled {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "global memory is disabled; set memory.global_enabled = true to share"));
+        }
         if self.ephemeral && scope == MemoryScope::Workspace {
             tracing::debug!("MEMORY_EPHEMERAL_SKIP: workspace memory append skipped");
             return Ok(());
@@ -367,7 +387,7 @@ impl MemoryStorage {
 
         // Global MEMORY.md
         let global_file = self.global_memory_file();
-        if global_file.is_file() {
+        if self.global_enabled && global_file.is_file() {
             files.push(global_file);
         }
 
@@ -408,7 +428,7 @@ impl MemoryStorage {
         std::fs::create_dir_all(&self.global_dir)?;
 
         let global_file = self.global_memory_file();
-        if !global_file.exists() {
+        if self.global_enabled && !global_file.exists() {
             initialize_file(
                 &global_file,
                 "# Global Memory\n\
@@ -1668,6 +1688,7 @@ mod tests {
         let workspace_dir = global_dir.join("ephemeral-abc12345");
 
         let storage = MemoryStorage {
+            global_enabled: true,
             global_dir: global_dir.clone(),
             workspace_dir: workspace_dir.clone(),
             workspace_path: PathBuf::from("/tmp/test"),
@@ -1700,6 +1721,7 @@ mod tests {
         let workspace_dir = global_dir.join("ephemeral-abc12345");
 
         let storage = MemoryStorage {
+            global_enabled: true,
             global_dir: global_dir.clone(),
             workspace_dir: workspace_dir.clone(),
             workspace_path: PathBuf::from("/tmp/test"),
@@ -1726,6 +1748,7 @@ mod tests {
         let workspace_dir = global_dir.join("ephemeral-abc12345");
 
         let storage = MemoryStorage {
+            global_enabled: true,
             global_dir: global_dir.clone(),
             workspace_dir: workspace_dir.clone(),
             workspace_path: PathBuf::from("/tmp/test"),

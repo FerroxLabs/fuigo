@@ -58,7 +58,7 @@ impl MemoryFileWatcher {
             for path in &event.paths {
                 if path.extension().is_some_and(|ext| ext == "md")
                     && event_scope.as_ref().is_none_or(|s| {
-                        path == &s.global_memory_file()
+                        (s.global_enabled() && path == &s.global_memory_file())
                             || path.strip_prefix(s.workspace_dir()).is_ok_and(|relative| {
                                 !relative
                                     .components()

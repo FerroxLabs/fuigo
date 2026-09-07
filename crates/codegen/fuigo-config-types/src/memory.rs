@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct MemorySettings {
     pub enabled: Option<bool>,
+    pub global_enabled: Option<bool>,
     pub index: Option<MemoryIndexSettings>,
     pub embedding: Option<MemoryEmbeddingSettings>,
     pub search: Option<MemorySearchSettings>,
@@ -385,7 +386,7 @@ pub struct MemoryDreamConfig {
 impl Default for MemoryDreamConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             min_hours: 24,
             min_sessions: 5,
             stale_lock_secs: 3600,
@@ -466,11 +467,11 @@ pub struct MemoryFlushConfig {
 impl Default for MemoryFlushConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             soft_threshold_tokens: 4000,
             flush_model: None,
             max_flush_write_chars: 8000,
-            idle_timeout_secs: Some(300),
+            idle_timeout_secs: None,
             semantic_dedup_threshold: None,
         }
     }
@@ -508,10 +509,11 @@ impl Default for PruningConfig {
 }
 
 /// Concrete memory configuration used by a running session.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     pub enabled: bool,
+    pub global_enabled: bool,
     pub index: MemoryIndexConfig,
     pub embedding: MemoryEmbeddingConfig,
     pub search: MemorySearchConfig,
@@ -528,6 +530,27 @@ pub struct MemoryConfig {
     pub root_dir_override: Option<std::path::PathBuf>,
     #[serde(skip)]
     pub flat_memory_root: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            global_enabled: false,
+            index: Default::default(),
+            embedding: Default::default(),
+            search: Default::default(),
+            initial_injection: Default::default(),
+            session: Default::default(),
+            watcher: Default::default(),
+            gc: Default::default(),
+            dream: Default::default(),
+            flush: Default::default(),
+            pruning: Default::default(),
+            root_dir_override: None,
+            flat_memory_root: false,
+        }
+    }
 }
 
 impl MemoryConfig {
@@ -597,9 +620,10 @@ impl MemoryConfig {
                 .cli(memory_enabled_override)
                 .config(memory.enabled)
                 .feature_flag(remote.and_then(|settings| settings.memory_enabled))
-                .default(false)
+                .default(true)
                 .resolve()
                 .value,
+            global_enabled: memory.global_enabled.unwrap_or(false),
             index: MemoryIndexConfig {
                 max_chunk_chars: index
                     .and_then(|settings| settings.max_chunk_chars)
@@ -615,7 +639,7 @@ impl MemoryConfig {
                 model: match embedding.and_then(|settings| settings.model.as_deref()) {
                     Some("") => None,
                     Some(model) => Some(model.to_owned()),
-                    None => remote.and_then(|settings| settings.memory_embedding_model.clone()),
+                    None => None,
                 },
                 dimensions: embedding
                     .and_then(|settings| settings.dimensions)
@@ -714,7 +738,6 @@ impl MemoryConfig {
             dream: MemoryDreamConfig {
                 enabled: dream
                     .and_then(|settings| settings.enabled)
-                    .or_else(|| remote.and_then(|settings| settings.dream_enabled))
                     .unwrap_or(defaults.dream.enabled),
                 min_hours: dream
                     .and_then(|settings| settings.min_hours)
@@ -740,7 +763,6 @@ impl MemoryConfig {
             flush: MemoryFlushConfig {
                 enabled: flush
                     .enabled
-                    .or_else(|| remote.and_then(|settings| settings.flush_enabled))
                     .unwrap_or(defaults.flush.enabled),
                 soft_threshold_tokens: flush
                     .soft_threshold_tokens

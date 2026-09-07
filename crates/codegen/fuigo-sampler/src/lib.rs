@@ -17,6 +17,7 @@ pub mod config;
 pub mod doom_loop;
 mod doom_loop_recovery;
 pub mod events;
+pub mod execution_budget;
 pub mod handle;
 pub mod metrics;
 pub mod retry;

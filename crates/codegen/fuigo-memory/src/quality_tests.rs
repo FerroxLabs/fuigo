@@ -14,6 +14,45 @@ struct Fixture {
     index: MemoryIndex,
 }
 
+#[tokio::test]
+async fn global_opt_out_blocks_get_search_and_writes_without_deleting_sources() {
+    use fuigo_tools::types::memory_backend::MemoryBackend;
+    use crate::storage::MemoryScope;
+    init_sqlite_vec();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("memory");
+    let storage = MemoryStorage::with_paths(root.clone(), root.join("workspace"));
+    storage.ensure_initialized().unwrap();
+    storage.write_long_term(MemoryScope::Global, "shared_canary private global decision").unwrap();
+    storage.write_long_term(MemoryScope::Workspace, "shared_canary local project decision").unwrap();
+    let db = storage.workspace_dir().join("index.sqlite");
+    let mut index = MemoryIndex::open_or_create(&db, storage.clone(), MemoryIndexConfig::default(), 1024).unwrap();
+    index.reindex_file(&storage.global_memory_file(), "global").unwrap();
+    index.reindex_file(&storage.workspace_memory_file(), "workspace").unwrap();
+    drop(index);
+    let scoped = storage.clone().with_global_enabled(false);
+    assert!(scoped.read_file(&scoped.global_memory_file(), None, None).is_err());
+    assert!(scoped.append_to_memory(MemoryScope::Global, "forbidden").is_err());
+    assert!(scoped.write_long_term(MemoryScope::Global, "forbidden").is_err());
+    let backend = crate::backend::MemoryBackendImpl::new(db, scoped);
+    let hits = backend.search("shared_canary", 10, 0.0).await.unwrap();
+    assert!(!hits.is_empty(), "workspace positive control must still retrieve");
+    assert!(hits.iter().all(|hit| hit.source != "global"));
+    assert_eq!(std::fs::read_to_string(storage.global_memory_file()).unwrap(), "shared_canary private global decision");
+    let enabled = storage.with_global_enabled(true);
+    assert!(enabled.read_file(&enabled.global_memory_file(), None, None).unwrap().contains("private global"));
+}
+
+#[test]
+fn global_opt_out_does_not_initialize_shared_memory() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("memory");
+    let storage = MemoryStorage::with_paths(root.clone(), root.join("workspace")).with_global_enabled(false);
+    storage.ensure_initialized().unwrap();
+    assert!(!storage.global_memory_file().exists());
+    assert!(storage.workspace_memory_file().exists());
+}
+
 impl Fixture {
     fn new() -> Self {
         init_sqlite_vec();

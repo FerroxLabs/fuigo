@@ -89,7 +89,10 @@ mod cli_catchall_drop_tests {
     #[test]
     fn disabled_memory_config_has_disabled_retrieval_mode() {
         assert_eq!(
-            configured_memory_retrieval_mode(Some(&Default::default())),
+            configured_memory_retrieval_mode(Some(&crate::config::MemoryConfig {
+                enabled: false,
+                ..Default::default()
+            })),
             fuigo_telemetry::events::MemoryRetrievalMode::Disabled
         );
     }
@@ -774,12 +777,12 @@ pub(crate) async fn spawn_session_actor(
             return crate::session::memory::MemoryStorage::new_flat(
                 tool_context.cwd.as_path(),
                 root,
-            );
+            ).with_global_enabled(mc.global_enabled);
         }
         crate::session::memory::MemoryStorage::new(
             tool_context.cwd.as_path(),
             mc.root_dir_override.as_deref(),
-        )
+        ).with_global_enabled(mc.global_enabled)
     });
     let memory_initial_injection_config = memory_config
         .as_ref()
@@ -895,7 +898,7 @@ pub(crate) async fn spawn_session_actor(
                 embedding_dimensions: mc.map_or(1024, |c| c.embedding.dimensions),
                 total_chunks,
                 total_files: storage.list_memory_files().map_or(0, |f| f.len()),
-                has_global_memory_md: storage.global_memory_file().exists(),
+                has_global_memory_md: storage.global_enabled() && storage.global_memory_file().exists(),
                 has_workspace_memory_md: storage.workspace_memory_file().exists(),
             },
         );
@@ -960,6 +963,7 @@ pub(crate) async fn spawn_session_actor(
         memory_enabled: memory_config.as_ref().is_some_and(|mc| mc.enabled),
         memory_global_path: memory_storage_for_session
             .as_ref()
+            .filter(|s| s.global_enabled())
             .map(|s| s.global_memory_file().to_string_lossy().into_owned()),
         memory_workspace_path: memory_storage_for_session
             .as_ref()
@@ -1698,6 +1702,7 @@ pub(crate) async fn spawn_session_actor(
             cancel: Default::default(),
         },
         memory: super::memory_state::SessionMemory {
+            suspended_storage: std::cell::RefCell::new(None),
             flush_config: memory_config.as_ref().map_or_else(
                 || crate::config::MemoryFlushConfig {
                     enabled: false,

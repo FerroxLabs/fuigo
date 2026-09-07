@@ -1634,14 +1634,15 @@ pub(crate) fn describe_subagent_type(
     resolve_subagent_toolset(subagent_type, harness_agent_type, ctx, &mut definition);
     SubagentDescribeOutcome::Ok(summarize_tool_config(&definition.tool_config))
 }
-/// Resolve a subagent's turn limit: its own `maxTurns` wins, else inherit the parent's.
+/// A subagent may tighten its parent's turn limit, but cannot raise it.
 fn resolve_subagent_max_turns(
     definition_max_turns: Option<u32>,
     parent_max_turns: Option<usize>,
 ) -> Option<usize> {
-    definition_max_turns
-        .map(|v| v as usize)
-        .or(parent_max_turns)
+    match (definition_max_turns.map(|v| v as usize), parent_max_turns) {
+        (Some(child), Some(parent)) => Some(child.min(parent)),
+        (child, parent) => child.or(parent),
+    }
 }
 /// What to do with a resumed subagent's isolated worktree directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

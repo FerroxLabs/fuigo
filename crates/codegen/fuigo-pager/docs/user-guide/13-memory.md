@@ -13,7 +13,9 @@ Without memory, each Fuigo session starts fresh: the model knows nothing about p
 - Carry architectural decisions forward across sessions.
 - Avoid re-asking questions it already has answers to.
 
-Memory is experimental and disabled by default.
+Fuigo 1.0.8 enables local workspace memory by default. Global sharing, embeddings,
+and automatic model-driven flush/consolidation require explicit configuration.
+Fuigo 1.0.7 and earlier defaulted memory off.
 
 ---
 
@@ -61,7 +63,33 @@ You can also toggle from inside the `/memory` modal by pressing `t`.
 2. `FUIGO_MEMORY` env var: `1`/`true` enables, `0`/`false` disables
 3. `[memory]` section in effective TOML
 4. Managed remote settings
-5. Default: disabled
+5. Default: enabled locally
+
+### Local-only defaults and explicit sharing
+
+```toml
+[memory]
+enabled = true
+global_enabled = false
+
+[memory.dream]
+enabled = false
+
+[compaction.memory_flush]
+enabled = false
+```
+
+Set `memory.global_enabled = true` deliberately to include the shared global
+`MEMORY.md` in automatic retrieval and permit global memory writes. Otherwise,
+existing shared files are preserved but excluded; `/remember` saves to the current
+workspace. Inspecting or explicitly clearing existing global memory remains available.
+
+No embedding model is selected by default. An explicit `[memory.embedding].model`
+opts into that route; a remote model suggestion alone does not enable it. Likewise,
+automatic dream and flush runs require their `enabled = true` setting. An application
+can set `memory.enabled = false` in its own `FUIGO_HOME/config.toml` or use
+`FUIGO_MEMORY=0`. Configuration changes apply when a session is created; the
+session-local off/on toggle preserves its original storage root and sharing policy.
 
 ---
 
@@ -77,7 +105,9 @@ Memory is stored as Markdown files under `~/.fuigo/memory/`:
 
 Fuigo suffixes each workspace directory with a short hash of the repository's identity. The identity is the `origin` remote in `org/repo` form when the directory is a Git repository with an `origin` remote, or the directory path otherwise. Because clones and worktrees of the same repository share an `origin` remote, they also share one memory directory.
 
-An SQLite index supports search within the current workspace and the shared global `MEMORY.md`. Other workspace directories and recovery snapshots are excluded from reads and retrieval, including through symlinks.
+An SQLite index supports search within the current workspace and, when explicitly
+enabled, the shared global `MEMORY.md`. Other workspace directories and recovery
+snapshots are excluded from reads and retrieval, including through symlinks.
 
 Fuigo serializes its memory writes and replaces files atomically, so concurrent appends preserve entries and interrupted replacements leave complete files. On Unix, Fuigo writes memory files with owner-only permissions. Nonempty workspace directories are retained even when they contain curated notes but no session logs.
 
