@@ -6,7 +6,7 @@ Fuigo connects to custom model endpoints for alternative providers, self-hosted 
 
 ## Default Models
 
-By default, Fuigo uses models hosted by Ferrox Labs, and new sessions start with `grok-4.5`. Default models require no configuration. Authenticate with `fuigo login` or an API key, then start a session.
+Fuigo's shipped default inference route is Flux Router (`https://api.fluxrouter.ai/v1`), using an API key. It does not require you to use that route: configure direct OpenAI, Anthropic, compatible gateways, local endpoints, or subscription models as named entries below. The selected default can be overridden by your configuration; use `-m` to choose a specific configured model.
 
 List all available models:
 
@@ -65,7 +65,7 @@ Fuigo supports three API backends. Set `api_backend` in your `[model.*]` config 
 
 When you omit `api_backend`, Fuigo uses `chat_completions`.
 
-To send provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- use the `extra_headers` field described below. Fuigo sends those headers verbatim with every request to the endpoint.
+For Anthropic API-key authentication, set `auth_scheme = "x_api_key"` with `env_key`. Use `extra_headers` for static headers such as the protocol version, and `env_http_headers` for additional secret headers supplied by environment variables.
 
 ---
 
@@ -203,11 +203,13 @@ model = "claude-opus-4-6"
 base_url = "https://api.anthropic.com/v1"
 name = "Claude Opus 4.6"
 api_backend = "messages"
+auth_scheme = "x_api_key"
+env_key = "ANTHROPIC_API_KEY"
 context_window = 200000
-extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01" }
+extra_headers = { "anthropic-version" = "2023-06-01" }
 ```
 
-The `messages` backend uses the Anthropic Messages protocol. Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Fuigo sends verbatim.
+The `messages` backend uses the Anthropic Messages protocol. Set `ANTHROPIC_API_KEY` in your shell; `auth_scheme = "x_api_key"` sends that credential in the required header without storing it in this config file. Choose a model ID and limits supported by your account.
 
 ### OpenAI (Chat Completions)
 
