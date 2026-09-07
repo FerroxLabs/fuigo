@@ -579,7 +579,7 @@ fn memory_config_remote_settings_pruning() {
     });
 }
 #[test]
-fn partial_embedding_injection_and_watcher_use_remote_for_missing_fields() {
+fn partial_embedding_requires_explicit_model_but_other_fields_use_remote_defaults() {
     without_fuigo_memory(|| {
         let config: toml::Value = toml::from_str(
                 "[memory.embedding]\ndimensions = 384\n[memory.initial_injection]\nenabled = false\n[memory.watcher]\nstale_claim_secs = 75",
@@ -594,7 +594,8 @@ fn partial_embedding_injection_and_watcher_use_remote_for_missing_fields() {
             ..Default::default()
         };
         let mem = MemoryConfig::resolve(false, false, &config, Some(&remote));
-        assert_eq!(mem.embedding.model.as_deref(), Some("remote-model"));
+        // Local dimensions do not consent to a remote embedding service.
+        assert_eq!(mem.embedding.model, None);
         assert_eq!(mem.embedding.dimensions, 384);
         assert!(!mem.initial_injection.enabled);
         assert_eq!(mem.initial_injection.min_score, Some(0.77));
