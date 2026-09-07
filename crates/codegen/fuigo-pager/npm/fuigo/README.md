@@ -1,57 +1,72 @@
 # Fuigo
 
-Bring Fuigo into your terminal. Fast, flicker-free CLI built for plans, subagents, and parallel work.
+**An engine for AI that can act, collaborate, and remember.**
+
+Fuigo is a general-purpose AI agent engine for research, analysis, creation, and work across connected tools. Its Rust runtime provides execution, persistent sessions, subagents, permission controls, and optional cross-session memory. Built-in tools work with files, search, and terminal commands; configured MCP servers extend its reach into external services.
+
+Work alongside it in the terminal, request files or structured outputs from a script, or use ACP to build your own application interface. Specialized document formats and external operations depend on the tools you connect.
+
+[Source and full setup guide](https://github.com/FerroxLabs/fuigo) · [Documentation](https://github.com/FerroxLabs/fuigo/tree/main/crates/codegen/fuigo-pager/docs/user-guide)
 
 ## Install
 
-```bash
-npm i -g fuigo
+Requires Node.js 20 or newer:
+
+```sh
+npm install -g fuigo@latest
+fuigo --version
 ```
 
-npm downloads only the binary matching your platform, not all six.
+The launcher selects your platform binary. Packages target macOS, Linux, and Windows on arm64 and x64.
 
-## Get Started
+## Connect a model
 
-```bash
-# Launch the interactive TUI
-fuigo
+Fuigo supports ChatGPT and Grok subscription access, Flux Router API keys, and configured compatible model endpoints.
 
-# Run a single task
-fuigo -p "Explain this codebase"
+```sh
+fuigo login --provider chatgpt
+fuigo models --provider chatgpt
 ```
 
-On first launch, Fuigo helps you set up a provider. For CI or headless environments, set an API key directly:
+Add a named model to `~/.fuigo/config.toml`, replacing the placeholder with a model ID from the list:
 
-```bash
-export FUIGO_API_KEY="fuigo-..."
+```toml
+[auth_provider.chatgpt-subscription]
+subscription = "chatgpt"
+
+[model.chatgpt-subscription]
+model = "REPLACE_WITH_MODEL_ID_FROM_LIST"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_provider = "chatgpt-subscription"
 ```
+
+```sh
+# Work interactively in your project
+fuigo -m chatgpt-subscription
+
+# Return structured output from a bounded task
+fuigo -m chatgpt-subscription -p "Compare the proposals in this folder" --output-format json --max-turns 4
+
+# Run as an agent for an ACP-capable client
+fuigo agent --model chatgpt-subscription stdio
+```
+
+For Grok subscription configuration and Flux Router API-key setup, follow the [full setup guide](https://github.com/FerroxLabs/fuigo#connect-a-model). Subscription login does not import other applications' credentials, and a subscription denial does not silently fall back to a paid API key.
+
+Memory is disabled by default. Enable `[memory] enabled = true` in your configuration, then use `/remember`, `/flush`, `/dream`, and `/memory`. Lexical memory search needs no embedding service.
 
 ## Update
 
-```bash
-fuigo update
+```sh
+npm install -g fuigo@latest
 ```
 
-Or if installed via npm:
+## Bundle the engine
 
-```bash
-npm i -g fuigo@latest
-```
+Pin a Fuigo version and include the matching `@fuigo` platform package when distributing it with an application. Your application can launch `fuigo agent stdio` and handle the ACP interface. The Rust workspace is implementation source, not a separately versioned public SDK. Preserve the included license and attribution files when redistributing the engine.
 
-## Supported Platforms
+## Documentation and licensing
 
-| Platform | Architecture |
-|---|---|
-| macOS | Apple Silicon (arm64), Intel (x86_64) |
-| Linux | x86_64, arm64 |
-| Windows | x86_64, arm64 |
+Run `/docs` in the terminal or read the [source documentation](https://github.com/FerroxLabs/fuigo/tree/main/crates/codegen/fuigo-pager/docs/user-guide) for permissions, sandboxing, model configuration, MCP, headless tasks, and ACP integration.
 
-## Documentation
-
-Fuigo ships its own documentation. Run `/docs` inside the TUI, or read the
-extracted copy under `~/.fuigo/docs/user-guide/`, covering configuration, MCP
-servers, custom models, headless mode and agent mode.
-
-## Feedback
-
-Run `/feedback` inside Fuigo to report issues or send feedback directly.
+Fuigo is licensed under Apache-2.0. See the included `LICENSE`, `NOTICE`, and third-party notices for origin, modification, and dependency attribution. Fuigo originated as a modified derivative of Grok Build and is independently maintained by Ferrox Labs; it is not affiliated with or endorsed by xAI or SpaceXAI.
