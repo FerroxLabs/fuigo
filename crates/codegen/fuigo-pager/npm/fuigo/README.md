@@ -2,7 +2,7 @@
 
 **An engine for AI that can act, collaborate, and remember.**
 
-Fuigo is a general-purpose AI agent engine for research, analysis, creation, and work across connected tools. Its Rust runtime provides execution, persistent sessions, subagents, permission controls, and optional cross-session memory. Built-in tools work with files, search, and terminal commands; configured MCP servers extend its reach into external services.
+Fuigo is a general-purpose, multi-provider AI agent engine for research, analysis, creation, and work across connected tools. Its Rust runtime provides execution, persistent sessions, subagents, permission controls, and optional cross-session memory. Built-in tools work with files, search, and terminal commands; configured MCP servers extend its reach into external services.
 
 Work alongside it in the terminal, request files or structured outputs from a script, or use ACP to build your own application interface. Specialized document formats and external operations depend on the tools you connect.
 
@@ -21,7 +21,37 @@ The launcher selects your platform binary. Packages target macOS, Linux, and Win
 
 ## Connect a model
 
-Fuigo supports ChatGPT and Grok subscription access, Flux Router API keys, and configured compatible model endpoints.
+| Route | Supported connection |
+| --- | --- |
+| OpenAI directly | API key; Chat Completions or Responses |
+| Anthropic directly | API key; Messages API |
+| Flux Router and compatible gateways | Supported API protocol and gateway credentials |
+| Local models, including Ollama | OpenAI-compatible endpoint |
+| ChatGPT and Grok subscriptions | Explicit provider login and entitled models |
+
+### Direct API keys
+
+Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in your environment, then add the corresponding entry to `~/.fuigo/config.toml`. Replace model placeholders with IDs available to your account:
+
+```toml
+[model.openai]
+model = "REPLACE_WITH_YOUR_OPENAI_MODEL_ID"
+base_url = "https://api.openai.com/v1"
+api_backend = "responses" # or "chat_completions"
+env_key = "OPENAI_API_KEY"
+
+[model.anthropic]
+model = "REPLACE_WITH_YOUR_CLAUDE_MODEL_ID"
+base_url = "https://api.anthropic.com/v1"
+api_backend = "messages"
+auth_scheme = "x_api_key"
+env_key = "ANTHROPIC_API_KEY"
+extra_headers = { "anthropic-version" = "2023-06-01" }
+```
+
+Run `fuigo -m openai` or `fuigo -m anthropic`. The Anthropic configuration sends the key as `x-api-key`. Set context and output limits for your selected model; use `env_http_headers` for additional secret gateway headers.
+
+### Subscriptions
 
 ```sh
 fuigo login --provider chatgpt
@@ -51,7 +81,7 @@ fuigo -m chatgpt-subscription -p "Compare the proposals in this folder" --output
 fuigo agent --model chatgpt-subscription stdio
 ```
 
-For Grok subscription configuration and Flux Router API-key setup, follow the [full setup guide](https://github.com/FerroxLabs/fuigo#connect-a-model). Subscription login does not import other applications' credentials, and a subscription denial does not silently fall back to a paid API key.
+For Grok subscriptions, Flux Router, and compatible gateways, follow the [full setup guide](https://github.com/FerroxLabs/fuigo#connect-a-model). The [custom-model guide](https://github.com/FerroxLabs/fuigo/blob/main/crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md) also includes local Ollama configuration. Features depend on the selected model and protocol. Subscription login does not import other applications' credentials, and a subscription denial does not silently fall back to a paid API key.
 
 Memory is disabled by default. Enable `[memory] enabled = true` in your configuration, then use `/remember`, `/flush`, `/dream`, and `/memory`. Lexical memory search needs no embedding service.
 

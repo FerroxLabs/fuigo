@@ -1,18 +1,24 @@
 <div align="center">
 
-# Fuigo
-
-### An engine for AI that can act, collaborate, and remember.
+![Fuigo — Act. Collaborate. Remember. A general-purpose, multi-provider agent engine.](docs/assets/fuigo-hero.png)
 
 [Get started](#get-started) · [Headless CLI](#headless-cli) · [ACP integration](#acp-integration) · [Memory](#memory-that-carries-forward) · [Documentation](#documentation) · [Build from source](#build-from-source)
 
 </div>
 
-Fuigo is a general-purpose AI agent engine. It gives models the machinery to work: tools, persistent sessions, permission controls, optional memory, and other agents to collaborate with. Use it to research and analyze information, create documents and code, produce structured outputs, or coordinate work across connected systems.
+Fuigo is a general-purpose, multi-provider AI agent engine. It gives models the machinery to work: tools, persistent sessions, permission controls, optional memory, and other agents to collaborate with. Use it to research and analyze information, create documents and code, produce structured outputs, or coordinate work across connected systems.
 
 The Rust runtime handles execution, context, and collaboration. Its built-in tools work with files, search, and terminal commands; MCP servers and other configured tools extend what it can do in external services. Run it directly in a terminal, call it from a script, or put an application in front of it through ACP.
 
-Choose your model and authentication route. Fuigo supports ChatGPT and Grok subscription access, Flux Router API keys, and configured compatible model endpoints. Switch models while keeping the conversation and tool history.
+Choose your model and authentication route: direct OpenAI and Anthropic API keys, Flux Router and compatible gateways, local OpenAI-compatible servers, or ChatGPT and Grok subscriptions. Switch models while keeping the conversation and tool history.
+
+| Model route | Connection |
+| --- | --- |
+| **OpenAI directly** | Your API key with Chat Completions or Responses |
+| **Anthropic directly** | Your API key with the Messages API |
+| **Flux Router and compatible gateways** | A gateway endpoint, supported API protocol, and its credentials |
+| **Local models** | An OpenAI-compatible endpoint, such as Ollama |
+| **ChatGPT and Grok subscriptions** | Explicit provider login and a model your subscription grants access to |
 
 ![Fuigo terminal interface](docs/assets/fuigo-terminal.png)
 
@@ -64,7 +70,51 @@ npm install -g fuigo@latest
 
 ### Connect a model
 
-Fuigo reads user configuration from `~/.fuigo/config.toml`, or `$FUIGO_HOME/config.toml` when you set a separate home. Choose a subscription or API-key route below.
+Fuigo reads user configuration from `~/.fuigo/config.toml`, or `$FUIGO_HOME/config.toml` when you set a separate home. Choose a route below; model IDs and supported features depend on the provider and account.
+
+#### OpenAI API key
+
+Set `OPENAI_API_KEY` in your shell and add a named model to your user config:
+
+```sh
+export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+```
+
+```toml
+[model.openai]
+model = "REPLACE_WITH_YOUR_OPENAI_MODEL_ID"
+base_url = "https://api.openai.com/v1"
+api_backend = "responses"
+env_key = "OPENAI_API_KEY"
+```
+
+```sh
+fuigo -m openai
+```
+
+For a model using Chat Completions, set `api_backend = "chat_completions"` instead.
+
+#### Anthropic API key
+
+```sh
+export ANTHROPIC_API_KEY="YOUR_ANTHROPIC_API_KEY"
+```
+
+```toml
+[model.anthropic]
+model = "REPLACE_WITH_YOUR_CLAUDE_MODEL_ID"
+base_url = "https://api.anthropic.com/v1"
+api_backend = "messages"
+auth_scheme = "x_api_key"
+env_key = "ANTHROPIC_API_KEY"
+extra_headers = { "anthropic-version" = "2023-06-01" }
+```
+
+```sh
+fuigo -m anthropic
+```
+
+`auth_scheme` sends the environment-supplied key as `x-api-key`; no key needs to be written into the config file. Set model-specific context and output limits to match the model you select. For gateway-specific secret headers, use `env_http_headers`.
 
 #### ChatGPT subscription
 
@@ -117,7 +167,7 @@ env_key = "FUIGO_API_KEY"
 fuigo -m flux
 ```
 
-Flux Router uses API keys. For other compatible endpoints, configure a separate named model with its own `base_url` and credentials. See [custom models](crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md).
+Flux Router uses API keys. For other compatible gateways, configure a separate named model with its own `base_url`, `api_backend`, and credentials. Local servers work through supported compatible protocols too; see the [Ollama example](crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md#ollama-local-models) and [custom-model guide](crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md). Protocol compatibility does not imply that every model supports every agent feature.
 
 ## Headless CLI
 
@@ -230,3 +280,5 @@ The root [`Cargo.toml`](Cargo.toml) is generated. Follow repository instructions
 Fuigo is independently maintained by Ferrox Labs under the [Apache License 2.0](LICENSE). It originated as a modified derivative of [Grok Build](https://github.com/xai-org/grok-build), with additional development and selectively integrated upstream changes. Fuigo is not affiliated with or endorsed by xAI or SpaceXAI.
 
 See [NOTICE](NOTICE) for lineage and modification notices, [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) for dependency and source-port attribution, and [`third_party/NOTICE`](third_party/NOTICE) for vendored components. Third-party code retains its original licenses.
+
+The hero’s galaxy mark is based on [Lucide Galaxy](https://lucide.dev/icons/galaxy); its [license is included](docs/assets/lucide-LICENSE.txt).
