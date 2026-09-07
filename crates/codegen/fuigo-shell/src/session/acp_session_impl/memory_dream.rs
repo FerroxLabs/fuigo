@@ -1,7 +1,18 @@
 //! Memory concern for `SessionActor`: memory flush, the dream pipeline, memory tool registration, and note rewriting.
 
 use super::*;
+use crate::session::memory::MemoryStorage;
 use fuigo_telemetry::session_end::{self, Phase};
+const DREAM_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Stale-lock floor: the whole dream (model call plus post-call reindex) must finish inside this, so it must exceed the model timeout; doubling it leaves reindex headroom.
+const DREAM_LOCK_STALE_FLOOR_SECS: u64 = DREAM_MODEL_TIMEOUT.as_secs() * 2;
+
+/// Whether a dream attempt reached the model call. `Ran` reports its own result; `Skipped` returned
+/// before the model call, so a user-initiated caller surfaces the reason and `/dream` is never silent.
+enum DreamAttempt {
+    Ran,
+    Skipped(&'static str),
+}
 
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
@@ -87,8 +98,7 @@ impl SessionActor {
         );
     }
 
-    /// Session-end memory save, the dream (gated off for empty sessions), and memory summary telemetry.
-    /// Shared by Shutdown and channel-closed so the dream gate cannot drift between exit arms.
+    /// Session-end memory save and summary telemetry, shared by the Shutdown and channel-closed arms.
     ///
     /// `log_suffix` is appended to the `MEMORY_SESSION_END:` log line so each arm keeps a distinct reason string in logs.
     pub(super) async fn run_session_end_memory_pipeline(
@@ -106,10 +116,6 @@ impl SessionActor {
         }
         let mut session_end_result = "disabled";
         let mut total_chunks_at_end = 0usize;
-        // Dream consolidates *prior* logs
-        // Run after Written/Failed, or when save was Skipped for config (`save_on_end=false`) but the session still meets the size threshold
-        // Empty or brief sessions stay off
-        let mut run_exit_dream = false;
         if let Some(storage) = self.memory.storage() {
             let _save = session_end::timed_child(timer, Phase::MemorySave, span.span());
             let conversation = self.chat_state_handle.get_conversation().await;
@@ -122,7 +128,6 @@ impl SessionActor {
             match &result {
                 crate::session::memory::hooks::SessionEndResult::Written(path_str) => {
                     session_end_result = "written";
-                    run_exit_dream = true;
                     self.reindex_and_embed(std::path::Path::new(path_str), "session")
                         .await;
                     self.send_fuigo_notification(FuigoSessionUpdate::MemorySessionSaved {
@@ -132,16 +137,9 @@ impl SessionActor {
                 }
                 crate::session::memory::hooks::SessionEndResult::Skipped => {
                     session_end_result = "skipped";
-                    // `Skipped` also means save_on_end=false; still dream when the conversation is substantial
-                    run_exit_dream =
-                        crate::session::memory::hooks::queries_meeting_session_end_threshold(
-                            &conversation,
-                        )
-                        .is_some();
                 }
                 crate::session::memory::hooks::SessionEndResult::Failed(_) => {
                     session_end_result = "failed";
-                    run_exit_dream = true;
                 }
             }
             total_chunks_at_end = storage.total_chunk_count();
@@ -155,11 +153,6 @@ impl SessionActor {
                 recovery_searches = telem.compaction_recovery_count,
                 "{msg}"
             );
-        }
-        if run_exit_dream {
-            let _consolidate =
-                session_end::timed_child(timer, Phase::MemoryConsolidate, span.span());
-            self.maybe_run_dream().await;
         }
         let telem = self.memory.telemetry_snapshot();
         self.emit_memory_session_summary(&telem, total_chunks_at_end, session_end_result);
@@ -185,15 +178,11 @@ impl SessionActor {
         let lock = crate::session::memory::dream_lock::DreamLock::new(workspace_dir);
         let sessions_dir = storage.sessions_dir();
         let sid = &self.session_info.id.0;
-        let sid8 = sid[..8.min(sid.len())].to_owned();
+        let sid8 = MemoryStorage::session_suffix(sid);
         Some((storage, lock, sessions_dir, sid8))
     }
 
     /// Run dream consolidation if gates pass.
-    ///
-    /// Called at session end after the session summary is written.
-    /// Uses the same sampling client infrastructure as flush but sends the dream prompt instead.
-    /// The model call has a 60s timeout.
     pub(super) async fn maybe_run_dream(&self) {
         if self.startup_hints.is_subagent {
             tracing::debug!(
@@ -209,6 +198,8 @@ impl SessionActor {
             return;
         };
 
+        // Cheap pre-check to filter out the common closed-gate case before taking the lock; the
+        // authoritative gate is re-checked under the lock inside run_dream_inner.
         let gate = check_dream_gates(&self.memory.dream_config, &lock, &sessions_dir, Some(&sid8));
         let sessions = match gate {
             DreamGate::Open { sessions } => sessions,
@@ -228,8 +219,15 @@ impl SessionActor {
             "MEMORY_DREAM: gates passed, starting consolidation"
         );
 
-        self.run_dream_inner(&storage, &lock, &sessions_dir, &sessions, "MEMORY_DREAM")
-            .await;
+        self.run_dream_inner(
+            &storage,
+            &lock,
+            &sessions_dir,
+            &sessions,
+            Some(&sid8),
+            "MEMORY_DREAM",
+        )
+        .await;
     }
 
     /// Run dream from the `/dream` slash command, bypassing the time and session gates.
@@ -269,28 +267,102 @@ impl SessionActor {
             "MEMORY_DREAM_SLASH: starting manual consolidation"
         );
 
-        self.run_dream_inner(
-            &storage,
-            &lock,
-            &sessions_dir,
-            &sessions,
-            "MEMORY_DREAM_SLASH",
-        )
-        .await;
+        // `/dream` is user-initiated, so a skip must be surfaced rather than logged silently.
+        if let DreamAttempt::Skipped(reason) = self
+            .run_dream_inner(
+                &storage,
+                &lock,
+                &sessions_dir,
+                &sessions,
+                None,
+                "MEMORY_DREAM_SLASH",
+            )
+            .await
+        {
+            self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
+                result: format!("skipped: {reason}"),
+                path: None,
+            })
+            .await;
+        }
     }
 
-    /// Shared dream execution: build message, call model, execute, record result.
+    /// Shared dream execution: acquire the lock, re-check the gate under it, build the message,
+    /// call the model, execute, and record the result.
+    ///
+    /// `recheck_sid8` is `Some` for the gated (auto) path: the gate is re-evaluated while holding the
+    /// lock, so a waiter that passed the pre-check cannot run a second dream on a stale snapshot after
+    /// the winner commits. `None` is the `/dream` slash path, which bypasses gates and consolidates
+    /// the caller-supplied `sessions`.
     async fn run_dream_inner(
         &self,
         storage: &crate::session::memory::MemoryStorage,
         lock: &crate::session::memory::dream_lock::DreamLock,
         sessions_dir: &std::path::Path,
         sessions: &[String],
+        recheck_sid8: Option<&str>,
         log_prefix: &str,
-    ) {
+    ) -> DreamAttempt {
         use crate::session::memory::dream::*;
 
-        let existing_memory = std::fs::read_to_string(storage.workspace_memory_file()).ok();
+        // Acquire first, with a stale window floored above the whole dream, so a live lock is
+        // never reclaimed mid-run.
+        let stale_lock_secs = self
+            .memory
+            .dream_config
+            .stale_lock_secs
+            .max(DREAM_LOCK_STALE_FLOOR_SECS);
+        let guard = match lock.acquire(stale_lock_secs) {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                tracing::info!(
+                    target: fuigo_telemetry::memory_log::TARGET,
+                    "{log_prefix}: lock held by another process, skipping"
+                );
+                return DreamAttempt::Skipped("another consolidation is already running");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: fuigo_telemetry::memory_log::TARGET,
+                    error = %e,
+                    "{log_prefix}: lock acquire failed"
+                );
+                return DreamAttempt::Skipped("could not acquire the consolidation lock");
+            }
+        };
+
+        // Re-check the gate under the lock: the pre-check ran before we held it, so the winner may
+        // have consolidated and closed the gate in the meantime.
+        let rechecked_sessions;
+        let sessions: &[String] = match recheck_sid8 {
+            Some(sid8) => {
+                match check_dream_gates(&self.memory.dream_config, lock, sessions_dir, Some(sid8)) {
+                    DreamGate::Open { sessions } => {
+                        rechecked_sessions = sessions;
+                        &rechecked_sessions
+                    }
+                    other => {
+                        tracing::info!(
+                            target: fuigo_telemetry::memory_log::TARGET,
+                            gate = ?other,
+                            "{log_prefix}: gate closed under lock, skipping"
+                        );
+                        return DreamAttempt::Skipped("nothing new to consolidate");
+                    }
+                }
+            }
+            None => sessions,
+        };
+
+        let generation = match storage.generation() {
+            Ok(epoch) => epoch,
+            Err(_) => return DreamAttempt::Skipped("memory generation could not be read"),
+        };
+        let existing_memory = match std::fs::read_to_string(storage.workspace_memory_file()) {
+            Ok(content) => Some(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return DreamAttempt::Skipped("existing memory could not be read"),
+        };
 
         let dream_msg =
             match build_dream_user_message(sessions_dir, sessions, existing_memory.as_deref()) {
@@ -300,12 +372,12 @@ impl SessionActor {
                         target: fuigo_telemetry::memory_log::TARGET,
                         "{log_prefix}: no readable session content, skipping"
                     );
-                    return;
+                    return DreamAttempt::Skipped("no readable session content");
                 }
             };
 
         let model_response = match tokio::time::timeout(
-            std::time::Duration::from_secs(30 * 60),
+            DREAM_MODEL_TIMEOUT,
             self.run_dream_model_call(&dream_msg.content),
         )
         .await
@@ -318,7 +390,7 @@ impl SessionActor {
                     "{log_prefix}: model call failed"
                 );
                 self.memory.record_dream_result(false);
-                return;
+                return DreamAttempt::Ran;
             }
             Err(_) => {
                 tracing::warn!(
@@ -326,51 +398,100 @@ impl SessionActor {
                     "{log_prefix}: model call timed out (30m)"
                 );
                 self.memory.record_dream_result(false);
-                return;
+                return DreamAttempt::Ran;
             }
         };
 
-        let result = execute_dream(
-            lock,
-            storage,
-            &model_response,
-            sessions.len(),
-            self.memory.dream_config.stale_lock_secs,
-            sessions_dir,
-            &dream_msg.processed_stems,
-        );
+        let result = match storage.with_generation(generation, || {
+            Ok(execute_dream(
+                storage,
+                &model_response,
+                sessions.len(),
+                existing_memory.as_deref().unwrap_or(""),
+            ))
+        }) {
+            Ok(result) => result,
+            Err(_) => return DreamAttempt::Skipped("memory was cleared during consolidation"),
+        };
 
-        match &result.status {
-            DreamStatus::Completed { .. } => self.memory.record_dream_result(true),
-            DreamStatus::Failed(_) => self.memory.record_dream_result(false),
-            _ => self.memory.record_dream_neutral(),
-        }
+        // Commit for Completed and NothingToConsolidate to close the gate; a Failed guard stays
+        // uncommitted so its drop releases the mutex and reopens the gate for a retry. A commit that
+        // cannot durably write the marker returns false: leave the gate open and do not claim success.
+        let mut marker_failed = false;
+        let dream_path = match &result.status {
+            DreamStatus::Completed { .. } => {
+                let path = storage.workspace_memory_file();
+                let indexed = self
+                    .memory
+                    .open_index(storage)
+                    .and_then(|mut index| index.reindex_file(&path, "dream").ok())
+                    .is_some();
+                if !indexed {
+                    self.memory.record_dream_result(false);
+                    self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
+                        result: "failed: memory saved with recovery but indexing failed; retry remains open".into(),
+                        path: Some(path.display().to_string()),
+                    }).await;
+                    return DreamAttempt::Ran;
+                }
+                self.memory.reindex_and_embed(&path, "dream").await;
 
-        let dream_path = if matches!(result.status, DreamStatus::Completed { .. }) {
-            let path = storage.workspace_memory_file();
-            self.memory.reindex_and_embed(&path, "dream").await;
+                // Raw sources stay on disk. The success marker records exact source hashes.
 
-            // Remove stale index chunks only for session files that were actually deleted
-            // Stems skipped by the recency guard are still on disk and must remain searchable
-            if !result.cleaned_stems.is_empty() {
-                let deleted_paths: Vec<std::path::PathBuf> = result
-                    .cleaned_stems
-                    .iter()
-                    .map(|stem| sessions_dir.join(format!("{stem}.md")))
-                    .collect();
-                self.memory.delete_paths_from_index(&deleted_paths);
+                // Commit last, after reindex and cleanup, so a mid-run cancel or failure releases the
+                // lock without stamping the marker. Only record success once the marker lands.
+                if storage
+                    .with_generation(generation, || {
+                        Ok(guard.commit_sources(&dream_msg.source_snapshots))
+                    })
+                    .unwrap_or(false)
+                {
+                    self.memory.record_dream_result(true);
+                    Some(path.display().to_string())
+                } else {
+                    marker_failed = true;
+                    self.memory.record_dream_result(false);
+                    tracing::warn!(
+                        target: fuigo_telemetry::memory_log::TARGET,
+                        "{log_prefix}: consolidation marker failed to write; gate stays open to retry"
+                    );
+                    None
+                }
             }
+            DreamStatus::NothingToConsolidate => {
+                if storage
+                    .with_generation(generation, || {
+                        Ok(guard.commit_sources(&dream_msg.source_snapshots))
+                    })
+                    .unwrap_or(false)
+                {
+                    self.memory.record_dream_neutral();
+                } else {
+                    marker_failed = true;
+                    self.memory.record_dream_result(false);
+                    tracing::warn!(
+                        target: fuigo_telemetry::memory_log::TARGET,
+                        "{log_prefix}: consolidation marker failed to write; gate stays open to retry"
+                    );
+                }
+                None
+            }
+            DreamStatus::Failed(_) => {
+                self.memory.record_dream_result(false);
+                None
+            }
+        };
 
-            Some(path.display().to_string())
+        let dream_result_str = if marker_failed {
+            "failed: success marker could not be saved; retry remains open".into()
         } else {
-            None
-        };
-
-        let dream_result_str = match &result.status {
-            DreamStatus::Completed { chars_written } => format!("written ({chars_written} chars)"),
-            DreamStatus::NothingToConsolidate => "nothing to consolidate".into(),
-            DreamStatus::Skipped(reason) => format!("skipped: {reason}"),
-            DreamStatus::Failed(err) => format!("failed: {err}"),
+            match &result.status {
+                DreamStatus::Completed { chars_written } => {
+                    format!("written ({chars_written} chars)")
+                }
+                DreamStatus::NothingToConsolidate => "nothing to consolidate".into(),
+                DreamStatus::Failed(err) => format!("failed: {err}"),
+            }
         };
         self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
             result: dream_result_str,
@@ -382,9 +503,11 @@ impl SessionActor {
             target: fuigo_telemetry::memory_log::TARGET,
             status = ?result.status,
             sessions_eligible = result.sessions_eligible,
-            sessions_cleaned = result.cleaned_stems.len(),
+            sessions_retained = dream_msg.processed_stems.len(),
             "{log_prefix}: consolidation complete"
         );
+
+        DreamAttempt::Ran
     }
 
     /// Make the dream model call using the session's sampling client.
@@ -442,7 +565,16 @@ impl SessionActor {
 
         tracing::info!(target: fuigo_telemetry::memory_log::TARGET, "MEMORY_FLUSH: starting");
         let flush_start = std::time::Instant::now();
+        let Some(flush_generation) = self
+            .memory
+            .storage()
+            .and_then(|storage| storage.generation().ok())
+        else {
+            self.memory.release_flush_lock();
+            return false;
+        };
 
+        let flush_turn = self.chat_state_handle.get_conversation_counts().await.total;
         self.send_fuigo_notification(FuigoSessionUpdate::MemoryFlushStarted)
             .await;
 
@@ -603,9 +735,20 @@ impl SessionActor {
                         } else if let Some(storage) = self.memory.storage() {
                             let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
                             let session_id = &self.session_info.id.0;
-                            match storage
-                                .write_daily_log(&date, trigger, session_id, &content, true)
-                            {
+                            let persisted = fuigo_memory::safety::capture_record(
+                                &content,
+                                session_id,
+                                &storage.workspace_path().display().to_string(),
+                                "flush_model",
+                                flush_turn,
+                            );
+                            match storage.with_generation(flush_generation, || {
+                                let persisted = persisted.ok_or_else(|| {
+                                    std::io::Error::other("unsafe flush content rejected")
+                                })?;
+                                storage
+                                    .write_daily_log(&date, trigger, session_id, &persisted, true)
+                            }) {
                                 Ok(path) => {
                                     tracing::info!("memory flush wrote session log");
                                     self.reindex_and_embed(&path, "session").await;

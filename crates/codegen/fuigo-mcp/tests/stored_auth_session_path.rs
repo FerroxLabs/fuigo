@@ -5,11 +5,11 @@ use agent_client_protocol as acp;
 use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use serde_json::{Value, json};
-use serial_test::serial;
 use fuigo_mcp::credentials::McpCredentialStore;
 use fuigo_mcp::rmcp;
 use fuigo_mcp::servers::{McpOauthDiscovery, McpSpawnCtx, OauthInteractivity, start_mcp_server};
+use serde_json::{Value, json};
+use serial_test::serial;
 
 const TOKEN: &str = "at-123";
 
@@ -22,7 +22,9 @@ async fn spawn_counting_gated_server() -> (String, Arc<AtomicUsize>, Arc<AtomicU
         .await
         .expect("bind fake server");
     let addr = listener.local_addr().expect("fake server addr");
-    let issuer = format!("http://{addr}");
+    // rmcp 3.x enforces RFC 8414 issuer validation: the advertised issuer must equal
+    // the issuer the client derived from the MCP base URL (including its path).
+    let issuer = format!("http://{addr}/mcp");
     let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
         let requests = Arc::clone(&handler_requests);
         let token_grants = Arc::clone(&handler_token_grants);
@@ -43,7 +45,7 @@ async fn spawn_counting_gated_server() -> (String, Arc<AtomicUsize>, Arc<AtomicU
             if path.contains("oauth-protected-resource") {
                 return StatusCode::NOT_FOUND.into_response();
             }
-            if path == "/token" {
+            if path.ends_with("/token") {
                 token_grants.fetch_add(1, Ordering::SeqCst);
                 return axum::Json(json!({
                     "access_token": TOKEN,

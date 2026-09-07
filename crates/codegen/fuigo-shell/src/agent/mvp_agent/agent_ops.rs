@@ -125,9 +125,7 @@ impl MvpAgent {
                 cfg
             }
             None => {
-                let mut fallback = primary.clone();
-                fallback.model = slug;
-                fallback
+                summary_fallback_config(primary, slug)
             }
         };
         let model = config.model.clone();
@@ -3255,11 +3253,66 @@ impl MvpAgent {
         }
         acp::SessionModelState::new(model_id, available_models)
     }
+    pub(crate) async fn session_model_state(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> acp::SessionModelState {
+        self.model_state(Some(session_id))
+    }
+    pub(crate) async fn acp_config_options_for_session(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Vec<acp::SessionConfigOption> {
+        let state = self.session_model_state(session_id).await;
+        self.acp_config_options(Some(session_id), &state)
+    }
     pub(super) fn session_config_options(
         &self,
         session_id: Option<&acp::SessionId>,
         state: &acp::SessionModelState,
     ) -> Vec<session_config::SessionConfigOption> {
+        let inputs = self.session_config_inputs(session_id, state);
+        session_config::build_session_config_options(
+            &state.available_models,
+            &inputs.model_id,
+            &inputs.effort_options,
+            inputs.current_effort,
+        )
+    }
+    pub(crate) fn acp_config_options(
+        &self,
+        session_id: Option<&acp::SessionId>,
+        state: &acp::SessionModelState,
+    ) -> Vec<acp::SessionConfigOption> {
+        let inputs = self.session_config_inputs(session_id, state);
+        session_config::build_acp_config_options(
+            &state.available_models,
+            &inputs.model_id,
+            &inputs.effort_options,
+            inputs.current_effort,
+        )
+    }
+    /// Resolve an effort selector against `model_id`'s menu (not a fresh session lookup, which
+    /// falls back to the global model when the session isn't resident). `session_id` still gates
+    /// the gateway case, which offers no local menu.
+    pub(crate) fn resolve_reasoning_effort_value(
+        &self,
+        session_id: &acp::SessionId,
+        model_id: &acp::ModelId,
+        value_id: &str,
+    ) -> Option<fuigo_sampling_types::ReasoningEffort> {
+        let state = acp::SessionModelState::new(model_id.clone(), Vec::new());
+        self.session_config_inputs(Some(session_id), &state)
+            .effort_options
+            .iter()
+            .find(|option| option.id.as_str() == value_id)
+            .map(|option| option.value)
+    }
+    fn session_config_inputs(
+        &self,
+        session_id: Option<&acp::SessionId>,
+        state: &acp::SessionModelState,
+    ) -> SessionConfigInputs {
         let model_id = resolve_catalog_key(
                 &self.models_manager.models(),
                 &state.current_model_id,
@@ -3293,12 +3346,11 @@ impl MvpAgent {
         } else {
             None
         };
-        session_config::build_session_config_options(
-            &state.available_models,
-            &model_id,
-            &effort_options,
+        SessionConfigInputs {
+            model_id,
+            effort_options,
             current_effort,
-        )
+        }
     }
     /// Insert the per-session `_meta` keys shared by `new_session` and `load_session`.
     /// The keys are `fuigo/sessionConfig`, `fuigo/sessionDetail`, and `fuigo/schedulerBackgroundLoops`.
@@ -4933,4 +4985,29 @@ impl Drop for LocalWorkspaceReapGuard {
             });
         }
     }
+}
+
+fn summary_fallback_config(primary: &SamplingConfig, slug: String) -> SamplingConfig {
+    let mut fallback=primary.clone();
+    if fallback.subscription.is_none() { fallback.model=slug; }
+    fallback
+}
+
+#[cfg(test)]
+mod subscription_summary_tests {
+    use super::*;
+    #[test]
+    fn subscription_summary_fallback_keeps_the_selected_model() {
+        let primary=SamplingConfig { model:"gpt-6-astra".into(),base_url:"https://chatgpt.com/backend-api/codex".into(),subscription:Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),..Default::default() };
+        let fallback=summary_fallback_config(&primary,"flux-fast".into());
+        assert_eq!(fallback.model,primary.model);assert_eq!(fallback.subscription,primary.subscription);
+        let api=SamplingConfig { model:"regular-model".into(),..Default::default() };
+        assert_eq!(summary_fallback_config(&api,"flux-fast".into()).model,"flux-fast");
+    }
+}
+
+struct SessionConfigInputs {
+ model_id: acp::ModelId,
+ effort_options: Vec<ReasoningEffortOption>,
+ current_effort: Option<fuigo_sampling_types::ReasoningEffort>,
 }

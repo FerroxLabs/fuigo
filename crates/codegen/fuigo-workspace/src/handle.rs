@@ -1,14 +1,16 @@
+//! [`WorkspaceHandle`] -- public handle to a workspace instance.
 use fastrace::future::FutureExt as _;
 use fastrace::local::LocalSpan;
+use fuigo_hunk_tracker::{HunkTrackerActor, HunkTrackerHandle, TrackingMode};
+use fuigo_tool_protocol::turn_hook::TurnHookOutcome;
+use fuigo_tool_protocol::{SessionId, ToolId, ToolServerStatusPayload};
 use prometheus::{
     Histogram, HistogramVec, IntCounter, IntCounterVec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_vec,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use fuigo_hunk_tracker::{HunkTrackerActor, HunkTrackerHandle, TrackingMode};
-use fuigo_tool_protocol::ToolServerStatusPayload;
-use fuigo_tool_protocol::turn_hook::TurnHookOutcome;
 /// Default SIGTERM drain budget (ms); override via `FUIGO_WORKSPACE_TERMINATION_GRACE_MS`.
 /// 45s fits under the K8s grace period.
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 45_000;
@@ -117,6 +119,19 @@ static WORKSPACE_BIND_ZERO_TOOLS_TOTAL: std::sync::LazyLock<IntCounterVec> =
     });
 /// `session.bind` resolutions that FAILED the bind (the server reports bind-unavailable and the harness re-provisions), by reason.
 /// Distinct from [`WORKSPACE_BIND_ZERO_TOOLS_TOTAL`], which counts binds that *completed* while advertising zero model-facing tools.
+/// Binds that SUCCEEDED but with MCP degraded (binding left `Closed` until
+/// the next bind). Deliberately not `WORKSPACE_BIND_FAILED_TOTAL`: the bind
+/// invariant is that no MCP condition fails a bind, so MCP race outcomes
+/// are degradations, not failures.
+static WORKSPACE_BIND_MCP_DEGRADED_TOTAL: std::sync::LazyLock<IntCounterVec> =
+    std::sync::LazyLock::new(|| {
+        register_int_counter_vec!(
+            "grok_workspace_bind_mcp_degraded_total",
+            "session.bind resolutions that succeeded with MCP degraded, by reason",
+            &["reason"]
+        )
+        .unwrap()
+    });
 static WORKSPACE_BIND_FAILED_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
         register_int_counter_vec!(
@@ -182,13 +197,13 @@ use crate::session::swap_policy::{
     record_swap_decision, record_toolset_swap,
 };
 use crate::session::tool_config::resolve_session_toolset;
-use crate::session::{WorkspaceSession, WorkspaceShared};
+use crate::session::{WorkspaceMcpBinding, WorkspaceSession, WorkspaceShared};
 use crate::telemetry::dc_log;
 use crate::workspace_ops::{
     GetFileEntry, GetFileResult, GetFilesRes, PutFileEntry, PutFileResult, PutFilesRes,
 };
-use fuigo_file_utils::queue::EnqueueOutcome;
 use fuigo_diag_server::DiagHandle;
+use fuigo_file_utils::queue::EnqueueOutcome;
 use fuigo_session_events::types::CancellationCategory;
 use fuigo_session_events::{Event, SessionRelationship, TurnOutcomeLabel};
 use fuigo_tool_protocol::turn_hook::{AfterTurnAckPayload, AfterTurnAckStatus};
@@ -351,6 +366,9 @@ pub(crate) fn init_metrics() {
             .with_label_values(&[reason])
             .inc_by(0);
     }
+    WORKSPACE_BIND_MCP_DEGRADED_TOTAL
+        .with_label_values(&["raced_teardown"])
+        .inc_by(0);
     for reason in ["empty_after_filter", "missing_tool_config"] {
         WORKSPACE_BIND_ZERO_TOOLS_TOTAL
             .with_label_values(&[reason])
@@ -418,9 +436,7 @@ pub struct WorkspaceHandle {
 }
 type AcknowledgedNotifyChannel = (
     fuigo_tools::notification::types::ToolNotificationHandle,
-    tokio::sync::mpsc::UnboundedReceiver<
-        fuigo_tools::notification::AcknowledgedToolNotification,
-    >,
+    tokio::sync::mpsc::UnboundedReceiver<fuigo_tools::notification::AcknowledgedToolNotification>,
 );
 /// Builds with no forwarder. They must not open the channel, because an unread one blocks every delete.
 fn acknowledged_notify_channel(_enabled: bool) -> Option<AcknowledgedNotifyChannel> {
@@ -650,6 +666,7 @@ impl WorkspaceHandle {
             root_cwd: config.root_cwd.clone(),
             sessions: parking_lot::RwLock::new(sessions),
             session_factory: config.session_factory,
+            bind_mcp: config.bind_mcp.map(parking_lot::RwLock::new),
             mcp_tools_snapshot: arc_swap::ArcSwap::new(Arc::new(vec![])),
             events,
             respect_gitignore: config.respect_gitignore,
@@ -2623,20 +2640,23 @@ impl WorkspaceHandle {
         }
         Some(outcome)
     }
-    /// Start MCP servers for a session and bridge them to the server.
+    /// Replace a session's MCP servers with `configs` (`workspace.configure_mcp`).
+    ///
+    /// Client-driven, so it is refused on a workspace whose MCP servers come
+    /// from local configuration — there, the machine owns the set and
+    /// [`Self::reload_bind_mcp`] is how it changes.
     pub async fn start_session_mcp_servers(
         &self,
         session_id: &str,
-        configs: Vec<agent_client_protocol::McpServer>,
+        mut configs: Vec<agent_client_protocol::McpServer>,
     ) -> crate::error::WorkspaceResult<crate::mcp::McpStartResult> {
-        use crate::mcp::{
-            McpClientTransportAdapter, McpStartFailure, McpStartResult, QualifiedMcpToolHandler,
-            make_bridge_config, server_name_from_mcp_error,
-        };
-        use fuigo_computer_hub_mcp_adapter::McpBridge;
-        use fuigo_computer_hub_sdk::ToolServerHandler as _;
-        use fuigo_mcp::servers::MCP_TOOL_NAME_DELIMITER;
-        use fuigo_tool_protocol::SessionId;
+        crate::mcp::dedupe_servers_last_wins(&mut configs);
+        crate::mcp::cap_servers(&mut configs);
+        if self.shared.bind_mcp.is_some() {
+            return Err(WorkspaceError::HubError(
+                "bind-time MCP configuration is immutable".to_owned(),
+            ));
+        }
         let tool_server = {
             let hub_guard = self.shared.hub_handle.lock().await;
             let hub = hub_guard
@@ -2649,178 +2669,289 @@ impl WorkspaceHandle {
             .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
         let sid = SessionId::new(session_id)
             .map_err(|e| WorkspaceError::HubError(format!("invalid session_id: {e}")))?;
+        let _update_guard = session.update_lock.lock().await;
+        let live: Vec<String> = session
+            .mcp_binding
+            .lock()
+            .await
+            .active()
+            .map(|active| active.servers.keys().cloned().collect())
+            .unwrap_or_default();
+        crate::mcp::stop_servers(&session, &sid, &tool_server, &live).await;
         {
-            let mut tool_ids = session.mcp_tool_ids.lock().await;
-            for tid in tool_ids.drain(..) {
-                let _ = tool_server.unregister_tool_dynamic(&tid, &sid).await;
-            }
-            let mut existing_bridges = session.mcp_bridges.lock().await;
-            existing_bridges.clear();
+            let _binding = session.mcp_binding.lock().await;
             let mut state = session.mcp_state.lock().await;
+            state.update_configs(configs.clone());
             state.owned_clients.clear();
         }
-        let session_id_owned = session_id.to_owned();
-        let event_writer = self.shared.session_event_writer(session_id);
-        let rt_handle = tokio::runtime::Handle::current();
-        let mcp_results: Vec<
-            Result<fuigo_mcp::servers::McpClient, fuigo_mcp::servers::McpError>,
-        > = tokio::task::spawn_blocking(move || {
-            use std::collections::HashMap;
-            use fuigo_mcp::oauth_config::McpOAuthConfigMap;
-            use fuigo_mcp::servers::{McpClientTimeoutOverrides, McpMetaConfigMap};
-            let overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
-            let meta_config_map = McpMetaConfigMap::new();
-            let oauth_config_map = McpOAuthConfigMap::new();
-            let ctx = fuigo_mcp::servers::McpSpawnCtx::for_session(
-                &session_id_owned,
-                &event_writer,
-                fuigo_mcp::servers::OauthInteractivity::Interactive,
-                None,
-            );
-            rt_handle.block_on(fuigo_mcp::servers::start_mcp_servers(
-                configs,
-                &overrides_map,
-                &meta_config_map,
-                &oauth_config_map,
-                &ctx,
-            ))
-        })
-        .await
-        .map_err(|e| WorkspaceError::JoinError(e.to_string()))?;
-        let mcp_state = session.mcp_state.clone();
-        let mut started = Vec::new();
-        let mut failed = Vec::new();
-        let mut bridges = Vec::new();
-        let mut registered_tool_ids = Vec::new();
-        for result in mcp_results {
-            match result {
-                Ok(client) => {
-                    let server_name = client.server_name().to_owned();
-                    let client = Arc::new(client);
-                    {
-                        let mut state = mcp_state.lock().await;
-                        state
-                            .owned_clients
-                            .insert(server_name.clone(), Arc::clone(&client));
-                    }
-                    let transport: Arc<dyn fuigo_computer_hub_mcp_adapter::McpTransport> =
-                        Arc::new(McpClientTransportAdapter::new(Arc::clone(&client)));
-                    let bridge_config = make_bridge_config(sid.clone(), &server_name);
-                    match McpBridge::connect(transport, &bridge_config).await {
-                        Ok(handle) => {
-                            for handler in handle.bridge.handlers() {
-                                let qualified_name = format!(
-                                    "{}{}{}",
-                                    server_name,
-                                    MCP_TOOL_NAME_DELIMITER,
-                                    handler.tool_id()
-                                );
-                                let qualified = match QualifiedMcpToolHandler::try_new(
-                                    qualified_name.clone(),
-                                    handler.clone(),
-                                ) {
-                                    Some(h) => Arc::new(h),
-                                    None => continue,
-                                };
-                                if let Err(e) = tool_server
-                                    .register_tool_dynamic(qualified, vec![sid.clone()])
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        server = %server_name,
-                                        tool = %qualified_name,
-                                        error = %e,
-                                        "failed to register MCP tool on hub"
-                                    );
-                                } else if let Ok(tid) =
-                                    fuigo_tool_protocol::ToolId::new(&qualified_name)
-                                {
-                                    registered_tool_ids.push(tid);
-                                }
-                            }
-                            bridges.push(handle);
-                            started.push(server_name);
-                        }
-                        Err(e) => {
-                            {
-                                let mut state = mcp_state.lock().await;
-                                state.owned_clients.remove(&server_name);
-                            }
-                            tracing::warn!(
-                                server = %server_name,
-                                error = %e,
-                                "McpBridge::connect failed"
-                            );
-                            failed.push(McpStartFailure {
-                                name: server_name,
-                                error: e.to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    let name = server_name_from_mcp_error(&e).to_owned();
-                    tracing::warn!(
-                        server = %name,
-                        error = %e,
-                        "MCP server start failed"
-                    );
-                    failed.push(McpStartFailure {
-                        name,
-                        error: e.to_string(),
-                    });
-                }
+        let (started, life) = crate::mcp::connect_servers(
+            &session,
+            session_id,
+            configs,
+            crate::config::BindMcpConfig::DEFAULT_DISCOVERY_TIMEOUT,
+            &std::collections::HashSet::new(),
+            self.shared.session_event_writer(session_id),
+        )
+        .await?;
+        let result = crate::mcp::McpStartResult {
+            started: started.servers.iter().map(|s| s.name.clone()).collect(),
+            failed: started.failed.clone(),
+        };
+        crate::mcp::install_and_advertise_qualified(
+            &session,
+            &sid,
+            &tool_server,
+            started.servers,
+            life,
+        )
+        .await?;
+        if !result.started.is_empty() {
+            let _ = self
+                .shared
+                .events
+                .send(fuigo_workspace_types::WorkspaceEvent::ToolsChanged {
+                    session_id: session_id.to_owned(),
+                });
+        }
+        Ok(result)
+    }
+    /// Publish a new locally-configured MCP set and converge every live
+    /// session onto it, without restarting the process.
+    ///
+    /// Only added, removed, and redefined servers are touched; the rest keep
+    /// their client, process, and in-flight calls. Tool changes reach the
+    /// model through the hub's own `tools_changed` fan-out, which the
+    /// harness already refreshes on. Sessions converge concurrently, each
+    /// serialized only by its own `update_lock`, and every convergence reads
+    /// the *published* config at execution time — so overlapping reloads
+    /// need no global ordering: the last publish wins. Returns the
+    /// per-session changes made; `Ok(vec![])` on a workspace with no local
+    /// MCP configuration (reloads do not apply there).
+    ///
+    /// # Errors
+    ///
+    /// [`WorkspaceError::HubError`] when no hub is connected. The config is
+    /// **published before that check** — new and revived binds start from it
+    /// — but no running session was converged, so the caller should retry
+    /// once the hub is back.
+    pub async fn reload_bind_mcp(
+        &self,
+        config: crate::config::BindMcpConfig,
+    ) -> WorkspaceResult<Vec<(String, crate::mcp::SessionMcpDelta)>> {
+        use futures::StreamExt;
+        let Some(bind_mcp) = self.shared.bind_mcp.as_ref() else {
+            tracing::debug!("ignoring MCP reload: this workspace has no local MCP configuration");
+            return Ok(Vec::new());
+        };
+        *bind_mcp.write() = config;
+        if self.shared.hub_server_blocking().await.is_none() {
+            return Err(WorkspaceError::HubError(
+                "no hub connection; the MCP config is staged and applies to new binds — \
+                 retry the reload once the hub reconnects"
+                    .to_owned(),
+            ));
+        }
+        let mut walks: futures::stream::FuturesUnordered<_> = self
+            .session_ids()
+            .into_iter()
+            .map(|session_id| async move {
+                let delta = self
+                    .converge_session_mcp(&session_id, crate::mcp::McpReclaim::IfChanged)
+                    .await;
+                (session_id, delta)
+            })
+            .collect();
+        let mut applied = Vec::new();
+        while let Some((session_id, delta)) = walks.next().await {
+            if let Some(delta) = delta
+                && !delta.is_empty()
+            {
+                applied.push((session_id, delta));
             }
         }
+        Ok(applied)
+    }
+    /// Converge one session's MCP servers onto the *currently published*
+    /// configuration, under that session's `update_lock`. The single entry
+    /// point for every convergence — bind-spawned, reload-driven — so tool
+    /// publication has exactly one channel (dynamic registration) and one
+    /// serialization point per session. Reads the config after taking the
+    /// lock, so a convergence queued behind another always applies the
+    /// latest publish. `None` when nothing was converged (no config, no hub,
+    /// or the session is gone); emits `ToolsChanged` when something changed.
+    pub(crate) async fn converge_session_mcp(
+        &self,
+        session_id: &str,
+        reclaim: crate::mcp::McpReclaim,
+    ) -> Option<crate::mcp::SessionMcpDelta> {
+        let bind_mcp = self.shared.bind_mcp.as_ref()?;
+        let session = self.session(session_id)?;
+        let tool_server = self.shared.hub_server_blocking().await;
+        let Some(tool_server) = tool_server else {
+            tracing::debug!(session_id, "skipping MCP convergence: no hub connection");
+            return None;
+        };
+        let _update_guard = session.update_lock.lock().await;
+        let config = bind_mcp.read().clone();
+        let delta = match crate::mcp::converge_session(
+            &session,
+            session_id,
+            &config,
+            &tool_server,
+            reclaim,
+            self.shared.session_event_writer(session_id),
+        )
+        .await
         {
-            let mut session_bridges = session.mcp_bridges.lock().await;
-            session_bridges.extend(bridges);
+            Ok(delta) => delta,
+            Err(error) => {
+                tracing::warn!(session_id, %error, "MCP convergence failed for session");
+                return None;
+            }
+        };
+        if !delta.is_empty() {
+            tracing::info!(
+                session_id,
+                added = ?delta.added,
+                removed = ?delta.removed,
+                failed = ?delta.failed,
+                "converged session onto the published MCP configuration"
+            );
+            let _ = self
+                .shared
+                .events
+                .send(fuigo_workspace_types::WorkspaceEvent::ToolsChanged {
+                    session_id: session_id.to_owned(),
+                });
         }
-        {
-            let mut ids = session.mcp_tool_ids.lock().await;
-            ids.extend(registered_tool_ids);
-        }
-        tracing::info!(
-            session_id = %session_id,
-            started = ?started,
-            failed_count = failed.len(),
-            "session MCP servers initialized"
-        );
-        if !started.is_empty() {
-            let _ =
-                self.shared
-                    .events
-                    .send(fuigo_workspace_types::WorkspaceEvent::ToolsChanged {
-                        session_id: session_id.to_owned(),
-                    });
-        }
-        Ok(McpStartResult { started, failed })
+        Some(delta)
+    }
+    /// [`Self::drop_session`], preceded by MCP teardown when — and only when
+    /// — the drop itself would be authorized (a self-drop). One predicate
+    /// for both halves, so an unauthorized caller can neither drop another
+    /// session nor tear down its MCP servers.
+    pub async fn drop_session_with_teardown(
+        &self,
+        caller_session_id: &str,
+        session_id: &str,
+    ) -> WorkspaceResult<()> {
+        let session = self.unmap_session(caller_session_id, session_id)?;
+        self.teardown_session_mcp_arc(&session, None).await;
+        self.finalize_dropped_session(&session, session_id);
+        Ok(())
     }
     /// Unregister all MCP tools for a session from the server.
+    ///
+    /// Deliberately takes no `update_lock`: session-end, evict, and
+    /// `drop_session` await this from hub hooks, and a bind or reload
+    /// mid-MCP-start holds that lock for up to the discovery window — a hook
+    /// must not queue behind it. Flipping the binding to `Closed` first is
+    /// what makes the lock unnecessary: every in-flight MCP step fails
+    /// closed against it (`install_servers` refuses the session and
+    /// `claim_tools` yields nothing), and cancelling `mcp_cancel` drops any
+    /// starts still connecting. `Closed` is terminal against reloads; a
+    /// bind is the hub's authority to re-open it (enrolment compares
+    /// `mcp_epoch` so a bind that predates this teardown cannot).
     pub async fn teardown_session_mcp(&self, session_id: &str) {
+        if let Some(session) = self.session(session_id) {
+            let _ = self.teardown_session_mcp_arc(&session, None).await;
+        }
+    }
+    /// The hub-EVENT teardown entry (`session.unbind`'s deferred task, the
+    /// `SessionEnded` hook) for a session that stays mapped: the caller
+    /// anchors the bind generation with ONE atomic load when the event
+    /// arrives, and this re-snapshots the (epoch, generation) pair
+    /// atomically under `mcp_binding` — two separate loads can tear, and a
+    /// soft rebind between them pairs the old epoch with the post-bind
+    /// generation, which would slip past the fence and close MCP under the
+    /// accepted bind. A generation moved past the anchor means a bind was
+    /// accepted since the event arrived and supersedes it. Returns whether
+    /// the teardown ran. (The unmapped-session paths — evict, drop — stay
+    /// unfenced by design: the unmap precedes the teardown, so no bind can
+    /// reach the session through the map, and the teardown must always run
+    /// or the MCP children leak.)
+    pub(crate) async fn teardown_session_mcp_for_event(
+        &self,
+        session_id: &str,
+        arrival_generation: u64,
+    ) -> bool {
+        let Some(session) = self.session(session_id) else {
+            return false;
+        };
+        let (epoch, generation) = {
+            let _binding = session.mcp_binding.lock().await;
+            (
+                session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst),
+                session
+                    .mcp_bind_generation
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+        };
+        if generation != arrival_generation {
+            return false;
+        }
+        self.teardown_session_mcp_arc(&session, Some((epoch, generation)))
+            .await
+    }
+    /// Arc-based teardown, so a caller that already unmapped the session
+    /// (the drop and evict paths) can still tear its MCP down.
+    pub(crate) async fn teardown_session_mcp_arc(
+        &self,
+        session: &Arc<WorkspaceSession>,
+        expected: Option<(u64, u64)>,
+    ) -> bool {
+        let session_id = session.session_id().to_owned();
+        let session_id = session_id.as_str();
+        let (servers, cancel, closed_life) = {
+            let mut binding = session.mcp_binding.lock().await;
+            let closed_life = session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst);
+            if let Some((expected_epoch, expected_bind_generation)) = expected {
+                if closed_life != expected_epoch {
+                    return false;
+                }
+                if session
+                    .mcp_bind_generation
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    != expected_bind_generation
+                {
+                    return false;
+                }
+            }
+            session
+                .mcp_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let cancel = session.mcp_cancel.lock().clone();
+            let servers = match std::mem::replace(&mut *binding, WorkspaceMcpBinding::Closed) {
+                WorkspaceMcpBinding::Active(active) => active.servers,
+                WorkspaceMcpBinding::Uninitialized | WorkspaceMcpBinding::Closed => {
+                    std::collections::HashMap::new()
+                }
+            };
+            session.mcp_state.lock().await.owned_clients.clear();
+            (servers, cancel, closed_life)
+        };
+        cancel.cancel();
         let tool_server = {
             let hub_guard = self.shared.hub_handle.lock().await;
-            match hub_guard.as_ref() {
-                Some(hub) => hub.server.clone(),
-                None => return,
+            hub_guard.as_ref().map(|hub| hub.server.clone())
+        };
+        if let (Some(tool_server), Ok(sid)) =
+            (tool_server, fuigo_tool_protocol::SessionId::new(session_id))
+        {
+            for server in servers.values() {
+                for tool_id in &server.tool_ids {
+                    let _ = crate::mcp::HubToolRegistry::unregister_tool_dynamic(
+                        &tool_server,
+                        tool_id,
+                        &sid,
+                        closed_life,
+                    )
+                    .await;
+                }
             }
-        };
-        let session = match self.session(session_id) {
-            Some(s) => s,
-            None => return,
-        };
-        let sid = match fuigo_tool_protocol::SessionId::new(session_id) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mut tool_ids = session.mcp_tool_ids.lock().await;
-        for tid in tool_ids.drain(..) {
-            let _ = tool_server.unregister_tool_dynamic(&tid, &sid).await;
         }
-        let mut bridges = session.mcp_bridges.lock().await;
-        bridges.clear();
-        let mut state = session.mcp_state.lock().await;
-        state.owned_clients.clear();
+        drop(servers);
+        true
     }
     pub fn session(&self, session_id: &str) -> Option<Arc<WorkspaceSession>> {
         self.shared.sessions.read().get(session_id).cloned()
@@ -2994,6 +3125,19 @@ impl WorkspaceHandle {
             .on_unbind(Self::bind_lifecycle_ctx(session, &real_root));
     }
     pub fn drop_session(&self, caller_session_id: &str, session_id: &str) -> WorkspaceResult<()> {
+        let session = self.unmap_session(caller_session_id, session_id)?;
+        self.finalize_dropped_session(&session, session_id);
+        Ok(())
+    }
+    /// Authorize and remove the session from the map, returning the Arc so
+    /// the caller can finish teardown on it. Split from
+    /// [`Self::finalize_dropped_session`] so the MCP drop path can tear down
+    /// between the two (unmap first — see `drop_session_with_teardown`).
+    fn unmap_session(
+        &self,
+        caller_session_id: &str,
+        session_id: &str,
+    ) -> WorkspaceResult<Arc<WorkspaceSession>> {
         if caller_session_id != session_id {
             return Err(WorkspaceError::Unauthorized {
                 caller: caller_session_id.to_owned(),
@@ -3004,14 +3148,17 @@ impl WorkspaceHandle {
         let Some(session) = sessions.remove(session_id) else {
             return Err(WorkspaceError::SessionNotFound(session_id.to_owned()));
         };
-        drop(sessions);
-        self.invoke_unbind_hook(&session);
+        Ok(session)
+    }
+    /// The non-MCP half of dropping a session: unbind hook, forwarder and
+    /// backend shutdowns, debounce-entry cleanup.
+    fn finalize_dropped_session(&self, session: &Arc<WorkspaceSession>, session_id: &str) {
+        self.invoke_unbind_hook(session);
         session.abort_system_notify_producers();
         session.shutdown_terminal_backend();
         session.shutdown_browser_service();
         session.cancel_hunk_tracker();
         self.shared.tool_defs_last_emit.remove(session_id);
-        Ok(())
     }
     /// Re-resolve every session's toolset against `new_snapshot` and emit one `WorkspaceEvent::ToolsChanged` per session.
     pub fn on_mcp_snapshot_changed(
@@ -3070,6 +3217,7 @@ impl WorkspaceHandle {
                     });
                 Box::pin(
                 async move {
+                    let bind_started = std::time::Instant::now();
                     let Some(shared) = weak_shared.upgrade() else {
                         WORKSPACE_BIND_FAILED_TOTAL
                             .with_label_values(&["workspace_shutdown"])
@@ -3301,6 +3449,9 @@ impl WorkspaceHandle {
                             );
                         }
                     };
+                    let mcp_bind_epoch = session
+                        .mcp_epoch
+                        .load(std::sync::atomic::Ordering::SeqCst);
                     if let Some(mapping) = path_virt {
                         if let Some(cwd) = bind_cwd_for_rebind
                             && let Err(e) = session.set_cwd_for_virtualization(cwd).await
@@ -3324,7 +3475,7 @@ impl WorkspaceHandle {
                         WORKSPACE_BIND_FAILED_TOTAL
                             .with_label_values(&["bind_mount_failed"])
                             .inc();
-                        let _ = ws.drop_session(&sid_str, &sid_str);
+                        let _ = ws.drop_session_with_teardown(&sid_str, &sid_str).await;
                         return Err(
                             fuigo_tool_runtime::ToolError::service_unavailable(
                                 format!(
@@ -3340,6 +3491,140 @@ impl WorkspaceHandle {
                             .with_property(|| ("session_id", sid_str.clone()));
                         build_session_routed_handlers(&session.toolset(), &ws)
                     };
+                    let () = async {
+                        if ws.shared.bind_mcp.is_some() && !bind_config.rpc_only
+                            && resolve_error.is_none()
+                        {
+                            let mut native: HashSet<ToolId> = handlers
+                                .iter()
+                                .map(|handler| handler.tool_id())
+                                .collect();
+                            native.insert(rpc_tool_id.clone());
+                            let mut degraded_raced_teardown = false;
+                            let mut union_grew = false;
+                            let enrolled = {
+                                let mut binding = session.mcp_binding.lock().await;
+                                if session
+                                    .mcp_epoch
+                                    .load(std::sync::atomic::Ordering::SeqCst) != mcp_bind_epoch
+                                {
+                                    if matches!(*binding, WorkspaceMcpBinding::Closed) {
+                                        session
+                                            .mcp_bind_generation
+                                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        degraded_raced_teardown = true;
+                                    } else {
+                                        {
+                                            let mut set = session.mcp_native_tool_ids.lock();
+                                            let before = set.len();
+                                            set.extend(native);
+                                            union_grew = set.len() != before;
+                                        }
+                                        session
+                                            .mcp_bind_generation
+                                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    false
+                                } else {
+                                    if matches!(*binding, WorkspaceMcpBinding::Closed) {
+                                        *binding = WorkspaceMcpBinding::Uninitialized;
+                                        *session.mcp_cancel.lock() = tokio_util::sync::CancellationToken::new();
+                                    }
+                                    let was_active = binding.active().is_some();
+                                    let _ = binding.join();
+                                    if !was_active {
+                                        session
+                                            .mcp_epoch
+                                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    session
+                                        .mcp_bind_generation
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    *session.mcp_native_tool_ids.lock() = native;
+                                    true
+                                }
+                            };
+                            if enrolled {
+                                let converge_ws = ws.clone();
+                                let converge_sid = sid_str.clone();
+                                let mut converge = tokio::spawn(async move {
+                                    converge_ws
+                                        .converge_session_mcp(
+                                            &converge_sid,
+                                            crate::mcp::McpReclaim::Always,
+                                        )
+                                        .await;
+                                });
+                                let grace = ws
+                                    .shared
+                                    .bind_mcp
+                                    .as_ref()
+                                    .map(|config| {
+                                        config
+                                            .read()
+                                            .bind_converge_grace_within(bind_started.elapsed())
+                                    })
+                                    .unwrap_or_default();
+                                let _ = tokio::time::timeout(grace, &mut converge).await;
+                            } else {
+                                tracing::warn!(
+                                session_id = %sid_str,
+                                degraded_raced_teardown,
+                                "session.bind: MCP enrolment refused — the session was torn down after this bind began"
+                            );
+                                if degraded_raced_teardown {
+                                    WORKSPACE_BIND_MCP_DEGRADED_TOTAL
+                                        .with_label_values(&["raced_teardown"])
+                                        .inc();
+                                }
+                                if union_grew {
+                                    let reclaim_ws = ws.clone();
+                                    let reclaim_sid = sid_str.clone();
+                                    tokio::spawn(async move {
+                                        reclaim_ws
+                                            .converge_session_mcp(
+                                                &reclaim_sid,
+                                                crate::mcp::McpReclaim::Always,
+                                            )
+                                            .await;
+                                    });
+                                }
+                            }
+                        } else {
+                            let mut binding = session.mcp_binding.lock().await;
+                            let epoch_current = session
+                                .mcp_epoch
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                                == mcp_bind_epoch;
+                            if epoch_current
+                                && matches!(*binding, WorkspaceMcpBinding::Closed)
+                            {
+                                *binding = WorkspaceMcpBinding::Uninitialized;
+                                *session.mcp_cancel.lock() = tokio_util::sync::CancellationToken::new();
+                                session
+                                    .mcp_epoch
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                session
+                                    .mcp_bind_generation
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            } else if !epoch_current
+                                && matches!(*binding, WorkspaceMcpBinding::Closed)
+                            {
+                                tracing::warn!(
+                                session_id = %sid_str,
+                                "session.bind: MCP re-open skipped — the session was torn down after this bind began; the next bind re-opens"
+                            );
+                                session
+                                    .mcp_bind_generation
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            } else {
+                                session
+                                    .mcp_bind_generation
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
+                        .await;
                     let advertised: Vec<String> = handlers
                         .iter()
                         .map(|h| h.tool_id().as_str().to_owned())
@@ -3478,6 +3763,29 @@ impl WorkspaceHandle {
         let catalog: Arc<Vec<Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>>> =
             Arc::new(template_handlers.clone());
         let resolver = self.session_bind_resolver(catalog, rpc_tool_id);
+        let unbind_workspace = self.clone();
+        let on_session_unbound: Arc<fuigo_computer_hub_sdk::SessionUnboundCallback> =
+            Arc::new(move |sid: &fuigo_tool_protocol::SessionId| {
+                let workspace = unbind_workspace.clone();
+                let session_id = sid.as_str().to_owned();
+                let Some(session) = workspace.session(&session_id) else {
+                    return;
+                };
+                let arrival_generation = session
+                    .mcp_bind_generation
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    if workspace
+                        .teardown_session_mcp_for_event(&session_id, arrival_generation)
+                        .await
+                    {
+                        tracing::info!(
+                            session = %session_id,
+                            "hub session unbind: MCP resources torn down"
+                        );
+                    }
+                });
+            });
         let hub_ws_started = std::time::Instant::now();
         let connect_result = HubHandle::connect(
             &hub_config,
@@ -3485,6 +3793,7 @@ impl WorkspaceHandle {
             template_handlers,
             self.shared.server_metadata.clone(),
             Some(resolver),
+            Some(on_session_unbound),
         )
         .await;
         let hub_ws_connect_secs = hub_ws_started.elapsed().as_secs_f64();
@@ -3818,9 +4127,8 @@ fn build_session_routed_handlers(
             Some(def.function.parameters.clone()),
             ws.clone(),
         ) {
-            Ok(handler) => {
-                handlers.push(Arc::new(handler) as Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>)
-            }
+            Ok(handler) => handlers
+                .push(Arc::new(handler) as Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>),
             Err(e) => {
                 tracing::warn!(
                     tool = %def.function.name,
@@ -4029,33 +4337,65 @@ pub(crate) async fn stream_hash_and_range(
     }
     Ok((format!("{:x}", hasher.finalize()), chunk, pos))
 }
+/// Everything [`connect_local_workspace`] needs beyond the connection
+/// identity (cwd, hub URL, auth). One options struct instead of a
+/// positional flag tail, so call sites read as named decisions and adding a
+/// knob is non-breaking. `Default` is the fail-closed configuration.
+#[derive(Clone, Default)]
+pub struct LocalWorkspaceConnectOptions {
+    /// Metadata attached to the tool-server registration (`servers.list`).
+    pub metadata: Option<serde_json::Value>,
+    /// Stable hub server id (`--server-id`).
+    pub server_id: Option<String>,
+    pub alpha_test_key: Option<String>,
+    /// Allow `ws://` hub URLs (tests and local development only).
+    pub allow_insecure_ws: bool,
+    /// Runtime-tunable timing/threshold config for the tool server.
+    pub status_config: crate::status_config::StatusConfig,
+    /// Enable the durable artifact upload queue.
+    pub upload_queue_enabled: bool,
+    /// Folder-trust verdict for project-scoped LSP servers.
+    pub project_lsp_trusted: bool,
+    /// Diagnostics server handle, when the embedder runs one.
+    pub diag: Option<DiagHandle>,
+    /// Fail binds without an explicit toolset closed instead of widening to
+    /// the default catalog (sandbox-launched standalone servers).
+    pub require_explicit_toolset: bool,
+    /// Confine `fuigo/fs/*` resolution to the workspace root (remote
+    /// sandboxes, where the root is a tenant boundary).
+    pub confine_fs_to_workspace_root: bool,
+    /// MCP servers every admitted hub session binds; hot-swappable via
+    /// [`WorkspaceHandle::reload_bind_mcp`].
+    pub bind_mcp: Option<crate::config::BindMcpConfig>,
+}
 /// Create a [`WorkspaceHandle`] and connect it to the hub.
 ///
 /// This is the shared setup used by both the standalone `workspace_server` binary and the TUI's in-process local workspace server.
 /// The workspace registers its tools on the server so external clients can reach them.
 /// Sessions are bound dynamically by clients calling `bind_server`.
 ///
-/// `confine_fs_to_workspace_root` confines `fuigo/fs/*` resolution to the root.
-/// The standalone workspace server defaults it on (it always backs a remote sandbox; override via `FUIGO_WORKSPACE_CONFINE_FS_TO_ROOT`).
-/// The CLI leader passes `false`.
-///
-/// Returns the connected handle (caller should keep it alive for the lifetime of the server connection).
+/// Returns the connected handle (caller should keep it alive for the
+/// lifetime of the server connection).
 pub async fn connect_local_workspace(
     cwd: std::path::PathBuf,
     hub_url: url::Url,
     auth: fuigo_computer_hub_sdk::SharedAuthProvider,
-    metadata: Option<serde_json::Value>,
-    server_id: Option<String>,
-    alpha_test_key: Option<String>,
-    allow_insecure_ws: bool,
-    status_config: crate::status_config::StatusConfig,
-    upload_queue_enabled: bool,
-    project_lsp_trusted: bool,
-    diag: Option<DiagHandle>,
-    require_explicit_toolset: bool,
-    confine_fs_to_workspace_root: bool,
+    options: LocalWorkspaceConnectOptions,
 ) -> WorkspaceResult<WorkspaceHandle> {
     use crate::session::tool_config::WorkspaceSessionContextFactory;
+    let LocalWorkspaceConnectOptions {
+        metadata,
+        server_id,
+        alpha_test_key,
+        allow_insecure_ws,
+        status_config,
+        upload_queue_enabled,
+        project_lsp_trusted,
+        diag,
+        require_explicit_toolset,
+        confine_fs_to_workspace_root,
+        bind_mcp,
+    } = options;
     let time_to_ready_started = std::time::Instant::now();
     let identity: crate::upload::environment::WorkspaceIdentity =
         auth.identity().map(Into::into).unwrap_or_default();
@@ -4096,6 +4436,7 @@ pub async fn connect_local_workspace(
     ws_config.project_lsp_trusted = project_lsp_trusted;
     ws_config.require_explicit_toolset = require_explicit_toolset;
     ws_config.confine_fs_to_workspace_root = confine_fs_to_workspace_root;
+    ws_config.bind_mcp = bind_mcp;
     if let Ok(dir) = std::env::var("FUIGO_WORKSPACE_SERVER_SKILLS_DIR")
         && !dir.is_empty()
     {
@@ -4346,7 +4687,9 @@ async fn enqueue_workspace_tool_definitions(
 }
 /// Single source of truth for mapping a turn-hook outcome to the `events.jsonl` [`TurnOutcomeLabel`].
 /// Kept as one `match` so the two enums cannot drift and the mapping is never duplicated across call sites.
-fn turn_outcome_label(outcome: fuigo_tool_protocol::turn_hook::TurnHookOutcome) -> TurnOutcomeLabel {
+fn turn_outcome_label(
+    outcome: fuigo_tool_protocol::turn_hook::TurnHookOutcome,
+) -> TurnOutcomeLabel {
     use fuigo_tool_protocol::turn_hook::TurnHookOutcome;
     match outcome {
         TurnHookOutcome::Completed => TurnOutcomeLabel::Completed,
@@ -4687,6 +5030,7 @@ impl WorkspaceHandle {
             project_lsp_trusted,
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
+            bind_mcp: None,
         };
         Self::build(
             config,
@@ -4729,6 +5073,7 @@ impl WorkspaceHandle {
             project_lsp_trusted: true,
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
+            bind_mcp: None,
         }
     }
     /// Test handle backed by a temp dir. Zero sessions; `TempDir` kept alive via `Arc`.

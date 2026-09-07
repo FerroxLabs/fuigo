@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Once;
 
-use rusqlite::params;
 use fuigo_sqlite_journal::JournalMode;
+use rusqlite::params;
 
 use super::chunker::{chunk_hash, chunk_markdown};
 use super::schema;
@@ -67,6 +67,7 @@ pub struct FtsResult {
     pub chunk_id: String,
     pub rowid: i64,
     pub rank: f64,
+    pub confidence: f64,
 }
 
 /// Result of reindexing a file.
@@ -80,12 +81,12 @@ pub struct ReindexResult {
 /// SQLite-backed memory index.
 pub struct MemoryIndex {
     db: rusqlite::Connection,
-    #[expect(dead_code, reason = "used by later PRs for reindex_all / file reads")]
     storage: MemoryStorage,
     chunk_config: MemoryIndexConfig,
     /// Whether sqlite-vec loaded successfully (FTS always available).
     vec_available: bool,
     embedding_dimensions: usize,
+    embedding_identity: Option<String>,
 }
 
 impl MemoryIndex {
@@ -99,8 +100,21 @@ impl MemoryIndex {
         config: MemoryIndexConfig,
         dimensions: usize,
     ) -> Result<Self, rusqlite::Error> {
+        if db_path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(rusqlite::Error::InvalidPath(db_path.to_owned()));
+        }
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            }
         }
 
         // The mode decision statfs's the parent dir created above.
@@ -123,6 +137,15 @@ impl MemoryIndex {
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
         let db = journal_mode.open(db_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                journal_mode.effective_db_path(db_path),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        }
 
         // Check if sqlite-vec loaded (graceful fallback if not)
         let vec_available =
@@ -188,7 +211,115 @@ impl MemoryIndex {
             chunk_config: config,
             vec_available,
             embedding_dimensions: dimensions,
+            embedding_identity: None,
         })
+    }
+
+    /// Bind vectors to endpoint/model/dimension identity. The Markdown and FTS
+    /// records survive migration; incompatible vectors are regenerated explicitly.
+    pub fn bind_embedding_provider(
+        &mut self,
+        provider: &dyn super::embedding::EmbeddingProvider,
+    ) -> Result<(), rusqlite::Error> {
+        let identity = provider.cache_identity();
+        let tx = self.db.transaction()?;
+        let prior = tx
+            .query_row(schema::GET_META_SQL, ["embedding_identity"], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok();
+        if prior.as_deref() != Some(&identity) {
+            if self.vec_available {
+                tx.execute("DELETE FROM chunks_vec", [])?;
+            }
+            tx.execute(
+                schema::UPSERT_META_SQL,
+                params!["embedding_identity", identity],
+            )?;
+        }
+        tx.commit()?;
+        self.embedding_identity = Some(identity);
+        Ok(())
+    }
+
+    fn identity_is_current(&self) -> bool {
+        self.embedding_identity.as_ref().is_none_or(|expected| {
+            self.db
+                .query_row(schema::GET_META_SQL, ["embedding_identity"], |r| {
+                    r.get::<_, String>(0)
+                })
+                .is_ok_and(|current| current == *expected)
+        })
+    }
+
+    /// Check source bytes at use time too: watcher delivery is asynchronous.
+    pub fn chunk_is_current(&self, chunk: &ChunkRecord) -> bool {
+        self.storage
+            .read_file(Path::new(&chunk.path), None, None)
+            .is_ok_and(|text| {
+                super::safety::is_safe_memory(&text)
+                    && chunk_markdown(&text, &self.chunk_config)
+                        .iter()
+                        .any(|candidate| {
+                            candidate.start_line == chunk.start_line
+                                && chunk_hash(&candidate.text) == chunk.hash
+                        })
+            })
+    }
+
+    /// Latest explicit version of each fact. Same-file later entries supersede
+    /// earlier ones; concurrent equal-time files are ambiguous and suppressed.
+    pub fn latest_fact_versions(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (i64, String)>, rusqlite::Error> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id FROM chunks ORDER BY created_at, path, start_line")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut latest: std::collections::HashMap<String, (i64, String, String)> =
+            std::collections::HashMap::new();
+        for id in ids {
+            let Some(chunk) = self.get_chunk(&id)? else {
+                continue;
+            };
+            let Some(key) = super::safety::fact_key(&chunk.text) else {
+                continue;
+            };
+            if !self.chunk_is_current(&chunk) {
+                continue;
+            }
+            let winner = match latest.get(&key) {
+                Some((time, _, path)) if *time == chunk.created_at && *path != chunk.path => {
+                    String::new()
+                }
+                _ => chunk.id.clone(),
+            };
+            latest.insert(key, (chunk.created_at, winner, chunk.path));
+        }
+        Ok(latest
+            .into_iter()
+            .map(|(k, (time, id, _))| (k, (time, id)))
+            .collect())
+    }
+
+    /// Reject a late embedding response for edited/deleted text or another model.
+    pub fn upsert_embedding_if_current(
+        &self,
+        id: &str,
+        text: &str,
+        embedding: &[f32],
+    ) -> Result<(), rusqlite::Error> {
+        let tx = self.db.unchecked_transaction()?;
+        let current = self.get_chunk(id)?;
+        if !self.identity_is_current()
+            || !current.is_some_and(|c| c.hash == chunk_hash(text) && self.chunk_is_current(&c))
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.upsert_embedding(id, embedding)?;
+        tx.commit()
     }
 
     /// Whether sqlite-vec is available for vector operations.
@@ -214,25 +345,39 @@ impl MemoryIndex {
     /// Reindex a single memory file. Compares chunk hashes to avoid redundant work.
     ///
     /// `source` should be `"global"`, `"workspace"`, or `"session"`.
+    pub fn allows_path(&self, path: &Path) -> bool {
+        self.storage.allows_path(path)
+    }
+
     pub fn reindex_file(
         &mut self,
         path: &Path,
         source: &str,
     ) -> Result<ReindexResult, rusqlite::Error> {
-        let content = match std::fs::read_to_string(path) {
+        let content = match self.storage.read_file(path, None, None) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "failed to read file for reindexing");
-                return Ok(ReindexResult::default());
+                let _ = self.delete_path(path);
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e)));
             }
         };
 
+        if !super::safety::is_safe_memory(&content) {
+            let removed = self.delete_path(path)?;
+            return Ok(ReindexResult {
+                removed,
+                ..Default::default()
+            });
+        }
         let new_chunks = chunk_markdown(&content, &self.chunk_config);
         let path_str = path.to_string_lossy().to_string();
 
         let existing = self.get_chunks_for_path(&path_str)?;
 
-        let now = std::time::SystemTime::now()
+        let now = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH)
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
@@ -250,13 +395,17 @@ impl MemoryIndex {
 
             match existing.get(&chunk_id) {
                 Some(old) if old.hash == hash => {
-                    // Unchanged, skip
+                    // Rebuild/migration must retain source time, not indexing time.
+                    tx.execute(
+                        "UPDATE chunks SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+                        params![now, chunk_id],
+                    )?;
                 }
                 Some(old) => {
                     // Changed: update chunk, delete stale FTS entry, insert new one
                     tx.execute(
                         "UPDATE chunks SET text = ?1, hash = ?2, start_line = ?3, \
-                         end_line = ?4, updated_at = ?5 WHERE id = ?6",
+                         end_line = ?4, updated_at = ?5, created_at = ?5 WHERE id = ?6",
                         params![
                             chunk.text,
                             hash,
@@ -359,7 +508,7 @@ impl MemoryIndex {
         if sources.is_empty() {
             return Ok(vec![]);
         }
-        let keywords = super::query_expansion::extract_keywords(query);
+        let keywords = super::query_expansion::extract_keywords(&query.replace('_', " "));
         let fts_query = keywords.join(" OR ");
         if fts_query.is_empty() {
             return Ok(vec![]);
@@ -393,11 +542,11 @@ impl MemoryIndex {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        self.resolve_fts_rowids(rows)
+        self.resolve_fts_rowids(rows, &keywords)
     }
 
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, rusqlite::Error> {
-        let keywords = super::query_expansion::extract_keywords(query);
+        let keywords = super::query_expansion::extract_keywords(&query.replace('_', " "));
         let fts_query = keywords.join(" OR ");
         if fts_query.is_empty() {
             return Ok(vec![]);
@@ -413,10 +562,14 @@ impl MemoryIndex {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        self.resolve_fts_rowids(rows)
+        self.resolve_fts_rowids(rows, &keywords)
     }
 
-    fn resolve_fts_rowids(&self, rows: Vec<(i64, f64)>) -> Result<Vec<FtsResult>, rusqlite::Error> {
+    fn resolve_fts_rowids(
+        &self,
+        rows: Vec<(i64, f64)>,
+        keywords: &[String],
+    ) -> Result<Vec<FtsResult>, rusqlite::Error> {
         let mut results = Vec::with_capacity(rows.len());
         for (rowid, rank) in rows {
             if let Ok(chunk_id) = self.db.query_row(
@@ -424,7 +577,23 @@ impl MemoryIndex {
                 params![rowid],
                 |row| row.get::<_, String>(0),
             ) {
+                let Some(chunk) = self.get_chunk(&chunk_id)? else {
+                    continue;
+                };
+                if !self.chunk_is_current(&chunk) {
+                    continue;
+                }
+                let terms: std::collections::HashSet<String> =
+                    super::query_expansion::extract_keywords(&chunk.text.replace('_', " "))
+                        .into_iter()
+                        .collect();
+                let coverage = keywords.iter().filter(|k| terms.contains(*k)).count() as f64
+                    / keywords.len().max(1) as f64;
+                // Absolute query coverage: one weak candidate cannot promote itself
+                // merely because it is the only result. A one-word query tops at .85.
+                let confidence = coverage * if keywords.len() == 1 { 0.85 } else { 0.98 };
                 results.push(FtsResult {
+                    confidence,
                     chunk_id,
                     rowid,
                     rank,
@@ -520,7 +689,15 @@ impl MemoryIndex {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(results)
+        Ok(results
+            .into_iter()
+            .filter(|(id, _)| {
+                self.get_chunk(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| self.chunk_is_current(&c))
+            })
+            .collect())
     }
 
     /// Insert or update an embedding for a chunk.
@@ -532,6 +709,11 @@ impl MemoryIndex {
         if !self.vec_available {
             return Ok(());
         }
+        if !self.identity_is_current() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let embedding = super::embedding::normalize_vector(embedding, self.embedding_dimensions)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let embedding_bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         self.db.execute(
             "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
@@ -549,6 +731,12 @@ impl MemoryIndex {
         if !self.vec_available {
             return Ok(vec![]);
         }
+        if !self.identity_is_current() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let query_embedding =
+            super::embedding::normalize_vector(query_embedding, self.embedding_dimensions)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let query_bytes: Vec<u8> = query_embedding
             .iter()
             .flat_map(|f| f.to_le_bytes())
@@ -729,6 +917,7 @@ mod tests {
     fn test_storage(tmp: &TempDir) -> MemoryStorage {
         let global = tmp.path().join("memory");
         let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         MemoryStorage::with_paths(global, workspace)
     }
 
@@ -812,7 +1001,7 @@ mod tests {
         let mut idx = test_index(&tmp);
 
         // Write a test memory file
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Title\n\nSome content here.").unwrap();
 
         let result = idx.reindex_file(&file_path, "workspace").unwrap();
@@ -826,7 +1015,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Title\n\nOriginal content.").unwrap();
         let r1 = idx.reindex_file(&file_path, "workspace").unwrap();
         assert_eq!(r1.added, 1);
@@ -843,7 +1032,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         // Write file with content that produces at least 2 chunks
         let big = format!(
             "## Section 1\n\n{}\n\n## Section 2\n\n{}",
@@ -865,7 +1054,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Static\n\nContent.").unwrap();
 
         let r1 = idx.reindex_file(&file_path, "workspace").unwrap();
@@ -882,7 +1071,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Guide\n\nRust programming language tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -895,7 +1084,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Guide\n\nPython tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -908,7 +1097,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Test\n\nChunk content.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -950,7 +1139,7 @@ mod tests {
         let mut idx = test_index(&tmp);
 
         // Simulate MemoryStorage::append_to_memory writing the file.
-        let mem_file = tmp.path().join("workspace_memory.md");
+        let mem_file = tmp.path().join("memory/test_ws/workspace_memory.md");
         std::fs::write(
             &mem_file,
             "## Rust Tip\n\nAlways prefer references over clones.",
@@ -985,7 +1174,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("removeme.md");
+        let file_path = tmp.path().join("memory/test_ws/removeme.md");
         std::fs::write(&file_path, "# Rust Guide\n\nRust ownership rules.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -1011,7 +1200,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("idempotent.md");
+        let file_path = tmp.path().join("memory/test_ws/idempotent.md");
         std::fs::write(&file_path, "# Entry\n\nSome content.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -1029,7 +1218,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let phantom = tmp.path().join("phantom.md");
+        let phantom = tmp.path().join("memory/test_ws/phantom.md");
         let removed = idx.delete_path(&phantom).unwrap();
         assert_eq!(removed, 0, "unindexed path must return 0");
     }
@@ -1040,8 +1229,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let keep = tmp.path().join("keep.md");
-        let remove = tmp.path().join("remove.md");
+        let keep = tmp.path().join("memory/test_ws/keep.md");
+        let remove = tmp.path().join("memory/test_ws/remove.md");
         std::fs::write(&keep, "# Keep\n\nPython tutorial.").unwrap();
         std::fs::write(&remove, "# Remove\n\nRust tutorial.").unwrap();
 
@@ -1075,7 +1264,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file = tmp.path().join("note.md");
+        let file = tmp.path().join("memory/test_ws/note.md");
         std::fs::write(&file, "# Guide\n\nRust testing.").unwrap();
         idx.reindex_file(&file, "workspace").unwrap();
 
@@ -1112,8 +1301,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let f1 = tmp.path().join("a.md");
-        let f2 = tmp.path().join("b.md");
+        let f1 = tmp.path().join("memory/test_ws/a.md");
+        let f2 = tmp.path().join("memory/test_ws/b.md");
         std::fs::write(&f1, "# Alpha\n\nalpha content.").unwrap();
         std::fs::write(&f2, "# Beta\n\nbeta content.").unwrap();
         idx.reindex_file(&f1, "workspace").unwrap();
@@ -1165,7 +1354,7 @@ mod tests {
         let mut idx = test_index(&tmp);
 
         // Seed the index with a file containing uniquely-identifiable content.
-        let file = tmp.path().join("session.md");
+        let file = tmp.path().join("memory/test_ws/session.md");
         std::fs::write(&file, "# Session\n\nXyzzy-orphan-regression-token.").unwrap();
         idx.reindex_file(&file, "workspace").unwrap();
 

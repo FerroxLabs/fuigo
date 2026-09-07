@@ -77,7 +77,11 @@ Memory is stored as Markdown files under `~/.fuigo/memory/`:
 
 Fuigo suffixes each workspace directory with a short hash of the repository's identity. The identity is the `origin` remote in `org/repo` form when the directory is a Git repository with an `origin` remote, or the directory path otherwise. Because clones and worktrees of the same repository share an `origin` remote, they also share one memory directory.
 
-An SQLite index supports search across all memory files:
+An SQLite index supports search within the current workspace and the shared global `MEMORY.md`. Other workspace directories and recovery snapshots are excluded from reads and retrieval, including through symlinks.
+
+Fuigo serializes its memory writes and replaces files atomically, so concurrent appends preserve entries and interrupted replacements leave complete files. On Unix, Fuigo writes memory files with owner-only permissions. Nonempty workspace directories are retained even when they contain curated notes but no session logs.
+
+Search uses:
 - **FTS5** provides the default full-text search for keyword matching.
 - **vec0** adds vector search for semantic similarity when an embedding model is configured.
 
@@ -90,10 +94,13 @@ When a session ends, Fuigo saves a structured metadata summary to that session's
 - Message counts (user, assistant, and tool results).
 - Topics: the first few substantive user prompts from the session, up to five.
 - The session date and time (UTC).
+- Bounded explicit `Fact:`, `Decision:`, `Correction:`, and `Outcome:` lines, plus selected visible assistant completion statements.
 
 Fuigo builds the summary from conversation metadata without an LLM call, without added latency. Fuigo skips the save for trivial sessions -- those with fewer than three substantive prompts, or fewer than 50 bytes of user text.
 
-The summary does not record tool usage, file paths, or shell commands. The session ID forms part of the log filename. To turn automatic saves off, set `session.save_on_end = false`. For richer capture of decisions, patterns, and reasoning, use `/flush`.
+Captured statements carry their session, workspace, speaker, turn, and observation time. They are historical claims, not independent proof that an assistant's reported outcome occurred. Tool-result bodies and private reasoning are excluded from this capture path. The session ID forms part of a collision-resistant log filename. To turn automatic saves off, set `session.save_on_end = false`. For richer capture of decisions, patterns, and reasoning, use `/flush`.
+
+A conservative filter excludes recognized credential patterns and instruction-injection text from capture and retrieval. It does not detect every possible secret or malicious instruction; keep sensitive material out of memory files.
 
 ---
 
@@ -126,6 +133,8 @@ Ask Fuigo to remember something, and it appends the note to a `MEMORY.md` file -
 
 Fuigo records entries as durable statements under organized headings, such as `## Preferences`, `## Project Context`, or `## Debugging`. The file watcher reindexes the change on the next memory search, so the new entry is searchable within the current session.
 
+For a fact that changes, use a stable explicit key, for example `Decision: database = SQLite`, followed later by `Correction: database = PostgreSQL`. Retrieval prefers the newer statement with the same key. This handles explicit keyed updates; it does not resolve every contradiction in ordinary prose.
+
 You can also save a note directly with the `/remember` command:
 
 ```
@@ -144,6 +153,8 @@ Ask Fuigo to forget something, and it finds and removes the matching entry:
 
 Forget is best-effort: the model searches memory and removes entries that match. For guaranteed removal, edit the files under `~/.fuigo/memory/` directly and delete the entry yourself. To locate a file, open the `/memory` browser and press `y` to copy its path.
 
+Deleted or changed source text is checked before retrieval, without waiting for the watcher. Previously injected memory whose source changed is removed before the next turn. Copies in other source files must be removed separately. Dream retains raw session logs and private recovery versions on disk; recovery versions are excluded from memory retrieval.
+
 ### Recall
 
 Ask what Fuigo remembers:
@@ -152,7 +163,7 @@ Ask what Fuigo remembers:
 > what do you remember?
 ```
 
-Fuigo searches across all memory files and summarizes what it knows, grouped by source: global preferences, project-specific knowledge, and session history. Use `/memory` to browse the raw files.
+Fuigo searches the current workspace and shared global memory and summarizes what it finds, grouped by source: global preferences, project-specific knowledge, and session history. Use `/memory` to browse the raw files.
 
 ### Direct Editing
 
@@ -204,7 +215,7 @@ When you save a note with `/remember`, Fuigo confirms in the scrollback:
 Memory saved to ~/.fuigo/memory/MEMORY.md
 ```
 
-Background saves — flush, dream, and session-end — run silently and do not post a scrollback message. Use `/memory` at any time to browse what Fuigo has stored.
+Background saves — flush, automatic dream, and session-end — run silently. An explicit `/dream` reports its result or why it could not run. Use `/memory` at any time to browse what Fuigo has stored.
 
 ---
 
@@ -216,11 +227,13 @@ The `/dream` command consolidates scattered memory fragments into organized topi
 /dream
 ```
 
-Dream reorganizes individual session logs and memory entries into a coherent, deduplicated knowledge base, which reduces noise and improves search quality over time. `/dream` requires memory to be enabled.
+Dream proposes a consolidated workspace memory from session logs and existing entries. `/dream` requires memory to be enabled. Raw session sources remain available after consolidation, and the previous workspace memory is saved privately under `.memory-recovery/` before replacement. Recovery files are not indexed or injected.
+
+Only one Dream run owns a workspace at a time, with ownership acquired before the model call. Failed or cancelled runs preserve the sources and do not record success; a result is rejected if its input changed while the model was working.
 
 ### Auto-Dream
 
-Dream also runs automatically. By default, Fuigo checks the consolidation gates when a session ends and runs Dream once enough time has passed and enough sessions have accumulated:
+Dream also runs automatically. Fuigo defers the startup check until the session loop is running, then checks periodically. Consolidation runs once enough time has passed and enough sessions have accumulated:
 
 ```toml
 [memory.dream]
@@ -262,12 +275,16 @@ Read my workspace MEMORY.md
 ```
 
 The model has access to two memory tools:
-- `memory_search` -- Search across all memory
-- `memory_get` -- Read a specific memory file by path
+- `memory_search` -- Search the current workspace and shared global memory
+- `memory_get` -- Read an allowed memory file by path
 
 ### Search Scoring
 
-The default embedding model is unset, so memory starts in full-text-only mode. If you configure an embedding model, search combines vector similarity (weight `0.7`) with BM25 text similarity (weight `0.3`). Results are filtered by a minimum score threshold (default: `0.7`).
+The default embedding model is unset, so memory starts in full-text-only mode. Lexical confidence reflects query coverage, so a lone weak keyword match does not become a high-confidence answer merely because no better result exists. Results are filtered by a minimum score threshold (default: `0.7`).
+
+With an explicitly configured embedding route, search uses normalized vector similarity alongside text confidence. When both signals match, their default weights are `0.7` and `0.3`; a single available signal retains its own confidence. Repeated access can improve ordering but cannot promote an otherwise rejected result past the confidence threshold. Duplicate text is removed from results.
+
+Embedding caches are bound to the endpoint, model, and dimensions. Switching that identity invalidates incompatible vectors while retaining Markdown and lexical search. A subscription login does not supply embedding access, and memory does not silently substitute a paid embedding route; without usable embedding configuration and credentials it falls back to lexical search.
 
 ### Source Weights
 
@@ -415,7 +432,7 @@ When a session memory is old, Fuigo attaches a staleness note to it in search re
 
 ## File Watcher
 
-By default, Fuigo watches `~/.fuigo/memory/` for external file changes. If you edit memory files directly (e.g., in your editor), the changes are picked up automatically on the next memory search:
+By default, Fuigo watches its memory locations for external file changes, scoped to the current workspace and shared global `MEMORY.md`. If you edit these files directly (e.g., in your editor), the changes are picked up automatically on the next memory search:
 
 - Created or modified files are reindexed.
 - Deleted files have their stale chunks removed from the index.

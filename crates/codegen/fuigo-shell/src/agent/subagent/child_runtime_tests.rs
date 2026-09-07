@@ -179,7 +179,7 @@ async fn send_active_message_freezes_parent_turn_before_first_poll() {
         let coordinator_task = tokio::task::spawn_local(coordinator.run());
         let spawn_task = tokio::task::spawn_local({
             let backend = backend.clone();
-            async move { backend.spawn(request()).await }
+            async move { backend.spawn(request(), None).await }
         });
         await_with_timeout(started_rx.recv())
             .await
@@ -254,7 +254,7 @@ async fn rejected_delivery(
         let coordinator_task = tokio::task::spawn_local(coordinator.run());
         let spawn_task = tokio::task::spawn_local({
             let backend = backend.clone();
-            async move { backend.spawn(request()).await }
+            async move { backend.spawn(request(), None).await }
         });
         await_with_timeout(started_rx.recv())
             .await

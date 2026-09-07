@@ -3585,6 +3585,9 @@ pub(crate) fn resolve_model_list(
                 );
             }
             provider.attach_trusted_config(config);
+            if provider.subscription_provider().is_some() && (entry.api_key.is_some() || entry.env_key.is_some()) {
+                provider.config.command = "invalid subscription/static-key combination".into();
+            }
         }
     }
     {
@@ -4409,9 +4412,10 @@ impl ModelEntry {
     /// The provider governing this model's bearer: `None` when a static `api_key`/`env_key` resolves.
     /// The turn paths consult this, so a shadowed provider never runs.
     pub(crate) fn effective_auth_provider(&self) -> Option<&crate::auth::AuthProviderRef> {
-        if self.own_credential().is_some() {
-            return None;
+        if self.auth_provider.as_ref().is_some_and(|p| p.subscription_provider().is_some()) {
+            return self.auth_provider.as_ref();
         }
+        if self.own_credential().is_some() { return None; }
         self.auth_provider.as_ref()
     }
     /// `true` when the model has a non-empty `api_key`, an `env_key` that resolves to a non-empty value, or a named auth provider.
@@ -4864,7 +4868,9 @@ pub(crate) fn resolve_credentials(
     session_key: Option<&str>,
 ) -> ResolvedCredentials {
     let info = model.info();
-    let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
+    let (api_key, base_url, auth_type) = if model.auth_provider.as_ref().is_some_and(|p| p.subscription_provider().is_some()) {
+        (None, info.base_url.clone(), fuigo_chat_state::AuthType::ApiKey)
+    } else if let Some(key) = model.own_credential() {
         (
             Some(key),
             info.base_url.clone(),
@@ -5072,7 +5078,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
             None,
             None,
         );
-        if sampler.api_key.is_some() {
+        if sampler.api_key.is_some() || sampler.subscription.is_some() {
             return Some(sampler);
         }
         if entry.effective_auth_provider().is_some() {
@@ -5162,6 +5168,10 @@ pub(crate) fn stamp_session_local_sampler_fields(
     client_identifier: Option<String>,
     max_retries: Option<u32>,
 ) {
+    // Auxiliary defaults must not turn a selected subscription into a paid API call.
+    if active_session_config.subscription.is_some() && cfg.subscription.is_none() {
+        *cfg = active_session_config.clone();
+    }
     cfg.client_identifier = client_identifier;
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
     if crate::util::is_fuigo_api_bearer_url(&cfg.base_url) {
@@ -5251,7 +5261,7 @@ pub(crate) fn sampling_config_for_model(
         &api_backend,
         &credentials.base_url,
     );
-    SamplerConfig {
+    let mut sampler = SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
         base_url: credentials.base_url,
@@ -5281,8 +5291,14 @@ pub(crate) fn sampling_config_for_model(
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
+        subscription: None,
+        subscription_resolver: None,
         header_injector: None,
+    };
+    if let Some(provider) = model.effective_auth_provider() {
+        crate::auth::subscription::inference::configure(&mut sampler,provider,model.api_key.is_some() || model.env_key.is_some());
     }
+    sampler
 }
 /// Fold URL-derived headers into `extra_headers`.
 ///
@@ -5384,7 +5400,7 @@ pub(crate) fn resolve_web_search_sampling_config(
 ) -> Option<SamplerConfig> {
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-        if credentials.api_key.is_none() && entry.effective_auth_provider().is_some() {
+        if credentials.api_key.is_none() && entry.effective_auth_provider().is_some_and(|p| p.subscription_provider().is_none()) {
             tracing::warn!(
                 web_search_model = %model_id,
                 "web search model uses an auth provider with no cached token; disabling web search"

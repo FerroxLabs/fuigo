@@ -6,7 +6,8 @@ use tokio::sync::{Mutex, oneshot, watch};
 
 use crate::oauth_config::McpOAuthConfig;
 use crate::rmcp::transport::auth::{
-    AuthError, AuthorizationManager, AuthorizationMetadata, OAuthClientConfig,
+    AuthError, AuthorizationManager, AuthorizationMetadata, AuthorizationMetadataSource,
+    OAuthClientConfig,
 };
 
 const MCP_OAUTH_CLIENT_NAME: &str = "Fuigo";
@@ -25,7 +26,18 @@ pub(crate) const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Durat
 pub(crate) async fn discover_metadata_bounded(
     manager: &AuthorizationManager,
 ) -> Result<AuthorizationMetadata, AuthError> {
-    tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, manager.discover_metadata())
+    // rmcp 3.x `resolve_metadata` never fails discovery: it degrades to legacy
+    // endpoints guessed from the base URL. The probe's auth decision needs the
+    // rmcp 2.x "no OAuth support" signal back, so the fallback maps to
+    // `NoAuthorizationSupport` instead of guessing endpoints.
+    let resolve = async {
+        let resolution = manager.resolve_metadata().await?;
+        if resolution.source == AuthorizationMetadataSource::LegacyEndpointFallback {
+            return Err(AuthError::NoAuthorizationSupport);
+        }
+        Ok(resolution.metadata)
+    };
+    tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, resolve)
         .await
         .unwrap_or_else(|_| {
             Err(AuthError::InternalError(format!(

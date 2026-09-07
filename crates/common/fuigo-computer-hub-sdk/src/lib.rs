@@ -49,6 +49,9 @@ pub mod oidc_provider;
 pub use auth::{AuthCredential, AuthIdentity, AuthProvider, PrincipalKey, SharedAuthProvider};
 pub use connection::{CLOSE_CODE_SANDBOX_TERMINATED, ConnKey, HubConnection, ReconnectEvent};
 pub use error::ClientError;
+pub use fuigo_computer_hub_core::{
+    FUIGO_BOT_TOOL_DESCRIPTIONS, FUIGO_BOT_TOOL_IDS, fuigo_bot_tool_description, is_fuigo_bot_tool,
+};
 pub use harness::{
     CancelOnDrop, LocalRegistry, ModelOutputExtractor, SessionBindReport, ToolHarness,
     ToolHarnessBuilder, extractor_for,
@@ -63,13 +66,10 @@ pub use oidc_provider::{
 };
 pub use pool::HubConnectionPool;
 pub use server::{
-    ResolvedSessionHandlers, SessionHandlerResolver, SystemNotifyAck, ToolServer,
-    ToolServerBuilder, ToolServerHandler, WeakToolServer,
+    ResolvedSessionHandlers, SessionHandlerResolver, SessionUnboundCallback, SystemNotifyAck,
+    ToolServer, ToolServerBuilder, ToolServerHandler, WeakToolServer,
 };
 pub use trace_donate::{HubDonatingReporter, TraceDonationPump};
-pub use fuigo_computer_hub_core::{
-    FUIGO_BOT_TOOL_DESCRIPTIONS, FUIGO_BOT_TOOL_IDS, fuigo_bot_tool_description, is_fuigo_bot_tool,
-};
 // Re-exported so consumers that depend only on the SDK can recognize the
 // server's `workspace_unavailable` error without also pulling in the core crate.
 pub use fuigo_computer_hub_core::is_workspace_unavailable;

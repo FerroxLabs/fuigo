@@ -477,6 +477,8 @@ async fn aux_model_with_auth_provider_never_reroutes() {
     let provider = crate::auth::AuthProviderRef::new(
         "aux-provider-test".into(),
         crate::auth::AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf aux-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -559,6 +561,8 @@ async fn web_search_with_auth_provider_requires_warm_cache() {
     let provider = crate::auth::AuthProviderRef::new(
         "web-search-provider-test".into(),
         crate::auth::AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf ws-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -860,6 +864,8 @@ fn parses_auth_provider_tables_and_model_reference() {
     assert_eq!(
         cfg.auth_providers.get("litellm"),
         Some(&crate::auth::AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "/usr/local/bin/litellm-token".into(),
             args: Some(vec!["--scope".into(), "corp".into()]),
             token_ttl_secs: Some(3600),
@@ -951,6 +957,8 @@ async fn resolve_credentials_serves_cached_provider_token() {
     let provider = crate::auth::AuthProviderRef::new(
         "resolve-creds-test".into(),
         crate::auth::AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf provider-minted-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -977,6 +985,8 @@ async fn set_env_key_shadows_warm_provider_at_resolve_time() {
     let provider = crate::auth::AuthProviderRef::new(
         "env-shadow-test".into(),
         crate::auth::AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf provider-token".into(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -1021,6 +1031,8 @@ fn prefetched_entry_provider_config_comes_from_trusted_tables_only() {
     cfg.auth_providers.insert(
         "cache-smuggle-test".to_string(),
         crate::auth::AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf local".to_string(),
             args: None,
             token_ttl_secs: None,
@@ -7689,4 +7701,65 @@ fn a_status_line_the_parser_could_not_read_in_full_reaches_fuigo_inspect() {
         1
     );
     assert_eq!(cfg.ui.theme.as_deref(), Some("kanagawa"));
+}
+
+#[test]
+fn subscription_model_selection_is_provider_scoped_and_keeps_flux_key() {
+    let raw: toml::Value=toml::from_str(r#"
+        [auth_provider.chatgpt]
+        subscription = "chatgpt"
+        account = "account-a"
+        [auth_provider.grok]
+        subscription = "xai"
+        [model.chatgpt]
+        model = "shared-model"
+        base_url = "https://chatgpt.com/backend-api/codex"
+        auth_provider = "chatgpt"
+        [model.grok]
+        model = "grok-fixture"
+        base_url = "https://api.x.ai/v1"
+        auth_provider = "grok"
+        [model.flux]
+        model = "shared-model"
+        base_url = "https://api.fluxrouter.ai/v1"
+        api_key = "fake-flux-key"
+    "#).unwrap();
+    let cfg=Config::new_from_toml_cfg(&raw).unwrap();let models=resolve_model_list(&cfg,None);
+    for (key,kind) in [("chatgpt",fuigo_sampler::subscription::SubscriptionKind::Chatgpt),("grok",fuigo_sampler::subscription::SubscriptionKind::Xai)] {
+        let model=&models[key];let credentials=resolve_credentials(model,Some("unrelated-session-secret"));
+        assert!(credentials.api_key.is_none());
+        let sampling=sampling_config_for_model(model,credentials,None,None,None,None);
+        assert_eq!(sampling.subscription,Some(kind));assert!(sampling.subscription_resolver.is_some());assert!(sampling.api_key.is_none());assert!(sampling.bearer_resolver.is_none());
+        let revived:ModelEntry=serde_json::from_value(serde_json::to_value(model).unwrap()).unwrap();
+        assert!(revived.auth_provider.unwrap().subscription_provider().is_none(),"serialized auth ref requires trusted config reattachment");
+    }
+    let flux=resolve_credentials(&models["flux"],Some("unrelated-session-secret"));assert_eq!(flux.api_key.as_deref(),Some("fake-flux-key"));
+    assert!(crate::auth::subscription::inference::from_models(&models,"shared-model","https://api.fluxrouter.ai/v1").is_none());
+    assert_eq!(crate::auth::subscription::inference::from_models(&models,"shared-model","https://chatgpt.com/backend-api/codex").unwrap().subscription_provider(),Some(crate::auth::subscription::SubscriptionProvider::Chatgpt));
+}
+#[tokio::test]
+async fn subscription_conflicting_static_key_and_command_fail_closed() {
+    for extra in [r#"api_key = "fake-paid-key""#, ""] {
+        let text=format!(r#"
+            [auth_provider.native]
+            subscription = "xai"
+            command = "never-execute-this"
+            [model.native]
+            model = "fixture-model"
+            base_url = "https://api.x.ai/v1"
+            auth_provider = "native"
+            {extra}
+        "#);
+        let raw:toml::Value=toml::from_str(&text).unwrap();let cfg=Config::new_from_toml_cfg(&raw).unwrap();let models=resolve_model_list(&cfg,None);let model=&models["native"];
+        let sampling=sampling_config_for_model(model,resolve_credentials(model,Some("session-secret")),None,None,None,None);
+        assert!(sampling.api_key.is_none());assert!(sampling.subscription_resolver.unwrap().resolve().await.is_err());
+    }
+}
+
+#[test]
+fn subscription_auxiliary_selection_does_not_fall_back_to_api_key() {
+    let active=SamplerConfig {model:"subscription-model".into(),base_url:"https://chatgpt.com/backend-api/codex".into(),subscription:Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),..Default::default()};
+    let mut auxiliary=SamplerConfig {model:"paid-default".into(),base_url:"https://api.fluxrouter.ai/v1".into(),api_key:Some("fake-paid-key".into()),..Default::default()};
+    stamp_session_local_sampler_fields(&mut auxiliary,&active,None,None);
+    assert_eq!(auxiliary.model,active.model);assert_eq!(auxiliary.base_url,active.base_url);assert_eq!(auxiliary.subscription,active.subscription);assert!(auxiliary.api_key.is_none());
 }

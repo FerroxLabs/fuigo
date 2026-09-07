@@ -19,9 +19,22 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Clear only this Fuigo-owned subscription provider.
+        #[arg(long, value_enum)]
+        provider: Option<fuigo_shell::auth::subscription::SubscriptionProvider>,
+        /// Clear only this account (requires --provider).
+        #[arg(long, requires = "provider")]
+        account: Option<String>,
+    },
     /// Sign in to Fuigo
     Login {
+        /// Explicit subscription login; never imports another application's credentials.
+        #[arg(long, value_enum, conflicts_with_all = ["legacy", "oauth", "device_auth"])]
+        provider: Option<fuigo_shell::auth::subscription::SubscriptionProvider>,
+        /// Show stored subscription metadata without login or network calls.
+        #[arg(long, requires = "provider")]
+        status: bool,
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
@@ -50,7 +63,11 @@ pub enum Command {
     /// Manage cross-session memory
     Memory(crate::memory_cmd::MemoryArgs),
     /// List available models and exit
-    Models,
+    Models {
+        /// List models returned for this subscription account.
+        #[arg(long, value_enum)]
+        provider: Option<fuigo_shell::auth::subscription::SubscriptionProvider>,
+    },
     /// List, search, or restore sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// Print persisted token and cost usage for a session
@@ -1405,9 +1422,25 @@ mod tests {
         assert_eq!(blank.initial_prompt(), None);
     }
     #[test]
+    fn subscription_cli_parsing() {
+        let models = PagerArgs::try_parse_from(["fuigo", "models", "--provider", "chatgpt"]).unwrap();
+        assert!(matches!(models.command, Some(Command::Models { provider: Some(_) })));
+        use fuigo_shell::auth::subscription::SubscriptionProvider;
+        let args = PagerArgs::try_parse_from(["fuigo", "login", "--provider", "chatgpt", "--status"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Login { provider: Some(SubscriptionProvider::Chatgpt), status: true, .. })));
+        let args = PagerArgs::try_parse_from(["fuigo", "logout", "--provider", "grok", "--account", "account-a"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Logout { provider: Some(SubscriptionProvider::Xai), account: Some(_) })));
+        for args in [vec!["fuigo", "login", "--status"], vec!["fuigo", "logout", "--account", "a"], vec!["fuigo", "login", "--provider", "xai", "--device-auth"], vec!["fuigo", "login", "--provider", "unknown"]] {
+            assert!(PagerArgs::try_parse_from(args).is_err());
+        }
+        assert!(PagerArgs::try_parse_from(["fuigo", "login"]).is_ok());
+        assert!(PagerArgs::try_parse_from(["fuigo", "login", "--device-auth"]).is_ok());
+        assert!(PagerArgs::try_parse_from(["fuigo", "logout"]).is_ok());
+    }
+    #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["fuigo", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(args.command, Some(Command::Logout { .. })));
         assert!(args.prompt.is_none());
     }
     #[test]

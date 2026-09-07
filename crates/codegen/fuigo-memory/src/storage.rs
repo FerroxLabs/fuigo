@@ -118,21 +118,50 @@ impl MemoryStorage {
         self.workspace_dir.join("MEMORY.md")
     }
 
-    /// Classify a file path as a memory source type.
-    ///
-    /// Returns `"global"`, `"workspace"`, or `"session"` based on location.
+    /// Only this workspace and the explicit global MEMORY.md are readable.
+    /// Canonical checks reject sibling workspaces and symlink escapes.
+    pub fn allows_path(&self, path: &Path) -> bool {
+        let Ok(path) = dunce::canonicalize(path) else {
+            return false;
+        };
+        let global = (!self
+            .global_memory_file()
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink()))
+        .then(|| dunce::canonicalize(self.global_memory_file()).ok())
+        .flatten();
+        let workspace = (!self
+            .workspace_dir
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink()))
+        .then(|| dunce::canonicalize(&self.workspace_dir).ok())
+        .flatten();
+        global.as_ref() == Some(&path)
+            || workspace.is_some_and(|root| {
+                path.strip_prefix(root).is_ok_and(|relative| {
+                    !relative
+                        .components()
+                        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+                }) && path.extension().is_some_and(|ext| ext == "md")
+            })
+    }
+
     pub fn classify_source(&self, path: &Path) -> &'static str {
-        if path.starts_with(&self.workspace_dir) {
-            if path.file_name().is_some_and(|f| f == "MEMORY.md") {
-                "workspace"
-            } else {
-                "session"
-            }
-        } else if path.starts_with(&self.global_dir) {
+        if !self.allows_path(path) {
+            return "denied";
+        }
+        if path == self.workspace_memory_file() {
+            "workspace"
+        } else if path == self.global_memory_file() {
             "global"
         } else {
             "session"
         }
+    }
+
+    /// Stable suffix for the whole ID; unlike a UUID prefix it includes random bits.
+    pub fn session_suffix(session_id: &str) -> String {
+        blake3::hash(session_id.as_bytes()).to_hex()[..32].to_owned()
     }
 
     /// Path to the workspace sessions directory.
@@ -146,7 +175,7 @@ impl MemoryStorage {
     ///
     /// - `date`: e.g. `"2026-02-23"`
     /// - `slug`: short slug derived from the first user message
-    /// - `session_id`: full session ID (first 8 chars used as suffix)
+    /// - `session_id`: full session ID (hash of the full ID used as suffix)
     /// - `append`: when `true`, appends a timestamped section instead of overwriting.
     ///   Each section is separated by `---` and a timestamp header so the chunker treats them as distinct entries.
     pub fn write_daily_log(
@@ -158,7 +187,20 @@ impl MemoryStorage {
         append: bool,
     ) -> std::io::Result<PathBuf> {
         let sessions_dir = self.sessions_dir();
-        let sid8 = &session_id[..session_id.len().min(8)];
+        let sid8 = Self::session_suffix(session_id);
+        let safe = |s: &str| {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        };
+        let date = safe(date);
+        let slug = safe(slug);
         let filename = format!("{date}-{slug}-{sid8}.md");
         let path = sessions_dir.join(&filename);
 
@@ -167,16 +209,14 @@ impl MemoryStorage {
             return Ok(path);
         }
 
-        std::fs::create_dir_all(&sessions_dir)?;
-
-        if append && path.exists() {
-            use std::io::Write;
-            let timestamp = chrono::Utc::now().format("%H:%M:%S UTC");
-            let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
-            write!(file, "\n\n---\n\n<!-- flush {timestamp} -->\n\n{content}")?;
-        } else {
-            std::fs::write(&path, content)?;
-        }
+        update_file(&path, |old| {
+            if append && !old.is_empty() {
+                let timestamp = chrono::Utc::now().format("%H:%M:%S UTC");
+                format!("{old}\n\n---\n\n<!-- flush {timestamp} -->\n\n{content}")
+            } else {
+                content.to_owned()
+            }
+        })?;
         tracing::debug!(path = %path.display(), append, "wrote daily session log");
 
         Ok(path)
@@ -202,10 +242,43 @@ impl MemoryStorage {
             }
         };
 
-        std::fs::write(&path, content)?;
+        update_file(&path, |_| content.to_owned())?;
         tracing::debug!(path = %path.display(), scope = ?scope, "wrote long-term memory");
 
         Ok(())
+    }
+
+    /// Replace the exact dream input while holding the same OS lock as other memory writers.
+    /// A private durable recovery version is kept before replacing any prior content.
+    pub fn replace_dream_memory(&self, expected: &str, content: &str) -> std::io::Result<()> {
+        if self.ephemeral {
+            return Err(std::io::Error::other("ephemeral workspace"));
+        }
+        let path = self.workspace_memory_file();
+        update_file_checked(&path, |old| {
+            if old != expected {
+                return Err(std::io::Error::other(
+                    "MEMORY.md changed during consolidation; retry with current input",
+                ));
+            }
+            if !old.is_empty() {
+                use std::io::Write;
+                let recovery = self.workspace_dir.join(".memory-recovery");
+                std::fs::create_dir_all(&recovery)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&recovery, std::fs::Permissions::from_mode(0o700))?;
+                }
+                let mut backup = tempfile::NamedTempFile::new_in(&recovery)?;
+                backup.write_all(old.as_bytes())?;
+                backup.as_file().sync_all()?;
+                backup.keep().map_err(|e| e.error)?;
+                #[cfg(unix)]
+                std::fs::File::open(&recovery)?.sync_all()?;
+            }
+            Ok(content.to_owned())
+        })
     }
 
     /// Append content to the `MEMORY.md` for the given scope.
@@ -235,17 +308,13 @@ impl MemoryStorage {
             }
         };
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-
-        use std::io::Write;
-        if file.metadata()?.len() > 0 {
-            write!(file, "\n\n{normalized}")?;
-        } else {
-            write!(file, "{normalized}")?;
-        }
+        update_file(&path, |old| {
+            if old.is_empty() {
+                normalized.clone()
+            } else {
+                format!("{old}\n\n{normalized}")
+            }
+        })?;
 
         tracing::debug!(path = %path.display(), scope = ?scope, "appended to memory");
         Ok(())
@@ -266,21 +335,10 @@ impl MemoryStorage {
     ) -> std::io::Result<String> {
         // Security: canonicalize both sides; fail hard if either doesn't exist
         let canonical = dunce::canonicalize(path)?;
-        let canonical_global = dunce::canonicalize(&self.global_dir).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("memory directory {:?} does not exist: {e}", self.global_dir),
-            )
-        })?;
-
-        // Fail-closed caveat for paths longer than MAX_PATH: see workspace clippy.toml
-        if !canonical.starts_with(&canonical_global) {
+        if !self.allows_path(&canonical) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "path {:?} is outside the memory directory {:?}",
-                    path, self.global_dir
-                ),
+                "memory path is outside this workspace and global MEMORY.md",
             ));
         }
 
@@ -338,6 +396,8 @@ impl MemoryStorage {
             files.extend(session_files);
         }
 
+        files.retain(|p| self.allows_path(p));
+        files.dedup();
         Ok(files)
     }
 
@@ -349,7 +409,7 @@ impl MemoryStorage {
 
         let global_file = self.global_memory_file();
         if !global_file.exists() {
-            std::fs::write(
+            initialize_file(
                 &global_file,
                 "# Global Memory\n\
                  \n\
@@ -372,7 +432,7 @@ impl MemoryStorage {
 
         let workspace_file = self.workspace_memory_file();
         if !workspace_file.exists() {
-            std::fs::write(
+            initialize_file(
                 &workspace_file,
                 format!(
                     "# Project Memory — {}\n\
@@ -391,12 +451,100 @@ impl MemoryStorage {
         Ok(())
     }
 
+    fn generation_path(&self) -> PathBuf {
+        let identity = blake3::hash(self.global_dir.to_string_lossy().as_bytes()).to_hex();
+        self.global_dir
+            .parent()
+            .unwrap_or(&self.global_dir)
+            .join(".fuigo-memory-generations")
+            .join(format!("{identity}.json"))
+    }
+
+    fn lock_generation(&self) -> std::io::Result<std::fs::File> {
+        let path = self.generation_path();
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(path.with_extension("lock"))?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn generations(&self) -> std::io::Result<std::collections::BTreeMap<String, u64>> {
+        match std::fs::read_to_string(self.generation_path()) {
+            Ok(text) => serde_json::from_str(&text).map_err(std::io::Error::other),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn workspace_generation_key(&self) -> String {
+        blake3::hash(self.workspace_dir.to_string_lossy().as_bytes())
+            .to_hex()
+            .to_string()
+    }
+
+    fn read_generation(&self) -> std::io::Result<(u64, u64)> {
+        let generations = self.generations()?;
+        Ok((
+            *generations.get("global").unwrap_or(&0),
+            *generations
+                .get(&self.workspace_generation_key())
+                .unwrap_or(&0),
+        ))
+    }
+
+    /// Snapshot before model inference. The epoch survives clearing the memory directory.
+    pub fn generation(&self) -> std::io::Result<(u64, u64)> {
+        let _lock = self.lock_generation()?;
+        self.read_generation()
+    }
+
+    /// Clear and model-produced writes share this stable OS lock. A clear invalidates
+    /// old snapshots without disabling new captures started afterward.
+    pub fn with_generation<T>(
+        &self,
+        expected: (u64, u64),
+        operation: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        let _lock = self.lock_generation()?;
+        if self.read_generation()? != expected {
+            return Err(std::io::Error::other(
+                "memory cleared during inference; stale result discarded",
+            ));
+        }
+        operation()
+    }
+
+    fn bump_generation(&self, key: String) -> std::io::Result<()> {
+        let mut generations = self.generations()?;
+        let epoch = generations.entry(key).or_default();
+        *epoch = epoch
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("memory generation overflow"))?;
+        let text = serde_json::to_string(&generations).map_err(std::io::Error::other)?;
+        update_file(&self.generation_path(), |_| text)
+    }
+
     /// Remove the entire workspace-scoped memory directory.
     ///
     /// Deletes MEMORY.md, sessions/, index.sqlite, and any other workspace files.
     /// The directory will be recreated on next session start via `ensure_initialized()`.
     /// Returns `Ok(true)` if the directory existed and was removed, `Ok(false)` if it didn't exist.
     pub fn clear_workspace(&self) -> std::io::Result<bool> {
+        let _lock = self.lock_generation()?;
+        self.bump_generation(self.workspace_generation_key())?;
         match std::fs::remove_dir_all(&self.workspace_dir) {
             Ok(()) => {
                 tracing::info!(path = %self.workspace_dir.display(), "cleared workspace memory");
@@ -413,6 +561,8 @@ impl MemoryStorage {
     /// The file will be recreated on next session start via `ensure_initialized()`.
     /// Returns `Ok(true)` if the file existed and was removed, `Ok(false)` if it didn't exist.
     pub fn clear_global(&self) -> std::io::Result<bool> {
+        let _lock = self.lock_generation()?;
+        self.bump_generation("global".into())?;
         let path = self.global_memory_file();
         match std::fs::remove_file(&path) {
             Ok(()) => {
@@ -426,10 +576,9 @@ impl MemoryStorage {
 
     /// Remove orphaned workspace directories under the memory root.
     ///
-    /// Deletion criteria (tiered):
-    /// 1. `tmp*` dirs: remove empty ones unconditionally; remove non-empty ones older than 7 days.
-    /// 2. Other workspaces with no session files: remove if older than `max_age_days`.
-    /// 3. Non-empty non-tmp workspaces: never touched.
+    /// Only genuinely empty directories qualify; retained memory, logs, recovery
+    /// versions and other workspace data always prevent deletion. Empty temporary
+    /// directories qualify immediately; other empty directories must meet the age gate.
     ///
     /// Returns the number of directories removed.
     pub fn gc(&self, max_age_days: u64) -> std::io::Result<usize> {
@@ -442,7 +591,7 @@ impl MemoryStorage {
         let mut removed = 0usize;
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if !entry.file_type()?.is_dir() {
                 continue;
             }
             if path == self.workspace_dir {
@@ -458,13 +607,13 @@ impl MemoryStorage {
             let empty = is_empty_workspace(&path);
 
             let should_remove = if is_tmp {
-                empty || is_older_than(&path, 7)
+                empty
             } else {
                 empty && is_older_than(&path, max_age_days)
             };
 
             if should_remove {
-                match std::fs::remove_dir_all(&path) {
+                match std::fs::remove_dir(&path) {
                     Ok(()) => {
                         tracing::debug!(
                             path = %path.display(),
@@ -489,16 +638,79 @@ impl MemoryStorage {
     }
 }
 
-/// A workspace directory is "empty" if its `sessions/` subdirectory either does not exist or contains no entries.
+/// Never infer emptiness from absence of session files or follow links during GC.
 fn is_empty_workspace(dir: &Path) -> bool {
-    let sessions = dir.join("sessions");
-    if !sessions.is_dir() {
-        return true;
+    std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// Serialize read-modify-replace across threads/processes. A crash before rename
+/// leaves the original intact; the OS releases the stable sidecar lock on exit.
+pub(crate) fn update_file(path: &Path, update: impl FnOnce(&str) -> String) -> std::io::Result<()> {
+    update_file_checked(path, |old| Ok(update(old)))
+}
+
+fn update_file_checked(
+    path: &Path,
+    update: impl FnOnce(&str) -> std::io::Result<String>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing parent"))?;
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    match std::fs::read_dir(&sessions) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(_) => true,
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    let lock = options.open(parent.join(".memory-write.lock"))?;
+    lock.lock()?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "memory write symlink",
+        ));
+    }
+    let old = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let content = update(&old)?;
+    if !crate::safety::is_safe_memory(&content) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsafe memory content rejected",
+        ));
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(content.as_bytes())?;
+    temp.as_file().sync_all()?;
+    // Detect edits by non-cooperating editors made while preparing the replacement.
+    let current = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    if current != old {
+        return Err(std::io::Error::other(
+            "memory changed before atomic replacement",
+        ));
+    }
+    temp.persist(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 /// Returns `true` if `dir`'s mtime is older than `days` days ago.
@@ -820,7 +1032,10 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap()
-                .contains("2026-02-23-fix-auth-session1")
+                .contains(&format!(
+                    "2026-02-23-fix-auth-{}",
+                    MemoryStorage::session_suffix("session12345678")
+                ))
         );
 
         let read_back = storage.read_file(&path, None, None).unwrap();
@@ -1585,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_nonempty_tmp_old_removed() {
+    fn test_gc_nonempty_tmp_old_preserved() {
         let tmp = TempDir::new().unwrap();
         let global_dir = tmp.path().join("memory");
         let workspace_dir = global_dir.join("current-ws");
@@ -1599,8 +1814,8 @@ mod tests {
         set_dir_mtime_days_ago(&tmp_ws, 8);
 
         let removed = storage.gc(30).unwrap();
-        assert_eq!(removed, 1);
-        assert!(!tmp_ws.exists());
+        assert_eq!(removed, 0);
+        assert!(tmp_ws.exists());
     }
 
     #[test]
@@ -1709,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_workspace_with_memory_md_but_no_sessions_is_empty() {
+    fn test_gc_curated_memory_without_sessions_is_preserved() {
         let tmp = TempDir::new().unwrap();
         let global_dir = tmp.path().join("memory");
         let workspace_dir = global_dir.join("current-ws");
@@ -1723,11 +1938,8 @@ mod tests {
         set_dir_mtime_days_ago(&ws, 31);
 
         let removed = storage.gc(30).unwrap();
-        assert_eq!(
-            removed, 1,
-            "workspace with MEMORY.md but no sessions is empty"
-        );
-        assert!(!ws.exists());
+        assert_eq!(removed, 0, "curated memory must survive retention");
+        assert!(ws.exists());
     }
 
     #[test]
@@ -1771,7 +1983,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(ws.join("sessions")).unwrap();
-        assert!(is_empty_workspace(&ws));
+        assert!(!is_empty_workspace(&ws));
     }
 
     #[test]
@@ -1822,5 +2034,160 @@ mod tests {
         )
         .unwrap();
         assert_eq!(storage.total_chunk_count(), 0);
+    }
+}
+
+fn initialize_file(path: &Path, content: impl AsRef<str>) -> std::io::Result<()> {
+    update_file(path, |old| {
+        if old.is_empty() {
+            content.as_ref().to_owned()
+        } else {
+            old.to_owned()
+        }
+    })
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+    #[test]
+    fn full_session_ids_do_not_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = MemoryStorage::with_paths(tmp.path().into(), tmp.path().join("ws"));
+        let a = storage
+            .write_daily_log("2026-09-07", "flush", "01a07abb-aaaa", "first", false)
+            .unwrap();
+        let b = storage
+            .write_daily_log("2026-09-07", "flush", "01a07abb-bbbb", "second", false)
+            .unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "first");
+    }
+    #[test]
+    fn sibling_read_is_denied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = MemoryStorage::with_paths(tmp.path().into(), tmp.path().join("a"));
+        let b = MemoryStorage::with_paths(tmp.path().into(), tmp.path().join("b"));
+        b.write_long_term(MemoryScope::Workspace, "private sibling")
+            .unwrap();
+        assert_eq!(
+            a.read_file(&b.workspace_memory_file(), None, None)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(a.classify_source(&b.workspace_memory_file()), "denied");
+    }
+    #[test]
+    fn concurrent_appends_preserve_every_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = MemoryStorage::with_paths(tmp.path().into(), tmp.path().join("ws"));
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let storage = storage.clone();
+                std::thread::spawn(move || {
+                    storage
+                        .append_to_memory(MemoryScope::Workspace, &format!("record-{i:02}"))
+                        .unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let text = storage
+            .read_file(&storage.workspace_memory_file(), None, None)
+            .unwrap();
+        for i in 0..16 {
+            assert_eq!(text.matches(&format!("record-{i:02}")).count(), 1);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(storage.workspace_memory_file())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+    #[test]
+    fn interrupted_update_preserves_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("MEMORY.md");
+        update_file(&path, |_| "complete original".into()).unwrap();
+        let result =
+            std::panic::catch_unwind(|| update_file(&path, |_| panic!("synthetic interruption")));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "complete original");
+        update_file(&path, |_| "complete replacement".into()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "complete replacement"
+        );
+    }
+    #[test]
+    fn clear_invalidates_inflight_writes_but_allows_new_capture() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage =
+            MemoryStorage::with_paths(tmp.path().join("memory"), tmp.path().join("memory/ws"));
+        let before = storage.generation().unwrap();
+        storage.clear_workspace().unwrap();
+        assert!(
+            storage
+                .with_generation(before, || storage
+                    .write_long_term(MemoryScope::Workspace, "## Stale"))
+                .is_err()
+        );
+        assert!(!storage.workspace_memory_file().exists());
+        let current = storage.generation().unwrap();
+        storage
+            .with_generation(current, || {
+                storage.write_long_term(MemoryScope::Workspace, "## Fresh")
+            })
+            .unwrap();
+        storage.clear_global().unwrap();
+        assert!(
+            storage
+                .with_generation(current, || storage
+                    .write_long_term(MemoryScope::Workspace, "## Stale again"))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(storage.workspace_memory_file()).unwrap(),
+            "## Fresh"
+        );
+    }
+    #[test]
+    fn recovery_markdown_is_never_readable_or_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage =
+            MemoryStorage::with_paths(tmp.path().join("memory"), tmp.path().join("memory/ws"));
+        let recovery = storage.workspace_dir().join(".memory-recovery/old.md");
+        std::fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+        std::fs::write(&recovery, "## Deleted fact").unwrap();
+        assert!(!storage.allows_path(&recovery));
+        assert!(storage.read_file(&recovery, None, None).is_err());
+        assert!(!storage.list_memory_files().unwrap().contains(&recovery));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn scope_roots_cannot_be_redirected_by_symlinks() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let global = tmp.path().join("memory");
+        let sibling = global.join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let private = sibling.join("MEMORY.md");
+        std::fs::write(&private, "## Sibling fact").unwrap();
+        let storage = MemoryStorage::with_paths(global.clone(), global.join("workspace"));
+        symlink(&private, storage.global_memory_file()).unwrap();
+        assert!(!storage.allows_path(&private));
+        assert!(!storage.allows_path(&storage.global_memory_file()));
+        symlink(&sibling, storage.workspace_dir()).unwrap();
+        assert!(!storage.allows_path(&storage.workspace_memory_file()));
     }
 }

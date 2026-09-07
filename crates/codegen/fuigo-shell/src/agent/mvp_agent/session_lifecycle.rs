@@ -48,6 +48,12 @@ impl CloseOutcome {
     }
 }
 impl MvpAgent {
+    pub(crate) fn config_mutation_lock(
+        &self,
+        id: &acp::SessionId,
+    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.session_registry.config_mutation_lock(id)
+    }
     /// Ask a live session actor to shut down.
     pub(crate) fn request_session_shutdown(&self, id: &acp::SessionId) {
         if let Some(handle) = self.resident_handle(id) {

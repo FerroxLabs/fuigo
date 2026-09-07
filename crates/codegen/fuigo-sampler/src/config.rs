@@ -34,6 +34,11 @@ pub enum AuthScheme {
 /// Auth is selected separately via `auth_scheme`, while `api_backend` controls only the request/response protocol shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
+    /// Persisted discriminator keeps a deserialized subscription config fail-closed.
+    #[serde(default)]
+    pub subscription: Option<crate::subscription::SubscriptionKind>,
+    #[serde(skip)]
+    pub subscription_resolver: Option<crate::subscription::SharedSubscriptionResolver>,
     pub api_key: Option<String>,
     pub base_url: String,
     pub model: String,
@@ -113,6 +118,8 @@ impl Default for SamplerConfig {
     /// Empty defaults so callers can use `..Default::default()` and new fields don't ripple through every literal site.
     fn default() -> Self {
         Self {
+            subscription: None,
+            subscription_resolver: None,
             api_key: None,
             base_url: String::new(),
             model: String::new(),

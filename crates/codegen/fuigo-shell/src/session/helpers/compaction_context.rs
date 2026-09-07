@@ -3,19 +3,21 @@
 //! The core [`CompactionStateContext`] struct and its builder live in `fuigo_chat_state::compaction_utils`.
 //! This module adds system-reminder rendering that requires dependencies not available in `fuigo-chat-state`.
 //!
-//! The three **common** active-agent sections (background tasks, TODO list, running subagents) are formatted by [`fuigo_compaction::reminder`].
+//! The **common** active-agent section (Running Background Tasks: commands, loops, workflows, subagents) plus TODO is formatted by [`fuigo_compaction::reminder`].
 //! That keeps fuigo-chat and fuigo-build in lockstep.
-//! Harness-only sections (edited files, AGENTS.md, skills, MCP, memory) stay here.
+//! Harness-only sections (edited files, AGENTS.md, skills, catalog workflows, MCP, memory) stay here.
 
 use std::path::PathBuf;
 
 pub use fuigo_chat_state::compaction_utils::{
     BackgroundTaskSummary, CompactionInputs, CompactionServerSummary, CompactionStateContext,
-    RunningSubagentSummary, TodoSummary, TodoSummaryStatus, extract_last_user_query,
-    extract_messages_since_last_user, extract_user_query,
+    RunningSubagentSummary, ScheduledLoopSummary, TodoSummary, TodoSummaryStatus,
+    WorkflowRunSummary, extract_last_user_query, extract_messages_since_last_user,
+    extract_user_query,
 };
 use fuigo_compaction::reminder::{
-    self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, TodoItem, TodoStatus,
+    self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, ScheduledLoop, TodoItem,
+    TodoStatus, WorkflowRun,
 };
 
 /// Resolved model-facing tool names for the MCP usage hint in compaction reminders.
@@ -59,6 +61,7 @@ pub fn to_system_reminder_sync(
         subagent_tool_names,
         mcp_tool_names,
         workflow_listing,
+        None,
     )
 }
 
@@ -73,6 +76,7 @@ pub async fn to_system_reminder(
     subagent_tool_names: Option<&SubagentToolNames>,
     mcp_tool_names: Option<&McpToolNames>,
     workflow_listing: Option<&str>,
+    memory_storage: Option<&fuigo_memory::storage::MemoryStorage>,
 ) -> Option<String> {
     // Fetch memory results first (async), then pass to sync inner method
     let mut memory_results = Vec::new();
@@ -96,6 +100,7 @@ pub async fn to_system_reminder(
         subagent_tool_names,
         mcp_tool_names,
         workflow_listing,
+        memory_storage,
     )
 }
 
@@ -108,6 +113,7 @@ fn to_system_reminder_inner(
     subagent_tool_names: Option<&SubagentToolNames>,
     mcp_tool_names: Option<&McpToolNames>,
     workflow_listing: Option<&str>,
+    memory_storage: Option<&fuigo_memory::storage::MemoryStorage>,
 ) -> Option<String> {
     let mut sections = Vec::new();
 
@@ -190,11 +196,41 @@ fn to_system_reminder_inner(
             elapsed_secs: s.elapsed_ms / 1000,
         })
         .collect();
+    let scheduled_loops: Vec<_> = ctx
+        .scheduled_loops
+        .iter()
+        .map(|t| ScheduledLoop {
+            task_id: &t.task_id,
+            interval: &t.interval,
+            next_fire_at: &t.next_fire_at,
+            prompt: &t.prompt,
+            recurring: t.recurring,
+            durable: t.durable,
+            foreground: t.foreground,
+        })
+        .collect();
+    let workflows: Vec<_> = ctx
+        .workflows
+        .iter()
+        .map(|w| WorkflowRun {
+            name: &w.name,
+            run_id: &w.run_id,
+            status: &w.status,
+            objective: Some(w.objective.as_str()).filter(|s| !s.is_empty()),
+            current_phase: w.current_phase.as_deref(),
+            agents_used: w.agents_used,
+            agent_budget: w.agent_budget,
+            elapsed_secs: w.elapsed_ms / 1000,
+        })
+        .collect();
     sections.extend(reminder::format_active_agent_sections(
         &ActiveAgentReminderState {
             running_commands: &commands,
             todos: &todos,
             running_subagents: &subagents,
+            scheduled_loops: &scheduled_loops,
+            workflows: &workflows,
+            workflow_tool: ctx.workflow_tool_name.as_deref(),
         },
         subagent_tool_names
             .map(|t| reminder::SubagentToolNames {
@@ -229,7 +265,9 @@ fn to_system_reminder_inner(
 
     // Relevant memory from past sessions (post-compaction recovery; shell-only)
     if !memory_results.is_empty()
-        && let Some(reminder) = super::memory_context::format_memory_reminder(memory_results)
+        && let Some(storage) = memory_storage
+        && let Some(reminder) =
+            super::memory_context::format_memory_reminder_with_storage(memory_results, storage)
     {
         sections.push(reminder);
     }
@@ -258,6 +296,9 @@ mod tests {
             running_tasks: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         }
     }
 
@@ -271,9 +312,10 @@ mod tests {
         let result = to_system_reminder_sync(&ctx, &[], &[], Some(&names), None, None);
         let text = result.expect("should produce a reminder");
         assert!(
-            text.contains("Running Subagents"),
+            text.contains("## Running Subagents"),
             "missing subagent section"
         );
+        assert!(text.contains("- \"sub-1\":"), "missing subagent id");
         assert!(text.contains("get_command_or_subagent_output"));
         assert!(text.contains("kill_command_or_subagent"));
         assert!(text.contains("sub-1"));
@@ -303,6 +345,9 @@ mod tests {
             running_tasks: vec![],
             running_subagents: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         };
         let result = to_system_reminder_sync(&ctx, &[], &[], None, None, None);
         let text = result.expect("should produce a reminder");
@@ -335,6 +380,9 @@ mod tests {
             running_subagents: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         };
         let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
             .expect("should produce a reminder");
@@ -372,6 +420,9 @@ mod tests {
             running_tasks: vec![],
             running_subagents: vec![],
             connected_mcp_servers: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         }
     }
 
@@ -453,6 +504,9 @@ mod tests {
             running_subagents: vec![],
             connected_mcp_servers: vec![],
             todos: vec![],
+            scheduled_loops: vec![],
+            workflows: vec![],
+            workflow_tool_name: None,
         };
         let skills = [fuigo_tools::implementations::skills::types::SkillInfo {
             name: "commit".into(),
@@ -473,6 +527,57 @@ mod tests {
             "workflows must sit under skills:\n{text}"
         );
         assert!(text.contains("review-pr"), "{text}");
+    }
+
+    #[test]
+    fn system_reminder_includes_scheduled_loops_and_live_workflows() {
+        let ctx = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
+            agent_message_anchor: None,
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            running_subagents: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+            scheduled_loops: vec![ScheduledLoopSummary {
+                task_id: "01a046ad3877".into(),
+                interval: "every 20 minutes".into(),
+                next_fire_at: "in 12m".into(),
+                prompt: "monitor job".into(),
+                recurring: true,
+                durable: true,
+                foreground: false,
+            }],
+            workflows: vec![WorkflowRunSummary {
+                name: "review-changes".into(),
+                run_id: "wf-1".into(),
+                status: "active".into(),
+                objective: "review the PR".into(),
+                current_phase: Some("Smoke".into()),
+                agents_used: 3,
+                agent_budget: Some(128),
+                elapsed_ms: 12_000,
+            }],
+            workflow_tool_name: Some("workflow".into()),
+        };
+        let text = to_system_reminder_sync(&ctx, &[], &[], None, None, None)
+            .expect("should produce a reminder");
+        let bg = text.find("## Running Background Tasks").expect("bg");
+        assert!(
+            text[bg..].contains("- \"01a046ad3877\": `monitor job`"),
+            "got:\n{text}"
+        );
+        assert!(text[bg..].contains("run id `wf-1`"), "got:\n{text}");
+        assert!(!text.contains("## Scheduled Loops"), "got:\n{text}");
+        assert!(text.contains("## Running Workflows"), "got:\n{text}");
+        assert!(!text.contains("## Active Workflows"), "got:\n{text}");
+        assert!(
+            text.contains("Use `workflow` to inspect or resume"),
+            "got:\n{text}"
+        );
     }
 
     #[test]

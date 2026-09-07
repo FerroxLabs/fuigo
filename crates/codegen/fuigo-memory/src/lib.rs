@@ -29,6 +29,7 @@ pub mod index;
 pub mod mmr;
 pub mod observation;
 pub mod query_expansion;
+pub mod safety;
 pub mod schema;
 pub mod search;
 pub mod storage;
@@ -50,9 +51,12 @@ pub(crate) const MEMORY_LOG_TARGET: &str = "fuigo_memory";
 /// This is the async glue between the sync `MemoryIndex` and the async `EmbeddingProvider`.
 /// Call after reindex, flush writes, or session-end writes.
 pub async fn embed_missing_chunks(
-    index: &MemoryIndex,
+    index: &mut MemoryIndex,
     provider: &dyn embedding::EmbeddingProvider,
 ) -> usize {
+    if index.bind_embedding_provider(provider).is_err() {
+        return 0;
+    }
     let chunks = match index.chunks_without_embeddings() {
         Ok(c) if c.is_empty() => return 0,
         Ok(c) => c,
@@ -74,8 +78,10 @@ pub async fn embed_missing_chunks(
         let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
         match provider.embed_batch(&texts).await {
             Ok(embeddings) => {
-                for ((chunk_id, _), embedding) in batch.iter().zip(embeddings.iter()) {
-                    if let Err(e) = index.upsert_embedding(chunk_id, embedding) {
+                for ((chunk_id, source_text), embedding) in batch.iter().zip(embeddings.iter()) {
+                    if let Err(e) =
+                        index.upsert_embedding_if_current(chunk_id, source_text, embedding)
+                    {
                         tracing::warn!(
                             target: MEMORY_LOG_TARGET,
                             chunk_id,
@@ -108,3 +114,6 @@ pub async fn embed_missing_chunks(
     }
     embedded
 }
+
+#[cfg(test)]
+mod quality_tests;

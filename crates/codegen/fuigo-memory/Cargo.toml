@@ -10,6 +10,7 @@ edition.workspace = true
 test-support = []
 
 [dependencies]
+tempfile = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
@@ -48,7 +49,6 @@ windows = { workspace = true }
 
 [dev-dependencies]
 filetime = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -333,6 +333,10 @@ pub enum SessionCommand {
         session_mode: acp::SessionModeId,
         responds_to: oneshot::Sender<()>,
     },
+    SetReasoningEffort {
+        effort: fuigo_sampling_types::ReasoningEffort,
+        responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
+    },
     SetSessionModel {
         sampling_config: fuigo_sampler::SamplerConfig,
         use_concise: bool,

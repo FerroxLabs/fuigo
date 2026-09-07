@@ -4,6 +4,88 @@ Fuigo supports several authentication methods, including interactive browser log
 
 ---
 
+## ChatGPT and Grok subscriptions
+
+Subscription login is explicit and separate from Fuigo's existing API-key and
+first-party authentication. It never imports Codex, Grok CLI, or Wayland sessions.
+
+```bash
+fuigo login --provider chatgpt
+fuigo login --provider xai
+fuigo login --provider chatgpt --status
+fuigo login --provider xai --status
+fuigo models --provider chatgpt
+fuigo models --provider xai
+```
+
+ChatGPT opens a browser and listens on `localhost:1455`. xAI uses a random local
+callback port. On Unix, if xAI displays a code instead of redirecting, paste it
+into Fuigo's terminal prompt; input is hidden. Login times out after ten minutes
+and Ctrl-C cancels waiting. Subscription device-code login is not implemented.
+Windows currently supports the browser callback path only.
+
+A subscription must grant the requested model access. Model listing shows IDs
+returned by the authenticated backend; it does not promise access to every model.
+A denial never switches to a paid API key or Flux Router.
+
+To select subscription inference, add named auth providers and models to your
+trusted user config (`~/.fuigo/config.toml`, or `$FUIGO_HOME/config.toml`):
+
+```toml
+[auth_provider.chatgpt-subscription]
+subscription = "chatgpt"
+# Optional: bind to an account ID shown by login --status.
+# account = "your-account-id"
+
+[auth_provider.grok-subscription]
+subscription = "xai"
+
+[model.chatgpt-subscription]
+model = "REPLACE_WITH_CHATGPT_MODEL_ID_FROM_LIST"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_provider = "chatgpt-subscription"
+
+[model.grok-subscription]
+model = "REPLACE_WITH_XAI_MODEL_ID_FROM_LIST"
+base_url = "https://api.x.ai/v1"
+auth_provider = "grok-subscription"
+```
+
+Replace the model placeholders, then select `-m chatgpt-subscription` or
+`-m grok-subscription`, or select that configured model in the TUI/ACP client.
+Keep each subscription's wire model/endpoint mapping unambiguous. Do not combine
+subscription auth with `api_key`, `env_key`, or a command helper. Flux Router keeps
+its existing API-key configuration.
+
+When switching models, Fuigo retains conversation messages and tool results.
+Model-private reasoning is included only for history from the same emitting model;
+foreign encrypted reasoning is omitted from the outgoing request, not deleted from
+saved history.
+
+Fuigo stores subscription credentials under `$FUIGO_HOME/subscriptions` (default
+`~/.fuigo/subscriptions`) with owner-only file permissions. These are plaintext
+credentials protected by OS permissions. Refreshes are serialized between Fuigo
+processes and persisted atomically. A failed or interrupted refresh can require a
+new login; Fuigo will not reuse a potentially consumed refresh token.
+
+```bash
+fuigo logout --provider chatgpt
+fuigo logout --provider xai
+# Remove one account without removing sibling accounts:
+fuigo logout --provider chatgpt --account ACCOUNT_ID
+```
+
+Logout removes only the named provider/account from Fuigo. It does not sign out
+other applications or revoke their sessions. Logging into another account keeps
+sibling records and selects the new account; configure `account` to pin a model.
+
+Protocol constants and flow behavior reuse Ferrox Labs' Wayland Core and Wayland
+implementations (Apache-2.0). Public OAuth client compatibility and subscription
+entitlements must be confirmed with the actual account; this is not a vendor
+endorsement or a guarantee of a stable third-party subscription API.
+
+---
+
 ## Browser Login (Default)
 
 On first launch, Fuigo opens your browser to authenticate with grok.com:
@@ -37,7 +119,7 @@ Running `fuigo login` starts the sign-in flow again, replacing your cached sessi
 | `--oauth` | Sign in through Ferrox Labs OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
 | `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
 
-To sign out, run `fuigo logout`. It takes no flags and clears your cached credentials.
+To sign out of the existing first-party session, run `fuigo logout` without `--provider`.
 
 ---
 

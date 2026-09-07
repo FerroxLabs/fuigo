@@ -22,6 +22,7 @@ impl SubagentBackend for FixedActiveMessageBackend {
     async fn spawn(
         &self,
         _: SubagentRequest,
+        _: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<SubagentResult, fuigo_tool_runtime::ToolError> {
         Err(fuigo_tool_runtime::ToolError::custom(
             "unsupported",

@@ -173,6 +173,9 @@ impl ToolNotificationFrame {
 /// Maximum serialized size of a `system.notify` opaque payload.
 pub const MAX_SYSTEM_NOTIFY_PAYLOAD_BYTES: usize = 256 * 1024;
 
+/// Shared hub session-bind acknowledgement window; discovery must leave headroom.
+pub const SESSION_BIND_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Body of a `system.notify` frame. `payload` is an opaque `SystemNotification`
 /// JSON value forwarded verbatim without decoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

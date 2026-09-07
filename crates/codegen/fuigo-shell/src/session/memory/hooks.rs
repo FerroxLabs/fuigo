@@ -5,7 +5,7 @@
 //!
 //! ## What is saved
 //!
-//! The current implementation writes a **structured metadata summary** with zero latency and no LLM call:
+//! Writes bounded decisions/outcomes with source provenance and a metadata summary, without an LLM call:
 //! - message counts (user / assistant / tool results)
 //! - the first few real user topics from the session (never synthetic prefixes)
 //! - session date
@@ -95,11 +95,20 @@ pub fn on_session_end(
     };
 
     // Slug from first *real* query (not the synthetic prefix User item).
-    let first_real_query = real_queries.first().map(String::as_str).unwrap_or("");
+    let first_real_query = real_queries
+        .iter()
+        .find(|q| fuigo_memory::safety::is_safe_memory(q))
+        .map(String::as_str)
+        .unwrap_or("");
     let slug = slugify(first_real_query, 30);
     let slug = if slug.is_empty() { "session" } else { &slug };
 
-    let summary = generate_metadata_summary(conversation, &real_queries);
+    let mut summary = generate_metadata_summary(conversation, &real_queries);
+    summary.push_str(&capture_session_claims(
+        conversation,
+        session_id,
+        &storage.workspace_path().display().to_string(),
+    ));
 
     // Write to daily session log.
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -153,6 +162,7 @@ pub(crate) fn generate_metadata_summary(
     // chars().take(100) avoids byte-boundary panics on multi-byte Unicode.
     let topics: Vec<String> = real_queries
         .iter()
+        .filter(|q| fuigo_memory::safety::is_safe_memory(q))
         .take(5)
         .map(|q| q.chars().take(100).collect::<String>())
         .collect();
@@ -166,6 +176,76 @@ pub(crate) fn generate_metadata_summary(
     }
 
     summary
+}
+
+/// Extract claims only from real user text and visible assistant prose. Tool output and
+/// private reasoning never enter this path; assistant results remain historical claims.
+fn capture_session_claims(
+    conversation: &[ConversationItem],
+    session_id: &str,
+    workspace: &str,
+) -> String {
+    let mut records = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (index, item) in conversation.iter().enumerate() {
+        let (role, texts) = match item {
+            ConversationItem::User(_) => (
+                "user",
+                crate::session::helpers::session_compact::extract_real_user_queries(
+                    std::slice::from_ref(item),
+                ),
+            ),
+            ConversationItem::Assistant(a) => ("assistant", vec![a.content.to_string()]),
+            _ => continue,
+        };
+        for text in texts {
+            // Check the complete candidate before splitting/truncation, so a trailing
+            // credential or injection cannot be hidden by a capture bound.
+            if !fuigo_memory::safety::is_safe_memory(&text) {
+                continue;
+            }
+            for line in text.lines() {
+                let line = line.trim().trim_start_matches("- ");
+                let lower = line.to_ascii_lowercase();
+                let explicit = ["decision:", "outcome:", "correction:", "fact:"]
+                    .iter()
+                    .any(|p| lower.starts_with(p));
+                let result = role == "assistant"
+                    && [
+                        "implemented ",
+                        "fixed ",
+                        "verified ",
+                        "tests passed",
+                        "completed ",
+                    ]
+                    .iter()
+                    .any(|p| lower.starts_with(p));
+                if !(explicit || result) || line.chars().count() > 500 || records.len() >= 16 {
+                    continue;
+                }
+                if !seen.insert(line.to_string()) {
+                    continue;
+                }
+                if let Some(record) = fuigo_memory::safety::capture_record(
+                    line,
+                    session_id,
+                    workspace,
+                    role,
+                    index + 1,
+                ) {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    if records.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Decisions and Outcomes (historical claims)\n\n{}",
+            records.join("\n")
+        )
+    }
 }
 
 #[cfg(test)]
@@ -286,7 +366,7 @@ mod tests {
                     .unwrap()
                     .to_str()
                     .unwrap()
-                    .contains("sess1234")
+                    .contains(MemoryStorage::session_suffix("sess12345678").as_str())
             })
             .collect();
         assert!(!session_files.is_empty(), "session log file should exist");
@@ -322,7 +402,7 @@ mod tests {
                     .unwrap()
                     .to_str()
                     .unwrap()
-                    .contains("sess1234")
+                    .contains(MemoryStorage::session_suffix("sess12345678").as_str())
             })
             .unwrap();
 
@@ -642,5 +722,31 @@ mod tests {
             !summary.contains("## Shell Commands"),
             "commands section must not appear"
         );
+    }
+    #[test]
+    fn session_end_captures_claims_with_provenance_and_rejects_secrets() {
+        let tmp = TempDir::new().unwrap();
+        let storage = test_storage(&tmp);
+        storage.ensure_initialized().unwrap();
+        let conv = vec![
+            make_user("Decision: cache = SQLite for the synthetic widget project"),
+            make_assistant("Implemented persistent widget caching and migration checks."),
+            make_user("Correction: cache = local SQLite only; remote caching is deferred"),
+            make_assistant("Outcome: regression = all synthetic widget tests passed"),
+            make_user("api_key = synthetic-private-value-do-not-save"),
+        ];
+        let SessionEndResult::Written(path) =
+            on_session_end(&storage, &conv, "synthetic-source-session", true)
+        else {
+            panic!("expected capture");
+        };
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("Decision: cache = SQLite"));
+        assert!(content.contains("Outcome: regression"));
+        assert!(content.contains("Correction: cache"));
+        assert!(content.contains("synthetic-source-session"));
+        assert!(content.contains("fuigo-memory-provenance"));
+        assert!(content.contains("\"turn\":4"));
+        assert!(!content.contains("synthetic-private-value"));
     }
 }

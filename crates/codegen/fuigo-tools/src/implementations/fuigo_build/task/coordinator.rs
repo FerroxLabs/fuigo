@@ -35,15 +35,17 @@ use super::types::{
     SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentResumeSource,
     SubagentValidateTypeOutcome,
 };
-use active_message::{ActiveChildGeneration, ActiveMessageFuture, ActiveMessageLifecycle};
+use active_message::{
+    ActiveChildGeneration, ActiveMessageFuture, ActiveMessageLifecycle, SpawnReadyMessages,
+};
 
 pub use super::coordinator_state::{
-    ACTIVE_MESSAGE_ADMISSION_TIMEOUT, ACTIVE_MESSAGE_FINALIZATION_TIMEOUT, ActiveMessageAdmission,
-    ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
-    CompletionDisposition, CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture,
-    MAX_ACTIVE_MESSAGE_ADMISSIONS, MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD, MAX_COMPLETED_ENTRIES,
-    SendBoxFuture, StartedChild, SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink,
-    SubagentProgress,
+    ACTIVE_MESSAGE_ADMISSION_TIMEOUT, ACTIVE_MESSAGE_FINALIZATION_TIMEOUT,
+    ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT, ActiveMessageAdmission, ChildCompletion, ChildControl,
+    ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner, CompletionDisposition,
+    CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture, MAX_ACTIVE_MESSAGE_ADMISSIONS,
+    MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD, MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild,
+    SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress,
 };
 use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 
@@ -90,6 +92,8 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     validations: FuturesUnordered<ReplyFuture<R::ValidateFuture, SubagentValidateTypeOutcome>>,
     descriptions: FuturesUnordered<ReplyFuture<R::DescribeFuture, SubagentDescribeOutcome>>,
     active_messages: FuturesUnordered<ActiveMessageFuture>,
+    /// Parked sends and the admission semaphore they re-acquire on start.
+    spawn_ready: SpawnReadyMessages,
     terminal_outputs: HashMap<String, ChildRunOutput<R::CompletionData>>,
     progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
     list_requests: HashMap<u64, ListRequest>,
@@ -112,6 +116,8 @@ struct TeardownDrain {
 pub struct SubagentCoordinatorReceiver {
     commands: mpsc::UnboundedReceiver<SubagentEvent>,
     pub(crate) active_messages: mpsc::UnboundedReceiver<ActiveMessageIngress>,
+    active_message_permits: Arc<tokio::sync::Semaphore>,
+    active_message_capacity: usize,
 }
 
 impl SubagentCoordinatorReceiver {
@@ -146,15 +152,20 @@ impl SubagentCoordinatorReceiver {
     ) {
         let (tx, commands) = mpsc::unbounded_channel();
         let (active_message_tx, active_messages) = mpsc::unbounded_channel();
+        let active_message_capacity = capacity.max(1);
+        let active_message_permits = Arc::new(tokio::sync::Semaphore::new(active_message_capacity));
         (
             crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender::from_paired_channels(
                 tx,
                 active_message_tx,
-                capacity,
+                Arc::clone(&active_message_permits),
+                active_message_capacity,
             ),
             Self {
                 commands,
                 active_messages,
+                active_message_permits,
+                active_message_capacity,
             },
         )
     }
@@ -189,7 +200,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         runner: R,
         config: CoordinatorConfig,
     ) -> Self {
-        Self::from_receivers(commands, None, runner, config)
+        Self::from_receivers(commands, None, None, 0, runner, config)
     }
 
     /// Build a coordinator from the receiver paired by [`Self::channel`].
@@ -201,6 +212,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         Self::from_receivers(
             receiver.commands,
             Some(receiver.active_messages),
+            Some(receiver.active_message_permits),
+            receiver.active_message_capacity,
             runner,
             config,
         )
@@ -209,6 +222,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn from_receivers(
         commands: mpsc::UnboundedReceiver<SubagentEvent>,
         active_message_ingress: Option<mpsc::UnboundedReceiver<ActiveMessageIngress>>,
+        active_message_permits: Option<Arc<tokio::sync::Semaphore>>,
+        active_message_capacity: usize,
         runner: R,
         config: CoordinatorConfig,
     ) -> Self {
@@ -239,6 +254,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             validations: FuturesUnordered::new(),
             descriptions: FuturesUnordered::new(),
             active_messages: FuturesUnordered::new(),
+            spawn_ready: SpawnReadyMessages::new(active_message_permits, active_message_capacity),
             terminal_outputs: HashMap::new(),
             progress: FuturesUnordered::new(),
             list_requests: HashMap::new(),
@@ -259,6 +275,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && self.validations.is_empty()
                 && self.descriptions.is_empty()
                 && self.active_messages.is_empty()
+                && self.spawn_ready.is_empty()
                 && self.terminal_outputs.is_empty()
                 && self.progress.is_empty()
             {
@@ -573,10 +590,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     return;
                 };
                 if pending.cancellation.is_cancelled() {
-                    self.pending.insert(subagent_id, pending);
+                    self.pending.insert(subagent_id.clone(), pending);
                     let _ = respond_to.send(false);
+                    self.reject_spawn_ready_messages(
+                        &subagent_id,
+                        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+                    );
                     return;
                 }
+                let promoted_id = subagent_id.clone();
                 self.active.insert(
                     subagent_id,
                     ActiveChild {
@@ -600,6 +622,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     },
                 );
                 let _ = respond_to.send(true);
+                self.admit_spawn_ready_messages(&promoted_id);
             }
             InternalEvent::Finalizing {
                 subagent_id,
@@ -649,6 +672,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         &mut self,
         request: SubagentRequest,
         spawn_reply: Option<oneshot::Sender<SubagentResult>>,
+        registered_tx: Option<oneshot::Sender<()>>,
         origin: StartOrigin,
     ) {
         let id = request.id.clone();
@@ -676,9 +700,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 foreground_deadline,
                 handle_only,
                 explicitly_killed: false,
+                launched: true,
             },
         );
         self.running_count_changed();
+        if let Some(tx) = registered_tx {
+            let _ = tx.send(());
+        }
         // Computed after the pending insert, so a non-workflow spawn counts
         // itself; max over launches gives a session's peak concurrency.
         let session_running = self.session_running_count(&request.parent_session_id);
@@ -866,6 +894,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn finish_child(&mut self, id: &str, output: ChildRunOutput<R::CompletionData>) {
+        self.reject_spawn_ready_messages(id, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
         let record = if let Some(child) = self.active.remove(id) {
             ChildRecord::Active(child)
         } else if let Some(child) = self.pending.remove(id) {
@@ -875,6 +904,24 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         };
 
         let request = record.request().clone();
+        let launched = match &record {
+            ChildRecord::Active(_) => true,
+            ChildRecord::Pending(child) => child.launched,
+        };
+        // Single owner for child-result failures after start. The TaskTool
+        // detached waiter only logs join/transport errors.
+        if launched
+            && request.run_in_background
+            && !output.result.success
+            && !output.result.cancelled
+        {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %request.subagent_type,
+                error = ?output.result.error,
+                "background subagent failed after start",
+            );
+        }
         let explicitly_killed = record.explicitly_killed();
         let (
             started_at,
@@ -1016,6 +1063,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         {
             child.explicitly_killed |= explicit;
             child.cancellation.cancel();
+            self.reject_spawn_ready_messages(id, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
             return SubagentCancelOutcome::Cancelled;
         }
         if self.remove_queued(|request| {
@@ -1043,13 +1091,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 child.control.cancel();
             }
         }
+        let mut doomed = Vec::new();
         for child in self.pending.values() {
             if child.request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
                 && belongs_to_session(&child.request, parent_session_id)
             {
                 child.cancellation.cancel();
+                doomed.push(child.request.id.clone());
             }
         }
+        self.reject_spawn_ready_ids(&doomed);
         self.remove_queued(|request| {
             request.parent_prompt_id.as_deref() == Some(parent_prompt_id)
                 && belongs_to_session(request, parent_session_id)
@@ -1068,13 +1119,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 cancelled += 1;
             }
         }
+        let mut doomed = Vec::new();
         for child in self.pending.values_mut() {
             if child.request.parent_session_id == parent_session_id {
                 child.request.surface_completion = false;
                 child.cancellation.cancel();
+                doomed.push(child.request.id.clone());
                 cancelled += 1;
             }
         }
+        self.reject_spawn_ready_ids(&doomed);
         // Parent is gone here too: a queued spawn's cancelled completion must
         // not be rebuffered for a later resume of the same session id.
         for queued in self.queued.iter_mut() {
@@ -1161,13 +1215,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 child.control.cancel();
             }
         }
+        let mut doomed = Vec::new();
         for child in self.pending.values() {
             if child.request.parent_session_id == parent_session_id
                 && !child.request.owner.is_workflow()
             {
                 child.cancellation.cancel();
+                doomed.push(child.request.id.clone());
             }
         }
+        self.reject_spawn_ready_ids(&doomed);
         self.remove_queued(|request| {
             request.parent_session_id == parent_session_id && !request.owner.is_workflow()
         });
@@ -1183,13 +1240,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 child.control.cancel();
             }
         }
+        let mut doomed = Vec::new();
         for child in self.pending.values() {
             if child.request.owner.workflow_run_id() == Some(run_id)
                 && belongs_to_session(&child.request, parent_session_id)
             {
                 child.cancellation.cancel();
+                doomed.push(child.request.id.clone());
             }
         }
+        self.reject_spawn_ready_ids(&doomed);
     }
 
     fn resolve_workflow_cancel_waiters(&mut self, run_id: &str) {
@@ -1231,6 +1291,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .map(|waiter| waiter.deadline),
             )
             .chain(self.teardown_drains.values().map(|drain| drain.deadline))
+            .chain(self.spawn_ready.deadlines())
             .min()
     }
 
@@ -1256,6 +1317,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn process_deadlines(&mut self) {
         self.reap_abandoned_callers();
         let now = tokio::time::Instant::now();
+        self.expire_spawn_ready_messages(now);
         // Backstop: a delete-path hold whose drain deadline elapsed force-clears
         // so a child that never finishes cannot block spawns forever.
         let stale: Vec<String> = self
@@ -1389,6 +1451,7 @@ impl<R: ChildRunner> Drop for SubagentCoordinator<R> {
         self.resolve_queued_at_drop();
         self.cancel_all_children();
         self.active_messages.clear();
+        self.spawn_ready.clear();
     }
 }
 

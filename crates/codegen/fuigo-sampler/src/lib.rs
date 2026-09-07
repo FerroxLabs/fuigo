@@ -23,6 +23,7 @@ pub mod retry;
 pub mod sampling_log;
 mod shared_http;
 pub mod stream;
+pub mod subscription;
 pub mod types;
 
 // Public re-exports: the API consumers see

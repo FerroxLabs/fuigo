@@ -11,18 +11,18 @@ use crate::config::{MemoryConfig, SessionContextFactory};
 use crate::file_system::{AsyncFsWrapper, LocalFs};
 use crate::hub::{HubConfig, HubHandle};
 use crate::session::file_state::FileStateTracker;
+use fuigo_computer_hub_mcp_adapter::McpBridgeHandle;
+use fuigo_hunk_tracker::HunkTrackerHandle;
+use fuigo_mcp::servers::McpState;
+use fuigo_tool_protocol::ToolId;
+use fuigo_tool_runtime::WorkspaceViewerContext;
+use fuigo_tools::notification::AcknowledgedToolNotification;
+use fuigo_tools::notification::types::ToolNotificationHandle;
+use fuigo_tools::registry::types::{FinalizedToolset, ToolConfig, ToolServerConfig};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use fuigo_computer_hub_mcp_adapter::McpBridgeHandle;
-use fuigo_mcp::servers::McpState;
-use fuigo_tools::notification::AcknowledgedToolNotification;
-use fuigo_tools::notification::types::ToolNotificationHandle;
-use fuigo_tools::registry::types::{FinalizedToolset, ToolConfig, ToolServerConfig};
-use fuigo_hunk_tracker::HunkTrackerHandle;
-use fuigo_tool_protocol::ToolId;
-use fuigo_tool_runtime::WorkspaceViewerContext;
 /// Minimal result types for git error reporting (duplicated from shell session/result).
 pub mod result {
     use serde::Serialize;
@@ -45,6 +45,60 @@ pub mod result {
     pub struct ExtMethodResult<T> {
         pub result: Option<T>,
         pub error: Option<serde_json::Value>,
+    }
+}
+/// One MCP server running for a session.
+pub(crate) struct SessionMcpServer {
+    pub(crate) bridge: McpBridgeHandle,
+    /// The ids this server contributed to the session's advertised tool set,
+    /// i.e. what survived collision filtering. Dropping the server
+    /// unregisters exactly these, so a native tool that shadowed a same-named
+    /// MCP tool is never torn down along with it.
+    pub(crate) tool_ids: Vec<ToolId>,
+}
+/// The MCP servers a session is running.
+pub(crate) struct ActiveMcp {
+    /// Config server name → live server. Empty is meaningful: it marks a
+    /// session that is in the configured set but currently runs nothing, so
+    /// a later reload can add servers to it.
+    pub(crate) servers: HashMap<String, SessionMcpServer>,
+}
+/// Whether a session takes part in the workspace's configured MCP set.
+///
+/// `Uninitialized` is a session that never joined: unbound, an `rpc_only`
+/// bind, or a bind whose toolset failed to resolve. Reloads skip those.
+pub(crate) enum WorkspaceMcpBinding {
+    Uninitialized,
+    Active(ActiveMcp),
+    Closed,
+}
+impl WorkspaceMcpBinding {
+    /// The session's servers, or `None` if it has not joined the set.
+    pub(crate) fn active(&self) -> Option<&ActiveMcp> {
+        match self {
+            Self::Active(active) => Some(active),
+            Self::Uninitialized | Self::Closed => None,
+        }
+    }
+    /// Mutable [`Self::active`]. Does **not** enrol a session that has not
+    /// joined — pushing servers into an `rpc_only` bind would hand it tools
+    /// it opted out of.
+    pub(crate) fn active_mut(&mut self) -> Option<&mut ActiveMcp> {
+        match self {
+            Self::Active(active) => Some(active),
+            Self::Uninitialized | Self::Closed => None,
+        }
+    }
+    /// Enrol this session in the configured set, or return its existing
+    /// servers. The only accessor that promotes, and `None` only once torn
+    /// down — a reload must never resurrect a session the hub has ended.
+    pub(crate) fn join(&mut self) -> Option<&mut ActiveMcp> {
+        if matches!(self, Self::Uninitialized) {
+            *self = Self::Active(ActiveMcp {
+                servers: HashMap::new(),
+            });
+        }
+        self.active_mut()
     }
 }
 /// Per-session state held in [`WorkspaceShared::sessions`].
@@ -82,14 +136,49 @@ pub struct WorkspaceSession {
     inner: RwLock<WorkspaceSessionInner>,
     /// Per-session lock that serialises `update_tool_config` calls.
     pub(crate) update_lock: tokio::sync::Mutex<()>,
-    /// Per-session MCP state (owned clients, etc.).
+    /// Canonical MCP client/configuration runtime state.
     pub(crate) mcp_state: Arc<tokio::sync::Mutex<McpState>>,
-    /// MCP bridges kept alive for the session lifetime.
-    pub(crate) mcp_bridges: tokio::sync::Mutex<Vec<McpBridgeHandle>>,
-    /// Qualified tool IDs registered on the server for this session's MCP tools.
-    pub(crate) mcp_tool_ids: tokio::sync::Mutex<Vec<ToolId>>,
-    /// Per-user feature-flag bag resolved at session-bind time, frozen for the session lifetime.
-    /// `None` means tools use their safe defaults.
+    /// Workspace hub publication state for MCP bridges and registered aliases.
+    pub(crate) mcp_binding: tokio::sync::Mutex<WorkspaceMcpBinding>,
+    /// Cancels the session's in-flight MCP server starts. Teardown flips the
+    /// binding to `Closed` for everything that COMPLETES afterwards, but a
+    /// start still connecting holds its child process inside a pending
+    /// future — cancelling drops those futures, killing the children now
+    /// instead of at the discovery deadline. A revive bind (re-opening a
+    /// `Closed` binding) swaps in a fresh token.
+    pub(crate) mcp_cancel: parking_lot::Mutex<tokio_util::sync::CancellationToken>,
+    /// MCP life counter, only ever bumped under `mcp_binding`: an enrolment
+    /// that TRANSITIONS the binding to Active starts a life, teardown ends
+    /// one. A soft rebind of an already-Active binding continues the life —
+    /// its cancel token and its hub registrations' life tags are the
+    /// life's, and must stay coherent with this counter. Two fences read
+    /// it:
+    ///
+    /// - A bind snapshots it when its resolution starts, and enrolment
+    ///   refuses a stale snapshot — so a stale soft rebind landing just
+    ///   after a genuine session-end teardown cannot re-open the binding
+    ///   and start servers nothing will ever tear down.
+    /// - A hub `session.unbind` snapshots it when the frame arrives, and
+    ///   its spawned teardown runs only while that life is still current
+    ///   (`teardown_session_mcp_for_event`) — so a stale unbind task
+    ///   cannot tear down a newer life a reconnect bind enrolled meanwhile.
+    pub(crate) mcp_epoch: std::sync::atomic::AtomicU64,
+    /// Accepted-bind counter, bumped under `mcp_binding` by every bind the
+    /// resolver accepts (enrolments, soft rebinds, re-opens — anything that
+    /// returns bind success). A hub unbind's DEFERRED teardown snapshots it
+    /// beside the epoch and re-checks both: a soft rebind continues the
+    /// life (same epoch — wave 13), so the epoch alone cannot distinguish
+    /// "before the unbind" from "after the reconnect bind"; a bind accepted
+    /// after the unbind arrived must invalidate the pending teardown, or it
+    /// would close MCP under the accepted bind with nothing to re-open it.
+    pub(crate) mcp_bind_generation: std::sync::atomic::AtomicU64,
+    /// The native tool ids the session's last bind advertised (including the
+    /// RPC handler), recorded by the bind resolver. `claim_tools` refuses an
+    /// MCP tool whose id collides with one of these, and only the bind knows
+    /// them — the hub snapshot also holds already-advertised MCP tools.
+    pub(crate) mcp_native_tool_ids: parking_lot::Mutex<std::collections::HashSet<ToolId>>,
+    /// Per-user feature-flag bag resolved at session-bind time, frozen for
+    /// the session lifetime. `None` → tools use their safe defaults.
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
     /// Auto-approve (YOLO) state. Seeded from `session.bind` metadata, refreshed by each before-turn hook.
     pub(crate) yolo_mode: std::sync::atomic::AtomicBool,
@@ -248,8 +337,11 @@ impl WorkspaceSession {
             bind_tool_config_fingerprint: std::sync::Mutex::new(None),
             stale_resolve: std::sync::atomic::AtomicBool::new(false),
             mcp_state: Arc::new(tokio::sync::Mutex::new(McpState::new(vec![]))),
-            mcp_bridges: tokio::sync::Mutex::new(Vec::new()),
-            mcp_tool_ids: tokio::sync::Mutex::new(Vec::new()),
+            mcp_binding: tokio::sync::Mutex::new(WorkspaceMcpBinding::Uninitialized),
+            mcp_cancel: parking_lot::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            mcp_epoch: std::sync::atomic::AtomicU64::new(0),
+            mcp_bind_generation: std::sync::atomic::AtomicU64::new(0),
+            mcp_native_tool_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
             viewer_ctx,
             yolo_mode: std::sync::atomic::AtomicBool::new(false),
             system_notifications,
@@ -541,6 +633,11 @@ pub struct WorkspaceShared {
     pub(crate) root_cwd: std::path::PathBuf,
     pub(crate) sessions: RwLock<HashMap<String, Arc<WorkspaceSession>>>,
     pub(crate) session_factory: Arc<dyn SessionContextFactory>,
+    /// `Some` iff every admitted session binds a configured set of MCP
+    /// servers. The contents are hot-swappable through
+    /// [`WorkspaceHandle::reload_bind_mcp`](crate::handle::WorkspaceHandle::reload_bind_mcp),
+    /// so a user can add or remove servers without restarting the process.
+    pub(crate) bind_mcp: Option<parking_lot::RwLock<crate::config::BindMcpConfig>>,
     pub(crate) mcp_tools_snapshot: arc_swap::ArcSwap<Vec<ToolConfig>>,
     pub(crate) events: tokio::sync::broadcast::Sender<fuigo_workspace_types::WorkspaceEvent>,
     pub(crate) respect_gitignore: bool,
@@ -885,11 +982,11 @@ impl WorkspaceShared {
                         &sid,
                         SwapAction::Applied,
                     );
-                    let _ =
-                        self.events
-                            .send(fuigo_workspace_types::WorkspaceEvent::ToolsChanged {
-                                session_id: sid,
-                            });
+                    let _ = self
+                        .events
+                        .send(fuigo_workspace_types::WorkspaceEvent::ToolsChanged {
+                            session_id: sid,
+                        });
                     rebuilt += 1;
                 }
                 Err(e) => {

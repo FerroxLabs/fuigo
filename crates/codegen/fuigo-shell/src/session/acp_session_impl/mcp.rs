@@ -13,6 +13,34 @@ fn attach_elicitation_tx(
         client.set_elicitation_tx(Some(tx));
     }
 }
+#[cfg(test)]
+mod oauth_lock_tests {
+    use super::super::support::create_test_actor;
+
+    #[tokio::test]
+    async fn auth_trigger_releases_state_lock_before_oauth_rebuild() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                // An absent client takes the real rebuild branch, whose first
+                // operation reacquires McpState. Missing config stops before
+                // discovery/browser login, after proving the lock was released.
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    actor.handle_mcp_auth_trigger("missing-oauth-server"),
+                )
+                .await
+                .expect("OAuth rebuild must not deadlock on the client lookup lock");
+                assert_eq!(
+                    result.unwrap_err(),
+                    "MCP server 'missing-oauth-server' not found in config"
+                );
+            })
+            .await;
+    }
+}
 impl SessionActor {
     /// If initialization is in progress by another task, this polls until complete.
     pub(super) async fn wait_for_mcp_initialized(&self) {
@@ -199,7 +227,11 @@ impl SessionActor {
     ///
     /// Runs force_reauth (browser flow), then re-initializes the server and registers its tools.
     pub(super) async fn handle_mcp_auth_trigger(&self, server_name: &str) -> Result<(), String> {
-        let client = match self.mcp_state.lock().await.get_client(server_name).cloned() {
+        let existing_client = {
+            let state = self.mcp_state.lock().await;
+            state.get_client(server_name).cloned()
+        };
+        let client = match existing_client {
             Some(c) if c.has_auth() => c,
             _ => {
                 self.rebuild_http_client_with_oauth(server_name, McpOauthDiscovery::Network)

@@ -11,13 +11,132 @@ use fuigo_tools::types::memory_backend::{MemorySearchResult, format_staleness_no
 const SNIPPET_MAX_CHARS: usize = 500;
 
 /// Returns `true` if a memory-context block is already persisted in the leading system message.
-/// Callers reuse a persisted block verbatim instead of re-searching.
+/// Callers reuse a persisted block after validating its source version before each turn.
 /// A re-scored block would mutate the system-prompt prefix and bust the KV cache for the whole downstream conversation.
 pub fn conversation_has_memory_context(items: &[ConversationItem]) -> bool {
     matches!(
         items.first(),
         Some(ConversationItem::System(sys)) if sys.content.contains(MEMORY_CONTEXT_OPEN_TAG)
     )
+}
+
+const SOURCES_MARKER: &str = "<!-- fuigo-memory-sources-v1 ";
+
+/// Versioned injection only reads sources through the workspace-scoped storage API.
+pub fn format_memory_reminder_with_storage(
+    results: &[MemorySearchResult],
+    storage: &fuigo_memory::storage::MemoryStorage,
+) -> Option<String> {
+    let current: Vec<_> = results
+        .iter()
+        .filter(|r| {
+            fuigo_memory::safety::is_safe_memory(&r.snippet)
+                && storage
+                    .read_file(std::path::Path::new(&r.path), None, None)
+                    .is_ok()
+        })
+        .cloned()
+        .collect();
+    let mut block = format_memory_reminder(&current)?;
+    let sources: Vec<_> = current
+        .iter()
+        .filter_map(|r| {
+            let content = storage
+                .read_file(std::path::Path::new(&r.path), None, None)
+                .ok()?;
+            Some((
+                r.path.clone(),
+                blake3::hash(content.as_bytes()).to_hex().to_string(),
+            ))
+        })
+        .collect();
+    if sources.len() != current.len() {
+        return None;
+    }
+    let json = serde_json::to_string(&sources)
+        .ok()?
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e");
+    block = block.replacen(
+        MEMORY_CONTEXT_OPEN_TAG,
+        &format!("{MEMORY_CONTEXT_OPEN_TAG}\n{SOURCES_MARKER}{json} -->"),
+        1,
+    );
+    Some(block)
+}
+
+/// Remove cached memory whose source disappeared, changed, or left this workspace.
+/// Old unversioned blocks are refreshed rather than trusted indefinitely.
+pub fn invalidate_stale_memory_context(
+    items: &mut [ConversationItem],
+    storage: Option<&fuigo_memory::storage::MemoryStorage>,
+) -> bool {
+    fn strip(text: &str, storage: Option<&fuigo_memory::storage::MemoryStorage>) -> String {
+        let mut output = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find(MEMORY_CONTEXT_OPEN_TAG) {
+            output.push_str(&rest[..start]);
+            let Some(end) = rest[start..]
+                .find(MEMORY_CONTEXT_CLOSE_TAG)
+                .map(|n| start + n + MEMORY_CONTEXT_CLOSE_TAG.len())
+            else {
+                return output;
+            };
+            let block = &rest[start..end];
+            let valid = storage.is_some_and(|storage| {
+                let Some(marker) = block.find(SOURCES_MARKER) else {
+                    return false;
+                };
+                let encoded = &block[marker + SOURCES_MARKER.len()..];
+                let Some(close) = encoded.find(" -->") else {
+                    return false;
+                };
+                let Ok(sources) = serde_json::from_str::<Vec<(String, String)>>(&encoded[..close])
+                else {
+                    return false;
+                };
+                !sources.is_empty()
+                    && sources.iter().all(|(path, digest)| {
+                        storage
+                            .read_file(std::path::Path::new(path), None, None)
+                            .is_ok_and(|content| {
+                                blake3::hash(content.as_bytes()).to_hex().as_str() == digest
+                            })
+                    })
+            });
+            if valid {
+                output.push_str(block);
+            }
+            rest = &rest[end..];
+        }
+        output.push_str(rest);
+        output
+    }
+    let mut changed = false;
+    for item in items {
+        match item {
+            ConversationItem::System(sys) => {
+                let updated = strip(&sys.content, storage);
+                if updated != sys.content.as_ref() {
+                    sys.content = updated.into();
+                    changed = true;
+                }
+            }
+            ConversationItem::User(user) if user.synthetic_reason.is_some() => {
+                for part in &mut user.content {
+                    if let fuigo_sampling_types::conversation::ContentPart::Text { text } = part {
+                        let updated = strip(text, storage);
+                        if updated != text.as_ref() {
+                            *text = updated.into();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
 }
 
 /// Format memory search results as a markdown section for system-reminder injection.
@@ -39,7 +158,11 @@ pub fn format_memory_reminder(results: &[MemorySearchResult]) -> Option<String> 
          prefer current evidence when it conflicts with memory.\n\n"
     );
 
-    for (i, r) in results.iter().enumerate() {
+    for (i, r) in results
+        .iter()
+        .filter(|r| fuigo_memory::safety::is_safe_memory(&r.snippet))
+        .enumerate()
+    {
         let truncated = r.snippet.chars().count() > SNIPPET_MAX_CHARS;
         let mut snippet: String = r.snippet.chars().take(SNIPPET_MAX_CHARS).collect();
         if truncated {
@@ -345,5 +468,65 @@ mod tests {
             reminder.is_some(),
             "non-empty results must produce Some(_) — injection_count SHOULD increment"
         );
+    }
+    #[test]
+    fn versioned_memory_context_expires_on_edit_delete_and_scope_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("memory");
+        let storage = fuigo_memory::storage::MemoryStorage::with_paths(
+            root.clone(),
+            root.join("workspace-a"),
+        );
+        storage.ensure_initialized().unwrap();
+        let source = storage.workspace_dir().join("facts.md");
+        std::fs::write(&source, "Decision: color = cobalt").unwrap();
+        let mut result = sample_result();
+        result.path = source.display().to_string();
+        result.snippet = "Decision: color = cobalt".into();
+        let block = format_memory_reminder_with_storage(&[result.clone()], &storage).unwrap();
+        let mut conversation = vec![ConversationItem::system(format!(
+            "Keep this prompt.\n{block}"
+        ))];
+        assert!(!invalidate_stale_memory_context(
+            &mut conversation,
+            Some(&storage)
+        ));
+        std::fs::write(&source, "Correction: color = amber").unwrap();
+        assert!(invalidate_stale_memory_context(
+            &mut conversation,
+            Some(&storage)
+        ));
+        assert!(!conversation_has_memory_context(&conversation));
+        let ConversationItem::System(sys) = &conversation[0] else {
+            panic!()
+        };
+        assert!(sys.content.contains("Keep this prompt."));
+        result.snippet = "Correction: color = amber".into();
+        let block = format_memory_reminder_with_storage(&[result], &storage).unwrap();
+        let mut deleted = vec![ConversationItem::system(block.clone())];
+        let other = fuigo_memory::storage::MemoryStorage::with_paths(
+            root.clone(),
+            root.join("workspace-b"),
+        );
+        other.ensure_initialized().unwrap();
+        let mut scoped = vec![ConversationItem::system(block)];
+        assert!(invalidate_stale_memory_context(&mut scoped, Some(&other)));
+        std::fs::remove_file(source).unwrap();
+        assert!(invalidate_stale_memory_context(
+            &mut deleted,
+            Some(&storage)
+        ));
+    }
+
+    #[test]
+    fn legacy_memory_context_is_removed_without_source_authority() {
+        let mut conversation = vec![ConversationItem::system(
+            "Prompt <memory-context>old fact</memory-context> preserved",
+        )];
+        assert!(invalidate_stale_memory_context(&mut conversation, None));
+        let ConversationItem::System(sys) = &conversation[0] else {
+            panic!()
+        };
+        assert_eq!(sys.content.as_ref(), "Prompt  preserved");
     }
 }

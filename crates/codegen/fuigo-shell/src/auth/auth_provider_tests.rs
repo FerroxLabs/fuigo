@@ -144,6 +144,8 @@ async fn provider_config_edit_invalidates_cached_token() {
     let edited = AuthProviderRef::new(
         "test-freshen".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf edited-token".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -177,6 +179,8 @@ async fn provider_401_recovery_reminted_under_edited_config() {
     let edited = AuthProviderRef::new(
         "test-401-edited".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf new-config-token".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -201,6 +205,8 @@ async fn provider_timeout_edit_does_not_invalidate_token() {
     let retimed = AuthProviderRef::new(
         "test-timeout-edit".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: provider.config.command.clone(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -225,6 +231,8 @@ async fn provider_cwd_edit_invalidates_cached_token() {
     let moved = AuthProviderRef::new(
         "test-cwd-edit".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: provider.config.command.clone(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -315,6 +323,8 @@ async fn provider_refresh_sets_expired_env() {
     let provider = AuthProviderRef::new(
         "test-expired-env".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf 'tok-%s' \"${FUIGO_AUTH_EXPIRED:-0}\"".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -342,6 +352,8 @@ async fn provider_concurrent_mints_single_flight() {
     let provider = AuthProviderRef::new(
         "test-single-flight".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: format!(
                 "sleep 0.3; echo run >> {c}; printf 'tok-%s' \"$(wc -l < {c} | tr -d ' ')\"",
                 c = counter.display()
@@ -394,6 +406,8 @@ async fn provider_expiry_source_precedence() {
         let provider = AuthProviderRef::new(
             name.to_owned(),
             AuthProviderConfig {
+                subscription: None,
+                account: None,
                 command,
                 args: None,
                 token_ttl_secs,
@@ -448,6 +462,8 @@ async fn provider_unusable_expiry_still_mints() {
     let provider = AuthProviderRef::new(
         "test-overflow".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: format!(
                 "printf '{{\"access_token\":\"t\",\"expires_in\":{}}}'",
                 u64::MAX
@@ -475,6 +491,8 @@ async fn provider_args_run_without_a_shell() {
     let provider = AuthProviderRef::new(
         "test-args".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf".to_owned(),
             // Shell metacharacters stay literal under direct exec.
             args: Some(vec!["tok-$HOME;42".to_owned()]),
@@ -494,6 +512,8 @@ async fn provider_command_times_out() {
     let provider = AuthProviderRef::new(
         "test-timeout".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "sleep 20; printf never".to_owned(),
             args: None,
             token_ttl_secs: None,
@@ -519,6 +539,8 @@ async fn provider_zero_timeout_clamps_to_one_second() {
     let fast = AuthProviderRef::new(
         "test-zero-timeout-fast".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf tok".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -535,6 +557,8 @@ async fn provider_zero_timeout_clamps_to_one_second() {
     let slow = AuthProviderRef::new(
         "test-zero-timeout-slow".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "sleep 5; printf tok".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -557,6 +581,8 @@ async fn mint_error_messages_distinguish_failure_modes() {
     let timed_out = AuthProviderRef::new(
         "test-classify-timeout".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "sleep 20".to_owned(),
             args: None,
             token_ttl_secs: None,
@@ -573,6 +599,8 @@ async fn mint_error_messages_distinguish_failure_modes() {
     let missing = AuthProviderRef::new(
         "test-classify-spawn".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "/nonexistent/provider-binary".to_owned(),
             args: Some(vec![]),
             token_ttl_secs: None,
@@ -589,6 +617,8 @@ async fn mint_error_messages_distinguish_failure_modes() {
     let empty_output = AuthProviderRef::new(
         "test-classify-permanent".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf ''".to_owned(),
             args: None,
             token_ttl_secs: None,
@@ -611,6 +641,8 @@ async fn re_mint_hands_the_prior_token_back_to_the_command() {
     let provider = AuthProviderRef::new(
         "test-handback".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "printf 'seen-%s' \"${FUIGO_AUTH_PROVIDER_ACCESS_TOKEN:-none}\"".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),
@@ -642,6 +674,8 @@ async fn failed_401_remint_invalidates_the_cached_token() {
     let provider = AuthProviderRef::new(
         "test-401-invalidate".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: format!(
                 "echo run >> {c}; n=$(wc -l < {c} | tr -d ' '); \
                  [ \"$n\" = 1 ] && printf 'tok-1' || exit 1",
@@ -680,6 +714,8 @@ async fn failed_pre_turn_mint_does_not_serve_the_stale_token() {
     let provider = AuthProviderRef::new(
         "test-pre-turn-stale".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: format!(
                 "echo run >> {c}; n=$(wc -l < {c} | tr -d ' '); \
                  [ \"$n\" = 1 ] && printf 'tok-1' || exit 1",
@@ -715,6 +751,8 @@ async fn provider_output_over_cap_fails_closed() {
     let provider = AuthProviderRef::new(
         "test-stdout-cap".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: format!("head -c {over} /dev/zero"),
             args: None,
             token_ttl_secs: None,
@@ -831,6 +869,8 @@ async fn provider_resolves_relative_program_against_cwd() {
     let provider = AuthProviderRef::new(
         "test-cwd-relative".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "./token.sh".to_owned(),
             args: Some(vec![]),
             token_ttl_secs: Some(3600),
@@ -854,6 +894,8 @@ async fn provider_command_runs_in_cwd() {
     let provider = AuthProviderRef::new(
         "test-cwd-shell".to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: "cat token.txt".to_owned(),
             args: None,
             token_ttl_secs: Some(3600),

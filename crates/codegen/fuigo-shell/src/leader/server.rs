@@ -1106,19 +1106,12 @@ async fn handle_workspace_start(
     crate::agent::folder_trust::resolve_and_record(&cwd_path, None, false);
     let project_lsp_trusted = crate::agent::folder_trust::project_scope_allowed(&cwd_path);
     let handle = fuigo_workspace::connect_local_workspace(
-        cwd_path.clone(),
-        url,
-        auth,
-        Some(metadata),
-        Some(server_id),
-        alpha_test_key,
-        allow_insecure_ws,
-        status_config,
-        upload_queue_enabled,
-        project_lsp_trusted,
-        None,
-        false,
-        false,
+        cwd_path.clone(), url, auth,
+        fuigo_workspace::LocalWorkspaceConnectOptions {
+            metadata: Some(metadata), server_id: Some(server_id), alpha_test_key,
+            allow_insecure_ws, status_config, upload_queue_enabled, project_lsp_trusted,
+            ..Default::default()
+        },
     )
     .await
     .map_err(|e| workspace_err(format!("failed to connect workspace to hub: {e}")))?;

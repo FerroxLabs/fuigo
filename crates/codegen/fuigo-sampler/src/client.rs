@@ -331,6 +331,8 @@ fn apply_env_http_headers(
 /// Carries an `Arc`-backed `reqwest::Client` and the default headers/request-defaults computed from a [`SamplerConfig`] at construction time.
 #[derive(Clone)]
 pub struct SamplingClient {
+    subscription: Option<crate::subscription::SubscriptionKind>,
+    subscription_resolver: Option<crate::subscription::SharedSubscriptionResolver>,
     http: reqwest::Client,
     default_headers: HeaderMap,
     base_url: String,
@@ -532,7 +534,15 @@ impl SamplingClient {
     /// Grabs the process-wide shared `reqwest::Client` (HTTP/2 by default, HTTP/1.1 when `config.force_http1` is set).
     /// Pre-computes the default request headers.
     /// This does not perform any network I/O.
-    pub fn new(config: SamplerConfig) -> Result<Self> {
+    pub fn new(mut config: SamplerConfig) -> Result<Self> {
+        if config.subscription.is_some() {
+            config.api_key = None;
+            config.bearer_resolver = None;
+            config.attribution_callback = None;
+            config.header_injector = None;
+            config.extra_headers.clear();
+            config.env_http_headers.clear();
+        }
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(ref api_key) = config.api_key {
@@ -675,6 +685,8 @@ impl SamplingClient {
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
 
         Ok(Self {
+            subscription: config.subscription,
+            subscription_resolver: config.subscription_resolver,
             http,
             default_headers: headers,
             base_url: config.base_url,
@@ -684,6 +696,13 @@ impl SamplingClient {
             header_injector: config.header_injector,
             endpoint,
         })
+    }
+
+    async fn dispatch_request(&self, request: reqwest::Request, streaming: bool) -> Result<reqwest::Response> {
+        if let Some(kind) = self.subscription {
+            return crate::subscription::dispatch(kind, self.subscription_resolver.as_ref(), request).await;
+        }
+        fuigo_extra_ca::dispatch::execute(&self.http, request).await.map_err(|error| dispatch_error(error, streaming))
     }
 
     pub fn api_backend(&self) -> ApiBackend {
@@ -944,9 +963,7 @@ impl SamplingClient {
         } = self.post(self.endpoint("chat/completions"));
         let http_request = fuigo_headers.apply(builder).json(&payload);
 
-        let response = fuigo_extra_ca::dispatch::send(http_request)
-            .await
-            .map_err(|error| dispatch_error(error, false))?;
+        let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
         self.handle_response(response, sent_bearer.as_deref()).await
     }
@@ -1016,9 +1033,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "chat/completions");
 
-        let response = fuigo_extra_ca::dispatch::execute(&self.http, built_request)
-            .await
-            .map_err(|error| dispatch_error(error, true))?;
+        let response = self.dispatch_request(built_request, true).await?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1170,6 +1185,17 @@ impl SamplingClient {
         &self,
         mut request: CreateResponseWrapper,
     ) -> Result<rs::Response> {
+        if self.subscription == Some(crate::subscription::SubscriptionKind::Chatgpt) {
+            let (mut events, _, _) = self.create_response_stream(request).await?;
+            while let Some(event) = events.next().await {
+                match event? {
+                    rs::ResponseStreamEvent::ResponseCompleted(event) => return Ok(event.response),
+                    rs::ResponseStreamEvent::ResponseFailed(_) | rs::ResponseStreamEvent::ResponseIncomplete(_) => return Err(SamplingError::InvalidConfiguration("subscription response did not complete")),
+                    _ => {},
+                }
+            }
+            return Err(SamplingError::InvalidConfiguration("subscription stream ended without completion"));
+        }
         self.apply_response_defaults(&mut request)?;
 
         let x_fuigo_conv_id = request.x_fuigo_conv_id.as_deref().unwrap_or_default();
@@ -1210,9 +1236,7 @@ impl SamplingClient {
         } = self.post(self.endpoint("responses"));
         let http_request = fuigo_headers.apply(builder).json(&request_body);
 
-        let response = fuigo_extra_ca::dispatch::send(http_request)
-            .await
-            .map_err(|error| dispatch_error(error, false))?;
+        let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
@@ -1364,9 +1388,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "responses");
 
-        let response = fuigo_extra_ca::dispatch::execute(&self.http, built_request)
-            .await
-            .map_err(|error| dispatch_error(error, true))?;
+        let response = self.dispatch_request(built_request, true).await?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1430,6 +1452,8 @@ impl SamplingClient {
         let event_stream = byte_stream.eventsource();
 
         let doom_loop_for_stream = doom_loop.clone();
+        let mut codex_output = (self.subscription == Some(crate::subscription::SubscriptionKind::Chatgpt))
+            .then(crate::subscription::CodexOutput::default);
 
         // The scan item is an `Option`: `Some(None)` skips an absorbed doom-loop event without terminating the stream (`filter_map` below)
         // An outer `None` still ends the stream
@@ -1464,7 +1488,11 @@ impl SamplingClient {
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
                         } else {
-                            Some(Some(deserialize_response_event(data)))
+                            let mut parsed = deserialize_response_event(data);
+                            if let (Some(output), Ok(event)) = (&mut codex_output, &mut parsed) {
+                                output.observe(event);
+                            }
+                            Some(Some(parsed))
                         }
                     }
                     Err(e) => {
@@ -1541,9 +1569,7 @@ impl SamplingClient {
         } = self.post(self.endpoint("messages"));
         let http_request = fuigo_headers.apply(builder).json(&request.inner);
 
-        let response = fuigo_extra_ca::dispatch::send(http_request)
-            .await
-            .map_err(|error| dispatch_error(error, false))?;
+        let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
@@ -1664,9 +1690,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "messages");
 
-        let response = fuigo_extra_ca::dispatch::execute(&self.http, built_request)
-            .await
-            .map_err(|error| dispatch_error(error, true))?;
+        let response = self.dispatch_request(built_request, true).await?;
 
         let status = response.status();
         let span = tracing::Span::current();
@@ -1800,6 +1824,9 @@ impl SamplingClient {
             request.max_output_tokens = self.defaults.max_completion_tokens;
         }
 
+        if self.subscription.is_some() {
+            crate::subscription::retain_reasoning_for_model(&mut request.items, request.model.as_deref().unwrap_or(&self.defaults.model));
+        }
         Ok(())
     }
 
@@ -2192,6 +2219,8 @@ mod tests {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            subscription: None,
+            subscription_resolver: None,
             header_injector: None,
         }
     }

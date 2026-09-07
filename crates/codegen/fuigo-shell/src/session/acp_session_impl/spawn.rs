@@ -828,7 +828,7 @@ pub(crate) async fn spawn_session_actor(
             .cloned()
             .unwrap_or_default();
         let watcher = if watcher_config.enabled {
-            crate::session::memory::watcher::MemoryFileWatcher::start(storage.global_dir())
+            crate::session::memory::watcher::MemoryFileWatcher::start_scoped(&storage)
                 .map(std::sync::Arc::new)
         } else {
             None
@@ -2023,7 +2023,7 @@ pub(crate) async fn spawn_session_actor(
                             api_key,
                         )
                     {
-                        crate::session::memory::embed_missing_chunks(&index, &provider).await
+                        crate::session::memory::embed_missing_chunks(&mut index, &provider).await
                     } else {
                         0
                     }

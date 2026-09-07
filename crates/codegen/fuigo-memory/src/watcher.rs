@@ -30,6 +30,17 @@ impl MemoryFileWatcher {
     ///
     /// Returns `None` if the watcher fails to initialize, after logging a warning.
     pub fn start(memory_dir: &Path) -> Option<Self> {
+        Self::start_inner(memory_dir, None)
+    }
+
+    pub fn start_scoped(storage: &crate::storage::MemoryStorage) -> Option<Self> {
+        Self::start_inner(storage.global_dir(), Some(storage.clone()))
+    }
+
+    fn start_inner(
+        memory_dir: &Path,
+        scope: Option<crate::storage::MemoryStorage>,
+    ) -> Option<Self> {
         let dirty_files: Arc<ArcSwap<HashSet<PathBuf>>> =
             Arc::new(ArcSwap::new(Arc::new(HashSet::new())));
         let dirty = Arc::new(AtomicBool::new(false));
@@ -37,6 +48,7 @@ impl MemoryFileWatcher {
         let df = dirty_files.clone();
         let d = dirty.clone();
 
+        let event_scope = scope.clone();
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             let Ok(event) = res else { return };
             match event.kind {
@@ -44,7 +56,16 @@ impl MemoryFileWatcher {
                 _ => return,
             }
             for path in &event.paths {
-                if path.extension().is_some_and(|ext| ext == "md") {
+                if path.extension().is_some_and(|ext| ext == "md")
+                    && event_scope.as_ref().is_none_or(|s| {
+                        path == &s.global_memory_file()
+                            || path.strip_prefix(s.workspace_dir()).is_ok_and(|relative| {
+                                !relative
+                                    .components()
+                                    .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+                            })
+                    })
+                {
                     let path = path.clone();
                     df.rcu(move |old| {
                         let mut new = (**old).clone();
@@ -61,7 +82,14 @@ impl MemoryFileWatcher {
         .ok()?;
 
         watcher
-            .watch(memory_dir, RecursiveMode::Recursive)
+            .watch(
+                memory_dir,
+                if scope.is_some() {
+                    RecursiveMode::NonRecursive
+                } else {
+                    RecursiveMode::Recursive
+                },
+            )
             .map_err(|e| {
                 tracing::warn!(
                     path = %memory_dir.display(),
@@ -70,6 +98,12 @@ impl MemoryFileWatcher {
                 );
             })
             .ok()?;
+
+        if let Some(scope) = &scope {
+            watcher
+                .watch(scope.workspace_dir(), RecursiveMode::Recursive)
+                .ok()?;
+        }
 
         tracing::info!(
             path = %memory_dir.display(),
@@ -90,8 +124,8 @@ impl MemoryFileWatcher {
 
     /// Takes all accumulated dirty paths and resets the dirty state.
     pub fn take_dirty(&self) -> Vec<PathBuf> {
-        let old = self.dirty_files.swap(Arc::new(HashSet::new()));
         self.dirty.store(false, Ordering::Relaxed);
+        let old = self.dirty_files.swap(Arc::new(HashSet::new()));
         old.iter().cloned().collect()
     }
 }
