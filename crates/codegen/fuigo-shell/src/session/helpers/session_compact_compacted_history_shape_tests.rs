@@ -309,6 +309,9 @@ fn fallback_minimal_history_has_no_tool_results() {
         running_subagents: vec![],
         connected_mcp_servers: vec![],
         todos: vec![],
+        scheduled_loops: vec![],
+        workflows: vec![],
+        workflow_tool_name: None,
     };
     let fallback = build_compacted_history(
         "You are a helpful assistant.",
@@ -534,6 +537,9 @@ fn fallback_preserves_subagents() {
         ],
         connected_mcp_servers: vec![],
         todos: vec![],
+        scheduled_loops: vec![],
+        workflows: vec![],
+        workflow_tool_name: None,
     };
     let fallback = CompactionStateContext {
         cwd_generation: original.cwd_generation,
@@ -546,6 +552,9 @@ fn fallback_preserves_subagents() {
         running_subagents: original.running_subagents.clone(),
         connected_mcp_servers: original.connected_mcp_servers.clone(),
         todos: original.todos.clone(),
+        scheduled_loops: original.scheduled_loops.clone(),
+        workflows: original.workflows.clone(),
+        workflow_tool_name: original.workflow_tool_name.clone(),
     };
     assert_eq!(
         fallback.running_subagents.len(),

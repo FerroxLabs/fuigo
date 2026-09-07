@@ -16,6 +16,10 @@ use super::token_output::{expiry_after_seconds, parse_token_output};
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub struct AuthProviderConfig {
+    /// Native subscription auth instead of a command helper.
+    pub subscription: Option<super::subscription::SubscriptionProvider>,
+    /// Explicit account; omitted means the provider's selected Fuigo account.
+    pub account: Option<String>,
     /// Command to run; without `args` it uses the platform shell, with `args` it execs directly.
     pub command: String,
     /// Command arguments; when set (even empty) the command execs directly.
@@ -30,7 +34,11 @@ pub struct AuthProviderConfig {
 
 impl AuthProviderConfig {
     pub(crate) fn is_usable(&self) -> bool {
-        !self.command.trim().is_empty()
+        if self.subscription.is_some() {
+            self.command.trim().is_empty() && self.args.is_none() && self.cwd.is_none()
+        } else {
+            !self.command.trim().is_empty() && self.account.is_none()
+        }
     }
 }
 
@@ -75,6 +83,10 @@ impl From<AuthProviderRef> for AuthProviderRefData {
 }
 
 impl AuthProviderRef {
+    pub(crate) fn subscription_provider(&self) -> Option<super::subscription::SubscriptionProvider> {
+        if self.resolved && !self.fail_closed { self.config.subscription } else { None }
+    }
+
     /// Production uses `unresolved` and then `attach_trusted_config`.
     #[cfg(test)]
     pub(crate) fn new(name: String, config: AuthProviderConfig) -> Self {
@@ -198,6 +210,8 @@ fn token_identity(
         args,
         token_ttl_secs,
         timeout_secs: _,
+        subscription: _, // native subscriptions never enter the helper cache
+        account: _,
         cwd,
     } = config;
     (command, args.as_deref(), *token_ttl_secs, cwd.as_deref())
@@ -450,7 +464,7 @@ impl AuthProviderRef {
     async fn locked_slot(
         &self,
     ) -> Option<tokio::sync::OwnedMutexGuard<Option<MintedProviderToken>>> {
-        if !self.resolved {
+        if !self.resolved || self.subscription_provider().is_some() {
             return None;
         }
         let mut slot = self.slot.clone().lock_owned().await;
@@ -473,7 +487,7 @@ impl AuthProviderRef {
     /// `None` for an unresolved ref, a cold or stale cache, or a mint in progress.
     /// Minting happens pre-turn via [`AuthProviderRef::ensure_fresh_token`].
     pub(crate) fn cached_token(&self) -> Option<String> {
-        if !self.resolved {
+        if !self.resolved || self.subscription_provider().is_some() {
             return None;
         }
         if !self.config.is_usable() {
@@ -500,6 +514,7 @@ impl AuthProviderRef {
         &self,
         current_key: Option<&str>,
     ) -> ProviderRefreshOutcome {
+        if self.subscription_provider().is_some() { return ProviderRefreshOutcome::Unchanged; }
         let Some(mut slot) = self.locked_slot().await else {
             return ProviderRefreshOutcome::Unusable;
         };
@@ -594,6 +609,8 @@ pub(crate) fn test_counting_provider(name: &str, dir: &std::path::Path) -> AuthP
     AuthProviderRef::new(
         name.to_owned(),
         AuthProviderConfig {
+            subscription: None,
+            account: None,
             command: format!(
                 "echo run >> {c}; printf 'tok-%s' \"$(wc -l < {c} | tr -d ' ')\"",
                 c = counter.display()

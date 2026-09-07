@@ -7348,3 +7348,144 @@ fn init_advertising_status_line(enabled: bool) -> acp::InitializeRequest {
             .meta(meta),
     )
 }
+
+// Synthetic ACP requests use catalog entries and an actor command channel, never a provider.
+#[tokio::test]
+async fn acp_config_rejects_unknown_and_locked_model() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use agent_client_protocol::Agent;
+    let agent = build_minimal_agent_for_tests();
+    let mut entry = ModelEntry::fallback("locked-config-model", &EndpointsConfig::default());
+    entry.info.user_selectable = false;
+    agent
+        .models_manager
+        .insert_test_entry("locked-config-model", entry);
+    let request = |id: &str, value: &str| {
+        serde_json::from_value::<acp::SetSessionConfigOptionRequest>(serde_json::json!({
+            "sessionId": "config-test", "configId": id, "value": value
+        }))
+        .unwrap()
+    };
+    assert!(
+        agent
+            .set_session_config_option(request("unknown", "high"))
+            .await
+            .is_err()
+    );
+    assert!(
+        agent
+            .set_session_config_option(request("model", "locked-config-model"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn acp_config_effort_applies_and_revalidates_after_waiting_for_lock() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use agent_client_protocol::Agent;
+    use fuigo_sampling_types::ReasoningEffort;
+    let agent = build_minimal_agent_for_tests();
+    let mut entry = ModelEntry::fallback("config-effort", &EndpointsConfig::default());
+    entry.info.supports_reasoning_effort = true;
+    agent
+        .models_manager
+        .insert_test_entry("config-effort", entry);
+    let mut unsupported = ModelEntry::fallback("config-no-effort", &EndpointsConfig::default());
+    unsupported.info.supports_reasoning_effort = false;
+    agent
+        .models_manager
+        .insert_test_entry("config-no-effort", unsupported);
+    let sid = acp::SessionId::new("config-test");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut handle = make_test_handle("config-effort", false, None);
+    handle.cmd_tx = tx;
+    agent.insert_resident(&sid, handle);
+    let request = || {
+        serde_json::from_value::<acp::SetSessionConfigOptionRequest>(serde_json::json!({
+            "sessionId": "config-test", "configId": "reasoning_effort", "value": "high"
+        }))
+        .unwrap()
+    };
+    let (result, ()) = tokio::join!(agent.set_session_config_option(request()), async {
+        match rx.recv().await.unwrap() {
+            crate::session::SessionCommand::SetReasoningEffort {
+                effort,
+                responds_to,
+            } => {
+                assert_eq!(effort, ReasoningEffort::High);
+                responds_to
+                    .send(Ok(acp::ModelId::new("config-effort")))
+                    .unwrap();
+            }
+            _ => panic!("effort selection must issue the dedicated actor command"),
+        }
+    });
+    assert!(result.is_ok());
+    assert_eq!(
+        agent.resident_handle(&sid).unwrap().reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    let guard = agent.config_mutation_lock(&sid).lock_owned().await;
+    let selection = agent.set_session_config_option(request());
+    tokio::pin!(selection);
+    tokio::select! {
+        _ = &mut selection => panic!("configuration mutation bypassed its lock"),
+        _ = tokio::task::yield_now() => {}
+    }
+    agent.with_resident_mut(&sid, |h| h.model_id = acp::ModelId::new("config-no-effort"));
+    drop(guard);
+    assert!(
+        selection.await.is_err(),
+        "effort must be checked against the newly resident model"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "invalid effort must not reach the actor"
+    );
+}
+
+#[tokio::test]
+async fn acp_config_model_applies_through_existing_switch() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use agent_client_protocol::Agent;
+    let agent = build_minimal_agent_for_tests();
+    let mut entry = ModelEntry::fallback("config-selectable", &EndpointsConfig::default());
+    entry.info.user_selectable = true;
+    agent
+        .models_manager
+        .insert_test_entry("config-selectable", entry);
+    let sid = acp::SessionId::new("config-model-test");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut handle = make_test_handle("config-selectable", false, None);
+    handle.cmd_tx = tx;
+    agent.insert_resident(&sid, handle);
+    let request = serde_json::from_value::<acp::SetSessionConfigOptionRequest>(serde_json::json!({
+        "sessionId": "config-model-test", "configId": "model", "value": "config-selectable"
+    }))
+    .unwrap();
+    let (result, ()) = tokio::join!(agent.set_session_config_option(request), async {
+        match rx.recv().await.unwrap() {
+            crate::session::SessionCommand::GetActiveAgent { responds_to } => {
+                let _ = responds_to.send(None);
+            }
+            _ => panic!("model selection checks existing harness compatibility"),
+        }
+        match rx.recv().await.unwrap() {
+            crate::session::SessionCommand::SetSessionModel {
+                sampling_config,
+                responds_to,
+                ..
+            } => {
+                assert_eq!(sampling_config.model, "config-selectable");
+                let _ = responds_to.send(Ok(acp::ModelId::new("config-selectable")));
+            }
+            _ => panic!("model selection must issue the existing model actor command"),
+        }
+    });
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        agent.resident_handle(&sid).unwrap().model_id.0.as_ref(),
+        "config-selectable"
+    );
+}

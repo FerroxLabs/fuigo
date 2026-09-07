@@ -692,7 +692,7 @@ async fn read_parent_sampling_config(
                 &cfg.api_backend,
                 &cfg.base_url,
             );
-            let inherited = fuigo_sampler::SamplerConfig {
+            let mut inherited = fuigo_sampler::SamplerConfig {
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
@@ -730,8 +730,14 @@ async fn read_parent_sampling_config(
                     .models_manager
                     .model_compaction_at_tokens(catalog_model_id.0.as_ref()),
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
+                subscription: None,
+                subscription_resolver: None,
                 header_injector: ctx.sampling_config.header_injector.clone(),
             };
+            crate::auth::subscription::inference::inherit(&mut inherited,&ctx.sampling_config);
+            if let Some(provider) = crate::auth::subscription::inference::selected_for_endpoint(&inherited.model,&inherited.base_url) {
+                crate::auth::subscription::inference::configure(&mut inherited,&provider,false);
+            }
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();
             fuigo_telemetry::unified_log::debug(

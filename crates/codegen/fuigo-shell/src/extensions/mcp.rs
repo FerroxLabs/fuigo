@@ -1320,6 +1320,9 @@ impl fuigo_tools::types::resources::McpResourceProvider for McpStateResourceProv
             .await
             .map_err(|e| format!("MCP init failed: {e}"))?;
 
+        // `RunningService::read_resource` (not `Peer::read_resource`) drives SEP-2322
+        // `input_required` rounds through the client handler, so elicitation requests on
+        // resource reads reach the HITL bridge like tool calls do.
         let result = mcp_service
             .read_resource(rmcp::model::ReadResourceRequestParams::new(uri.clone()))
             .await

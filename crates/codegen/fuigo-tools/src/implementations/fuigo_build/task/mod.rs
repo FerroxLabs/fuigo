@@ -31,8 +31,8 @@ use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
-use regex::Regex;
 use fuigo_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
+use regex::Regex;
 
 pub const TASK_TOOL_NAME: &str = "task";
 
@@ -186,6 +186,68 @@ pub struct TaskTool;
 /// definition sites.
 pub fn is_task_tool_id(name: &str) -> bool {
     matches!(name, TASK_TOOL_NAME | "Task" | "spawn_subagent")
+}
+
+fn flatten_spawn_join(
+    joined: Result<Result<SubagentResult, fuigo_tool_runtime::ToolError>, tokio::task::JoinError>,
+) -> Result<SubagentResult, fuigo_tool_runtime::ToolError> {
+    match joined {
+        Ok(result) => result,
+        Err(_) => Err(fuigo_tool_runtime::ToolError::custom(
+            "channel_closed",
+            "background spawn task failed before registration",
+        )),
+    }
+}
+
+fn background_spawn_reject_error(
+    id: &str,
+    subagent_type: &str,
+    result: Result<SubagentResult, fuigo_tool_runtime::ToolError>,
+) -> fuigo_tool_runtime::ToolError {
+    match result {
+        Err(e) => {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %subagent_type,
+                "background spawn transport error: {e:#}",
+            );
+            e
+        }
+        Ok(r) => {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %subagent_type,
+                error = ?r.error,
+                "background spawn rejected by coordinator",
+            );
+            fuigo_tool_runtime::ToolError::custom(
+                "spawn_rejected",
+                r.error.unwrap_or_else(|| {
+                    "background spawn was rejected by the coordinator".to_owned()
+                }),
+            )
+        }
+    }
+}
+
+fn log_background_spawn_after_start(
+    id: &str,
+    subagent_type: &str,
+    joined: Result<Result<SubagentResult, fuigo_tool_runtime::ToolError>, tokio::task::JoinError>,
+) {
+    match flatten_spawn_join(joined) {
+        // Child-result failures are logged once by the coordinator. This
+        // waiter only owns join/transport errors the coordinator never sees.
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(
+                subagent_id = %id,
+                subagent_type = %subagent_type,
+                "background spawn transport error after start: {e:#}",
+            );
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -564,35 +626,53 @@ impl fuigo_tool_runtime::Tool for TaskTool {
             cancel_token: child_cancellation,
         };
 
-        // 4. Background mode: fire-and-forget via backend.spawn().
-        // Coordinator stores the result for TaskOutputTool polling.
-        // Both transport errors and coordinator rejections are logged so
-        // late failures (worktree creation, etc.) remain visible.
+        // 4. Background mode: await registration (pending/queued), not the
+        // child session. `spawn()` stays the terminal result; late failures
+        // are logged from a detached waiter.
         if input.run_in_background {
             drop(foreground_wait);
-            let bg_backend = backend.clone();
-            let bg_id = id.clone();
-            let bg_type = input.subagent_type.clone();
-            tokio::spawn(async move {
-                match bg_backend.backend().spawn(request).await {
-                    Err(e) => {
-                        tracing::error!(
-                            subagent_id = %bg_id,
-                            subagent_type = %bg_type,
-                            "background spawn transport error: {e:#}",
-                        );
-                    }
-                    Ok(r) if !r.success => {
-                        tracing::error!(
-                            subagent_id = %bg_id,
-                            subagent_type = %bg_type,
-                            error = ?r.error,
-                            "background spawn rejected by coordinator",
-                        );
-                    }
-                    Ok(_) => {}
-                }
+            let (registered_tx, mut registered_rx) = tokio::sync::oneshot::channel();
+            let spawn_backend = backend.clone();
+            let mut spawn_task = tokio::spawn(async move {
+                spawn_backend
+                    .backend()
+                    .spawn(request, Some(registered_tx))
+                    .await
             });
+
+            let mut terminal_already_logged = false;
+            let registered = tokio::select! {
+                biased;
+                reg = &mut registered_rx => matches!(reg, Ok(())),
+                joined = &mut spawn_task => {
+                    if registered_rx.try_recv().is_ok() {
+                        log_background_spawn_after_start(&id, &input.subagent_type, joined);
+                        terminal_already_logged = true;
+                        true
+                    } else {
+                        return Err(background_spawn_reject_error(
+                            &id,
+                            &input.subagent_type,
+                            flatten_spawn_join(joined),
+                        ));
+                    }
+                }
+            };
+            if !registered {
+                return Err(background_spawn_reject_error(
+                    &id,
+                    &input.subagent_type,
+                    flatten_spawn_join(spawn_task.await),
+                ));
+            }
+            if !terminal_already_logged {
+                let log_id = id.clone();
+                let log_type = input.subagent_type.clone();
+                // Detached: started text is the model reply; `spawn()` is terminal.
+                tokio::spawn(async move {
+                    log_background_spawn_after_start(&log_id, &log_type, spawn_task.await);
+                });
+            }
 
             let (task_output_tool, task_ids_param, timeout_ms_param) =
                 resolve_background_notice_names(&resources).await;
@@ -617,7 +697,7 @@ impl fuigo_tool_runtime::Tool for TaskTool {
         }
 
         // 5. Blocking mode (default): spawn via backend and await result
-        let result = backend.backend().spawn(request).await;
+        let result = backend.backend().spawn(request, None).await;
         if let Some(forwarder) = cancellation_forwarder {
             forwarder.abort();
         }
@@ -692,9 +772,9 @@ mod tests {
     };
     use crate::types::resources::Resources;
     use crate::types::tool_metadata::test_ctx;
+    use fuigo_tool_types::SubagentCapabilityMode;
     use std::sync::Arc;
     use tokio::sync::mpsc;
-    use fuigo_tool_types::SubagentCapabilityMode;
 
     /// Backend whose `ValidateType` events are auto-acked with `Ok`.
     fn make_backend() -> (
@@ -796,6 +876,12 @@ mod tests {
         resources.insert(SessionIdResource("child-session".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-nested".to_string()));
 
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(mut req)) = rx.recv().await {
+                req.notify_registered();
+            }
+        });
+
         let result = fuigo_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
@@ -818,7 +904,7 @@ mod tests {
             result.is_ok(),
             "expected Ok at depth 1 with max 2: {result:?}"
         );
-        let _ = rx.try_recv();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
     }
 
     #[tokio::test]
@@ -1301,7 +1387,8 @@ mod tests {
         input.model = Some("invented-model".to_string());
 
         let result =
-            fuigo_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+            fuigo_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                .await;
 
         let msg = result
             .expect_err("invalid model must reject before spawn")
@@ -1321,14 +1408,8 @@ mod tests {
             resources_with_parent_exec(backend, "CI still fails, fix and gt submit /pr-babysit");
 
         let drain = tokio::spawn(async move {
-            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                let _ = boxed.respond_with(|boxed| SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from(""),
-                    subagent_id: boxed.id.clone(),
-                    child_session_id: boxed.id.clone(),
-                    ..Default::default()
-                });
+            if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                boxed.notify_registered();
             }
         });
 
@@ -1363,14 +1444,8 @@ mod tests {
             resources_with_parent_exec(backend, "review this PR https://github.com/x/y/pull/1");
 
         let drain = tokio::spawn(async move {
-            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                let _ = boxed.respond_with(|boxed| SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from(""),
-                    subagent_id: boxed.id.clone(),
-                    child_session_id: boxed.id.clone(),
-                    ..Default::default()
-                });
+            if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                boxed.notify_registered();
             }
         });
 
@@ -1423,14 +1498,8 @@ mod tests {
         );
 
         let drain = tokio::spawn(async move {
-            if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                let _ = boxed.respond_with(|boxed| SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from(""),
-                    subagent_id: boxed.id.clone(),
-                    child_session_id: boxed.id.clone(),
-                    ..Default::default()
-                });
+            if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                boxed.notify_registered();
             }
         });
 
@@ -1485,19 +1554,14 @@ mod tests {
             test_ctx(resources.into_shared()),
             task_input("general-purpose", true),
         )
-        .await
-        .expect("background tool call returns Ok regardless of coordinator outcome");
-        let text = match result {
-            ToolOutput::Text(t) => t.text,
-            other => panic!("expected text output, got {other:?}"),
-        };
-        assert!(text.contains("Subagent started in background"));
+        .await;
+        let err = result.expect_err("definite coordinator reject is a tool error");
+        assert!(
+            err.to_string().contains("worktree creation failed"),
+            "{err}"
+        );
 
-        // Let the fire-and-forget bg task advance past `.await` on spawn.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), done_rx).await;
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
 
         let mut events_rx = captured.events_rx;
         let mut saw_error = false;
@@ -1533,18 +1597,15 @@ mod tests {
             test_ctx(resources.into_shared()),
             task_input("general-purpose", true),
         )
-        .await
-        .expect("transport error must not break the fire-and-forget contract");
-        match result {
-            ToolOutput::Text(t) => {
-                assert!(
-                    t.text.contains("Subagent started in background"),
-                    "{}",
-                    t.text,
-                );
-            }
-            other => panic!("expected text output, got {other:?}"),
-        }
+        .await;
+        let err = result.expect_err("closed coordinator channel is a tool error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("channel closed")
+                || msg.contains("cannot spawn")
+                || msg.contains("result channel dropped"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -1609,11 +1670,13 @@ mod tests {
             }));
 
             let drain = tokio::spawn(async move {
-                if let Some(SubagentEvent::Spawn(boxed)) = rx.recv().await {
-                    let _ = boxed.respond_with(|boxed| SubagentResult {
+                if let Some(SubagentEvent::Spawn(mut boxed)) = rx.recv().await {
+                    boxed.notify_registered();
+                    // Foreground mode still awaits the terminal `spawn()` result.
+                    let _ = boxed.respond_with(|req| SubagentResult {
                         success: true,
-                        subagent_id: boxed.id.clone(),
-                        child_session_id: boxed.id.clone(),
+                        subagent_id: req.id.clone(),
+                        child_session_id: req.id.clone(),
                         ..Default::default()
                     });
                 }
@@ -1666,7 +1729,7 @@ mod tests {
     #[tokio::test]
     async fn validate_request_threads_session_id_to_coordinator() {
         let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<String>();
-        let (backend, _rx) = make_backend_with_validation_fn(move |_t, parent_session_id| {
+        let (backend, mut rx) = make_backend_with_validation_fn(move |_t, parent_session_id| {
             let _ = capture_tx.send(parent_session_id.to_string());
             SubagentValidateTypeOutcome::Ok
         });
@@ -1676,12 +1739,19 @@ mod tests {
         resources.insert(SessionIdResource("special-session-id".to_string()));
         resources.insert(CurrentPromptIdResource("prompt-x".to_string()));
 
+        let drain = tokio::spawn(async move {
+            if let Some(SubagentEvent::Spawn(mut req)) = rx.recv().await {
+                req.notify_registered();
+            }
+        });
+
         let _ = fuigo_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(resources.into_shared()),
             task_input("explore", true),
         )
         .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
 
         let seen = capture_rx.try_recv().expect("must fire at least once");
         assert_eq!(seen, "special-session-id");

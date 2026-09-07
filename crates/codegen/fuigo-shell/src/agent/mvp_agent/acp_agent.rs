@@ -1011,7 +1011,8 @@ impl acp::Agent for MvpAgent {
                             arguments.session_id.clone(),
                             restore_model_id.clone(),
                         ),
-                        None,
+                        crate::agent::handlers::model_switch::SwitchEffort::Preserve,
+                        crate::agent::handlers::model_switch::ConfigNotice::Send,
                     )
                     .await
                 {
@@ -2190,43 +2191,11 @@ impl acp::Agent for MvpAgent {
             })?;
         Ok(acp::SetSessionModeResponse::new())
     }
-    async fn set_session_model(
-        &self,
-        args: acp::SetSessionModelRequest,
-    ) -> Result<acp::SetSessionModelResponse, acp::Error> {
-        let model = match self.resolve_model_id(&args.model_id) {
-            Ok(model) => model,
-            Err(_) => {
-                self.models_manager.wait_for_first_catalog().await;
-                self.resolve_model_id(&args.model_id)?
-            }
-        };
-        if !model.info.user_selectable {
-            return Err(
-                acp::Error::invalid_params()
-                    .data("This model isn't allowed by your allowed_models setting."),
-            );
-        }
-        let session_id = args.session_id.clone();
-        let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
-        let res = crate::agent::handlers::model_switch::apply(
-                self,
-                args,
-                effort_override,
-            )
-            .await;
-        if res.is_ok()
-            && let Some(unavailable) = self
-                .session_registry
-                .take_unavailable_model(&session_id)
-        {
-            tracing::info!(
-                session_id = %session_id.0,
-                previously_unavailable_model = %unavailable.0,
-                "set_session_model: user model switch cleared the model-unavailable block"
-            );
-        }
-        res
+    async fn set_session_model(&self, args: acp::SetSessionModelRequest) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        self.set_model_gated(args).await
+    }
+    async fn set_session_config_option(&self, args: acp::SetSessionConfigOptionRequest) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
+        crate::agent::handlers::config_option::apply(self, args).await
     }
     #[tracing::instrument(
         name = "agent.ext_method",
@@ -2982,5 +2951,50 @@ mod tool_overrides_capability_tests {
                 "x_thread_fetch": false,
             }),
         );
+    }
+}
+
+impl MvpAgent {
+    pub(crate) async fn set_model_gated(
+        &self,
+        args: acp::SetSessionModelRequest,
+    ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        let model = match self.resolve_model_id(&args.model_id) {
+            Ok(model) => model,
+            Err(_) => {
+                self.models_manager.wait_for_first_catalog().await;
+                self.resolve_model_id(&args.model_id)?
+            }
+        };
+        if !model.info.user_selectable {
+            return Err(
+                acp::Error::invalid_params()
+                    .data("This model isn't allowed by your allowed_models setting."),
+            );
+        }
+        let session_id = args.session_id.clone();
+        let effort_override = match parse_reasoning_effort_meta(args.meta.as_ref()) {
+ Some(effort) => crate::agent::handlers::model_switch::SwitchEffort::Set(Some(effort)),
+ None => crate::agent::handlers::model_switch::SwitchEffort::Preserve,
+ };
+        let res = crate::agent::handlers::model_switch::apply(
+                self,
+                args,
+                effort_override,
+                crate::agent::handlers::model_switch::ConfigNotice::Send,
+            )
+            .await;
+        if res.is_ok()
+            && let Some(unavailable) = self
+                .session_registry
+                .take_unavailable_model(&session_id)
+        {
+            tracing::info!(
+                session_id = %session_id.0,
+                previously_unavailable_model = %unavailable.0,
+                "set_session_model: user model switch cleared the model-unavailable block"
+            );
+        }
+        res
     }
 }

@@ -370,10 +370,14 @@ pub(super) async fn run_session(
         None => tokio::time::sleep(std::time::Duration::MAX),
     };
     tokio::pin!(idle_flush_sleep);
-    let dream_check_sleep = match session.dream_check_timeout {
-        Some(timeout) => tokio::time::sleep(timeout),
-        None => tokio::time::sleep(std::time::Duration::MAX),
-    };
+    let mut startup_dream_pending = session.memory.dream_config.enabled;
+    let dream_check_sleep = tokio::time::sleep(if startup_dream_pending {
+        std::time::Duration::from_secs(30)
+    } else { std::time::Duration::MAX });
+    // Dropping the actor loop aborts its dream task, releasing the OS guard and HTTP future.
+    struct DreamTask(Option<tokio::task::JoinHandle<()>>);
+    impl Drop for DreamTask { fn drop(&mut self) { if let Some(task) = &self.0 { task.abort(); } } }
+    let mut dream_task = DreamTask(None);
     tokio::pin!(dream_check_sleep);
     loop {
         tokio::select! {
@@ -410,16 +414,17 @@ pub(super) async fn run_session(
                     }
                 }
                 // Dream check timer: periodically run dream consolidation
-                _ = &mut dream_check_sleep, if session.dream_check_timeout.is_some()
+                _ = &mut dream_check_sleep, if (startup_dream_pending || session.dream_check_timeout.is_some())
                     && session.memory.is_enabled() => {
                     tracing::debug!(target: fuigo_telemetry::memory_log::TARGET,
                         "MEMORY_DREAM_CHECK: timer fired");
-                    tokio::task::spawn_local({
-                        let session = session.clone();
-                        async move {
-                            session.maybe_run_dream().await;
-                        }
-                    });
+                    startup_dream_pending = false;
+                    if dream_task.0.as_ref().is_none_or(|task| task.is_finished()) {
+                        dream_task.0 = Some(tokio::task::spawn_local({
+                            let session = session.clone();
+                            async move { session.maybe_run_dream().await; }
+                        }));
+                    }
                     if let Some(timeout) = session.dream_check_timeout {
                         dream_check_sleep.as_mut().reset(tokio::time::Instant::now() + timeout);
                     }
@@ -691,6 +696,10 @@ pub(super) async fn run_session(
                         SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
                             let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
+                        }
+                        SessionCommand::SetReasoningEffort { effort, responds_to } => {
+                            let result = session.handle_set_reasoning_effort(effort).await;
+                            let _ = responds_to.send(result);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;

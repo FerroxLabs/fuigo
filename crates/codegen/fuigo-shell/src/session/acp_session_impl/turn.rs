@@ -2004,7 +2004,7 @@ impl SessionActor {
         let (injection_params, configured_min_score) =
             build_initial_injection_backend_params(params, &self.memory.initial_injection_config);
         let backend = crate::session::memory::MemoryBackendImpl::from_session_params(
-            storage,
+            storage.clone(),
             &injection_params,
         );
         let raw_query =
@@ -2074,7 +2074,10 @@ impl SessionActor {
                 duration_ms: inject_start.elapsed().as_millis() as u64,
             },
         );
-        crate::session::helpers::memory_context::format_memory_reminder(&inject_results)
+        crate::session::helpers::memory_context::format_memory_reminder_with_storage(
+            &inject_results,
+            &storage,
+        )
     }
     /// Inspect `tool_calls` for a `StructuredOutput` call and decide the turn's next step, pushing the call's `tool_result` as a side effect.
     /// The pushed result is a correction, a retry error, or the terminal answer.
@@ -2259,6 +2262,14 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
+        let mut memory_conversation = self.chat_state_handle.get_conversation().await;
+        if crate::session::helpers::memory_context::invalidate_stale_memory_context(
+            &mut memory_conversation,
+            self.memory.storage().as_ref(),
+        ) {
+            self.chat_state_handle
+                .replace_conversation(memory_conversation);
+        }
         let conv_turn_start = std::time::Instant::now();
         let conv_turn_clock = DualClock::now();
         self.maybe_refresh_model_metadata_on_resume().await;

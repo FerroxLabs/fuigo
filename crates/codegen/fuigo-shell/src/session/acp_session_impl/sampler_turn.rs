@@ -637,7 +637,13 @@ impl SessionActor {
                 stream_tool_calls: None,
             });
         let creds = self.chat_state_handle.get_credentials().await;
-        let model_facts = self.model_auth_facts(cfg.model.as_str());
+        let (mut model_facts, mut selected_provider) = self.model_auth_state(cfg.model.as_str());
+        if let Some(provider) = crate::auth::subscription::inference::selected_for_endpoint(&cfg.model,&cfg.base_url) {
+            model_facts.byok = crate::agent::auth_method::ModelByok::Byok;
+            selected_provider = Some(provider);
+        } else if selected_provider.as_ref().and_then(|p| p.subscription_provider()).is_some_and(|p| p.sampling_kind().base_url() != cfg.base_url) {
+            selected_provider = None;
+        }
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
         // `cfg.base_url` keeps an `Unknown` BYOK status refreshable against first-party Ferrox Labs hosts
         // That avoids leaking the session token to a third-party endpoint
@@ -699,7 +705,9 @@ impl SessionActor {
             &cfg.api_backend,
             &cfg.base_url,
         );
-        SamplingConfig {
+        let mut sampler = SamplingConfig {
+            subscription: None,
+            subscription_resolver: None,
             api_key,
             base_url: cfg.base_url,
             model: cfg.model,
@@ -748,7 +756,11 @@ impl SessionActor {
             // The sampler sends the opt-in header itself when this is set.
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+        };
+        if let Some(provider) = selected_provider {
+            crate::auth::subscription::inference::configure(&mut sampler,&provider,false);
         }
+        sampler
     }
 
     /// Install the auto-mode permission classifier with a live LLM side-query.

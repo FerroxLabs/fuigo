@@ -31,12 +31,22 @@ use fuigo_tool_runtime::ToolError;
 /// identically regardless of the underlying transport.
 #[async_trait::async_trait]
 pub trait SubagentBackend: Send + Sync + 'static {
-    /// Spawn a subagent and await its result.
+    /// Spawn a subagent and await its terminal result.
     ///
-    /// For blocking mode the caller awaits the returned future directly.
-    /// For background mode the caller spawns a tokio task around this call
-    /// and drops the receiver immediately.
-    async fn spawn(&self, request: SubagentRequest) -> Result<SubagentResult, ToolError>;
+    /// The returned value is completion, cancellation, a foreground-budget
+    /// handoff, or a definite reject — never a Task background start ack.
+    ///
+    /// `registered_tx`, when `Some`, is signaled once the child is recorded
+    /// pending or queued. Callers that send to a spawning child must pass
+    /// this oneshot; `None` means there is no registration signal and a
+    /// later send can fail immediately. The signal is independent of the
+    /// returned [`SubagentResult`]. A drop without a send means the spawn
+    /// was rejected before registration (the error is on the returned future).
+    async fn spawn(
+        &self,
+        request: SubagentRequest,
+        registered_tx: Option<oneshot::Sender<()>>,
+    ) -> Result<SubagentResult, ToolError>;
 
     /// Query the current state of a subagent by ID.
     ///
@@ -130,13 +140,13 @@ impl SubagentCoordinatorSender {
     pub(crate) fn from_paired_channels(
         tx: mpsc::UnboundedSender<SubagentEvent>,
         active_message_tx: mpsc::UnboundedSender<super::active_message::ActiveMessageIngress>,
-        capacity: usize,
+        active_message_permits: Arc<tokio::sync::Semaphore>,
+        active_message_capacity: usize,
     ) -> Self {
-        let active_message_capacity = capacity.max(1);
         Self {
             tx,
             active_message_tx,
-            active_message_permits: Arc::new(tokio::sync::Semaphore::new(active_message_capacity)),
+            active_message_permits,
             active_message_capacity,
         }
     }
@@ -467,7 +477,7 @@ impl ChannelBackend {
         wait: Option<&super::types::SubagentForegroundWait>,
     ) -> Result<SubagentResult, ToolError> {
         let _wait = wait.map(super::types::SubagentForegroundWait::enter);
-        self.spawn(request).await
+        self.spawn(request, None).await
     }
 }
 
@@ -486,7 +496,11 @@ impl Drop for CancelResultReceiverOnDrop {
 
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
-    async fn spawn(&self, mut request: SubagentRequest) -> Result<SubagentResult, ToolError> {
+    async fn spawn(
+        &self,
+        mut request: SubagentRequest,
+        registered_tx: Option<oneshot::Sender<()>>,
+    ) -> Result<SubagentResult, ToolError> {
         if let Some(parent_session_id) = self.parent_session_id.as_deref() {
             request.parent_session_id = parent_session_id.to_owned();
         }
@@ -498,6 +512,7 @@ impl SubagentBackend for ChannelBackend {
             .send(SubagentEvent::Spawn(SubagentSpawnRequest {
                 request: Box::new(request),
                 result_tx: respond_to,
+                registered_tx,
             }))
             .map_err(|_| {
                 ToolError::custom(

@@ -80,7 +80,7 @@ impl CheckedOAuthClient {
         policy: OAuthHttpRedirectPolicy,
         timeout: Option<Duration>,
     ) -> Result<http::Response<Vec<u8>>, OAuthHttpClientError> {
-        check_url(request.url().as_str()).map_err(OAuthHttpClientError::new)?;
+        check_url(request.url().as_str()).map_err(OAuthHttpClientError::from)?;
         if let Some(timeout) = timeout {
             *request.timeout_mut() = Some(timeout);
         }
@@ -88,7 +88,7 @@ impl CheckedOAuthClient {
             OAuthHttpRedirectPolicy::Follow => &self.follow,
             OAuthHttpRedirectPolicy::Stop => &self.stop,
             _ => {
-                return Err(OAuthHttpClientError::new(
+                return Err(OAuthHttpClientError::from(
                     "unsupported OAuth redirect policy",
                 ));
             }
@@ -96,7 +96,7 @@ impl CheckedOAuthClient {
         let response = client
             .execute(request)
             .await
-            .map_err(|error| OAuthHttpClientError::new(error.without_url().to_string()))?;
+            .map_err(|error| OAuthHttpClientError::from(error.without_url().to_string()))?;
         let mut builder = http::Response::builder()
             .status(response.status())
             .version(response.version());
@@ -109,15 +109,15 @@ impl CheckedOAuthClient {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
-                .map_err(|error| OAuthHttpClientError::new(error.without_url().to_string()))?;
+                .map_err(|error| OAuthHttpClientError::from(error.without_url().to_string()))?;
             if chunk.len() > MAX_BODY - body.len() {
-                return Err(OAuthHttpClientError::new("OAuth response exceeds 1 MiB"));
+                return Err(OAuthHttpClientError::from("OAuth response exceeds 1 MiB"));
             }
             body.extend_from_slice(&chunk);
         }
         builder
             .body(body)
-            .map_err(|error| OAuthHttpClientError::new(error.to_string()))
+            .map_err(|error| OAuthHttpClientError::from(error.to_string()))
     }
 }
 
@@ -125,7 +125,7 @@ impl OAuthHttpClient for CheckedOAuthClient {
     fn execute(&self, operation: OAuthHttpRequest) -> OAuthHttpClientFuture<'_> {
         Box::pin(async move {
             let request = reqwest::Request::try_from(operation.request)
-                .map_err(|error| OAuthHttpClientError::new(error.without_url().to_string()))?;
+                .map_err(|error| OAuthHttpClientError::from(error.without_url().to_string()))?;
             self.execute_request(request, operation.redirect_policy, operation.timeout)
                 .await
         })
@@ -357,7 +357,9 @@ mod tests {
         let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
         let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", server.local_addr().unwrap());
-        let issuer = base.clone();
+        // Discovery for the /mcp issuer must advertise that exact issuer under
+        // rmcp 3.x validation, so registration reaches the recipient policy.
+        let issuer = format!("{base}/mcp");
         let discoveries = Arc::new(AtomicUsize::new(0));
         let observed = discoveries.clone();
         let app = Router::new().fallback(move |uri: axum::http::Uri| {
@@ -406,7 +408,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let metadata = manager.discover_metadata().await.unwrap();
+        let metadata = crate::oauth::discover_metadata_bounded(&manager)
+            .await
+            .unwrap();
         assert!(discoveries.load(Ordering::SeqCst) > 0);
         manager.set_metadata(metadata);
         let error = manager

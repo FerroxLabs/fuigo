@@ -677,6 +677,15 @@ impl SessionRegistry {
     /// Per-parent heal mutex.
     /// Tray `list_running` and resume heal take this from the registry.
     /// The session actor holds the same `Arc` on `ToolContext` so overlapping ticks share one lock.
+    pub(super) fn config_mutation_lock(&self, id: &acp::SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        self.edit(id, |e| {
+            e.retained
+                .get_or_insert_default()
+                .config_mutation_lock
+                .get_or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        })
+    }
     pub(super) fn live_orphan_heal_lock(&self, id: &acp::SessionId) -> Arc<tokio::sync::Mutex<()>> {
         self.edit(id, |e| {
             e.retained

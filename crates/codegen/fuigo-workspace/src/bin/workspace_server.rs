@@ -3,9 +3,6 @@
 //! Reads OIDC credentials from `~/.fuigo/auth.json`, connects to a
 //! server, exposes workspace tools, and refreshes tokens automatically.
 use clap::Parser;
-use std::path::PathBuf;
-use std::time::Duration;
-use url::Url;
 use fuigo_diag_server::{self as diag_server, DiagHandle, ErrorClass};
 use fuigo_workspace::config::merge_session_metadata;
 use fuigo_workspace::error::WorkspaceError;
@@ -13,6 +10,9 @@ use fuigo_workspace_daemon::daemonize;
 use fuigo_workspace_daemon::preview_supervisor::{
     self, PreviewActivitySink, PreviewArgs, PreviewVisibility,
 };
+use std::path::PathBuf;
+use std::time::Duration;
+use url::Url;
 /// OTLP `service.name` for this binary's exported traces/logs/metrics and direct-OTLP fastrace export.
 /// Single source so the call sites can't drift.
 const SERVICE_NAME: &str = "prod_fuigo_workspace";
@@ -447,16 +447,18 @@ async fn run(
         cwd,
         url,
         auth_provider,
-        metadata,
-        server_id.clone(),
-        None,
-        args.allow_insecure_ws,
-        status_config,
-        args.upload_queue_enabled,
-        args.project_lsp_trusted,
-        Some(diag_handle.clone()),
-        args.require_explicit_toolset,
-        args.confine_fs_to_workspace_root,
+        fuigo_workspace::LocalWorkspaceConnectOptions {
+            metadata,
+            server_id: server_id.clone(),
+            allow_insecure_ws: args.allow_insecure_ws,
+            status_config,
+            upload_queue_enabled: args.upload_queue_enabled,
+            project_lsp_trusted: args.project_lsp_trusted,
+            diag: Some(diag_handle.clone()),
+            require_explicit_toolset: args.require_explicit_toolset,
+            confine_fs_to_workspace_root: args.confine_fs_to_workspace_root,
+            ..Default::default()
+        },
     )
     .await
     {
@@ -533,10 +535,7 @@ async fn run(
     let tracker = ws_handle.activity_tracker().clone();
     let grace_budget = fuigo_workspace::handle::termination_grace_from_env();
     ws_handle
-        .two_phase_drain(
-            grace_budget,
-            fuigo_workspace::handle::DrainReason::Sigterm,
-        )
+        .two_phase_drain(grace_budget, fuigo_workspace::handle::DrainReason::Sigterm)
         .await;
     tracker.set_shutting_down();
     tracing::info!("Shutting down...");
@@ -809,8 +808,9 @@ mod tests {
         unsafe { std::env::remove_var("FUIGO_WORKSPACE_PROJECT_LSP_TRUSTED") };
         let args = Args::try_parse_from(["fuigo-workspace-server"]).unwrap();
         assert!(!args.project_lsp_trusted);
-        let args = Args::try_parse_from(["fuigo-workspace-server", "--project-lsp-trusted", "true"])
-            .unwrap();
+        let args =
+            Args::try_parse_from(["fuigo-workspace-server", "--project-lsp-trusted", "true"])
+                .unwrap();
         assert!(args.project_lsp_trusted);
     }
     #[test]
@@ -868,8 +868,8 @@ mod tests {
     }
     #[test]
     fn ready_file_is_accepted_as_a_deprecated_no_op() {
-        let args =
-            Args::try_parse_from(["fuigo-workspace-server", "--ready-file", "/tmp/x.ready"]).unwrap();
+        let args = Args::try_parse_from(["fuigo-workspace-server", "--ready-file", "/tmp/x.ready"])
+            .unwrap();
         assert_eq!(args.ready_file, Some(PathBuf::from("/tmp/x.ready")));
     }
     #[test]

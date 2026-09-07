@@ -1164,6 +1164,8 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
+                subscription: None,
+                subscription_resolver: None,
                 header_injector: None,
             };
             let _ = actor
@@ -1259,6 +1261,8 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
+                subscription: None,
+                subscription_resolver: None,
                 header_injector: None,
             };
             let _ = actor
@@ -1527,4 +1531,21 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
             );
         })
         .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subscription_acp_reconstruction_uses_native_resolver_without_session_key() {
+    let local=tokio::task::LocalSet::new();
+    local.run_until(async {
+        let (actor,_rx)=make_actor_with_method_and_credentials(None,"api_key",fuigo_chat_state::AuthType::ApiKey,"fake-unrelated-key".into()).await;
+        let mut config=actor.chat_state_handle.get_sampling_config().await.unwrap();
+        config.base_url="https://chatgpt.com/backend-api/codex".into();
+        let model=config.model.clone();
+        actor.chat_state_handle.update_sampling_config(config);
+        let provider=crate::auth::AuthProviderRef::new("native-test".into(),crate::auth::AuthProviderConfig{subscription:Some(crate::auth::subscription::SubscriptionProvider::Chatgpt),account:Some("account-a".into()),..Default::default()});
+        actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo{model_id:model,facts:crate::agent::config::ModelAuthFacts{byok:crate::agent::auth_method::ModelByok::Byok,auth_scheme:Default::default()},provider:Some(provider)}));
+        let sampling=actor.reconstruct_full_config().await;
+        assert_eq!(sampling.subscription,Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt));
+        assert!(sampling.subscription_resolver.is_some());assert!(sampling.api_key.is_none());assert!(sampling.bearer_resolver.is_none());assert!(sampling.attribution_callback.is_none());
+    }).await;
 }

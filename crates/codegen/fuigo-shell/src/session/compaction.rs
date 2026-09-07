@@ -30,6 +30,28 @@ use fuigo_sampling_types::{ApiBackend, ConversationItem};
 use std::sync::Arc;
 /// Prefix on the early-guard failure payloads below; the user-facing normalizer strips it (the renderer prepends its own headline).
 const COMPACTION_FAILED_GUARD_PREFIX: &str = "Compaction failed: ";
+/// Human-readable "next fire" for a scheduled loop in the compaction reminder.
+fn format_loop_next_fire(
+    next: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let secs = next.signed_duration_since(now).num_seconds();
+    if secs <= 0 {
+        return "now".to_string();
+    }
+    if secs < 60 {
+        return format!("in {secs}s");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("in {mins}m");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("in {hours}h");
+    }
+    next.format("%d %b %H:%M UTC").to_string()
+}
 /// Default percentage points below the auto-compact threshold at which prefire (background pass-1) starts.
 /// The lead gives pass-1 runway to finish before the limit.
 /// Override with `FUIGO_PREFIRE_LEAD_PERCENT`.
@@ -1432,6 +1454,65 @@ impl SessionActor {
                             })
                             .unwrap_or_default()
                     };
+                    let scheduled_loops = {
+                        use crate::session::helpers::compaction_context::ScheduledLoopSummary;
+                        let now = chrono::Utc::now();
+                        let bridge = self.agent.borrow().tool_bridge().clone();
+                        bridge
+                        .list_scheduled_tasks()
+                        .await
+                        .into_iter()
+                        .filter(|t| t.pending_fire_at(now).is_some())
+                        .map(|t| {
+                            let next_fire_at = format_loop_next_fire(
+                                t.next_fire_at(),
+                                now,
+                            );
+                            ScheduledLoopSummary {
+                                task_id: t.id,
+                                interval: fuigo_tools::implementations::fuigo_build::scheduler::interval::interval_to_human(
+                                    t.interval_secs,
+                                ),
+                                next_fire_at,
+                                prompt: t.prompt,
+                                recurring: t.recurring,
+                                durable: t.durable,
+                                foreground: t.foreground,
+                            }
+                        })
+                        .collect()
+                    };
+                    let workflows = {
+                        use crate::session::helpers::compaction_context::WorkflowRunSummary;
+                        let tracker = self.workflow_tracker().await;
+                        let guard = tracker.lock();
+                        guard
+                            .list()
+                            .into_iter()
+                            .filter(|r| !r.status.is_terminal())
+                            .map(|r| WorkflowRunSummary {
+                                elapsed_ms: guard.elapsed_ms(&r.run_id),
+                                name: r.name,
+                                run_id: r.run_id,
+                                status: r.status.as_str().to_string(),
+                                objective: r.objective,
+                                current_phase: r.current_phase,
+                                agents_used: r.agents_used,
+                                agent_budget: r.agent_budget,
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let workflow_tool_name = if workflows.is_empty() {
+                        None
+                    } else {
+                        use fuigo_tools::types::tool::ToolKind;
+                        self.agent
+                            .borrow()
+                            .tool_bridge()
+                            .tool_for_kind(ToolKind::Workflow)
+                            .await
+                            .filter(|s| !s.is_empty())
+                    };
                     CompactionStateContext::build(
                         &conversation,
                         CompactionInputs {
@@ -1440,6 +1521,9 @@ impl SessionActor {
                             agent_edited_paths: edited_paths.clone(),
                             connected_mcp_servers,
                             todos,
+                            scheduled_loops,
+                            workflows,
+                            workflow_tool_name,
                             ..Default::default()
                         },
                     )
@@ -1538,6 +1622,7 @@ impl SessionActor {
                 subagent_tool_names.as_ref(),
                 mcp_tool_names.as_ref(),
                 workflow_listing.as_deref(),
+                self.memory.storage().as_ref(),
             )
             .await
         };

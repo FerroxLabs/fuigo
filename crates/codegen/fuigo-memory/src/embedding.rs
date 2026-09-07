@@ -22,6 +22,70 @@ pub trait EmbeddingProvider: Send + Sync {
     fn model_name(&self) -> &str;
 
     fn dimensions(&self) -> usize;
+
+    fn cache_identity(&self) -> String {
+        format!("v2-unit-cosine:{}:{}", self.model_name(), self.dimensions())
+    }
+}
+
+/// All distance math uses unit vectors. Refuse malformed vectors rather than
+/// silently comparing incompatible or non-finite values.
+pub fn normalize_vector(vector: &[f32], dimensions: usize) -> Result<Vec<f32>, &'static str> {
+    if vector.len() != dimensions || vector.is_empty() || vector.iter().any(|v| !v.is_finite()) {
+        return Err("invalid embedding dimensions or values");
+    }
+    let norm = vector
+        .iter()
+        .map(|v| f64::from(*v).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if norm <= f64::EPSILON {
+        return Err("zero embedding");
+    }
+    Ok(vector
+        .iter()
+        .map(|v| (f64::from(*v) / norm) as f32)
+        .collect())
+}
+
+fn parse_embeddings(
+    body: &serde_json::Value,
+    count: usize,
+    dimensions: usize,
+) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    let data = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or("missing embedding data")?;
+    if data.len() != count {
+        return Err("embedding response count mismatch".into());
+    }
+    let mut ordered = vec![None; count];
+    for item in data {
+        let index = item
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing embedding index")? as usize;
+        if index >= count || ordered[index].is_some() {
+            return Err("invalid or duplicate embedding index".into());
+        }
+        let raw: Vec<f32> = item
+            .get("embedding")
+            .and_then(|v| v.as_array())
+            .ok_or("missing embedding vector")?
+            .iter()
+            .map(|v| {
+                v.as_f64()
+                    .map(|v| v as f32)
+                    .ok_or("invalid embedding value")
+            })
+            .collect::<Result<_, _>>()?;
+        ordered[index] = Some(normalize_vector(&raw, dimensions)?);
+    }
+    ordered
+        .into_iter()
+        .map(|v| v.ok_or_else(|| "incomplete embeddings".into()))
+        .collect()
 }
 
 /// API-based embedding provider using an OpenAI-compatible embeddings endpoint.
@@ -54,6 +118,9 @@ impl ApiEmbeddingProvider {
         api_base: String,
         client: reqwest_middleware::ClientWithMiddleware,
     ) -> Option<Self> {
+        if config.provider != "api" {
+            return None;
+        }
         let model = config.model.clone().filter(|m| !m.is_empty())?;
         Some(Self::new(api_base, model, config.dimensions, client))
     }
@@ -98,6 +165,12 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
         &self,
         texts: &[&str],
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        if texts
+            .iter()
+            .any(|text| !super::safety::is_safe_memory(text))
+        {
+            return Err("unsafe embedding input".into());
+        }
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -149,38 +222,29 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
 
                 let status = response.status();
                 if status.is_success() {
-                    let body: serde_json::Value = response.json().await?;
-                    let data = body
-                        .get("data")
-                        .and_then(|d| d.as_array())
-                        .ok_or("embedding response missing 'data' array")?;
-
-                    for item in data {
-                        let embedding: Vec<f32> = item
-                            .get("embedding")
-                            .and_then(|e| e.as_array())
-                            .ok_or("embedding item missing 'embedding' array")?
-                            .iter()
-                            .filter_map(|v| v.as_f64().map(|f| f as f32))
-                            .collect();
-                        all_embeddings.push(embedding);
+                    const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+                    let mut response = response;
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = response.chunk().await? {
+                        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+                            return Err("embedding response too large".into());
+                        }
+                        bytes.extend_from_slice(&chunk);
                     }
+                    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    all_embeddings.extend(parse_embeddings(&body, batch.len(), self.dimensions)?);
                     success = true;
                     break;
                 }
 
                 // Retry on 429 (rate limit) or 5xx (server error)
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                    last_err = format!(
-                        "HTTP {status}: {}",
-                        response.text().await.unwrap_or_default()
-                    );
+                    last_err = format!("HTTP {status}");
                     continue;
                 }
 
                 // Any other status is not retryable, so fail immediately
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("embedding API error {status}: {body}").into());
+                return Err(format!("embedding API error {status}").into());
             }
 
             if !success {
@@ -192,6 +256,27 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
         }
 
         Ok(all_embeddings)
+    }
+
+    fn cache_identity(&self) -> String {
+        let endpoint = reqwest::Url::parse(&self.api_base)
+            .map(|mut u| {
+                u.set_query(None);
+                u.set_fragment(None);
+                let _ = u.set_username("");
+                let _ = u.set_password(None);
+                u.to_string()
+            })
+            .unwrap_or_default();
+        blake3::hash(
+            format!(
+                "v2-unit-cosine:api:{endpoint}:{}:{}",
+                self.model, self.dimensions
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string()
     }
 
     fn model_name(&self) -> &str {
@@ -269,5 +354,25 @@ mod tests {
         let provider = MockEmbeddingProvider { dimensions: 128 };
         let results = provider.embed_batch(&["test"]).await.unwrap();
         assert_eq!(results[0].len(), 128);
+    }
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+    #[test]
+    fn response_indices_and_unit_norm_are_enforced() {
+        let body = serde_json::json!({"data": [
+            {"index": 1, "embedding": [0.0, 4.0]}, {"index": 0, "embedding": [3.0, 0.0]}
+        ]});
+        assert_eq!(
+            parse_embeddings(&body, 2, 2).unwrap(),
+            vec![vec![1.0, 0.0], vec![0.0, 1.0]]
+        );
+        let duplicate = serde_json::json!({"data": [{"index":0,"embedding":[1.0,0.0]}, {"index":0,"embedding":[1.0,0.0]}]});
+        assert!(parse_embeddings(&duplicate, 2, 2).is_err());
+        assert!(normalize_vector(&[f32::NAN, 0.0], 2).is_err());
+        assert!(normalize_vector(&[0.0, 0.0], 2).is_err());
+        assert!(normalize_vector(&[1.0], 2).is_err());
     }
 }

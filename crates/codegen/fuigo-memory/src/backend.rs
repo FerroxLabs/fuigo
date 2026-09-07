@@ -363,6 +363,13 @@ impl MemoryBackend for MemoryBackendImpl {
             }
         };
 
+        // Remove obsolete or out-of-scope persisted rows even if a watcher event
+        // was missed (or this database predates workspace isolation).
+        for path in index.all_indexed_paths().unwrap_or_default() {
+            if !self.storage.allows_path(Path::new(&path)) {
+                let _ = index.delete_path(Path::new(&path));
+            }
+        }
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
         let mut reindex_chunks: Vec<(String, String)> = Vec::new();
         let mut needs_release = false;
@@ -402,17 +409,27 @@ impl MemoryBackend for MemoryBackendImpl {
 
         // ── Async phase: embed missing chunks (no &index borrow) ──
         let provider = self.make_embedding_provider().await;
+        if let Some(ref provider) = provider {
+            index.bind_embedding_provider(provider).map_err(|e| {
+                Box::new(std::io::Error::other(e.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
+            // Also covers a model switch with unchanged source files.
+            reindex_chunks = index.chunks_without_embeddings().unwrap_or_default();
+        }
         let mut embedded_count: usize = 0;
         if !reindex_chunks.is_empty()
             && let Some(ref provider) = provider
         {
-            let mut upserts: Vec<(String, Vec<f32>)> = Vec::new();
+            let mut upserts: Vec<(String, String, Vec<f32>)> = Vec::new();
             for batch in reindex_chunks.chunks(32) {
                 let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
                 match provider.embed_batch(&texts).await {
                     Ok(embeddings) => {
-                        for ((chunk_id, _), emb) in batch.iter().zip(embeddings.into_iter()) {
-                            upserts.push((chunk_id.clone(), emb));
+                        for ((chunk_id, source_text), emb) in
+                            batch.iter().zip(embeddings.into_iter())
+                        {
+                            upserts.push((chunk_id.clone(), source_text.clone(), emb));
                         }
                     }
                     Err(e) => {
@@ -425,8 +442,8 @@ impl MemoryBackend for MemoryBackendImpl {
                 }
             }
             // Sync: upsert embeddings back (borrows &index, no await)
-            for (chunk_id, emb) in &upserts {
-                let _ = index.upsert_embedding(chunk_id, emb);
+            for (chunk_id, source_text, emb) in &upserts {
+                let _ = index.upsert_embedding_if_current(chunk_id, source_text, emb);
             }
             embedded_count = upserts.len();
         }
@@ -565,6 +582,7 @@ mod factory_tests {
         let primary = Err::<Vec<_>, _>("primary");
         assert_eq!(merge_fts_results(primary, Ok(vec![])).len(), 0);
         let base = vec![crate::index::FtsResult {
+            confidence: 0.85,
             chunk_id: "base".into(),
             rowid: 1,
             rank: -1.0,
@@ -588,12 +606,13 @@ mod factory_tests {
     }
     use crate::index::{MemoryIndex, init_sqlite_vec};
     use crate::storage::MemoryStorage;
-    use tempfile::TempDir;
     use fuigo_config_types::{MemoryEmbeddingConfig, MemorySearchConfig};
+    use tempfile::TempDir;
 
     fn make_storage(tmp: &TempDir) -> MemoryStorage {
         let global = tmp.path().join("memory");
         let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         MemoryStorage::with_paths(global, workspace)
     }
 
@@ -625,7 +644,7 @@ mod factory_tests {
             4,
         )
         .unwrap();
-        let file = tmp.path().join("note.md");
+        let file = tmp.path().join("memory/test_ws/note.md");
         std::fs::write(&file, "# Facts\n\nRust is fast.").unwrap();
         idx.reindex_file(&file, "workspace").unwrap();
         drop(idx);
@@ -664,7 +683,7 @@ mod factory_tests {
         )
         .unwrap();
         for i in 0..10 {
-            let f = tmp.path().join(format!("note{i}.md"));
+            let f = storage.workspace_dir().join(format!("note{i}.md"));
             std::fs::write(&f, format!("# Entry {i}\n\nRust tip number {i}.")).unwrap();
             idx.reindex_file(&f, "workspace").unwrap();
         }
@@ -860,7 +879,7 @@ mod factory_tests {
             4,
         )
         .unwrap();
-        let f = tmp.path().join("note.md");
+        let f = tmp.path().join("memory/test_ws/note.md");
         std::fs::write(&f, "# Guide\n\nRust ownership rules.").unwrap();
         idx.reindex_file(&f, "workspace").unwrap();
         drop(idx);
@@ -893,7 +912,7 @@ mod factory_tests {
             4,
         )
         .unwrap();
-        let f = tmp.path().join("note.md");
+        let f = tmp.path().join("memory/test_ws/note.md");
         std::fs::write(&f, "# Guide\n\nRust borrow checker.").unwrap();
         idx.reindex_file(&f, "workspace").unwrap();
         drop(idx);
@@ -933,7 +952,7 @@ mod factory_tests {
             4,
         )
         .unwrap();
-        let f = tmp.path().join("note.md");
+        let f = tmp.path().join("memory/test_ws/note.md");
         std::fs::write(&f, "# Tip\n\nAlways write tests.").unwrap();
         idx.reindex_file(&f, "workspace").unwrap();
         drop(idx);
@@ -1042,7 +1061,7 @@ mod factory_tests {
         //
         // On macOS, TempDir paths may live under /private/tmp (via a symlink from /tmp)
         // FSEvents returns canonicalized paths, so the path stored in the index must match what the watcher event delivers
-        let file_raw = global.join("note.md");
+        let file_raw = storage.workspace_dir().join("note.md");
         std::fs::write(&file_raw, "# Unique\n\nXyzzy-watcher-delete-token.").unwrap();
         let file = dunce::canonicalize(&file_raw).unwrap_or(file_raw);
 
@@ -1119,8 +1138,8 @@ mod factory_tests {
     /// This prevents memory_search 401s on rotated tokens.
     #[tokio::test]
     async fn make_embedding_provider_uses_async_api_key_resolution() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use fuigo_tools::types::ApiKeyProvider;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         struct AsyncProbe {
             sync_calls: Arc<AtomicU32>,
@@ -1194,8 +1213,8 @@ mod factory_tests {
 mod tests {
     use super::*;
     use crate::index::{MemoryIndex, init_sqlite_vec};
-    use tempfile::TempDir;
     use fuigo_config_types::MemoryIndexConfig;
+    use tempfile::TempDir;
 
     /// An api-key provider that fails the test if its key is ever resolved, proving a scoped-away credential is never consulted.
     struct PanicKey;
@@ -1209,6 +1228,7 @@ mod tests {
         init_sqlite_vec();
         let global = tmp.path().join("memory");
         let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = tmp.path().join("test.sqlite");
 
@@ -1216,7 +1236,7 @@ mod tests {
             MemoryIndex::open_or_create(&db_path, storage.clone(), MemoryIndexConfig::default(), 4)
                 .unwrap();
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Guide\n\nRust programming tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -1425,6 +1445,7 @@ mod tests {
         init_sqlite_vec();
         let global = tmp.path().join("memory");
         let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = storage.workspace_dir().join("index.sqlite");
 
@@ -1433,7 +1454,7 @@ mod tests {
                 .unwrap();
 
         // Index global and workspace with matching content
-        let global_file = tmp.path().join("global_mem.md");
+        let global_file = tmp.path().join("memory/MEMORY.md");
         std::fs::write(
             &global_file,
             "# Preferences\n\nAlways use graphite for PRs. Prefer Rust over Python.",
@@ -1441,7 +1462,7 @@ mod tests {
         .unwrap();
         idx.reindex_file(&global_file, "global").unwrap();
 
-        let ws_file = tmp.path().join("ws_mem.md");
+        let ws_file = tmp.path().join("memory/test_ws/ws_mem.md");
         std::fs::write(
             &ws_file,
             "# Project Decisions\n\nWe chose graphite for PRs in this project.",
@@ -1451,7 +1472,7 @@ mod tests {
 
         // Index session files that also match the query.
         for i in 0..5 {
-            let f = tmp.path().join(format!("session_{i}.md"));
+            let f = tmp.path().join(format!("memory/test_ws/session_{i}.md"));
             std::fs::write(
                 &f,
                 format!("# Session {i}\n\nDiscussed graphite for PRs and item {i}."),
@@ -1511,6 +1532,7 @@ mod index_embedding_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let global = tmp.path().join("memory");
         let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = tmp.path().join("test.sqlite");
 
@@ -1529,7 +1551,7 @@ mod index_embedding_tests {
             return;
         }
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Title\n\nSome content here.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -1542,7 +1564,7 @@ mod index_embedding_tests {
 
         // After upserting an embedding, the chunk should disappear from missing
         let (chunk_id, _) = &missing[0];
-        let dummy_embedding = vec![0.0f32; 4];
+        let dummy_embedding = vec![1.0f32, 0.0, 0.0, 0.0];
         idx.upsert_embedding(chunk_id, &dummy_embedding).unwrap();
 
         let missing_after = idx.chunks_without_embeddings().unwrap();

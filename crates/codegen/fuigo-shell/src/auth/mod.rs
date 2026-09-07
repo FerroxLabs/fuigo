@@ -61,3 +61,6 @@ pub use model::{AuthMode, FuigoAuth, lookup_auth};
 pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{clear_api_key, read_api_key, read_auth_json, store_api_key};
+
+/// Provider-scoped subscription auth, separate from first-party authority.
+pub mod subscription;

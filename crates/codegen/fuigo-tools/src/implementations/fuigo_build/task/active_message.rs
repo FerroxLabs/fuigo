@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use educe::Educe;
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use fuigo_tool_types::is_not_sentinel;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 
 /// Maximum UTF-8 byte length of one in-memory V0 agent message.
 pub const MAX_ACTIVE_AGENT_MESSAGE_BYTES: usize = 32 * 1024;
@@ -59,6 +59,19 @@ impl ActiveAgentMessageRequest {
             text,
             operation,
         })
+    }
+
+    /// Moves the request out, leaving a dropped placeholder. Not a valid send.
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::placeholder())
+    }
+
+    fn placeholder() -> Self {
+        Self {
+            subagent_id: String::new(),
+            text: Arc::from(""),
+            operation: ActiveAgentMessageOperation::Queue,
+        }
     }
 
     pub fn subagent_id(&self) -> &str {

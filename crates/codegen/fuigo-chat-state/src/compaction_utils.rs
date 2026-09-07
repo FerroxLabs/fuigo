@@ -3,8 +3,8 @@
 //! These are stateless functions that operate on conversation data only —
 //! no I/O, no actor state. They live in `fuigo-chat-state` so that both
 //! this crate and `fuigo-shell` can share them without duplication.
-use std::collections::BTreeSet;
 use fuigo_sampling_types::{ContentPart, ConversationItem, SyntheticReason, ToolResultItem};
+use std::collections::BTreeSet;
 pub const AGENT_MESSAGE_MODEL_LABEL: &str =
     "[Message authored by another agent; not a human request or approval.]";
 /// Canonical history prepared exactly once for a model-facing request.
@@ -600,6 +600,29 @@ pub struct BackgroundTaskSummary {
     /// `None` omits it from the reminder.
     pub tool_name: Option<String>,
 }
+/// Summary of a still-registered scheduled loop for compaction context.
+#[derive(Clone)]
+pub struct ScheduledLoopSummary {
+    pub task_id: String,
+    pub interval: String,
+    pub next_fire_at: String,
+    pub prompt: String,
+    pub recurring: bool,
+    pub durable: bool,
+    pub foreground: bool,
+}
+/// Summary of a still-live workflow run for compaction context.
+#[derive(Clone)]
+pub struct WorkflowRunSummary {
+    pub name: String,
+    pub run_id: String,
+    pub status: String,
+    pub objective: String,
+    pub current_phase: Option<String>,
+    pub agents_used: u64,
+    pub agent_budget: Option<u64>,
+    pub elapsed_ms: u64,
+}
 /// Summary of a connected MCP server for compaction context.
 #[derive(Clone)]
 pub struct CompactionServerSummary {
@@ -667,6 +690,12 @@ pub struct CompactionStateContext {
     /// Todo list captured at compaction time, for post-compaction
     /// system-reminder injection.
     pub todos: Vec<TodoSummary>,
+    /// Scheduled loops still registered at compaction time.
+    pub scheduled_loops: Vec<ScheduledLoopSummary>,
+    /// Non-terminal workflow runs at compaction time.
+    pub workflows: Vec<WorkflowRunSummary>,
+    /// Model-facing workflow tool name, when one could be resolved.
+    pub workflow_tool_name: Option<String>,
 }
 /// Live session state captured at compaction time, fed to
 /// [`CompactionStateContext::build`].
@@ -679,6 +708,9 @@ pub struct CompactionInputs {
     pub agent_edited_paths: BTreeSet<String>,
     pub connected_mcp_servers: Vec<CompactionServerSummary>,
     pub todos: Vec<TodoSummary>,
+    pub scheduled_loops: Vec<ScheduledLoopSummary>,
+    pub workflows: Vec<WorkflowRunSummary>,
+    pub workflow_tool_name: Option<String>,
 }
 impl CompactionStateContext {
     /// Build the state context from current session state.
@@ -697,6 +729,9 @@ impl CompactionStateContext {
             running_subagents: inputs.running_subagents,
             connected_mcp_servers: inputs.connected_mcp_servers,
             todos: inputs.todos,
+            scheduled_loops: inputs.scheduled_loops,
+            workflows: inputs.workflows,
+            workflow_tool_name: inputs.workflow_tool_name,
         }
     }
     /// Create a task summary from individual fields.
@@ -735,6 +770,9 @@ impl CompactionStateContext {
             running_subagents: self.running_subagents.clone(),
             connected_mcp_servers: self.connected_mcp_servers.clone(),
             todos: self.todos.clone(),
+            scheduled_loops: self.scheduled_loops.clone(),
+            workflows: self.workflows.clone(),
+            workflow_tool_name: self.workflow_tool_name.clone(),
         }
     }
 }

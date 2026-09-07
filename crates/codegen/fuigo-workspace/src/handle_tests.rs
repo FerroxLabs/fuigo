@@ -1,13 +1,17 @@
 use super::*;
 use crate::capability::CapabilityMode;
-use crate::config::{AgentSessionConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig};
+use crate::config::{
+    AgentSessionConfig, BindMcpConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig,
+};
 use crate::error::WorkspaceError;
 use crate::session::tool_config::resolve_session_toolset;
 use crate::session::tool_config::test_support::{TestSessionContextFactory, baseline_config, tc};
-use std::sync::Arc;
+use axum::response::IntoResponse;
+use fuigo_tool_runtime::ToolCallContext;
 use fuigo_tools::registry::types::ToolServerConfig;
 use fuigo_tools::types::tool::ToolKind;
 use fuigo_workspace_types::WorkspaceEvent;
+use std::sync::Arc;
 /// Create a test workspace handle with a "main" session pre-created.
 pub(crate) fn make_handle() -> WorkspaceHandle {
     make_handle_with_rewind_all_outcomes(false)
@@ -94,6 +98,7 @@ fn make_handle_with_factory(
         project_lsp_trusted: true,
         require_explicit_toolset,
         confine_fs_to_workspace_root,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::build(
         config,
@@ -148,10 +153,9 @@ impl fuigo_tool_runtime::Tool for BashCcoStub {
         Ok(fuigo_tools::types::output::ToolOutput::Bash(
             fuigo_tools::types::output::BashOutput {
                 output: output.to_vec(),
-                output_for_prompt:
-                    fuigo_tools::types::output::BashOutput::make_output_for_prompt(
-                        BASH_CCO_STUB_STDOUT,
-                    ),
+                output_for_prompt: fuigo_tools::types::output::BashOutput::make_output_for_prompt(
+                    BASH_CCO_STUB_STDOUT,
+                ),
                 exit_code: 0,
                 command: format!("echo {BASH_CCO_STUB_STDOUT}"),
                 truncated: false,
@@ -200,8 +204,8 @@ pub(crate) async fn drain_terminal_ok(
         Item = fuigo_tool_runtime::ToolStreamItem<fuigo_tool_runtime::TypedToolOutput>,
     > + Unpin,
 ) -> fuigo_tool_runtime::TypedToolOutput {
-    use futures::StreamExt;
     use fuigo_tool_runtime::ToolStreamItem;
+    use futures::StreamExt;
     while let Some(item) = stream.next().await {
         match item {
             ToolStreamItem::Terminal(Ok(t)) => return t,
@@ -1261,6 +1265,7 @@ fn make_persistent_shell_handle() -> WorkspaceHandle {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     WorkspaceHandle::build(
         config,
@@ -1695,6 +1700,7 @@ pub(crate) fn make_handle_with_events() -> (WorkspaceHandle, tempfile::TempDir) 
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let home = tempfile::tempdir().unwrap();
     let handle = WorkspaceHandle::build(
@@ -2309,6 +2315,7 @@ fn make_queue_backed_handle_with(
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let home = tempfile::tempdir().expect("workspace home tempdir");
     let auth: fuigo_computer_hub_sdk::SharedAuthProvider = Arc::new(
@@ -2992,6 +2999,7 @@ async fn hook_registry_loads_from_settings_file() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3027,6 +3035,7 @@ async fn hook_registry_loads_from_directory() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3084,6 +3093,7 @@ async fn hook_load_errors_reported_for_bad_file() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::new(config).expect("construction must still succeed");
     assert!(
@@ -3125,6 +3135,7 @@ async fn hook_registry_global_and_project_sources_merge() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3153,6 +3164,7 @@ async fn hook_registry_missing_source_is_non_fatal() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::new(config).expect("must not panic on missing source");
     assert!(handle.hook_registry().is_empty());
@@ -3185,6 +3197,7 @@ async fn hook_registry_empty_directory_yields_empty_registry() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     assert!(handle.hook_registry().is_empty());
@@ -3907,7 +3920,9 @@ async fn fork_session_inherits_viewer_ctx_from_parent() {
     );
 }
 /// Build the resolver exactly the way `connect_hub` does: session catalog handlers and the workspace RPC handler.
-fn bind_resolver_fixture(handle: &WorkspaceHandle) -> fuigo_computer_hub_sdk::SessionHandlerResolver {
+fn bind_resolver_fixture(
+    handle: &WorkspaceHandle,
+) -> fuigo_computer_hub_sdk::SessionHandlerResolver {
     let catalog_toolset = handle.session("main").expect("main session").toolset();
     let mut catalog = build_session_routed_handlers(&catalog_toolset, handle);
     let rpc_handler: Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler> =
@@ -3923,8 +3938,2517 @@ fn handler_names(resolved: &fuigo_computer_hub_sdk::ResolvedSessionHandlers) -> 
         .map(|h| h.tool_id().as_str().to_owned())
         .collect()
 }
-/// Strict mode, preset-only bind: the full resolver path fails closed.
-/// That means an RPC-only advertise and a `missing_tool_config` reason in the bind report.
+#[derive(Clone, Default)]
+struct BindMcpTestState {
+    session_ids: Arc<parking_lot::Mutex<Vec<String>>>,
+    tool_calls: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+    hang_tools_list: bool,
+    zero_tools: bool,
+    tool_name: Option<String>,
+    /// When set, `tools/list` signals the first notify and waits on the
+    /// second before answering, so a test can interleave work mid-discovery.
+    tools_list_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    /// When set, `tools/list` returns this many tools (`tool_000`, ...)
+    /// instead of the single default.
+    tool_count: Option<usize>,
+}
+async fn bind_mcp_post(
+    axum::extract::State(state): axum::extract::State<BindMcpTestState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    if let Some(session_id) = headers
+        .get(fuigo_mcp::servers::GROK_AGENT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        state.session_ids.lock().push(session_id.to_owned());
+    }
+    let id = request["id"].clone();
+    match request["method"].as_str() {
+        Some("initialize") => (
+            [("mcp-session-id", "local-test-session")],
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": request["params"]["protocolVersion"].clone(),
+                    "capabilities": {},
+                    "serverInfo": {"name": "local-test", "version": "1"}
+                }
+            })),
+        )
+            .into_response(),
+        Some("tools/list") => {
+            if state.hang_tools_list {
+                std::future::pending::<()>().await;
+            }
+            if let Some((reached, release)) = &state.tools_list_gate {
+                reached.notify_one();
+                release.notified().await;
+            }
+            let tools = if state.zero_tools {
+                Vec::new()
+            } else if let Some(count) = state.tool_count {
+                (0..count)
+                    .map(|index| {
+                        serde_json::json!({
+                            "name": format!("tool_{index:03}"),
+                            "description": "generated",
+                            "inputSchema": {"type": "object"}
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![serde_json::json!({
+                    "name": state.tool_name.as_deref().unwrap_or("echo"),
+                    "description": "Echo a value",
+                    "inputSchema": {"type": "object"}
+                })]
+            };
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"tools": tools}
+            }))
+            .into_response()
+        }
+        Some("tools/call") => {
+            state.tool_calls.lock().push(request["params"].clone());
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": "MCP_CALL_OK"}],
+                    "isError": false
+                }
+            }))
+            .into_response()
+        }
+        _ => axum::http::StatusCode::ACCEPTED.into_response(),
+    }
+}
+async fn bind_mcp_get() -> axum::response::Response {
+    let body =
+        axum::body::Body::from_stream(futures::stream::pending::<Result<String, std::io::Error>>());
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        body,
+    )
+        .into_response()
+}
+async fn spawn_bind_mcp_server(state: BindMcpTestState) -> (String, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new()
+        .route("/mcp", axum::routing::get(bind_mcp_get).post(bind_mcp_post))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{address}/mcp"), task)
+}
+fn configured_test_mcp(name: &str, url: String) -> agent_client_protocol::McpServer {
+    agent_client_protocol::McpServer::Http(
+        agent_client_protocol::McpServerHttp::new(name, url).headers(vec![]),
+    )
+}
+#[tokio::test]
+async fn bind_advertises_configured_mcp_per_session() {
+    let state = BindMcpTestState::default();
+    let (url, server_task) = spawn_bind_mcp_server(state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("bound", url)])
+            .with_first_party_servers(["bound".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let rpc_only = resolver(
+        fuigo_tool_protocol::SessionId::new("rpc-only").unwrap(),
+        Some(serde_json::json!({"metadata": {"rpc_only": true}})),
+    )
+    .await
+    .expect("RPC-only bind must succeed");
+    assert!(!handler_names(&rpc_only).contains(&"echo".to_owned()));
+    assert!(
+        state.session_ids.lock().is_empty(),
+        "RPC-only binds must not initialize configured MCPs"
+    );
+    let session_id = "session-123";
+    let sid = fuigo_tool_protocol::SessionId::new(session_id).unwrap();
+    let resolved = resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    assert!(!handler_names(&resolved).contains(&"echo".to_owned()));
+    assert_eq!(
+        live_mcp_servers(&handle, session_id).await,
+        Some(Vec::new()),
+        "the bind must enrol the session before its convergence runs"
+    );
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, session_id).await,
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])])
+    );
+    let echo = hub
+        .handlers_for_session(&sid)
+        .into_iter()
+        .find(|handler| handler.tool_id().as_str() == "echo")
+        .expect("echo must be dynamically registered");
+    assert_eq!(echo.description().namespace.as_deref(), Some("bound"));
+    let output = drain_terminal_ok(
+        echo.handle_call(
+            ToolCallContext::default(),
+            serde_json::json!({"message": "round-trip"}),
+        )
+        .await,
+    )
+    .await;
+    assert!(output.value.to_string().contains("MCP_CALL_OK"));
+    {
+        let calls = state.tool_calls.lock();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "echo");
+        assert_eq!(calls[0]["arguments"]["message"], "round-trip");
+    }
+    let session_ids = state.session_ids.lock().clone();
+    assert!(
+        !session_ids.is_empty(),
+        "configured session headers must reach the MCP transport"
+    );
+    assert!(
+        session_ids.iter().all(|value| value == session_id),
+        "MCP requests must use the bound session id: {session_ids:?}"
+    );
+    resolver(sid.clone(), None)
+        .await
+        .expect("soft rebind must succeed");
+    converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, session_id).await,
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])])
+    );
+    assert_eq!(
+        state.session_ids.lock().len(),
+        session_ids.len(),
+        "a soft rebind must reuse the per-session MCP client"
+    );
+    let second_session_id = "session-456";
+    resolver(
+        fuigo_tool_protocol::SessionId::new(second_session_id).unwrap(),
+        None,
+    )
+    .await
+    .expect("second conversation bind must succeed");
+    let second_hub = FakeHubRegistry::default();
+    converge_with(
+        &handle,
+        second_session_id,
+        &second_hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    let all_session_ids = state.session_ids.lock().clone();
+    assert!(all_session_ids.len() > session_ids.len());
+    assert!(
+        all_session_ids[session_ids.len()..]
+            .iter()
+            .all(|value| value == second_session_id),
+        "each session must get its own MCP client headers: {all_session_ids:?}"
+    );
+    server_task.abort();
+}
+/// Drive one session's MCP convergence the way the bind-spawned task and the
+/// reload walk do, but against a fake hub — tests have no live hub
+/// connection, so `converge_session_mcp` (which resolves the real one) is
+/// exercised here at the `converge_session` level with the published config.
+async fn converge_with(
+    handle: &WorkspaceHandle,
+    session_id: &str,
+    hub: &FakeHubRegistry,
+    reclaim: crate::mcp::McpReclaim,
+) -> crate::mcp::SessionMcpDelta {
+    let session = handle.session(session_id).expect("session exists");
+    let config = handle
+        .shared
+        .bind_mcp
+        .as_ref()
+        .expect("bind_mcp")
+        .read()
+        .clone();
+    let _update_guard = session.update_lock.lock().await;
+    crate::mcp::converge_session(
+        &session,
+        session_id,
+        &config,
+        hub,
+        reclaim,
+        fuigo_session_events::EventWriter::noop(),
+    )
+    .await
+    .expect("converge must succeed")
+}
+/// Server names a session is currently running, and the tool ids each one
+/// contributed. A reload reads both, so both must be right after a bind.
+async fn live_mcp_servers(
+    handle: &WorkspaceHandle,
+    session_id: &str,
+) -> Option<Vec<(String, Vec<String>)>> {
+    let session = handle.session(session_id)?;
+    let binding = session.mcp_binding.lock().await;
+    let mut live: Vec<(String, Vec<String>)> = binding
+        .active()?
+        .servers
+        .iter()
+        .map(|(name, server)| {
+            (
+                name.clone(),
+                server
+                    .tool_ids
+                    .iter()
+                    .map(|id| id.as_str().to_owned())
+                    .collect(),
+            )
+        })
+        .collect();
+    live.sort();
+    Some(live)
+}
+/// The load-bearing precondition for adding an MCP server while the app is
+/// running: a session that bound with nothing configured must still join the
+/// configured set, so a later reload has somewhere to add servers. If this
+/// regressed to `Uninitialized`, reloads would silently skip the session.
+#[tokio::test]
+async fn bind_with_no_configured_mcp_still_joins_the_configured_set() {
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(fuigo_tool_protocol::SessionId::new("empty").unwrap(), None)
+        .await
+        .expect("bind must succeed with no MCP servers configured");
+    assert_eq!(live_mcp_servers(&handle, "empty").await, Some(Vec::new()));
+}
+/// A reload unregisters exactly the ids a server contributed, so those ids
+/// must be recorded per server at bind time.
+#[tokio::test]
+async fn bind_records_which_tools_each_mcp_server_contributed() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        fuigo_tool_protocol::SessionId::new("attributed").unwrap(),
+        None,
+    )
+    .await
+    .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, "attributed", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "attributed").await,
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])])
+    );
+    server_task.abort();
+}
+/// An MCP tool that lost its id to a native tool must not be attributed to
+/// the MCP server — otherwise removing that server would unregister the
+/// native `read_file` along with it.
+#[tokio::test]
+async fn a_shadowed_mcp_tool_is_not_attributed_to_its_server() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tool_name: Some("read_file".to_owned()),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("shadow", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        fuigo_tool_protocol::SessionId::new("shadowed").unwrap(),
+        None,
+    )
+    .await
+    .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, "shadowed", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "shadowed").await,
+        Some(vec![("shadow".to_owned(), Vec::new())]),
+        "the server is running but owns no advertised id"
+    );
+    assert!(
+        !fake_hub_tool_ids(
+            &hub,
+            &fuigo_tool_protocol::SessionId::new("shadowed").unwrap()
+        )
+        .contains(&"read_file".to_owned()),
+        "the shadowed MCP tool must not be registered over the native one"
+    );
+    server_task.abort();
+}
+/// An `rpc_only` bind opts out of MCP entirely, so a later reload must leave
+/// it alone rather than pushing servers into it.
+#[tokio::test]
+async fn an_rpc_only_bind_never_joins_the_configured_set() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        fuigo_tool_protocol::SessionId::new("rpc-only").unwrap(),
+        Some(serde_json::json!({"metadata": {"rpc_only": true}})),
+    )
+    .await
+    .expect("RPC-only bind must succeed");
+    assert_eq!(live_mcp_servers(&handle, "rpc-only").await, None);
+    server_task.abort();
+}
+/// Reloading a workspace that has no local MCP configuration is a no-op
+/// rather than an error, so non-desktop embedders are unaffected.
+#[tokio::test]
+async fn reload_is_a_no_op_without_local_mcp_configuration() {
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let config = WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    assert!(
+        handle
+            .reload_bind_mcp(BindMcpConfig::new([]))
+            .await
+            .expect("no local MCP configuration must be a no-op, not an error")
+            .is_empty()
+    );
+}
+/// A reload that lands while the hub is disconnected must not be silently
+/// dropped: the config is published (new and revived binds start from it)
+/// and the caller gets an error so it can retry the convergence when the
+/// hub is back.
+#[tokio::test]
+async fn a_reload_without_a_hub_stages_the_config_and_reports_it() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let staged = BindMcpConfig::new([configured_test_mcp("staged", url)]);
+    let result = handle.reload_bind_mcp(staged).await;
+    assert!(
+        result.is_err(),
+        "a hub-less reload must be reported, not silently dropped"
+    );
+    assert_eq!(
+        handle
+            .shared
+            .bind_mcp
+            .as_ref()
+            .unwrap()
+            .read()
+            .servers()
+            .len(),
+        1,
+        "the config must be published even without a hub"
+    );
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(fuigo_tool_protocol::SessionId::new("late").unwrap(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, "late", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "late").await,
+        Some(vec![("staged".to_owned(), vec!["echo".to_owned()])]),
+        "a new bind must start from the staged config"
+    );
+    server_task.abort();
+}
+#[tokio::test]
+async fn bind_mcp_config_rejects_rpc_reconfiguration() {
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let error = handle
+        .start_session_mcp_servers("main", Vec::new())
+        .await
+        .expect_err("bind-time MCP configuration must be immutable");
+    assert!(
+        error
+            .to_string()
+            .contains("bind-time MCP configuration is immutable")
+    );
+}
+#[tokio::test]
+async fn zero_tool_bind_mcp_is_reused_on_soft_rebind() {
+    let state = BindMcpTestState {
+        zero_tools: true,
+        ..Default::default()
+    };
+    let (url, server_task) = spawn_bind_mcp_server(state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("empty", url)])
+            .with_first_party_servers(["empty".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = fuigo_tool_protocol::SessionId::new("zero-tool").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(session_id.clone(), None).await.unwrap();
+    converge_with(&handle, "zero-tool", &hub, crate::mcp::McpReclaim::Always).await;
+    let request_count = state.session_ids.lock().len();
+    assert!(request_count > 0);
+    resolver(session_id, None).await.unwrap();
+    converge_with(&handle, "zero-tool", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        state.session_ids.lock().len(),
+        request_count,
+        "an unchanged zero-tool server must be reused, not restarted"
+    );
+    server_task.abort();
+}
+/// A server whose start failed is absent from the session map, so every
+/// later convergence — bind-spawned or reload-driven — is its retry.
+#[tokio::test]
+async fn a_failed_server_is_retried_by_the_next_convergence() {
+    let state = BindMcpTestState {
+        hang_tools_list: true,
+        ..Default::default()
+    };
+    let (url, server_task) = spawn_bind_mcp_server(state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("hanging", url)])
+            .with_discovery_timeout(std::time::Duration::from_secs(2))
+            .with_first_party_servers(["hanging".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let hub = FakeHubRegistry::default();
+    resolver(
+        fuigo_tool_protocol::SessionId::new("failed-mcp").unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    let delta = converge_with(&handle, "failed-mcp", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(delta.failed, vec!["hanging".to_owned()]);
+    let request_count = state.session_ids.lock().len();
+    assert!(request_count > 0);
+    let delta = converge_with(&handle, "failed-mcp", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        delta.failed,
+        vec!["hanging".to_owned()],
+        "the failed server must be retried (and fail again here)"
+    );
+    assert!(
+        state.session_ids.lock().len() > request_count,
+        "the retry must actually contact the server"
+    );
+    server_task.abort();
+}
+#[tokio::test]
+async fn duplicate_bind_mcp_tool_ids_are_rejected() {
+    let (first_url, first_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let (second_url, second_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([
+        configured_test_mcp("first", first_url),
+        configured_test_mcp("second", second_url),
+    ]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    resolver(
+        fuigo_tool_protocol::SessionId::new("duplicates").unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, "duplicates", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "duplicates").await,
+        Some(vec![
+            ("first".to_owned(), Vec::new()),
+            ("second".to_owned(), Vec::new()),
+        ]),
+        "an ambiguous id is refused from both servers"
+    );
+    assert!(
+        !fake_hub_tool_ids(
+            &hub,
+            &fuigo_tool_protocol::SessionId::new("duplicates").unwrap()
+        )
+        .contains(&"echo".to_owned())
+    );
+    first_task.abort();
+    second_task.abort();
+}
+#[tokio::test]
+async fn bind_mcp_cannot_shadow_native_tool() {
+    let state = BindMcpTestState {
+        tool_name: Some("read_file".to_owned()),
+        ..Default::default()
+    };
+    let (url, server_task) = spawn_bind_mcp_server(state).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("shadow", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("native-collision").unwrap();
+    let resolved = resolver(sid.clone(), None).await.unwrap();
+    let hub = FakeHubRegistry::default();
+    hub.install_bind_response(&sid, resolved.handlers);
+    converge_with(
+        &handle,
+        "native-collision",
+        &hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    let read_file_handlers: Vec<_> = hub
+        .handlers_for_session(&sid)
+        .into_iter()
+        .filter(|handler| handler.tool_id().as_str() == "read_file")
+        .collect();
+    assert_eq!(
+        read_file_handlers.len(),
+        1,
+        "exactly one read_file must be advertised"
+    );
+    assert_eq!(
+        read_file_handlers[0].description().namespace,
+        None,
+        "and it must be the native one"
+    );
+    server_task.abort();
+}
+/// A teardown that lands while a bridge is still connecting cancels the
+/// drive outright: the pending start future is dropped (killing the client
+/// and its child process) instead of the child living on until the
+/// discovery deadline, and nothing is committed to the ended session.
+#[tokio::test]
+async fn a_teardown_mid_connect_drops_the_finished_client() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&reached), Arc::clone(&release))),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    let connect = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("gated", url);
+        tokio::spawn(async move {
+            crate::mcp::connect_servers(
+                &session,
+                "main",
+                vec![server],
+                std::time::Duration::from_secs(10),
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+            )
+            .await
+            .map(|(started, _life)| started)
+        })
+    };
+    reached.notified().await;
+    handle.teardown_session_mcp("main").await;
+    release.notify_one();
+    let result = connect.await.unwrap();
+    assert!(
+        matches!(result, Err(WorkspaceError::SessionNotFound(_))),
+        "teardown mid-connect must cancel the drive, not hand servers to install"
+    );
+    assert!(
+        session.mcp_state.lock().await.owned_clients.is_empty(),
+        "the cancelled client must be dropped, not retained on the ended session"
+    );
+    server_task.abort();
+}
+/// [`crate::mcp::HubToolRegistry`] wrapper that runs a session teardown just
+/// before the first dynamic registration goes through — the exact
+/// interleaving where teardown's own unregister pass cannot see the id yet.
+struct TeardownOnFirstRegister {
+    inner: FakeHubRegistry,
+    handle: WorkspaceHandle,
+    session_id: String,
+    fired: std::sync::atomic::AtomicBool,
+}
+impl crate::mcp::HubToolRegistry for TeardownOnFirstRegister {
+    async fn register_tool_dynamic(
+        &self,
+        handler: Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>,
+        sessions: Vec<fuigo_tool_protocol::SessionId>,
+        life: u64,
+    ) -> Result<(), fuigo_computer_hub_sdk::ClientError> {
+        if !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.handle.teardown_session_mcp(&self.session_id).await;
+        }
+        crate::mcp::HubToolRegistry::register_tool_dynamic(&self.inner, handler, sessions, life)
+            .await
+    }
+    async fn unregister_tool_dynamic(
+        &self,
+        tool_id: &fuigo_tool_protocol::ToolId,
+        session_id: &fuigo_tool_protocol::SessionId,
+        life: u64,
+    ) -> Result<bool, fuigo_computer_hub_sdk::ClientError> {
+        crate::mcp::HubToolRegistry::unregister_tool_dynamic(&self.inner, tool_id, session_id, life)
+            .await
+    }
+}
+/// The commit gate on the reload's registrations: a teardown that lands
+/// while re-claimed tools are registering must not leave those ids on the
+/// hub — teardown's unregister pass covers only ids recorded on the servers
+/// it extracted, which cannot include one registered after the extraction.
+#[tokio::test]
+async fn a_teardown_mid_registration_unregisters_the_orphaned_tools() {
+    let (first_url, first_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let (second_url, second_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tool_name: Some("beta".to_owned()),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let first = configured_test_mcp("first", first_url);
+    let second = configured_test_mcp("second", second_url);
+    config.bind_mcp = Some(BindMcpConfig::new([first]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("swapped").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = TeardownOnFirstRegister {
+        inner: FakeHubRegistry::default(),
+        handle: handle.clone(),
+        session_id: "swapped".to_owned(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    };
+    let session = handle.session("swapped").unwrap();
+    {
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            "swapped",
+            &BindMcpConfig::new([second]),
+            &hub,
+            crate::mcp::McpReclaim::IfChanged,
+            fuigo_session_events::EventWriter::noop(),
+        )
+        .await
+        .expect("converge must succeed");
+    }
+    assert_eq!(live_mcp_servers(&handle, "swapped").await, None);
+    let hub_ids = fake_hub_tool_ids(&hub.inner, &sid);
+    assert!(
+        !hub_ids.contains(&"beta".to_owned()),
+        "an id registered after teardown's extraction must be unregistered again: {hub_ids:?}"
+    );
+    first_task.abort();
+    second_task.abort();
+}
+/// Tool lists come from external servers and every advertised tool is
+/// model-visible, so a session's advertisement carries a named cap; tools
+/// past it are dropped deterministically and never owned.
+#[tokio::test]
+async fn advertised_mcp_tools_are_capped_per_session() {
+    let over = crate::mcp::MAX_ADVERTISED_MCP_TOOLS + 40;
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tool_count: Some(over),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("big", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("capped").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, "capped", &hub, crate::mcp::McpReclaim::Always).await;
+    let live = live_mcp_servers(&handle, "capped").await.unwrap();
+    assert_eq!(live.len(), 1);
+    let (_, owned) = &live[0];
+    assert_eq!(
+        owned.len(),
+        crate::mcp::MAX_ADVERTISED_MCP_TOOLS,
+        "ownership must stop exactly at the cap"
+    );
+    assert_eq!(
+        fake_hub_tool_ids(&hub, &sid).len(),
+        crate::mcp::MAX_ADVERTISED_MCP_TOOLS,
+        "the hub must see exactly the capped set"
+    );
+    assert_eq!(owned[0], "tool_000", "truncation must be deterministic");
+    server_task.abort();
+}
+/// A bind's enrol step must not queue on the session's `update_lock`: a
+/// convergence mid-discovery holds that lock for up to the discovery
+/// window, and a soft rebind or revive bind stuck behind it would blow the
+/// hub's bind ack. Enrolment mutates only the binding and the native-id
+/// set, each under its own short mutex.
+#[tokio::test]
+async fn a_soft_rebind_does_not_queue_behind_an_in_flight_convergence() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("mid-discovery").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let session = handle.session("mid-discovery").unwrap();
+    let _converge_guard = session.update_lock.lock().await;
+    let rebound = tokio::time::timeout(std::time::Duration::from_secs(2), resolver(sid, None))
+        .await
+        .expect("a soft rebind must not wait out the discovery window");
+    rebound.expect("the rebind must succeed");
+    server_task.abort();
+}
+/// Teardown runs from hub hooks, so it must not queue on the session's
+/// `update_lock` either: a bind or reload mid-MCP-start holds that lock for
+/// up to the discovery window, and the stall would re-enter the hook path
+/// sideways. `Closed` is what makes the lock unnecessary.
+#[tokio::test]
+async fn teardown_does_not_queue_behind_a_slow_mcp_start() {
+    let handle = make_handle();
+    let session = handle.session("main").unwrap();
+    let _mcp_start_guard = session.update_lock.lock().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle.teardown_session_mcp("main"),
+    )
+    .await
+    .expect("teardown must not queue behind the update_lock");
+    assert!(matches!(
+        *session.mcp_binding.lock().await,
+        crate::session::WorkspaceMcpBinding::Closed
+    ));
+}
+/// The `Closed` lifecycle, end to end. A `SessionEnded` teardown leaves the
+/// session in the map (late notifications still need it), so `Closed` must
+/// be terminal for *reloads* — a late reload never resurrects an ended
+/// session — but not for *binds*: the hub can revive a session id, and that
+/// rebind must re-open the binding and recover the configured set instead of
+/// failing forever against the previous life's terminal state.
+#[tokio::test]
+async fn an_ended_session_rebind_recovers_the_configured_set() {
+    let state = BindMcpTestState::default();
+    let (url, server_task) = spawn_bind_mcp_server(state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let bound = configured_test_mcp("bound", url);
+    config.bind_mcp = Some(BindMcpConfig::new([bound.clone()]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("revived").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    handle.teardown_session_mcp("revived").await;
+    assert!(state.tool_calls.lock().is_empty());
+    let session = handle.session("revived").unwrap();
+    let hub = FakeHubRegistry::default();
+    let delta = {
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            "revived",
+            &BindMcpConfig::new([bound]),
+            &hub,
+            crate::mcp::McpReclaim::IfChanged,
+            fuigo_session_events::EventWriter::noop(),
+        )
+        .await
+        .unwrap()
+    };
+    assert!(delta.is_empty(), "a reload must skip an ended session");
+    assert_eq!(live_mcp_servers(&handle, "revived").await, None);
+    resolver(sid, None)
+        .await
+        .expect("a revive bind must succeed, not fail against the previous life");
+    assert_eq!(
+        live_mcp_servers(&handle, "revived").await,
+        Some(Vec::new()),
+        "the revive bind must re-enrol the session"
+    );
+    converge_with(&handle, "revived", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "revived").await,
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])]),
+        "the revived session must get its MCP tools back"
+    );
+    server_task.abort();
+}
+/// In-memory [`crate::mcp::HubToolRegistry`]: what the hub tracks per session,
+/// without the live connection a real `ToolServer` requires.
+#[derive(Default)]
+struct FakeHubRegistry {
+    handlers: parking_lot::Mutex<
+        std::collections::HashMap<
+            fuigo_tool_protocol::SessionId,
+            Vec<Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>>,
+        >,
+    >,
+    /// Dynamic registrations tracked separately, exactly like the real
+    /// `ToolServer`'s `dynamic_handlers`: a resolver install must preserve
+    /// them (resolver wins tool-id collisions), which is the property
+    /// single-channel publication rests on. Entries carry the life that
+    /// made them, mirroring the SDK's life-tagged ledger.
+    dynamic: parking_lot::Mutex<DynamicRegistrations>,
+}
+/// Per-session life-tagged dynamic registrations, as the fake hub tracks
+/// them: `session -> [(life, handler)]`.
+type DynamicRegistrations = std::collections::HashMap<
+    fuigo_tool_protocol::SessionId,
+    Vec<(u64, Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>)>,
+>;
+impl FakeHubRegistry {
+    /// What the fake hub currently advertises for a session — the
+    /// assertion surface reload/converge tests read. Inherent (not on
+    /// [`crate::mcp::HubToolRegistry`]): production never reads back
+    /// through the registry seam, so the trait carries only the
+    /// register/unregister channel.
+    fn handlers_for_session(
+        &self,
+        session_id: &fuigo_tool_protocol::SessionId,
+    ) -> Vec<Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>> {
+        self.handlers
+            .lock()
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+impl crate::mcp::HubToolRegistry for FakeHubRegistry {
+    async fn register_tool_dynamic(
+        &self,
+        handler: Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>,
+        sessions: Vec<fuigo_tool_protocol::SessionId>,
+        life: u64,
+    ) -> Result<(), fuigo_computer_hub_sdk::ClientError> {
+        let mut map = self.handlers.lock();
+        let mut dynamic_map = self.dynamic.lock();
+        let tool_id = handler.tool_id();
+        for sid in sessions {
+            let ledger = dynamic_map.get(&sid).and_then(|regs| {
+                regs.iter()
+                    .find(|(_, h)| h.tool_id() == tool_id)
+                    .map(|(generation, _)| *generation)
+            });
+            match ledger {
+                Some(existing) if existing == life => continue,
+                Some(existing) if existing > life => {
+                    return Err(fuigo_computer_hub_sdk::ClientError::InvalidConfig(format!(
+                        "tool_id {tool_id} is registered for session {sid} by a newer life"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    if map
+                        .get(&sid)
+                        .is_some_and(|handlers| handlers.iter().any(|h| h.tool_id() == tool_id))
+                    {
+                        return Err(fuigo_computer_hub_sdk::ClientError::InvalidConfig(format!(
+                            "tool_id {tool_id} is already registered for session {sid}"
+                        )));
+                    }
+                }
+            }
+            if let Some(regs) = dynamic_map.get_mut(&sid) {
+                let stale: Vec<Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>> = regs
+                    .iter()
+                    .filter(|(generation, h)| h.tool_id() == tool_id && *generation < life)
+                    .map(|(_, h)| h.clone())
+                    .collect();
+                regs.retain(|(generation, h)| !(h.tool_id() == tool_id && *generation < life));
+                if let Some(handlers) = map.get_mut(&sid) {
+                    handlers.retain(|h| !stale.iter().any(|s| Arc::ptr_eq(h, s)));
+                }
+            }
+            map.entry(sid.clone()).or_default().push(handler.clone());
+            dynamic_map
+                .entry(sid)
+                .or_default()
+                .push((life, handler.clone()));
+        }
+        Ok(())
+    }
+    async fn unregister_tool_dynamic(
+        &self,
+        tool_id: &fuigo_tool_protocol::ToolId,
+        session_id: &fuigo_tool_protocol::SessionId,
+        life: u64,
+    ) -> Result<bool, fuigo_computer_hub_sdk::ClientError> {
+        let mut map = self.handlers.lock();
+        let mut dynamic_map = self.dynamic.lock();
+        let Some(regs) = dynamic_map.get_mut(session_id) else {
+            return Ok(false);
+        };
+        let Some(index) = regs
+            .iter()
+            .position(|(generation, h)| h.tool_id() == *tool_id && *generation == life)
+        else {
+            return Ok(false);
+        };
+        let (_, removed) = regs.remove(index);
+        if let Some(handlers) = map.get_mut(session_id) {
+            handlers.retain(|h| !Arc::ptr_eq(h, &removed));
+        }
+        Ok(true)
+    }
+}
+impl FakeHubRegistry {
+    /// What the SDK does with a bind response: publish the resolver's
+    /// handlers MERGED with the session's surviving dynamic registrations,
+    /// the resolver winning tool-id collisions (the SDK's
+    /// `merge_resolved_with_dynamic`). A rebind's install must not clobber
+    /// dynamically registered MCP tools.
+    fn install_bind_response(
+        &self,
+        sid: &fuigo_tool_protocol::SessionId,
+        handlers: Vec<Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler>>,
+    ) {
+        let resolved_ids: std::collections::HashSet<fuigo_tool_protocol::ToolId> =
+            handlers.iter().map(|h| h.tool_id()).collect();
+        let mut merged = handlers;
+        if let Some(dynamic) = self.dynamic.lock().get(sid) {
+            merged.extend(
+                dynamic
+                    .iter()
+                    .filter(|(_, handler)| !resolved_ids.contains(&handler.tool_id()))
+                    .map(|(_, handler)| handler.clone()),
+            );
+        }
+        self.handlers.lock().insert(sid.clone(), merged);
+    }
+}
+fn fake_hub_tool_ids(hub: &FakeHubRegistry, sid: &fuigo_tool_protocol::SessionId) -> Vec<String> {
+    hub.handlers_for_session(sid)
+        .iter()
+        .map(|handler| handler.tool_id().as_str().to_owned())
+        .collect()
+}
+/// The property single-channel publication rests on, pinned from the
+/// workspace side: a soft rebind re-runs the resolver (natives only) and the
+/// SDK installs that bind response by MERGING it with the session's
+/// surviving dynamic registrations — so the MCP tools a convergence
+/// registered stay advertised across the rebind, exactly once. The SDK half
+/// is the pure `merge_resolved_with_dynamic` (unit-tested in the SDK); the
+/// double mirrors it so this covers the workspace's end of the contract.
+#[tokio::test]
+async fn a_soft_rebind_install_preserves_dynamic_mcp_registrations() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("rebind-merge").unwrap();
+    let hub = FakeHubRegistry::default();
+    let resolved = resolver(sid.clone(), None).await.expect("bind");
+    hub.install_bind_response(&sid, resolved.handlers);
+    converge_with(
+        &handle,
+        "rebind-merge",
+        &hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    assert!(
+        fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()),
+        "convergence must register the MCP tool"
+    );
+    let resolved = resolver(sid.clone(), None).await.expect("rebind");
+    let native_count = resolved.handlers.len();
+    hub.install_bind_response(&sid, resolved.handlers);
+    let ids = fake_hub_tool_ids(&hub, &sid);
+    assert_eq!(
+        ids.iter().filter(|id| *id == "echo").count(),
+        1,
+        "the rebind install must preserve the dynamic MCP tool exactly once: {ids:?}"
+    );
+    assert_eq!(
+        ids.len(),
+        native_count + 1,
+        "natives once, MCP tool once, nothing else: {ids:?}"
+    );
+    server_task.abort();
+}
+/// The stale-bind fence (`mcp_epoch`): a teardown landing after a bind's
+/// resolution began must refuse that bind's MCP enrolment — the hub ended
+/// the session, no further teardown is coming, so enrolling (and the
+/// converge it would spawn) would resurrect servers nothing ever tears
+/// down. The refusal DEGRADES the bind rather than failing it (the bind
+/// invariant: nothing retries a failed bind transparently, so "MCP absent
+/// until the next bind" beats "agent broken now"); the binding stays
+/// `Closed` and the next bind enrols normally. The bind's mount hook runs
+/// between the epoch snapshot and enrolment, so a real teardown inside it
+/// is exactly this race, made deterministic. The distinct coverage kept
+/// here beyond `a_mid_bind_teardown_cannot_fail_a_bind_with_configured_mcp`:
+/// the revived life is fully FUNCTIONAL — the earlier teardown cancelled
+/// only its own life's token, so the revive's converge still starts
+/// servers and claims tools.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_teardown_during_bind_resolution_refuses_stale_enrolment() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let teardown_handle = handle.clone();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_hook = Arc::clone(&fired);
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            if !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let handle = teardown_handle.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(handle.teardown_session_mcp("stale"))
+                });
+            }
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("stale").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/stale"}});
+    resolver(sid.clone(), Some(metadata.clone()))
+        .await
+        .expect("a bind overtaken by a teardown must degrade MCP, not fail");
+    assert_eq!(
+        live_mcp_servers(&handle, "stale").await,
+        None,
+        "a bind that a teardown overtook must not (re-)enrol the session"
+    );
+    resolver(sid, Some(metadata))
+        .await
+        .expect("revive bind must succeed");
+    assert_eq!(
+        live_mcp_servers(&handle, "stale").await,
+        Some(Vec::new()),
+        "a fresh bind after the teardown must enrol"
+    );
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, "stale", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "stale").await,
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])]),
+        "the revived life's converge must start servers and claim tools"
+    );
+    server_task.abort();
+}
+/// Minimal handler standing in for a resolver-installed native tool.
+struct StaticHandler(ToolId);
+impl StaticHandler {
+    fn new(id: &str) -> Self {
+        Self(ToolId::new(id).unwrap())
+    }
+}
+#[async_trait::async_trait]
+impl fuigo_computer_hub_sdk::ToolServerHandler for StaticHandler {
+    fn tool_id(&self) -> ToolId {
+        self.0.clone()
+    }
+    fn description(&self) -> fuigo_tool_types::ToolDescription {
+        fuigo_tool_types::ToolDescription::new(self.0.as_str().to_owned(), "static test tool")
+    }
+    fn input_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+    async fn handle_call(
+        &self,
+        _ctx: ToolCallContext,
+        _args: serde_json::Value,
+    ) -> fuigo_tool_runtime::ToolStream<fuigo_tool_runtime::TypedToolOutput> {
+        unreachable!("static test tool is never called")
+    }
+}
+/// The last life-blind commit gate: a server completing its start while a
+/// teardown+revive interleaves (deterministically: teardown and the revive
+/// queued on the FIFO binding lock ahead of the drive's commit) must NOT
+/// commit its client into the NEW life's `owned_clients` nor publish its
+/// outcome — the commit gate compares the LIFE, never just not-`Closed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&reached), Arc::clone(&release))),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    async fn reopen_and_enrol(session: &crate::session::WorkspaceSession) {
+        let mut binding = session.mcp_binding.lock().await;
+        if matches!(*binding, crate::session::WorkspaceMcpBinding::Closed) {
+            *binding = crate::session::WorkspaceMcpBinding::Uninitialized;
+            *session.mcp_cancel.lock() = tokio_util::sync::CancellationToken::new();
+        }
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    reopen_and_enrol(&session).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("gated", url);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                std::time::Duration::from_secs(10),
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    reached.notified().await;
+    let gate = session.mcp_binding.lock().await;
+    let teardown = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.teardown_session_mcp("main").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let revive = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move { reopen_and_enrol(&session).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    release.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(gate);
+    teardown.await.unwrap();
+    revive.await.unwrap();
+    let _ = drive.await.unwrap();
+    assert!(
+        rx.recv().await.is_none(),
+        "a stale drive must not publish outcomes into a revived life"
+    );
+    assert!(
+        !session
+            .mcp_state
+            .lock()
+            .await
+            .owned_clients
+            .contains_key("gated"),
+        "a stale drive's client must not commit into the revived life's owned_clients"
+    );
+    server_task.abort();
+}
+/// The last state-shaped gate, closed: an outcome recorded under life N is
+/// still IN FLIGHT through the convergence's publish channel when a
+/// teardown+revive opens a new life — `install_servers` must refuse it by
+/// LIFE, or the revived session would treat the stale client as already
+/// running and never start a fresh one. Deterministic: the record commits
+/// legitimately under life N (queued first on the FIFO binding lock), the
+/// teardown and revive run next, and the install's lock request lands after
+/// them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_install_cannot_cross_into_a_revived_life() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&reached), Arc::clone(&release))),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let mcp_config = BindMcpConfig::new([configured_test_mcp("gated", url)]);
+    config.bind_mcp = Some(mcp_config.clone());
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    async fn reopen_and_enrol(session: &crate::session::WorkspaceSession) {
+        let mut binding = session.mcp_binding.lock().await;
+        if matches!(*binding, crate::session::WorkspaceMcpBinding::Closed) {
+            *binding = crate::session::WorkspaceMcpBinding::Uninitialized;
+            *session.mcp_cancel.lock() = tokio_util::sync::CancellationToken::new();
+        }
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    reopen_and_enrol(&session).await;
+    let converge = {
+        let session = Arc::clone(&session);
+        let hub = FakeHubRegistry::default();
+        let writer = fuigo_session_events::EventWriter::noop();
+        tokio::spawn(async move {
+            crate::mcp::converge_session(
+                &session,
+                "main",
+                &mcp_config,
+                &hub,
+                crate::mcp::McpReclaim::Always,
+                writer,
+            )
+            .await
+        })
+    };
+    reached.notified().await;
+    let gate = session.mcp_binding.lock().await;
+    release.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let teardown = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.teardown_session_mcp("main").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let revive = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move { reopen_and_enrol(&session).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(gate);
+    teardown.await.unwrap();
+    revive.await.unwrap();
+    let _ = converge.await.unwrap();
+    assert_eq!(
+        live_mcp_servers(&handle, "main").await,
+        Some(Vec::new()),
+        "a server recorded under a closed life must not install into the revived one"
+    );
+    server_task.abort();
+}
+/// Only servers designated FIRST-PARTY in the bind config receive the
+/// agent-id header (the bound session id, which also flips the transport to
+/// the no-OAuth local-agent posture). A user-configured third-party server
+/// must see no header — the fixture records the header when present, so
+/// both sides are observable.
+#[tokio::test]
+async fn a_bind_mcp_server_gets_no_agent_header_unless_first_party() {
+    let third_state = BindMcpTestState::default();
+    let app_state = BindMcpTestState {
+        tool_name: Some("app_tool".to_owned()),
+        ..Default::default()
+    };
+    let (third_url, third_task) = spawn_bind_mcp_server(third_state.clone()).await;
+    let (app_url, app_task) = spawn_bind_mcp_server(app_state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([
+            configured_test_mcp("third", third_url),
+            configured_test_mcp("app", app_url),
+        ])
+        .with_first_party_servers(["app".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("hdr").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "hdr", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(
+        third_state.session_ids.lock().is_empty(),
+        "a third-party bind MCP server must never receive the agent-id header \
+         (it carries the session id and disables the server's OAuth path)"
+    );
+    let app_seen = app_state.session_ids.lock().clone();
+    assert!(
+        !app_seen.is_empty() && app_seen.iter().all(|s| s == "hdr"),
+        "the designated first-party endpoint must receive the session id on \
+         its requests: {app_seen:?}"
+    );
+    third_task.abort();
+    app_task.abort();
+}
+/// A soft rebind of an Active session CONTINUES the life: the epoch must not
+/// bump, or the session's hub registrations (tagged with the life that made
+/// them) desync from the counter and teardown's life-tagged unregisters
+/// miss — handlers then keep routing into dropped bridges.
+#[tokio::test]
+async fn a_soft_rebind_keeps_registration_tags_matching_the_life() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("softlife").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "softlife", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()));
+    let session = handle.session("softlife").expect("session");
+    let life_a = session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    resolver(sid.clone(), None).await.expect("soft rebind");
+    assert_eq!(
+        session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst),
+        life_a,
+        "a soft rebind of an Active session must not bump the life"
+    );
+    let closed_life = session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let removed = crate::mcp::HubToolRegistry::unregister_tool_dynamic(
+        &hub,
+        &ToolId::new("echo").unwrap(),
+        &sid,
+        closed_life,
+    )
+    .await
+    .expect("unregister");
+    assert!(
+        removed,
+        "the life-tagged unregister must find the registration it made"
+    );
+    assert!(!fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()));
+    server_task.abort();
+}
+/// A bind accepted AFTER a hub unbind arrived supersedes the unbind's
+/// deferred teardown: a soft rebind continues the life (same epoch — wave
+/// 13), so the epoch alone cannot distinguish before-unbind from
+/// after-reconnect; the bind generation can. Without it, the deferred
+/// teardown closes MCP under the already-accepted bind, stranding a live
+/// session on `Closed`.
+#[tokio::test]
+async fn a_bind_accepted_after_an_unbind_invalidates_its_deferred_teardown() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("reconnect").unwrap();
+    resolver(sid.clone(), None).await.expect("first bind");
+    let session = handle.session("reconnect").expect("session");
+    let arrival_generation = session
+        .mcp_bind_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    resolver(sid, None).await.expect("reconnect bind");
+    assert!(
+        !handle
+            .teardown_session_mcp_for_event("reconnect", arrival_generation)
+            .await,
+        "a bind accepted after the unbind must invalidate its deferred teardown"
+    );
+    assert!(
+        session.mcp_binding.lock().await.active().is_some(),
+        "the accepted bind's MCP must stay open"
+    );
+    server_task.abort();
+}
+/// A stale `SessionEnded` hook must not close a life revived (or
+/// continued) by a bind accepted after the end arrived — the third member
+/// of the unbind-fence family (wave 15 fenced `session.unbind`; the hook's
+/// teardown was still unfenced). Unfenced, the end flips the accepted
+/// bind's binding back to `Closed`, and reloads and `configure_mcp` both
+/// refuse `Closed`, so the hub-visible session stays permanently MCP-less
+/// until another bind. The hook anchors the bind generation at arrival;
+/// `teardown_session_mcp_for_event` refuses once a bind moved it.
+/// (Failing-first verified: with the pre-fix unfenced
+/// `teardown_session_mcp` in place of the fenced call, the "must stay
+/// open" assertion below panics.)
+#[tokio::test]
+async fn a_bind_accepted_after_a_session_end_invalidates_its_teardown() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("ended").unwrap();
+    resolver(sid.clone(), None).await.expect("first bind");
+    let session = handle.session("ended").expect("session");
+    let arrival_generation = session
+        .mcp_bind_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    resolver(sid, None).await.expect("reconnect bind");
+    assert!(
+        !handle
+            .teardown_session_mcp_for_event("ended", arrival_generation)
+            .await,
+        "a bind accepted after the end must invalidate its teardown"
+    );
+    assert!(
+        session.mcp_binding.lock().await.active().is_some(),
+        "the accepted bind's MCP must stay open"
+    );
+    server_task.abort();
+}
+/// The event fence's pair must be untearable: the old unbind callback
+/// loaded `mcp_epoch` and `mcp_bind_generation` as two separate atomics
+/// outside `mcp_binding`, so a soft rebind BETWEEN the loads produced the
+/// torn pair (old epoch, post-bind generation) — and a soft rebind keeps
+/// its epoch, so a pairwise (epoch, generation) gate fed that torn pair
+/// matches and closes MCP under the accepted bind. The event path now
+/// anchors ONE load at arrival and re-snapshots the pair under
+/// `mcp_binding`; with the true arrival anchor the teardown refuses.
+#[tokio::test]
+async fn a_torn_unbind_snapshot_cannot_close_an_accepted_binds_mcp() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("torn").unwrap();
+    resolver(sid.clone(), None).await.expect("first bind");
+    let session = handle.session("torn").expect("session");
+    let epoch_before = session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    let generation_before = session
+        .mcp_bind_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    resolver(sid, None).await.expect("soft rebind");
+    let generation_after = session
+        .mcp_bind_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst),
+        epoch_before,
+        "precondition: a soft rebind continues the life"
+    );
+    assert_ne!(
+        generation_after, generation_before,
+        "precondition: the accepted bind moved the generation"
+    );
+    assert!(
+        !handle
+            .teardown_session_mcp_for_event("torn", generation_before)
+            .await,
+        "the arrival anchor must refuse the teardown once a bind was accepted"
+    );
+    assert!(
+        session.mcp_binding.lock().await.active().is_some(),
+        "the accepted bind's MCP must stay open"
+    );
+    server_task.abort();
+}
+/// A losing-but-successful bind (sibling's enrolment won the epoch race,
+/// binding open) still contributes its native ids to the collision-refusal
+/// set: the SDK's install may serve ITS handlers (last resolver install
+/// wins), so filtering against the winner's set alone could let a later
+/// converge advertise an MCP tool that shadows a live native. The sets are
+/// UNIONED, since either bind's handlers may be the installed ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_losing_bind_still_contributes_its_native_ids() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let sibling_handle = handle.clone();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_hook = Arc::clone(&fired);
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            if !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let handle = sibling_handle.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let session = handle.session("loser").expect("session");
+                        let mut binding = session.mcp_binding.lock().await;
+                        let was_active = binding.active().is_some();
+                        let _ = binding.join();
+                        if !was_active {
+                            session
+                                .mcp_epoch
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        session
+                            .mcp_bind_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        *session.mcp_native_tool_ids.lock() =
+                            std::collections::HashSet::from(
+                                [ToolId::new("winner_marker").unwrap()],
+                            );
+                    })
+                });
+            }
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("loser").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/loser"}});
+    resolver(sid, Some(metadata))
+        .await
+        .expect("the losing bind still succeeds (binding is open)");
+    let session = handle.session("loser").expect("session");
+    let natives = session.mcp_native_tool_ids.lock().clone();
+    assert!(
+        natives.contains(&ToolId::new("winner_marker").unwrap()),
+        "the winner's set must survive (union, not overwrite): {natives:?}"
+    );
+    assert!(
+        natives.contains(&ToolId::new("workspace_rpc").unwrap()),
+        "the loser's natives must join the collision-refusal set: {natives:?}"
+    );
+    server_task.abort();
+}
+/// The union alone is not enough when the sibling's converge already CLAIMED
+/// against the pre-union set: an MCP tool named after one of the LOSER's
+/// natives is then registered on the hub, and only a reclaim against the
+/// grown set can unregister it before it steals routing from the native.
+/// The losing arm now spawns exactly that `Always` reclaim
+/// (`converge_session_mcp`); unit tests have no hub connection for the spawn
+/// to resolve — the spawn's wiring is the same shape as the enrolled arm's,
+/// which the live matrix covers end-to-end — so this test drives the reclaim
+/// at the fake-registry seam every convergence test uses, pinning the
+/// Bugbot ordering (claim precedes union) and the reclaim's corrective
+/// effect: the collision leaves the hub, the session's server survives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reclaim_after_a_losing_binds_union_drops_new_collisions() {
+    let state = BindMcpTestState {
+        tool_name: Some("workspace_rpc".to_owned()),
+        ..Default::default()
+    };
+    let (url, server_task) = spawn_bind_mcp_server(state).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let hub = Arc::new(FakeHubRegistry::default());
+    let sibling_handle = handle.clone();
+    let sibling_hub = Arc::clone(&hub);
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_hook = Arc::clone(&fired);
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            if !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let handle = sibling_handle.clone();
+                let hub = Arc::clone(&sibling_hub);
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let session = handle.session("loser").expect("session");
+                        {
+                            let mut binding = session.mcp_binding.lock().await;
+                            let was_active = binding.active().is_some();
+                            let _ = binding.join();
+                            if !was_active {
+                                session
+                                    .mcp_epoch
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            session
+                                .mcp_bind_generation
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            *session.mcp_native_tool_ids.lock() =
+                                std::collections::HashSet::from([
+                                    ToolId::new("winner_marker").unwrap()
+                                ]);
+                        }
+                        converge_with(&handle, "loser", &hub, crate::mcp::McpReclaim::Always).await;
+                    })
+                });
+            }
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("loser").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/loser"}});
+    resolver(sid.clone(), Some(metadata))
+        .await
+        .expect("the losing bind still succeeds (binding is open)");
+    let session = handle.session("loser").expect("session");
+    assert!(
+        session
+            .mcp_native_tool_ids
+            .lock()
+            .contains(&ToolId::new("workspace_rpc").unwrap()),
+        "precondition: the union must have grown the set with the loser's natives"
+    );
+    assert!(
+        hub.handlers_for_session(&sid)
+            .iter()
+            .any(|handler| handler.tool_id().as_str() == "workspace_rpc"),
+        "precondition: the sibling's converge must have claimed the collision"
+    );
+    converge_with(&handle, "loser", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(
+        !hub.handlers_for_session(&sid)
+            .iter()
+            .any(|handler| handler.tool_id().as_str() == "workspace_rpc"),
+        "the reclaim against the grown set must unregister the colliding MCP tool"
+    );
+    assert_eq!(
+        live_mcp_servers(&handle, "loser").await,
+        Some(vec![("bound".to_owned(), Vec::new())]),
+        "the server survives the reclaim; only its colliding tool is dropped"
+    );
+    server_task.abort();
+}
+/// The init-progress straggler of the uniform rule: a drive whose scope was
+/// opened under life 1 must not stamp the revived life's shared init
+/// progress with its servers — the init marks compare the life like every
+/// other state write. (Same FIFO choreography: teardown and revive queued
+/// on the binding lock ahead of the stale drive's init block.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_drive_cannot_stamp_a_revived_lifes_init_progress() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    async fn reopen_and_enrol(session: &crate::session::WorkspaceSession) {
+        let mut binding = session.mcp_binding.lock().await;
+        if matches!(*binding, crate::session::WorkspaceMcpBinding::Closed) {
+            *binding = crate::session::WorkspaceMcpBinding::Uninitialized;
+            *session.mcp_cancel.lock() = tokio_util::sync::CancellationToken::new();
+        }
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    reopen_and_enrol(&session).await;
+    let stale_scope = crate::mcp::begin_mcp_drive(&session).await.expect("scope");
+    let gate = session.mcp_binding.lock().await;
+    let teardown = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.teardown_session_mcp("main").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let revive = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move { reopen_and_enrol(&session).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (tx, _rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("stale", url);
+        tokio::spawn(async move {
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                std::time::Duration::from_secs(10),
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                stale_scope,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    drop(gate);
+    teardown.await.unwrap();
+    revive.await.unwrap();
+    let _ = drive.await.unwrap();
+    assert!(
+        !session.mcp_state.lock().await.is_initializing(),
+        "a stale drive must not stamp the revived life's init progress"
+    );
+    server_task.abort();
+}
+/// A workspace with NO machine-owned MCP (`bind_mcp: None` — the CLI
+/// leader, the sandbox server, today's desktop sidecar) must never fail a
+/// bind for an MCP reason: when a teardown lands between the bind's epoch
+/// snapshot and its re-open block, there is nothing to lose by proceeding
+/// — and no layer retries a failed bind transparently (the SDK replies the
+/// error to the hub, the hub maps it to Unavailable, the harness returns
+/// it to the caller), so the old loud refusal was a USER-VISIBLE bind
+/// failure on deployments that have no MCP at all. The binding stays
+/// `Closed` only until the next bind, which re-opens with a fresh
+/// snapshot — also asserted here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mid_bind_teardown_cannot_fail_a_bind_without_mcp_config() {
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let config = WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    assert!(
+        config.bind_mcp.is_none(),
+        "precondition: no machine-owned MCP"
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let raced_handle = handle.clone();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_hook = Arc::clone(&fired);
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            if !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let handle = raced_handle.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(async move { handle.teardown_session_mcp("no-mcp").await })
+                });
+            }
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("no-mcp").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/no-mcp"}});
+    resolver(sid.clone(), Some(metadata))
+        .await
+        .expect("a bind with no MCP config must survive a mid-bind teardown");
+    let session = handle.session("no-mcp").expect("session");
+    assert!(
+        matches!(
+            *session.mcp_binding.lock().await,
+            crate::session::WorkspaceMcpBinding::Closed
+        ),
+        "the stale bind must not re-open the fence-refused binding"
+    );
+    resolver(sid, None).await.expect("the next bind succeeds");
+    assert!(
+        !matches!(
+            *session.mcp_binding.lock().await,
+            crate::session::WorkspaceMcpBinding::Closed
+        ),
+        "the next bind must re-open the binding for the configure path"
+    );
+}
+/// An EMPTY configured set must never fail a bind: the desktop always
+/// passes `bind_mcp: Some(...)` (an empty registry must still be a
+/// configured set so a later `mcp.json` edit has somewhere to land), so a
+/// user with no MCP servers — the common case — sits on the configured
+/// arm. Wave 18's reasoning applies verbatim there: nothing machine-owned
+/// to lose, and nothing retries a failed bind transparently. The loud
+/// raced-teardown refusal keys on the set being NON-empty; an empty set
+/// proceeds with the binding left `Closed`, and the next bind re-opens.
+/// (Accepted trade-off: an `mcp.json` edit landing inside that raced
+/// window attaches at the session's next bind, not immediately — the same
+/// deal the no-config arm made in wave 18.)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_configured_set_never_fails_a_bind() {
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let raced_handle = handle.clone();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_hook = Arc::clone(&fired);
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            if !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let handle = raced_handle.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(async move { handle.teardown_session_mcp("empty-cfg").await })
+                });
+            }
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("empty-cfg").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/empty-cfg"}});
+    resolver(sid.clone(), Some(metadata))
+        .await
+        .expect("a bind with an EMPTY configured set must survive a mid-bind teardown");
+    let session = handle.session("empty-cfg").expect("session");
+    assert!(
+        matches!(
+            *session.mcp_binding.lock().await,
+            crate::session::WorkspaceMcpBinding::Closed
+        ),
+        "the stale bind must not resurrect the fence-refused binding"
+    );
+    resolver(sid, None).await.expect("the next bind succeeds");
+    assert!(
+        session.mcp_binding.lock().await.active().is_some(),
+        "the next bind must re-open and enrol the (empty) configured set"
+    );
+}
+/// THE bind invariant, strict-arm edition: even with a NON-empty configured
+/// set, a teardown racing the bind must not fail it. Nothing retries a
+/// failed bind transparently (proven in wave 18), so the old loud refusal
+/// traded "MCP absent until the next bind" for "agent broken now" — the
+/// wrong trade in every deployment. The bind proceeds degraded: binding
+/// stays `Closed` for that raced window, observable via
+/// `WORKSPACE_BIND_MCP_DEGRADED_TOTAL{reason="raced_teardown"}`, and the
+/// next bind re-opens and serves the configured set.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mid_bind_teardown_cannot_fail_a_bind_with_configured_mcp() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let raced_handle = handle.clone();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_hook = Arc::clone(&fired);
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            if !fired_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let handle = raced_handle.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(async move { handle.teardown_session_mcp("racy").await })
+                });
+            }
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("racy").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/racy"}});
+    resolver(sid.clone(), Some(metadata))
+        .await
+        .expect("a teardown racing the bind must degrade MCP, never fail the bind");
+    let session = handle.session("racy").expect("session");
+    assert!(
+        matches!(
+            *session.mcp_binding.lock().await,
+            crate::session::WorkspaceMcpBinding::Closed
+        ),
+        "the stale bind must not resurrect the fence-refused binding"
+    );
+    resolver(sid, None).await.expect("the next bind succeeds");
+    assert!(
+        session.mcp_binding.lock().await.active().is_some(),
+        "the next bind must re-open and enrol the configured set"
+    );
+    server_task.abort();
+}
+/// THE bind invariant, latency edition: a hung MCP server cannot push a
+/// bind past the hub's ack budget even when setup was slow — the converge
+/// grace is a deadline from BIND START, so setup time shrinks the wait.
+/// Here setup (the mount hook) burns ~6s of the 10s window, discovery
+/// hangs forever, and the bind must return in ~6s + min(8s, 10−1−6=3s) ≈
+/// 9s — where the pre-deadline behavior (6s + full 8s grace = 14s) would
+/// blow the ack. The 11s assert cleanly separates the two behaviors while
+/// leaving CI-load margin; the exact ≤-budget property is unit-proven in
+/// `bind_converge_grace_shrinks_when_setup_was_slow`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_mcp_server_cannot_push_a_bind_past_the_ack_budget() {
+    let state = BindMcpTestState {
+        hang_tools_list: true,
+        ..Default::default()
+    };
+    let (url, server_task) = spawn_bind_mcp_server(state).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("hung", url)])
+            .with_discovery_timeout(std::time::Duration::from_secs(300)),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
+        |_| false,
+        move |_root| {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            Ok(())
+        },
+    ));
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("slow-setup").unwrap();
+    let metadata = serde_json::json!({"metadata": {"session_root": "/workspace/slow-setup"}});
+    let started = std::time::Instant::now();
+    resolver(sid, Some(metadata))
+        .await
+        .expect("a hung MCP server must not fail the bind");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(11),
+        "slow setup must shrink the converge grace (deadline from bind start), got {elapsed:?}"
+    );
+    server_task.abort();
+}
+/// The legacy client-driven path honors the SAME per-session advertisement
+/// cap as the bind path's `claim_tools`: a server offering more than
+/// [`crate::mcp::MAX_ADVERTISED_MCP_TOOLS`] tools registers exactly the cap
+/// on the hub (first tools in server order win), instead of unbounded
+/// dynamic registrations.
+#[tokio::test]
+async fn the_configure_path_caps_advertised_tools() {
+    let state = BindMcpTestState {
+        tool_count: Some(crate::mcp::MAX_ADVERTISED_MCP_TOOLS + 10),
+        ..Default::default()
+    };
+    let (url, server_task) = spawn_bind_mcp_server(state).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let config = WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    assert!(config.bind_mcp.is_none());
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("capped").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    let session = handle.session("capped").expect("session");
+    let (started, life) = crate::mcp::connect_servers(
+        &session,
+        "capped",
+        vec![configured_test_mcp("big", url)],
+        std::time::Duration::from_secs(10),
+        &std::collections::HashSet::new(),
+        fuigo_session_events::EventWriter::noop(),
+    )
+    .await
+    .expect("connect");
+    crate::mcp::install_and_advertise_qualified(&session, &sid, &hub, started.servers, life)
+        .await
+        .expect("install");
+    assert_eq!(
+        crate::mcp::MAX_ADVERTISED_MCP_TOOLS,
+        fake_hub_tool_ids(&hub, &sid).len(),
+        "the configure path must stop registering at the advertisement cap"
+    );
+    server_task.abort();
+}
+/// The legacy client-driven path (`workspace.configure_mcp`, used when
+/// `bind_mcp` is None: sandbox, standalone, Grok Build) across the full
+/// lifecycle: configure → hub unbind teardown → REBIND (which must re-open
+/// the `Closed` binding even without a machine-owned config) → configure
+/// again succeeds. Without the re-open, the drive fails closed on `Closed`
+/// forever and the session can never attach servers again.
+#[tokio::test]
+async fn a_rebind_reopens_for_the_client_driven_configure_path() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let config = WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    assert!(config.bind_mcp.is_none());
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("legacy").unwrap();
+    let hub = FakeHubRegistry::default();
+    async fn configure(
+        handle: &WorkspaceHandle,
+        hub: &FakeHubRegistry,
+        sid: &fuigo_tool_protocol::SessionId,
+        server: agent_client_protocol::McpServer,
+    ) -> crate::error::WorkspaceResult<()> {
+        let session = handle.session("legacy").expect("session");
+        let (started, life) = crate::mcp::connect_servers(
+            &session,
+            "legacy",
+            vec![server],
+            std::time::Duration::from_secs(5),
+            &std::collections::HashSet::new(),
+            fuigo_session_events::EventWriter::noop(),
+        )
+        .await?;
+        crate::mcp::install_and_advertise_qualified(&session, sid, hub, started.servers, life).await
+    }
+    resolver(sid.clone(), None).await.expect("first bind");
+    configure(&handle, &hub, &sid, configured_test_mcp("cfg", url.clone()))
+        .await
+        .expect("first configure succeeds");
+    assert!(
+        fake_hub_tool_ids(&hub, &sid)
+            .iter()
+            .any(|id| id.contains("echo")),
+        "configure must advertise the qualified tool"
+    );
+    handle.teardown_session_mcp("legacy").await;
+    let err = configure(&handle, &hub, &sid, configured_test_mcp("cfg", url.clone()))
+        .await
+        .expect_err("configure on a Closed binding fails");
+    assert!(matches!(err, WorkspaceError::SessionNotFound(_)));
+    resolver(sid.clone(), None).await.expect("rebind");
+    configure(&handle, &hub, &sid, configured_test_mcp("cfg", url))
+        .await
+        .expect("configure after rebind must succeed");
+    assert!(
+        fake_hub_tool_ids(&hub, &sid)
+            .iter()
+            .any(|id| id.contains("echo")),
+        "the re-opened session must advertise again"
+    );
+    server_task.abort();
+}
+/// Carrier #6, HIGH shape: hub registrations are life-tagged, so a stale
+/// in-flight teardown's unregister batch (tagged with the life it closed)
+/// can never remove the registration a revived life has since made under
+/// the same id. The revive's register SUPERSEDES the stale ledger entry
+/// (same id, older life) instead of being refused as a duplicate.
+#[tokio::test]
+async fn a_stale_teardown_unregister_cannot_remove_a_revived_lifes_tool() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("relife").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "relife", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()));
+    let session = handle.session("relife").expect("session");
+    let life1 = session.mcp_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    handle.teardown_session_mcp("relife").await;
+    resolver(sid.clone(), None).await.expect("revive bind");
+    converge_with(&handle, "relife", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(
+        fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()),
+        "the revived life must be able to re-register the id its stale \
+         predecessor still holds on the hub (supersede, not duplicate-refuse)"
+    );
+    let removed = crate::mcp::HubToolRegistry::unregister_tool_dynamic(
+        &hub,
+        &ToolId::new("echo").unwrap(),
+        &sid,
+        life1,
+    )
+    .await
+    .expect("unregister call succeeds");
+    assert!(!removed, "a stale life's unregister must be a no-op");
+    assert!(
+        fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()),
+        "the revived life's registration must survive the stale teardown batch"
+    );
+    server_task.abort();
+}
+/// Carrier #6, MEDIUM shape: an `Always` reclaim that takes an id away from
+/// the MCP side must not strip a resolver-installed NATIVE handler that has
+/// since taken the id — unregisters remove only matching-life DYNAMIC
+/// registrations, by Arc identity, never by bare id.
+#[tokio::test]
+async fn a_reclaim_unregister_cannot_strip_a_native_tool() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("native-clash").unwrap();
+    let hub = FakeHubRegistry::default();
+    let resolved = resolver(sid.clone(), None).await.expect("bind");
+    hub.install_bind_response(&sid, resolved.handlers);
+    converge_with(
+        &handle,
+        "native-clash",
+        &hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    assert!(fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()));
+    let resolved = resolver(sid.clone(), None).await.expect("rebind");
+    let mut with_native = resolved.handlers;
+    let native_echo: Arc<dyn fuigo_computer_hub_sdk::ToolServerHandler> =
+        Arc::new(StaticHandler::new("echo"));
+    with_native.push(native_echo);
+    hub.install_bind_response(&sid, with_native);
+    let session = handle.session("native-clash").expect("session");
+    session
+        .mcp_native_tool_ids
+        .lock()
+        .insert(ToolId::new("echo").unwrap());
+    converge_with(
+        &handle,
+        "native-clash",
+        &hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    let ids = fake_hub_tool_ids(&hub, &sid);
+    assert!(
+        ids.contains(&"echo".to_owned()),
+        "the native `echo` must survive the reclaim's unregister: {ids:?}"
+    );
+    server_task.abort();
+}
+/// A drop must never orphan a life: `drop_session_with_teardown` unmaps
+/// FIRST and then tears down the unmapped Arc — the reverse order let a
+/// revive bind enrol between the teardown and the unmap, leaving that new
+/// life Active on a session no id lookup could ever reach (so no hub
+/// unbind, reload, or drop could clean it up). The teardown's hub-handle
+/// acquisition is a deterministic park point: holding `hub_handle` while
+/// the drop runs opens the window, and the revive bind lands inside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_racing_a_revive_bind_orphans_no_life() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("bound", url)])
+            .with_discovery_timeout(std::time::Duration::from_millis(300)),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("dropped").unwrap();
+    resolver(sid.clone(), None).await.expect("first bind");
+    let first_arc = handle.session("dropped").expect("mapped");
+    let gate = handle.shared.hub_handle.lock().await;
+    let drop_task = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .drop_session_with_teardown("dropped", "dropped")
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    resolver(sid, None).await.expect("revive bind");
+    drop(gate);
+    drop_task.await.unwrap().expect("drop succeeds");
+    let first_active = first_arc.mcp_binding.lock().await.active().is_some();
+    let mapped = handle.session("dropped");
+    assert!(
+        !first_active || mapped.as_ref().is_some_and(|s| Arc::ptr_eq(s, &first_arc)),
+        "the revive's life was orphaned: Active on an unmapped session"
+    );
+    let mapped = mapped.expect("the revive bind's session must be reachable");
+    assert!(
+        mapped.mcp_binding.lock().await.active().is_some(),
+        "the revive bind's session must be enrolled"
+    );
+    server_task.abort();
+}
+/// The drive's cancel snapshot must belong to the life its entry check saw
+/// (it is taken inside that same critical section): a teardown of that life
+/// then aborts the drive promptly, instead of the drive continuing to start
+/// servers under a newer life's token that the old teardown never cancelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drives_token_belongs_to_the_life_it_checked() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&reached), Arc::clone(&release))),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("gated", url);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                std::time::Duration::from_secs(10),
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    reached.notified().await;
+    handle.teardown_session_mcp("main").await;
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        if matches!(*binding, crate::session::WorkspaceMcpBinding::Closed) {
+            *binding = crate::session::WorkspaceMcpBinding::Uninitialized;
+            *session.mcp_cancel.lock() = tokio_util::sync::CancellationToken::new();
+        }
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    release.notify_one();
+    let outcome = drive.await.unwrap();
+    assert!(
+        matches!(outcome, Err(WorkspaceError::SessionNotFound(_))),
+        "the drive must abort when its life's token is cancelled"
+    );
+    assert!(
+        rx.recv().await.is_none(),
+        "an aborted drive must not deliver outcomes into the revived life"
+    );
+    server_task.abort();
+}
+/// The other half of the `mcp_epoch` life fence: a hub `session.unbind`
+/// snapshots the epoch when the frame arrives and runs its teardown on a
+/// spawned task — if a reconnect bind enrols a NEW life before that task
+/// runs, the stale teardown must be refused, or it would end a life the
+/// hub still considers live (and no further teardown would come for it).
+#[tokio::test]
+async fn a_stale_unbind_teardown_skips_a_newer_life() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("unbind-race").unwrap();
+    resolver(sid.clone(), None).await.expect("bind");
+    let session = handle.session("unbind-race").expect("session exists");
+    let unbind_generation = session
+        .mcp_bind_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    handle.teardown_session_mcp("unbind-race").await;
+    resolver(sid, None).await.expect("revive bind");
+    assert_eq!(
+        live_mcp_servers(&handle, "unbind-race").await,
+        Some(Vec::new()),
+        "the revive must have enrolled a new life"
+    );
+    assert!(
+        !handle
+            .teardown_session_mcp_for_event("unbind-race", unbind_generation)
+            .await,
+        "a teardown gated on a superseded life must be refused"
+    );
+    assert_eq!(
+        live_mcp_servers(&handle, "unbind-race").await,
+        Some(Vec::new()),
+        "the new life must survive the stale unbind"
+    );
+    let session = handle.session("unbind-race").expect("session exists");
+    let current_generation = session
+        .mcp_bind_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        handle
+            .teardown_session_mcp_for_event("unbind-race", current_generation)
+            .await,
+        "a teardown gated on the current life must run"
+    );
+    assert_eq!(
+        live_mcp_servers(&handle, "unbind-race").await,
+        None,
+        "the current-life teardown must close the binding"
+    );
+    server_task.abort();
+}
+/// Every other collision test goes through bind, where nothing is registered
+/// on the hub yet. Only a reload can orphan a registration: when a reload
+/// adds a server whose tool name clashes with a running one, the ambiguity
+/// rule drops the id from both servers — so the id the survivor had
+/// registered must be unregistered, or it stays on the hub owned by nobody
+/// and no later removal ever cleans it up.
+#[tokio::test]
+async fn reload_collision_unregisters_the_id_the_surviving_server_lost() {
+    let (first_url, first_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let (second_url, second_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let first = configured_test_mcp("first", first_url);
+    let second = configured_test_mcp("second", second_url);
+    config.bind_mcp = Some(BindMcpConfig::new([first.clone()]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("collide").unwrap();
+    let resolved = resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    hub.install_bind_response(&sid, resolved.handlers);
+    converge_with(&handle, "collide", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "collide").await,
+        Some(vec![("first".to_owned(), vec!["echo".to_owned()])])
+    );
+    let session = handle.session("collide").unwrap();
+    let delta = {
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            "collide",
+            &BindMcpConfig::new([first.clone(), second]),
+            &hub,
+            crate::mcp::McpReclaim::IfChanged,
+            fuigo_session_events::EventWriter::noop(),
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(delta.added, vec!["second".to_owned()]);
+    assert_eq!(
+        live_mcp_servers(&handle, "collide").await,
+        Some(vec![
+            ("first".to_owned(), Vec::new()),
+            ("second".to_owned(), Vec::new()),
+        ]),
+        "an ambiguous id must be dropped from both servers"
+    );
+    assert!(
+        !fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()),
+        "the id the surviving server lost must be unregistered from the hub"
+    );
+    let delta = {
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            "collide",
+            &BindMcpConfig::new([first]),
+            &hub,
+            crate::mcp::McpReclaim::IfChanged,
+            fuigo_session_events::EventWriter::noop(),
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(delta.removed, vec!["second".to_owned()]);
+    assert_eq!(
+        live_mcp_servers(&handle, "collide").await,
+        Some(vec![("first".to_owned(), vec!["echo".to_owned()])])
+    );
+    assert!(
+        fake_hub_tool_ids(&hub, &sid).contains(&"echo".to_owned()),
+        "the resolved id must be advertised again"
+    );
+    first_task.abort();
+    second_task.abort();
+}
+#[tokio::test]
+async fn bind_mcp_discovery_is_concurrent_and_bounded() {
+    let (hanging_url, hanging_task) = spawn_bind_mcp_server(BindMcpTestState {
+        hang_tools_list: true,
+        ..Default::default()
+    })
+    .await;
+    let (ready_url, ready_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([
+            configured_test_mcp("hanging", hanging_url),
+            configured_test_mcp("ready", ready_url),
+        ])
+        .with_discovery_timeout(std::time::Duration::from_secs(1)),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("bounded-mcp").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed regardless of MCP servers");
+    let hub = FakeHubRegistry::default();
+    let started_at = std::time::Instant::now();
+    let delta = converge_with(&handle, "bounded-mcp", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(
+        started_at.elapsed() < std::time::Duration::from_secs(3),
+        "one hanging server must not extend the deadline"
+    );
+    assert_eq!(delta.added, vec!["ready".to_owned()]);
+    assert_eq!(delta.failed, vec!["hanging".to_owned()]);
+    let echo = hub
+        .handlers_for_session(&sid)
+        .into_iter()
+        .find(|handler| handler.tool_id().as_str() == "echo")
+        .expect("ready echo handler must be registered");
+    assert_eq!(echo.description().namespace.as_deref(), Some("ready"));
+    hanging_task.abort();
+    ready_task.abort();
+}
+/// Strict mode, preset-only bind: the full resolver path fails closed —
+/// RPC-only advertise + a `missing_tool_config` reason in the bind report.
 #[tokio::test]
 async fn strict_bind_without_explicit_toolset_fails_closed_end_to_end() {
     let handle = make_strict_handle();
@@ -5017,6 +7541,7 @@ fn make_handle_with_queue_routing(
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        bind_mcp: None,
     };
     let home = tempfile::tempdir().unwrap();
     let auth: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));

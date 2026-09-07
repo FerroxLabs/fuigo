@@ -709,6 +709,7 @@ struct RetainedResources {
     /// Same `Arc` is cloned onto `ToolContext` at spawn.
     /// Released by `remove_session`.
     live_orphan_heal_lock: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
+    config_mutation_lock: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
     permission_event_receiver: Option<
         tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>,
     >,

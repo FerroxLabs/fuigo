@@ -74,7 +74,11 @@ impl super::super::coordinator::ChildRunner for BackendTestRunner {
 
 #[async_trait::async_trait]
 impl SubagentBackend for BackendWithoutActiveMessages {
-    async fn spawn(&self, _request: SubagentRequest) -> Result<SubagentResult, ToolError> {
+    async fn spawn(
+        &self,
+        _request: SubagentRequest,
+        _registered_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<SubagentResult, ToolError> {
         Err(ToolError::custom("unsupported", "spawn unsupported"))
     }
 
@@ -161,7 +165,7 @@ async fn channel_backend_spawn_success() {
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
-    let result = backend.spawn(request).await.unwrap();
+    let result = backend.spawn(request, None).await.unwrap();
     assert!(result.success);
     assert_eq!(result.subagent_id, "test-id");
     assert_eq!(result.tool_calls, 3);
@@ -194,7 +198,7 @@ async fn channel_backend_spawn_closed_channel() {
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
-    let err = backend.spawn(request).await.unwrap_err();
+    let err = backend.spawn(request, None).await.unwrap_err();
     assert!(err.to_string().contains("channel closed"));
 }
 
@@ -470,7 +474,7 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
         let cancel_token = request.cancel_token.clone();
         let task = tokio::spawn({
             let backend = backend.clone();
-            async move { backend.spawn(request).await }
+            async move { backend.spawn(request, None).await }
         });
         let spawned = recv_event!(rx, Spawn);
         task.abort();
@@ -512,7 +516,7 @@ async fn channel_backend_spawn_result_dropped() {
         cancel_token: tokio_util::sync::CancellationToken::new(),
     };
 
-    let err = backend.spawn(request).await.unwrap_err();
+    let err = backend.spawn(request, None).await.unwrap_err();
     assert!(
         err.to_string().contains("result channel dropped"),
         "error: {err}"

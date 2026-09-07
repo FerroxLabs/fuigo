@@ -57,11 +57,11 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
             Command::Inspect { .. }
             | Command::Doctor(_)
             | Command::Leader(_)
-            | Command::Logout
+            | Command::Logout { .. }
             | Command::Mcp(_)
             | Command::Plugin(_)
             | Command::Memory(_)
-            | Command::Models
+            | Command::Models { .. }
             | Command::Sessions(_)
             | Command::Usage(_)
             | Command::Setup { .. }
@@ -91,13 +91,13 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
         None
         | Some(Command::Agent(_))
         | Some(Command::Dashboard)
-        | Some(Command::Models)
+        | Some(Command::Models { .. })
         | Some(Command::Worktree(_)) => true,
         Some(
             Command::Inspect { .. }
             | Command::Doctor(_)
             | Command::Leader(_)
-            | Command::Logout
+            | Command::Logout { .. }
             | Command::Login { .. }
             | Command::Mcp(_)
             | Command::Plugin(_)
@@ -1907,6 +1907,38 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+/// Subscription auth is dispatched before telemetry, session housekeeping and agent startup.
+fn dispatch_subscription_if_requested(args: &PagerArgs) -> bool {
+    use fuigo_shell::auth::subscription;
+    let Some(command) = args.command.as_ref() else { return false; };
+    if !matches!(command, Command::Login { provider: Some(_), .. } | Command::Logout { provider: Some(_), .. } | Command::Models { provider: Some(_) }) {
+        return false;
+    }
+    let result = (|| -> anyhow::Result<()> {
+        fuigo_config::validate_requirements()?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        runtime.block_on(async {
+            match command {
+                Command::Login { provider: Some(provider), status, .. } => {
+                    if *status { subscription::cli_status(*provider).await?; }
+                    else { subscription::cli_login(*provider).await?; }
+                }
+                Command::Logout { provider: Some(provider), account } => {
+                    subscription::default_store()?.logout(*provider, account.as_deref()).await?;
+                    println!("{} subscription credentials removed from Fuigo.", provider.name());
+                }
+                Command::Models { provider: Some(provider) } => subscription::cli_models(*provider).await?,
+                _ => unreachable!("subscription command checked above"),
+            }
+            Ok(())
+        })
+    })();
+    if let Err(error) = result {
+        eprintln!("Fuigo subscription command failed: {error}");
+        std::process::exit(1);
+    }
+    true
+}
 fn main() {
     fuigo_version::set_full_version(env!("VERSION_WITH_COMMIT"));
     fuigo_telemetry::startup::mark_process_start();
@@ -1920,7 +1952,7 @@ fn main() {
         fuigo_update::channel_name().unwrap_or_default(),
     ));
     let args = PagerArgs::parse_cli();
-    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) || dispatch_subscription_if_requested(&args) {
         return;
     }
     fuigo_pager_minimal::install();
@@ -2164,7 +2196,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = fuigo_telemetry::otel_layer::otel_guard();
                 return fuigo_pager::plugin_cmd::run(plugin_args).await;
             }
-            Command::Models => {
+            Command::Models { .. } => {
                 init_tracing_simple("cli");
                 let _otel_guard = fuigo_telemetry::otel_layer::otel_guard();
                 let agent_config = fuigo_shell::config::load_agent_config_disk_only()
@@ -2253,11 +2285,21 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 .await;
             }
             Command::Login {
+                provider,
+                status,
                 legacy: _,
                 oauth,
                 device_auth,
                 devbox,
             } => {
+                if let Some(provider) = provider {
+                    if status {
+                        fuigo_shell::auth::subscription::cli_status(provider).await?;
+                    } else {
+                        fuigo_shell::auth::subscription::cli_login(provider).await?;
+                    }
+                    return Ok(());
+                }
                 init_tracing_simple("cli");
                 let _otel_guard = fuigo_telemetry::otel_layer::otel_guard();
                 let config = fuigo_shell::config::load_agent_config_disk_only()
@@ -2266,7 +2308,12 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 println!();
                 fuigo_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout => {
+            Command::Logout { provider, account } => {
+                if let Some(provider) = provider {
+                    fuigo_shell::auth::subscription::default_store()?.logout(provider, account.as_deref()).await?;
+                    println!("{} subscription credentials removed from Fuigo.", provider.name());
+                    return Ok(());
+                }
                 init_tracing_simple("cli");
                 let config = fuigo_shell::config::load_agent_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;

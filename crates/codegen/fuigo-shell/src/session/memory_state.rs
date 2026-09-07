@@ -135,7 +135,7 @@ impl SessionMemory {
             if let Some(ref params) = self.backend_params
                 && let Some(provider) = params.make_embedding_provider().await
             {
-                crate::session::memory::embed_missing_chunks(&index, &provider).await;
+                crate::session::memory::embed_missing_chunks(&mut index, &provider).await;
             }
         }
     }

@@ -542,7 +542,7 @@ async fn create_injection_ready_actor(
     let storage =
         crate::session::memory::MemoryStorage::with_paths(global_dir, workspace_dir.clone());
     crate::session::memory::index::init_sqlite_vec();
-    let note = tmp.path().join("note.md");
+    let note = workspace_dir.join("note.md");
     std::fs::write(
         &note,
         "# Conventions\n\nProject uses Rust for backend services.",

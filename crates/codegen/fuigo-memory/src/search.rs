@@ -228,34 +228,13 @@ pub(super) fn hybrid_search_merge(
     let mut fts_scores: HashMap<String, f64> = HashMap::new();
     let mut vec_scores: HashMap<String, f64> = HashMap::new();
 
-    // Normalize FTS BM25 scores to [0,1]. FTS5 ranks are negative; more negative means a better match.
-    if !fts_results.is_empty() {
-        let min_rank = fts_results
-            .iter()
-            .map(|r| r.rank)
-            .fold(f64::INFINITY, f64::min);
-        let max_rank = fts_results
-            .iter()
-            .map(|r| r.rank)
-            .fold(f64::NEG_INFINITY, f64::max);
-        // With only one FTS result, min_rank == max_rank, so range = EPSILON and normalized = 1.0: a single result gets full score
-        let range = (max_rank - min_rank).max(f64::EPSILON);
-
-        for r in &fts_results {
-            // Flip so the best (most negative) rank normalizes to 1.0
-            let normalized = 1.0 - (r.rank - min_rank) / range;
-            fts_scores.insert(r.chunk_id.clone(), normalized);
-        }
+    for result in &fts_results {
+        fts_scores.insert(result.chunk_id.clone(), result.confidence);
     }
 
-    // Normalize vector distances to [0,1] similarity on an absolute scale
-    // For normalized embeddings, L2 distance ranges from 0 (identical) to 2 (opposite), so `similarity = 1.0 - distance / 2.0` maps it to [0, 1]
-    // Relative normalization (`1 - d/max_d`) would collapse all scores to near-zero when candidates cluster in a narrow distance band
-    // High-dimensional embeddings cluster that way (concentration of measure)
-    // The constant `2.0` is the theoretical maximum L2 distance between two unit-norm vectors: `||u - v||₂ = sqrt(2 - 2·cos(θ)) ≤ sqrt(4) = 2`
-    const MAX_L2_DISTANCE: f64 = 2.0;
+    // Unit-vector cosine is 1 - squared L2 / 2, on an absolute scale.
     for (chunk_id, distance) in &vec_results {
-        let similarity = (1.0 - (*distance as f64 / MAX_L2_DISTANCE)).clamp(0.0, 1.0);
+        let similarity = (1.0 - f64::from(*distance).powi(2) / 2.0).clamp(0.0, 1.0);
         vec_scores.insert(chunk_id.clone(), similarity);
     }
 
@@ -281,7 +260,7 @@ pub(super) fn hybrid_search_merge(
             fts
         } else {
             // Vector-only: weighted vector score
-            vector_weight * vec
+            vec
         };
 
         scores.insert(chunk_id.clone(), score);
@@ -298,16 +277,24 @@ pub(super) fn hybrid_search_merge(
     // Pairs the unclamped ranking score with each result (see the raw_score / display_score split below)
     let mut ranked: Vec<(f64, SearchResult)> = Vec::new();
 
+    let latest_facts = index.latest_fact_versions()?;
     for (chunk_id, base_score) in &scores {
         let Some(chunk) = index.get_chunk(chunk_id).ok().flatten() else {
             continue;
         };
 
         // Filter at search time (not index time) so already-indexed stubs are excluded without requiring a reindex
-        if is_content_free(&chunk.text, &chunk.source) {
+        if !index.chunk_is_current(&chunk) || is_content_free(&chunk.text, &chunk.source) {
             continue;
         }
 
+        if let Some(key) = super::safety::fact_key(&chunk.text)
+            && latest_facts
+                .get(&key)
+                .is_some_and(|(_, id)| id != &chunk.id)
+        {
+            continue;
+        }
         let decay_multiplier =
             temporal_decay_multiplier(&chunk.source, chunk.created_at, now_secs, half_life);
 
@@ -326,7 +313,9 @@ pub(super) fn hybrid_search_merge(
         // The stored display_score is clamped so it reads as a [0,1] similarity
         // Gating on display_score keeps the threshold and the stored value in agreement
         let raw_score = base_score * decay_multiplier * source_weight * access_boost;
-        let display_score = raw_score.clamp(0.0, 1.0);
+        // Popularity changes ordering, never admission confidence.
+        let display_score =
+            (base_score * decay_multiplier * source_weight.min(1.0)).clamp(0.0, 1.0);
 
         if display_score >= config.min_score as f64 {
             ranked.push((
@@ -356,7 +345,17 @@ pub(super) fn hybrid_search_merge(
         Vec::new()
     };
     let mut results: Vec<SearchResult> = Vec::with_capacity(ranked.len());
+    let mut seen = std::collections::HashSet::new();
     for (raw_score, result) in ranked {
+        let normalized = result
+            .snippet
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if !seen.insert(normalized) {
+            continue;
+        }
         if mmr_enabled {
             relevance.push(raw_score);
         }
@@ -380,8 +379,8 @@ mod tests {
     use crate::embedding::MockEmbeddingProvider;
     use crate::index::{MemoryIndex, init_sqlite_vec};
     use crate::storage::MemoryStorage;
-    use tempfile::TempDir;
     use fuigo_config_types::{MemoryIndexConfig, MemorySearchConfig};
+    use tempfile::TempDir;
 
     struct FailingEmbeddingProvider;
 
@@ -407,6 +406,7 @@ mod tests {
         init_sqlite_vec();
         let global = tmp.path().join("memory");
         let workspace = global.join("test_ws");
+        std::fs::create_dir_all(&workspace).unwrap();
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = tmp.path().join("test.sqlite");
         MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 4).unwrap()
@@ -416,7 +416,7 @@ mod tests {
     fn vector_failure_falls_back_to_fts() {
         let tmp = TempDir::new().unwrap();
         let mut index = test_index(&tmp);
-        let file = tmp.path().join("test.md");
+        let file = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file, "# Guide\n\nRust programming.").unwrap();
         index.reindex_file(&file, "workspace").unwrap();
         index.db().execute("DROP TABLE chunks_vec", []).unwrap();
@@ -439,7 +439,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Guide\n\nRust programming language tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -462,7 +462,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Guide\n\nPython tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -481,7 +481,7 @@ mod tests {
 
         // Create multiple matching files
         for i in 0..10 {
-            let file_path = tmp.path().join(format!("test_{i}.md"));
+            let file_path = tmp.path().join(format!("memory/test_ws/test_{i}.md"));
             std::fs::write(&file_path, format!("# Doc {i}\n\nRust content {i}.")).unwrap();
             idx.reindex_file(&file_path, "workspace").unwrap();
         }
@@ -536,7 +536,7 @@ mod tests {
         let mock = MockEmbeddingProvider { dimensions: 4 };
 
         // Index a file and embed its chunks
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file_path, "# Guide\n\nRust programming language tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
@@ -679,11 +679,11 @@ mod tests {
         let mut idx = test_index(&tmp);
 
         // Index a workspace file (evergreen) and a session file (decays)
-        let ws_file = tmp.path().join("ws.md");
+        let ws_file = tmp.path().join("memory/test_ws/ws.md");
         std::fs::write(&ws_file, "# WS\n\nRust workspace content about memory.").unwrap();
         idx.reindex_file(&ws_file, "workspace").unwrap();
 
-        let sess_file = tmp.path().join("sess.md");
+        let sess_file = tmp.path().join("memory/test_ws/sess.md");
         std::fs::write(&sess_file, "# Sess\n\nRust session content about memory.").unwrap();
         idx.reindex_file(&sess_file, "session").unwrap();
 
@@ -733,64 +733,26 @@ mod tests {
     // PR-8: access-frequency boost tests
     // -----------------------------------------------------------------------
 
-    /// A chunk with access_count > 0 scores higher than an identical chunk with access_count = 0, all else equal.
+    /// Popularity chooses which duplicate survives, but does not raise confidence.
     #[tokio::test]
-    async fn test_access_boost_raises_frequently_accessed_chunks() {
+    async fn test_access_boost_orders_and_deduplicates_without_promoting_confidence() {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
-
-        // Two files with nearly identical content; chunk B is accessed once.
-        let fa = tmp.path().join("chunk_a.md");
-        let fb = tmp.path().join("chunk_b.md");
-        std::fs::write(&fa, "# Rust\n\nRust ownership model explained.").unwrap();
-        std::fs::write(&fb, "# Rust\n\nRust ownership model explained.").unwrap();
-        idx.reindex_file(&fa, "workspace").unwrap();
-        idx.reindex_file(&fb, "workspace").unwrap();
-
-        // Record one access for chunk B.
-        let chunk_b_id = format!("{}:0", fb.to_string_lossy());
-        idx.record_access(&chunk_b_id).unwrap();
-
-        // Use the DEFAULT config (all source_weights = 1.0)
-        // Both chunks normalize to base_score = 1.0 as the top FTS matches, so their display scores both clamp to 1.0
-        // Ranking is performed on the UNCLAMPED score, so the access boost still orders the accessed chunk first
-        // This exercises the common default-config path where the clamp would otherwise make the boost inert
-        let config = MemorySearchConfig::default();
-        let results = hybrid_search_merge(
-            &idx,
-            idx.search_fts("rust ownership", 10).unwrap(),
-            None,
-            &config,
-        )
-        .unwrap()
-        .results;
-
-        // Both chunks must be returned so the test cannot pass vacuously
-        let pos_a = results
-            .iter()
-            .position(|r| r.path == fa.to_string_lossy().as_ref())
-            .expect("chunk A must be returned");
-        let pos_b = results
-            .iter()
-            .position(|r| r.path == fb.to_string_lossy().as_ref())
-            .expect("chunk B must be returned");
-
-        // The accessed chunk (B) must rank ahead of the unaccessed chunk (A), even though both display scores clamp to 1.0 under default weights
+        let a = tmp.path().join("memory/test_ws/a.md");
+        let b = tmp.path().join("memory/test_ws/b.md");
+        for path in [&a, &b] {
+            std::fs::write(path, "Rust ownership model explained.").unwrap();
+            idx.reindex_file(path, "workspace").unwrap();
+        }
+        idx.record_access(&format!("{}:0", b.display())).unwrap();
+        let results = hybrid_search(&idx, None, "rust ownership", &MemorySearchConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "identical snippets deduplicate");
+        assert_eq!(results[0].path, b.to_string_lossy());
         assert!(
-            pos_b < pos_a,
-            "accessed chunk (rank {pos_b}) should rank ahead of unaccessed (rank {pos_a})",
-        );
-        // Pin the premise: both display scores are exactly 1.0, the collision that ranking on the unclamped score resolves
-        // The rank ordering above therefore can only come from the unclamped score
-        assert!(
-            (results[pos_a].score - 1.0).abs() < 1e-9,
-            "unaccessed display score ({:.6}) must clamp to exactly 1.0",
-            results[pos_a].score,
-        );
-        assert!(
-            (results[pos_b].score - 1.0).abs() < 1e-9,
-            "accessed display score ({:.6}) must clamp to exactly 1.0",
-            results[pos_b].score,
+            (results[0].score - 0.98).abs() < 1e-6,
+            "access must not raise admission confidence"
         );
     }
 
@@ -805,9 +767,9 @@ mod tests {
         let mut idx = test_index(&tmp);
 
         // Two identical (redundant) chunks + one diverse chunk, all matching.
-        let fa = tmp.path().join("a.md");
-        let fb = tmp.path().join("b.md");
-        let fc = tmp.path().join("c.md");
+        let fa = tmp.path().join("memory/test_ws/a.md");
+        let fb = tmp.path().join("memory/test_ws/b.md");
+        let fc = tmp.path().join("memory/test_ws/c.md");
         std::fs::write(&fa, "# Rust\n\nRust ownership model explained.").unwrap();
         std::fs::write(&fb, "# Rust\n\nRust ownership model explained.").unwrap();
         std::fs::write(&fc, "# Borrow\n\nRust borrowing and lifetimes guide.").unwrap();
@@ -840,21 +802,28 @@ mod tests {
             !results.is_empty(),
             "MMR-enabled search must return results"
         );
-        let pos_a = results
-            .iter()
-            .position(|r| r.path == fa.to_string_lossy().as_ref())
-            .expect("chunk A must be returned");
         let pos_b = results
             .iter()
             .position(|r| r.path == fb.to_string_lossy().as_ref())
             .expect("chunk B must be returned");
+        let pos_c = results
+            .iter()
+            .position(|r| r.path == fc.to_string_lossy().as_ref())
+            .expect("diverse chunk C must be returned");
 
-        // With MMR on, the access-boosted chunk (B) ranks ahead of its identical twin (A)
-        // MMR's relevance term reads the unclamped `relevance` slice; both chunks share a clamped display score of 1.0
+        // Access ranking selects B before deduplication removes its identical
+        // twin A. MMR retains the distinct alternative C after B.
         assert!(
-            pos_b < pos_a,
-            "boosted chunk (rank {pos_b}) should rank ahead of its twin (rank {pos_a}) with MMR on",
+            results
+                .iter()
+                .all(|r| r.path != fa.to_string_lossy().as_ref()),
+            "identical lower-ranked chunk A must be deduplicated"
         );
+        assert!(
+            pos_b < pos_c,
+            "boosted chunk (rank {pos_b}) should rank ahead of diverse chunk (rank {pos_c}) with MMR on",
+        );
+        assert_eq!(results.len(), 2, "one boosted twin and one diverse result");
     }
 
     // -----------------------------------------------------------------------
@@ -868,7 +837,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(
             &file_path,
             "# Rust Guide\n\nRust programming language ownership and borrowing tutorial.",
@@ -903,7 +872,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("global.md");
+        let file_path = tmp.path().join("memory/MEMORY.md");
         std::fs::write(
             &file_path,
             "# Project Conventions\n\nAlways use graphite for PRs. Never commit without review.",
@@ -940,7 +909,7 @@ mod tests {
         let mock = MockEmbeddingProvider { dimensions: 4 };
 
         // File A: has both FTS and vector embedding
-        let file_a = tmp.path().join("embedded.md");
+        let file_a = tmp.path().join("memory/test_ws/embedded.md");
         std::fs::write(
             &file_a,
             "# Rust\n\nRust programming language ownership tutorial.",
@@ -956,7 +925,7 @@ mod tests {
         idx.upsert_embedding(&chunk_a_id, &embeddings[0]).unwrap();
 
         // File B: FTS only (no embedding)
-        let file_b = tmp.path().join("unembedded.md");
+        let file_b = tmp.path().join("memory/test_ws/unembedded.md");
         std::fs::write(
             &file_b,
             "# Rust\n\nRust programming language borrowing tutorial.",
@@ -1009,7 +978,7 @@ mod tests {
         let mut idx = test_index(&tmp);
         let mock = MockEmbeddingProvider { dimensions: 4 };
 
-        let file = tmp.path().join("test.md");
+        let file = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(&file, "# Test\n\nContent for vector search test.").unwrap();
         idx.reindex_file(&file, "workspace").unwrap();
 
@@ -1193,19 +1162,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let stub_path = tmp.path().join("stub.md");
+        let stub_path = tmp.path().join("memory/MEMORY.md");
         std::fs::write(&stub_path, GLOBAL_STUB).unwrap();
         idx.reindex_file(&stub_path, "global").unwrap();
 
-        // A real-content global file that also matches the query.
-        let real_path = tmp.path().join("real.md");
+        // A real-content workspace file that also matches the query.
+        let real_path = tmp.path().join("memory/test_ws/real.md");
         std::fs::write(
             &real_path,
             "# Conventions\n\nProject preferences: always use graphite for PRs. \
              Architecture is event-driven.",
         )
         .unwrap();
-        idx.reindex_file(&real_path, "global").unwrap();
+        idx.reindex_file(&real_path, "workspace").unwrap();
 
         // Precondition: the stub IS a raw FTS candidate for this query (the term "preferences" appears in it)
         // This proves the filter, not a non-match, removes it from the final results below
@@ -1241,7 +1210,7 @@ mod tests {
             results
                 .iter()
                 .any(|r| r.path == real_path.to_string_lossy().as_ref()),
-            "real-content global file must be returned"
+            "real-content workspace file must be returned"
         );
         assert!(
             results
@@ -1254,7 +1223,7 @@ mod tests {
     /// The display score must clamp to exactly 1.0 when the access boost pushes the unclamped product above 1.0.
     /// The precondition that the unclamped product really exceeds 1.0 is asserted explicitly so the test can't silently go vacuous.
     #[tokio::test]
-    async fn test_final_score_clamped_to_one() {
+    async fn test_frequency_never_promotes_admission_confidence() {
         // Precondition: the boost at 100 accesses really does exceed 1.0.
         let boost_at_100 = 1.0 + (100_f64).ln_1p() * 0.05;
         assert!(
@@ -1265,7 +1234,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut idx = test_index(&tmp);
 
-        let file_path = tmp.path().join("test.md");
+        let file_path = tmp.path().join("memory/test_ws/test.md");
         std::fs::write(
             &file_path,
             "# Rust\n\nRust ownership and borrowing tutorial.",
@@ -1299,8 +1268,8 @@ mod tests {
         );
         // The top chunk is a top FTS match (base 1.0) times workspace weight (1.0) times a boost above 1.0, so its unclamped score exceeds 1.0
         assert!(
-            (results[0].score - 1.0).abs() < 1e-9,
-            "display score ({:.6}) must clamp to exactly 1.0",
+            (results[0].score - 0.98).abs() < 1e-9,
+            "display confidence ({:.6}) must remain .98 despite popularity",
             results[0].score,
         );
         for r in &results {

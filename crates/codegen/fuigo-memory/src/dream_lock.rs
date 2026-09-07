@@ -1,140 +1,71 @@
-//! Coordination for background memory consolidation ("dream").
-//! [`DreamLock`] is a PID-based lock file whose mtime records the last consolidation.
-//! [`sessions_since`] counts session files modified after a given timestamp.
-
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-
-const LOCK_FILE_NAME: &str = ".dream-lock";
-
-/// Copy of `crate::util::is_process_alive`, kept local so the memory subsystem can move to its own crate.
-#[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
-    use nix::errno::Errno;
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-
-    // Signal 0 probes existence; EPERM means alive under a different UID.
-    match kill(Pid::from_raw(pid as i32), None) {
-        Ok(()) => true,
-        Err(Errno::ESRCH) => false,
-        Err(_) => true,
-    }
-}
-
-#[cfg(windows)]
-fn is_process_alive(pid: u32) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
-    };
-
-    // SAFETY: OpenProcess returns Err on absence/permission failure;
-    // PROCESS_SYNCHRONIZE is the minimum right needed for WaitForSingleObject.
-    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
-        return false;
-    };
-
-    // SAFETY: handle is valid; timeout 0 means "poll, don't block."
-    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
-    // SAFETY: handle is owned by us; close regardless of wait result.
-    let _ = unsafe { CloseHandle(handle) };
-
-    wait_result == WAIT_TIMEOUT
-}
+//! OS-backed consolidation exclusion and a separate durable success marker.
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 pub struct DreamLock {
     path: PathBuf,
+    marker: PathBuf,
 }
-
+pub struct DreamGuard {
+    _file: fs::File,
+    marker: PathBuf,
+}
 impl DreamLock {
     pub fn new(workspace_dir: &Path) -> Self {
         Self {
-            path: workspace_dir.join(LOCK_FILE_NAME),
+            path: workspace_dir.join(".dream-mutex"),
+            marker: workspace_dir.join(".dream-consolidated"),
         }
     }
-
-    /// Reads the last consolidation timestamp (the lock file's mtime).
-    /// Returns `None` if the lock file doesn't exist.
     pub fn last_consolidated_at(&self) -> io::Result<Option<SystemTime>> {
-        match fs::metadata(&self.path) {
+        match fs::metadata(&self.marker) {
             Ok(meta) => Ok(Some(meta.modified()?)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
-
-    /// Returns `Ok(Some(prior))` on success, where `prior` is the previous mtime (`None` if the file didn't exist).
-    /// Pass `prior` to [`Self::rollback`] if the dream fails.
-    /// Returns `Ok(None)` when a live process holds a lock younger than `stale_secs`; a dead PID or older file is reclaimed.
-    ///
-    /// Acquisition is best-effort: the write-then-verify step narrows the race, but two processes can rarely both believe they won.
-    /// Callers must tolerate duplicate consolidation (dream is idempotent).
-    pub fn try_acquire(&self, stale_secs: u64) -> io::Result<Option<Option<SystemTime>>> {
-        let prior = match fs::metadata(&self.path) {
-            Ok(meta) => {
-                let mtime = meta.modified()?;
-                if let Ok(content) = fs::read_to_string(&self.path)
-                    && let Ok(pid) = content.trim().parse::<u32>()
-                {
-                    let age = SystemTime::now()
-                        .duration_since(mtime)
-                        .unwrap_or_default()
-                        .as_secs();
-                    if age < stale_secs && is_process_alive(pid) {
-                        return Ok(None);
-                    }
-                }
-                Some(mtime)
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        };
-
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+    /// The OS releases this stable lock on drop or process exit. Never steal a live lock by age.
+    pub fn acquire(&self, _stale_secs: u64) -> io::Result<Option<DreamGuard>> {
+        fs::create_dir_all(self.path.parent().unwrap())?;
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        let our_pid = std::process::id();
-        fs::write(&self.path, our_pid.to_string())?;
-
-        // A concurrent acquirer may have overwritten our PID, so re-read to see who won
-        let content = fs::read_to_string(&self.path)?;
-        if content.trim().parse::<u32>().ok() == Some(our_pid) {
-            Ok(Some(prior))
-        } else {
-            Ok(None)
+        let file = opts.open(&self.path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(DreamGuard {
+                _file: file,
+                marker: self.marker.clone(),
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
     }
-
-    /// Restores the lock to its pre-acquire state after a failed dream.
-    /// If `prior` is `None` (no prior file), deletes the lock file.
-    pub fn rollback(&self, prior: Option<SystemTime>) -> io::Result<()> {
-        match prior {
-            None => {
-                if let Err(e) = fs::remove_file(&self.path)
-                    && e.kind() != io::ErrorKind::NotFound
-                {
-                    return Err(e);
-                }
-                Ok(())
-            }
-            Some(mtime) => {
-                // Clear the PID body so our alive PID doesn't block future reclaimers.
-                fs::write(&self.path, "")?;
-                let file = fs::File::options().write(true).open(&self.path)?;
-                file.set_times(fs::FileTimes::new().set_modified(mtime))
-            }
-        }
+}
+impl DreamGuard {
+    /// Stamp only after the complete operation succeeds; cancellation never changes this marker.
+    pub fn commit(self) -> bool {
+        self.commit_sources(&[])
     }
-
-    /// Rewrites the lock file so its mtime records the consolidation time.
-    pub fn record_consolidation(&self) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&self.path, std::process::id().to_string())
+    pub fn commit_sources(self, snapshots: &[(String, String)]) -> bool {
+        super::storage::update_file(&self.marker, |old| {
+            let mut processed: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(old).unwrap_or_default();
+            for (stem, content) in snapshots {
+                processed.insert(
+                    stem.clone(),
+                    blake3::hash(content.as_bytes()).to_hex().to_string(),
+                );
+            }
+            serde_json::to_string(&processed).expect("string map serialization")
+        })
+        .is_ok()
     }
 }
 
@@ -150,12 +81,18 @@ pub fn sessions_since(
         Err(e) => return Err(e),
     };
 
+    let marker = sessions_dir.parent().map(|p| p.join(".dream-consolidated"));
+    let processed: std::collections::BTreeMap<String, String> = marker
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     let mut result = Vec::new();
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") || !entry.file_type()?.is_file()
+        {
             continue;
         }
 
@@ -168,6 +105,13 @@ pub fn sessions_since(
             continue;
         }
 
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && let Some(prior) = processed.get(stem)
+            && let Ok(content) = fs::read(&path)
+            && *prior == blake3::hash(&content).to_hex().to_string()
+        {
+            continue;
+        }
         if entry.metadata()?.modified()? > since
             && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
         {
@@ -185,191 +129,94 @@ mod tests {
     use filetime::FileTime;
     use std::time::Duration;
     use tempfile::TempDir;
-
-    // --- DreamLock tests ---
-
     #[test]
-    fn no_file_means_no_prior_consolidation() {
-        let dir = TempDir::new().unwrap();
+    fn exclusion_and_cancellation_preserve_success() {
+        let dir = tempfile::tempdir().unwrap();
         let lock = DreamLock::new(dir.path());
+        let guard = lock.acquire(0).unwrap().unwrap();
+        assert!(lock.acquire(0).unwrap().is_none());
         assert!(lock.last_consolidated_at().unwrap().is_none());
+        drop(guard);
+        let guard = lock.acquire(0).unwrap().unwrap();
+        assert!(guard.commit());
+        let success = lock.last_consolidated_at().unwrap();
+        drop(lock.acquire(0).unwrap().unwrap());
+        assert_eq!(lock.last_consolidated_at().unwrap(), success);
+        assert!(lock.acquire(0).unwrap().is_some());
+    }
+    #[test]
+    fn marker_failure_keeps_retry_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DreamLock::new(dir.path());
+        fs::create_dir(&lock.marker).unwrap();
+        assert!(!lock.acquire(0).unwrap().unwrap().commit());
+        assert!(lock.acquire(0).unwrap().is_some());
+    }
+    #[test]
+    fn receipts_keep_changed_and_unprocessed_sources_eligible() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        fs::write(sessions.join("processed.md"), "original").unwrap();
+        fs::write(sessions.join("pending.md"), "pending").unwrap();
+        let lock = DreamLock::new(dir.path());
+        assert!(
+            lock.acquire(0)
+                .unwrap()
+                .unwrap()
+                .commit_sources(&[("processed".into(), "original".into())])
+        );
+        assert_eq!(
+            sessions_since(&sessions, SystemTime::UNIX_EPOCH, None).unwrap(),
+            vec!["pending"]
+        );
+        fs::write(sessions.join("processed.md"), "external edit").unwrap();
+        assert_eq!(
+            sessions_since(&sessions, SystemTime::UNIX_EPOCH, None).unwrap(),
+            vec!["pending", "processed"]
+        );
     }
 
     #[test]
-    fn acquire_on_empty_dir_writes_pid() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        let prior = lock.try_acquire(300).unwrap().expect("should acquire");
-        assert!(prior.is_none(), "no prior file existed");
-
-        let content = fs::read_to_string(&lock.path).unwrap();
-        assert_eq!(content, std::process::id().to_string());
-        assert!(lock.last_consolidated_at().unwrap().is_some());
+    #[ignore = "helper launched by cross_process_lock_released_after_exit"]
+    fn lock_process_child() {
+        let dir = std::path::PathBuf::from(std::env::var_os("FUIGO_DREAM_TEST_DIR").unwrap());
+        let lock = DreamLock::new(&dir);
+        let _guard = lock.acquire(0).unwrap().unwrap();
+        fs::write(dir.join("ready"), "ready").unwrap();
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-
     #[test]
-    fn rollback_none_deletes_file() {
+    fn cross_process_lock_released_after_exit() {
         let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        let prior = lock.try_acquire(300).unwrap().unwrap();
-        assert!(lock.path.exists());
-
-        lock.rollback(prior).unwrap();
-        assert!(!lock.path.exists());
-        assert!(lock.last_consolidated_at().unwrap().is_none());
-    }
-
-    #[test]
-    fn rollback_restores_prior_mtime() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        let old_time = SystemTime::now() - Duration::from_secs(7200);
-        fs::write(&lock.path, "4000000000").unwrap(); // Dead PID
-        filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old_time)).unwrap();
-
-        let prior = lock
-            .try_acquire(300)
-            .unwrap()
-            .expect("should reclaim dead PID");
-        let prior_mtime = prior.expect("prior file existed");
-
-        // The acquire above rewrote the file, so its mtime is roughly now
-        let fresh = lock.last_consolidated_at().unwrap().unwrap();
-        let fresh_age = SystemTime::now().duration_since(fresh).unwrap_or_default();
-        assert!(fresh_age.as_secs() < 5);
-
-        // Rollback restores old mtime
-        lock.rollback(Some(prior_mtime)).unwrap();
-        let restored = lock.last_consolidated_at().unwrap().unwrap();
-        let drift = restored
-            .duration_since(old_time)
-            .or_else(|_| old_time.duration_since(restored))
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dream_lock::tests::lock_process_child",
+                "--ignored",
+            ])
+            .env("FUIGO_DREAM_TEST_DIR", dir.path())
+            .stdout(std::process::Stdio::null())
+            .spawn()
             .unwrap();
-        assert!(drift.as_secs() < 2, "mtime should be restored");
-    }
-
-    #[test]
-    fn dead_pid_is_reclaimed() {
-        let dir = TempDir::new().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !dir.path().join("ready").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ready = dir.path().join("ready").exists();
         let lock = DreamLock::new(dir.path());
-
-        fs::write(&lock.path, "4000000000").unwrap();
+        let excluded = lock.acquire(0).unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
         assert!(
-            lock.try_acquire(300).unwrap().is_some(),
-            "dead PID should be reclaimable"
+            ready,
+            "child must reach the OS lock before contention is tested"
         );
-
-        let content = fs::read_to_string(&lock.path).unwrap();
-        assert_eq!(content, std::process::id().to_string());
-    }
-
-    #[test]
-    fn live_pid_blocks_acquisition() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        assert!(lock.try_acquire(300).unwrap().is_some(), "first acquire");
-        assert!(
-            lock.try_acquire(300).unwrap().is_none(),
-            "second acquire should be blocked by live PID"
-        );
-    }
-
-    #[test]
-    fn stale_age_allows_reclaim_even_if_alive() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        fs::write(&lock.path, std::process::id().to_string()).unwrap();
-        let old = SystemTime::now() - Duration::from_secs(600);
-        filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old)).unwrap();
-
-        // Age 600 exceeds stale_secs 300, so the live PID does not block
-        assert!(
-            lock.try_acquire(300).unwrap().is_some(),
-            "stale lock should be reclaimable"
-        );
-    }
-
-    #[test]
-    fn record_consolidation_creates_file() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        lock.record_consolidation().unwrap();
-        assert!(lock.path.exists());
-
-        let age = SystemTime::now()
-            .duration_since(lock.last_consolidated_at().unwrap().unwrap())
-            .unwrap_or_default();
-        assert!(age.as_secs() < 5);
-    }
-
-    #[test]
-    fn record_consolidation_updates_mtime() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        fs::write(&lock.path, "12345").unwrap();
-        let old = SystemTime::now() - Duration::from_secs(7200);
-        filetime::set_file_mtime(&lock.path, FileTime::from_system_time(old)).unwrap();
-
-        lock.record_consolidation().unwrap();
-
-        let age = SystemTime::now()
-            .duration_since(lock.last_consolidated_at().unwrap().unwrap())
-            .unwrap_or_default();
-        assert!(age.as_secs() < 5, "mtime should be ~now");
-    }
-
-    #[test]
-    fn full_lifecycle_acquire_consolidate_blocks_reacquire() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        let prior = lock.try_acquire(300).unwrap().unwrap();
-        assert!(prior.is_none());
-
-        lock.record_consolidation().unwrap();
-
-        assert!(
-            lock.try_acquire(300).unwrap().is_none(),
-            "fresh consolidation should block re-acquire"
-        );
-    }
-
-    #[test]
-    fn rollback_on_nonexistent_file_is_noop() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-        lock.rollback(None).unwrap();
-    }
-
-    #[test]
-    fn corrupted_lock_body_is_reclaimable() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        fs::write(&lock.path, "not-a-pid").unwrap();
-        assert!(
-            lock.try_acquire(300).unwrap().is_some(),
-            "unparseable PID should be reclaimable"
-        );
-    }
-
-    #[test]
-    fn empty_lock_body_is_reclaimable() {
-        let dir = TempDir::new().unwrap();
-        let lock = DreamLock::new(dir.path());
-
-        fs::write(&lock.path, "").unwrap();
-        assert!(
-            lock.try_acquire(300).unwrap().is_some(),
-            "empty body should be reclaimable"
-        );
+        assert!(excluded);
+        assert!(lock.acquire(0).unwrap().is_some());
+        assert!(lock.last_consolidated_at().unwrap().is_none());
     }
 
     // --- sessions_since tests ---

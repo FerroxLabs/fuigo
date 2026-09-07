@@ -370,3 +370,6 @@ fn first_der_item(der: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+/// Explicit subscription-only transport; does not relax general egress policy.
+pub mod subscription;

@@ -601,7 +601,8 @@ impl MvpAgent {
                 crate::agent::handlers::model_switch::apply(
                     self,
                     acp::SetSessionModelRequest::new(session_id.clone(), acp::ModelId::new(model_id)),
-                    switch_effort,
+                    crate::agent::handlers::model_switch::SwitchEffort::Set(switch_effort),
+                    crate::agent::handlers::model_switch::ConfigNotice::Skip,
                 )
                 .await
             });
@@ -715,8 +716,10 @@ impl MvpAgent {
             session_started_at.elapsed(),
             false,
         );
+        let config_options = self.acp_config_options(Some(&session_id), &models);
         Ok(acp::NewSessionResponse::new(session_id)
             .models(Some(models))
+            .config_options(Some(config_options))
             .meta(meta.as_object().cloned()))
     }
     pub(super) async fn load_session_inner(
@@ -772,8 +775,7 @@ impl MvpAgent {
         let mut load_timer = crate::instrumentation_timer!("session.load_session");
         load_timer.with_field("session_id", session_id.0.as_ref());
         load_timer.with_field("cwd", cwd.as_str());
-        let git_root =
-            fuigo_workspace::session::git::find_git_root_from_path(cwd.as_path()).ok();
+        let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd.as_path()).ok();
         if let Some(root) = git_root {
             tokio::task::spawn_blocking(move || {
                 crate::session::worktree_pool::cleanup_stale_pool_worktrees(Some(&root));
@@ -1059,8 +1061,10 @@ impl MvpAgent {
             .build_attach_response_meta(&session_id, &summary, persist_data, code_restore_info)
             .await;
         fuigo_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
+        let config_options = self.acp_config_options(Some(&session_id), &model_state);
         let response = acp::LoadSessionResponse::new()
             .models(Some(model_state))
+            .config_options(Some(config_options))
             .meta(response_meta.as_object().cloned());
         if let Some(handle) = self.resident_handle(&session_id) {
             let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
@@ -1108,11 +1112,10 @@ impl MvpAgent {
         if restore_code_requested && registry_client_for_restore.is_none() {
             fuigo_workspace::session::git::warn_registry_disabled_restore(session_id.0.as_ref());
         }
-        let restore_checkout_allowed =
-            fuigo_workspace::session::git::restore_code_checkout_allowed(
-                cwd.as_path(),
-                Some(summary.info.cwd.as_str()),
-            );
+        let restore_checkout_allowed = fuigo_workspace::session::git::restore_code_checkout_allowed(
+            cwd.as_path(),
+            Some(summary.info.cwd.as_str()),
+        );
         if restore_code_requested
             && !restore_checkout_allowed
             && let Some(ref target_sha) = summary.head_commit
@@ -1436,7 +1439,8 @@ impl MvpAgent {
             if let Err(err) = crate::agent::handlers::model_switch::apply(
                 self,
                 acp::SetSessionModelRequest::new(session_id.to_owned(), model_id),
-                restore_effort,
+                crate::agent::handlers::model_switch::SwitchEffort::Set(restore_effort),
+                crate::agent::handlers::model_switch::ConfigNotice::Skip,
             )
             .await
             {

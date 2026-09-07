@@ -142,6 +142,40 @@ impl SessionActor {
         }
         Ok(model_id)
     }
+    /// Set the reasoning effort on the live sampling config, applying the same
+    /// support check and per-effort model routing as `apply_supported_effort`.
+    pub(super) async fn handle_set_reasoning_effort(
+        self: &std::sync::Arc<Self>,
+        effort: fuigo_sampling_types::ReasoningEffort,
+    ) -> Result<acp::ModelId, acp::Error> {
+        let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return Err(acp::Error::internal_error().data("session has no sampling config"));
+        };
+        if !self
+            .models_manager
+            .model_supports_reasoning_effort(&cfg.model)
+        {
+            return Err(acp::Error::invalid_params()
+                .data("the session's current model does not support reasoning effort"));
+        }
+        if let Some(routed) = self.models_manager.model_for_effort(&cfg.model, effort) {
+            cfg.model = routed;
+        }
+        cfg.reasoning_effort = Some(effort);
+        let model_id = acp::ModelId::new(cfg.model.clone());
+        self.chat_state_handle.update_sampling_config(cfg);
+        let agent_name = self.agent.borrow().definition().name.clone();
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::CurrentModel {
+                model_id: model_id.clone(),
+                agent_name: Some(agent_name),
+                reasoning_effort: Some(Some(effort)),
+            });
+        self.emit_status_snapshot_detached();
+        Ok(model_id)
+    }
     /// Handle [`SessionCommand::RebuildAgentForDefinition`].
     ///
     /// Builds a fresh [`fuigo_agent::Agent`] from the cached [`crate::session::agent_rebuild::AgentRebuildSpec`] and the supplied definition.
