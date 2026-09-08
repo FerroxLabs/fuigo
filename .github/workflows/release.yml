@@ -208,13 +208,16 @@ jobs:
       - name: Smoke test
         shell: bash
         run: |
+          set -euo pipefail
           BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
-          "$BIN" --version
-          # The version must match the single source of truth. A mismatch here
-          # means FUIGO_VERSION leaked in from somewhere.
+          ACTUAL=$("$BIN" --version | tr -d '\r')
           EXPECTED=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
-          "$BIN" --version | grep -q "$EXPECTED" || {
-            echo "::error::binary reports $("$BIN" --version), expected $EXPECTED"; exit 1; }
+          COMMIT=$(git rev-parse HEAD)
+          COMMIT=${COMMIT:0:12}
+          echo "$ACTUAL"
+          [ "$ACTUAL" = "fuigo $EXPECTED ($COMMIT)" ] || {
+            echo "::error::binary identity mismatch: expected fuigo $EXPECTED ($COMMIT)"; exit 1; }
+
 
       # Two separate checks, because the signing rule is per-architecture and
       # both darwin jobs now share one runner.
@@ -255,6 +258,16 @@ jobs:
               ;;
             *) echo "::error::unhandled macOS target ${{ matrix.target }}"; exit 1 ;;
           esac
+
+      - name: Verify release memory finalization
+        if: matrix.npm_platform == 'darwin-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --out "$RUNNER_TEMP/memory-final"
+          python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --hostile-final-tool --out "$RUNNER_TEMP/memory-hostile"
+          python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --general-tools --out "$RUNNER_TEMP/memory-general"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -297,6 +310,9 @@ jobs:
           cargo test --locked -p fuigo-shell -p fuigo-tools -p fuigo-mcp -p fuigo-hooks --lib t05_ -- --test-threads=1
           cargo test --locked -p fuigo-shell -p fuigo-tools --lib t04_ -- --test-threads=1
           cargo test --locked -p fuigo-sampler --lib actor::request_task::tests -- --test-threads=1
+          cargo test --locked -p fuigo-memory -p fuigo-config-types --lib -- --test-threads=1
+          cargo test --locked -p fuigo-sampler --lib execution_budget -- --test-threads=1
+          cargo test --locked -p fuigo-shell --lib recall_finalization_tests -- --test-threads=1
 
   publish:
     name: assemble and publish
