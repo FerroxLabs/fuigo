@@ -431,3 +431,47 @@ fn provider_switch_rejects_a_late_response_on_an_old_connection() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn calibrated_semantic_admission_preserves_lexical_and_source_guards() {
+    let mut f = Fixture::new();
+    let provider = UnitVectorProvider("calibration-fixture");
+    f.index.bind_embedding_provider(&provider).unwrap();
+    let path = f.add("calibrated.md", "Fact: orchard = peaches", "workspace");
+    let id = format!("{}:0", path.display());
+    let chunk = f.index.get_chunk(&id).unwrap().unwrap();
+    f.index
+        .upsert_embedding_if_current(&id, &chunk.text, &[0.5, 0.8660254, 0.0, 0.0])
+        .unwrap();
+    let defaults = MemorySearchConfig::default();
+    assert!(
+        hybrid_search(&f.index, Some(&provider), "unrelated query", &defaults)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let calibrated = MemorySearchConfig {
+        semantic_min_score: Some(0.45),
+        ..defaults
+    };
+    assert_eq!(
+        hybrid_search(&f.index, Some(&provider), "unrelated query", &calibrated)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        hybrid_search(&f.index, None, "unrelated query", &calibrated)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        hybrid_search(&f.index, Some(&provider), "unrelated query", &calibrated)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

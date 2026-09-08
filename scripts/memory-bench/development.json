@@ -1,0 +1,2489 @@
+{
+  "version": 1,
+  "provenance": "Synthetic authored policy fixtures; no real user data. Fixed before implementation. Not evidence of real-world quality.",
+  "sources": [
+    {
+      "id": "source-00",
+      "revision": 1,
+      "scope": "project-00",
+      "threadId": "thread-00",
+      "messageId": "message-00",
+      "role": "user",
+      "state": "active",
+      "text": "Releases require two reviewers before production deployment.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-00-old",
+      "revision": 0,
+      "scope": "project-00",
+      "threadId": "thread-00",
+      "messageId": "old-message-00",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for release: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-00-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-00",
+      "messageId": "message-00",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_00: confidential release note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-01",
+      "revision": 1,
+      "scope": "project-01",
+      "threadId": "thread-01",
+      "messageId": "message-01",
+      "role": "user",
+      "state": "active",
+      "text": "Database backups run at 02:00 UTC and are retained for 30 days.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-01-old",
+      "revision": 0,
+      "scope": "project-01",
+      "threadId": "thread-01",
+      "messageId": "old-message-01",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for backup: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-01-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-01",
+      "messageId": "message-01",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_01: confidential backup note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-02",
+      "revision": 1,
+      "scope": "project-02",
+      "threadId": "thread-02",
+      "messageId": "message-02",
+      "role": "user",
+      "state": "active",
+      "text": "The application stores authoritative records in SQLite.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-02-old",
+      "revision": 0,
+      "scope": "project-02",
+      "threadId": "thread-02",
+      "messageId": "old-message-02",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for database: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-02-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-02",
+      "messageId": "message-02",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_02: confidential database note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-03",
+      "revision": 1,
+      "scope": "project-03",
+      "threadId": "thread-03",
+      "messageId": "message-03",
+      "role": "user",
+      "state": "active",
+      "text": "Refund requests must include the original purchase receipt.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-03-old",
+      "revision": 0,
+      "scope": "project-03",
+      "threadId": "thread-03",
+      "messageId": "old-message-03",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for refund: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-03-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-03",
+      "messageId": "message-03",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_03: confidential refund note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-04",
+      "revision": 1,
+      "scope": "project-04",
+      "threadId": "thread-04",
+      "messageId": "message-04",
+      "role": "user",
+      "state": "active",
+      "text": "Urgent support incidents go to the on-call engineer.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-04-old",
+      "revision": 0,
+      "scope": "project-04",
+      "threadId": "thread-04",
+      "messageId": "old-message-04",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for support: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-04-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-04",
+      "messageId": "message-04",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_04: confidential support note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-05",
+      "revision": 1,
+      "scope": "project-05",
+      "threadId": "thread-05",
+      "messageId": "message-05",
+      "role": "user",
+      "state": "active",
+      "text": "Interactive controls must remain usable with the keyboard.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-05-old",
+      "revision": 0,
+      "scope": "project-05",
+      "threadId": "thread-05",
+      "messageId": "old-message-05",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for design: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-05-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-05",
+      "messageId": "message-05",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_05: confidential design note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-06",
+      "revision": 1,
+      "scope": "project-06",
+      "threadId": "thread-06",
+      "messageId": "message-06",
+      "role": "user",
+      "state": "active",
+      "text": "Orders ship within three business days after payment.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-06-old",
+      "revision": 0,
+      "scope": "project-06",
+      "threadId": "thread-06",
+      "messageId": "old-message-06",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for shipping: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-06-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-06",
+      "messageId": "message-06",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_06: confidential shipping note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-07",
+      "revision": 1,
+      "scope": "project-07",
+      "threadId": "thread-07",
+      "messageId": "message-07",
+      "role": "user",
+      "state": "active",
+      "text": "Invoices are payable within fourteen calendar days.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-07-old",
+      "revision": 0,
+      "scope": "project-07",
+      "threadId": "thread-07",
+      "messageId": "old-message-07",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for billing: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-07-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-07",
+      "messageId": "message-07",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_07: confidential billing note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-08",
+      "revision": 1,
+      "scope": "project-08",
+      "threadId": "thread-08",
+      "messageId": "message-08",
+      "role": "user",
+      "state": "active",
+      "text": "Temporary exports expire after seven days.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-08-old",
+      "revision": 0,
+      "scope": "project-08",
+      "threadId": "thread-08",
+      "messageId": "old-message-08",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for retention: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-08-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-08",
+      "messageId": "message-08",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_08: confidential retention note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-09",
+      "revision": 1,
+      "scope": "project-09",
+      "threadId": "thread-09",
+      "messageId": "message-09",
+      "role": "user",
+      "state": "active",
+      "text": "Credentials must be entered through the secure credential card.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-09-old",
+      "revision": 0,
+      "scope": "project-09",
+      "threadId": "thread-09",
+      "messageId": "old-message-09",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for secrets: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-09-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-09",
+      "messageId": "message-09",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_09: confidential secrets note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-10",
+      "revision": 1,
+      "scope": "project-10",
+      "threadId": "thread-10",
+      "messageId": "message-10",
+      "role": "user",
+      "state": "active",
+      "text": "Team schedules use the Asia/Bangkok timezone.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-10-old",
+      "revision": 0,
+      "scope": "project-10",
+      "threadId": "thread-10",
+      "messageId": "old-message-10",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for timezone: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-10-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-10",
+      "messageId": "message-10",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_10: confidential timezone note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-11",
+      "revision": 1,
+      "scope": "project-11",
+      "threadId": "thread-11",
+      "messageId": "message-11",
+      "role": "user",
+      "state": "active",
+      "text": "Images conveying information need meaningful alternative text.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-11-old",
+      "revision": 0,
+      "scope": "project-11",
+      "threadId": "thread-11",
+      "messageId": "old-message-11",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for accessibility: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-11-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-11",
+      "messageId": "message-11",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_11: confidential accessibility note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-12",
+      "revision": 1,
+      "scope": "project-12",
+      "threadId": "thread-12",
+      "messageId": "message-12",
+      "role": "user",
+      "state": "active",
+      "text": "A failing acceptance check blocks candidate integration.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-12-old",
+      "revision": 0,
+      "scope": "project-12",
+      "threadId": "thread-12",
+      "messageId": "old-message-12",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for quality: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-12-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-12",
+      "messageId": "message-12",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_12: confidential quality note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-13",
+      "revision": 1,
+      "scope": "project-13",
+      "threadId": "thread-13",
+      "messageId": "message-13",
+      "role": "user",
+      "state": "active",
+      "text": "Schema upgrades require a verified recovery snapshot.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-13-old",
+      "revision": 0,
+      "scope": "project-13",
+      "threadId": "thread-13",
+      "messageId": "old-message-13",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for migration: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-13-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-13",
+      "messageId": "message-13",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_13: confidential migration note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-14",
+      "revision": 1,
+      "scope": "project-14",
+      "threadId": "thread-14",
+      "messageId": "message-14",
+      "role": "user",
+      "state": "active",
+      "text": "Private conversation notes are not automatically shared with rooms.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-14-old",
+      "revision": 0,
+      "scope": "project-14",
+      "threadId": "thread-14",
+      "messageId": "old-message-14",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for privacy: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-14-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-14",
+      "messageId": "message-14",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_14: confidential privacy note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-15",
+      "revision": 1,
+      "scope": "project-15",
+      "threadId": "thread-15",
+      "messageId": "message-15",
+      "role": "user",
+      "state": "active",
+      "text": "Historical queries must distinguish old decisions from current policy.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-15-old",
+      "revision": 0,
+      "scope": "project-15",
+      "threadId": "thread-15",
+      "messageId": "old-message-15",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for search: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-15-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-15",
+      "messageId": "message-15",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_15: confidential search note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-16",
+      "revision": 1,
+      "scope": "project-16",
+      "threadId": "thread-16",
+      "messageId": "message-16",
+      "role": "user",
+      "state": "active",
+      "text": "Operational logs must exclude raw credentials.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-16-old",
+      "revision": 0,
+      "scope": "project-16",
+      "threadId": "thread-16",
+      "messageId": "old-message-16",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for logging: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-16-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-16",
+      "messageId": "message-16",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_16: confidential logging note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-17",
+      "revision": 1,
+      "scope": "project-17",
+      "threadId": "thread-17",
+      "messageId": "message-17",
+      "role": "user",
+      "state": "active",
+      "text": "Attachments larger than the supported limit are rejected explicitly.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-17-old",
+      "revision": 0,
+      "scope": "project-17",
+      "threadId": "thread-17",
+      "messageId": "old-message-17",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for storage: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-17-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-17",
+      "messageId": "message-17",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_17: confidential storage note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-18",
+      "revision": 1,
+      "scope": "project-18",
+      "threadId": "thread-18",
+      "messageId": "message-18",
+      "role": "user",
+      "state": "active",
+      "text": "Interrupted jobs resume from their last durable checkpoint.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-18-old",
+      "revision": 0,
+      "scope": "project-18",
+      "threadId": "thread-18",
+      "messageId": "old-message-18",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for recovery: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-18-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-18",
+      "messageId": "message-18",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_18: confidential recovery note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-19",
+      "revision": 1,
+      "scope": "project-19",
+      "threadId": "thread-19",
+      "messageId": "message-19",
+      "role": "user",
+      "state": "active",
+      "text": "Only the owner may pin authoritative workspace constraints.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-19-old",
+      "revision": 0,
+      "scope": "project-19",
+      "threadId": "thread-19",
+      "messageId": "old-message-19",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for ownership: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-19-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-19",
+      "messageId": "message-19",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_19: confidential ownership note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-20",
+      "revision": 1,
+      "scope": "project-20",
+      "threadId": "thread-20",
+      "messageId": "message-20",
+      "role": "user",
+      "state": "active",
+      "text": "Duplicate payment notifications must not create duplicate orders.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-20-old",
+      "revision": 0,
+      "scope": "project-20",
+      "threadId": "thread-20",
+      "messageId": "old-message-20",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for payments: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-20-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-20",
+      "messageId": "message-20",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_20: confidential payments note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-21",
+      "revision": 1,
+      "scope": "project-21",
+      "threadId": "thread-21",
+      "messageId": "message-21",
+      "role": "user",
+      "state": "active",
+      "text": "An offline client shows cached data with a stale indicator.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-21-old",
+      "revision": 0,
+      "scope": "project-21",
+      "threadId": "thread-21",
+      "messageId": "old-message-21",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for network: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-21-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-21",
+      "messageId": "message-21",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_21: confidential network note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-22",
+      "revision": 1,
+      "scope": "project-22",
+      "threadId": "thread-22",
+      "messageId": "message-22",
+      "role": "user",
+      "state": "active",
+      "text": "Customer-facing content supports English, Thai and Chinese.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-22-old",
+      "revision": 0,
+      "scope": "project-22",
+      "threadId": "thread-22",
+      "messageId": "old-message-22",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for language: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-22-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-22",
+      "messageId": "message-22",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_22: confidential language note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-23",
+      "revision": 1,
+      "scope": "project-23",
+      "threadId": "thread-23",
+      "messageId": "message-23",
+      "role": "user",
+      "state": "active",
+      "text": "Code reviews must cite the affected file and behavior.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-23-old",
+      "revision": 0,
+      "scope": "project-23",
+      "threadId": "thread-23",
+      "messageId": "old-message-23",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for reviews: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-23-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-23",
+      "messageId": "message-23",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_23: confidential reviews note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-24",
+      "revision": 1,
+      "scope": "project-24",
+      "threadId": "thread-24",
+      "messageId": "message-24",
+      "role": "user",
+      "state": "active",
+      "text": "Cancelling a turn does not undo tool operations already completed.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-24-old",
+      "revision": 0,
+      "scope": "project-24",
+      "threadId": "thread-24",
+      "messageId": "old-message-24",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for cancellation: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-24-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-24",
+      "messageId": "message-24",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_24: confidential cancellation note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-25",
+      "revision": 1,
+      "scope": "project-25",
+      "threadId": "thread-25",
+      "messageId": "message-25",
+      "role": "user",
+      "state": "active",
+      "text": "Cache entries are invalidated when access permissions change.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-25-old",
+      "revision": 0,
+      "scope": "project-25",
+      "threadId": "thread-25",
+      "messageId": "old-message-25",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for cache: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-25-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-25",
+      "messageId": "message-25",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_25: confidential cache note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-26",
+      "revision": 1,
+      "scope": "project-26",
+      "threadId": "thread-26",
+      "messageId": "message-26",
+      "role": "user",
+      "state": "active",
+      "text": "A shared directory does not automatically grant project-memory access.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-26-old",
+      "revision": 0,
+      "scope": "project-26",
+      "threadId": "thread-26",
+      "messageId": "old-message-26",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for projects: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-26-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-26",
+      "messageId": "message-26",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_26: confidential projects note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-27",
+      "revision": 1,
+      "scope": "project-27",
+      "threadId": "thread-27",
+      "messageId": "message-27",
+      "role": "user",
+      "state": "active",
+      "text": "The active plan controls scope and acceptance criteria.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-27-old",
+      "revision": 0,
+      "scope": "project-27",
+      "threadId": "thread-27",
+      "messageId": "old-message-27",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for planning: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-27-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-27",
+      "messageId": "message-27",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_27: confidential planning note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-28",
+      "revision": 1,
+      "scope": "project-28",
+      "threadId": "thread-28",
+      "messageId": "message-28",
+      "role": "user",
+      "state": "active",
+      "text": "Missing model assets must produce explicit degraded status.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-28-old",
+      "revision": 0,
+      "scope": "project-28",
+      "threadId": "thread-28",
+      "messageId": "old-message-28",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for models: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-28-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-28",
+      "messageId": "message-28",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_28: confidential models note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-29",
+      "revision": 1,
+      "scope": "project-29",
+      "threadId": "thread-29",
+      "messageId": "message-29",
+      "role": "user",
+      "state": "active",
+      "text": "Background extraction stops when its daily token budget is exhausted.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-29-old",
+      "revision": 0,
+      "scope": "project-29",
+      "threadId": "thread-29",
+      "messageId": "old-message-29",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for cost: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-29-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-29",
+      "messageId": "message-29",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_29: confidential cost note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-30",
+      "revision": 1,
+      "scope": "project-30",
+      "threadId": "thread-30",
+      "messageId": "message-30",
+      "role": "user",
+      "state": "active",
+      "text": "An expired worker lease cannot publish results.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-30-old",
+      "revision": 0,
+      "scope": "project-30",
+      "threadId": "thread-30",
+      "messageId": "old-message-30",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for concurrency: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-30-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-30",
+      "messageId": "message-30",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_30: confidential concurrency note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-31",
+      "revision": 1,
+      "scope": "project-31",
+      "threadId": "thread-31",
+      "messageId": "message-31",
+      "role": "user",
+      "state": "active",
+      "text": "A source correction creates a new revision and preserves attribution.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-31-old",
+      "revision": 0,
+      "scope": "project-31",
+      "threadId": "thread-31",
+      "messageId": "old-message-31",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for history: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-31-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-31",
+      "messageId": "message-31",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_31: confidential history note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-32",
+      "revision": 1,
+      "scope": "project-32",
+      "threadId": "thread-32",
+      "messageId": "message-32",
+      "role": "user",
+      "state": "active",
+      "text": "Forgotten source hashes are blocked from automatic reimport.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-32-old",
+      "revision": 0,
+      "scope": "project-32",
+      "threadId": "thread-32",
+      "messageId": "old-message-32",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for deletion: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-32-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-32",
+      "messageId": "message-32",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_32: confidential deletion note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-33",
+      "revision": 1,
+      "scope": "project-33",
+      "threadId": "thread-33",
+      "messageId": "message-33",
+      "role": "user",
+      "state": "active",
+      "text": "Portable bot blueprints exclude private conversation history.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-33-old",
+      "revision": 0,
+      "scope": "project-33",
+      "threadId": "thread-33",
+      "messageId": "old-message-33",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for export: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-33-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-33",
+      "messageId": "message-33",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_33: confidential export note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-34",
+      "revision": 1,
+      "scope": "project-34",
+      "threadId": "thread-34",
+      "messageId": "message-34",
+      "role": "user",
+      "state": "active",
+      "text": "Health status distinguishes a delayed index from failed capture.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-34-old",
+      "revision": 0,
+      "scope": "project-34",
+      "threadId": "thread-34",
+      "messageId": "old-message-34",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for health: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-34-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-34",
+      "messageId": "message-34",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_34: confidential health note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-35",
+      "revision": 1,
+      "scope": "project-35",
+      "threadId": "thread-35",
+      "messageId": "message-35",
+      "role": "user",
+      "state": "active",
+      "text": "A private build is verified before any public publication.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-35-old",
+      "revision": 0,
+      "scope": "project-35",
+      "threadId": "thread-35",
+      "messageId": "old-message-35",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for rollout: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-35-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-35",
+      "messageId": "message-35",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_35: confidential rollout note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-36",
+      "revision": 1,
+      "scope": "project-36",
+      "threadId": "thread-36",
+      "messageId": "message-36",
+      "role": "user",
+      "state": "active",
+      "text": "Retrieval relevance is separate from factual certainty.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-36-old",
+      "revision": 0,
+      "scope": "project-36",
+      "threadId": "thread-36",
+      "messageId": "old-message-36",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for evidence: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-36-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-36",
+      "messageId": "message-36",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_36: confidential evidence note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-37",
+      "revision": 1,
+      "scope": "project-37",
+      "threadId": "thread-37",
+      "messageId": "message-37",
+      "role": "user",
+      "state": "active",
+      "text": "Room knowledge belongs to the room audience.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-37-old",
+      "revision": 0,
+      "scope": "project-37",
+      "threadId": "thread-37",
+      "messageId": "old-message-37",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for scope: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-37-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-37",
+      "messageId": "message-37",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_37: confidential scope note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-38",
+      "revision": 1,
+      "scope": "project-38",
+      "threadId": "thread-38",
+      "messageId": "message-38",
+      "role": "user",
+      "state": "active",
+      "text": "Memory-tool access is independent of delegation depth.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-38-old",
+      "revision": 0,
+      "scope": "project-38",
+      "threadId": "thread-38",
+      "messageId": "old-message-38",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for tools: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-38-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-38",
+      "messageId": "message-38",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_38: confidential tools note.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-39",
+      "revision": 1,
+      "scope": "project-39",
+      "threadId": "thread-39",
+      "messageId": "message-39",
+      "role": "user",
+      "state": "active",
+      "text": "Archived records remain available to explicit historical queries.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-39-old",
+      "revision": 0,
+      "scope": "project-39",
+      "threadId": "thread-39",
+      "messageId": "old-message-39",
+      "role": "user",
+      "state": "superseded",
+      "text": "Previous draft for archive: no settled policy yet.",
+      "assertion": "owner-statement"
+    },
+    {
+      "id": "source-39-private",
+      "revision": 1,
+      "scope": "private-other",
+      "threadId": "thread-39",
+      "messageId": "message-39",
+      "role": "user",
+      "state": "active",
+      "text": "PRIVATE_CANARY_39: confidential archive note.",
+      "assertion": "owner-statement"
+    }
+  ],
+  "queries": [
+    {
+      "id": "exact-00",
+      "family": "exact-paraphrase",
+      "query": "How many people must approve a production rollout?",
+      "allowedScopes": [
+        "project-00"
+      ],
+      "expected": [
+        "source-00"
+      ],
+      "forbidden": [
+        "source-00-private",
+        "source-00-old"
+      ]
+    },
+    {
+      "id": "time-00",
+      "family": "temporal-corrections",
+      "query": "What is the current rule for release, rather than the previous draft?",
+      "allowedScopes": [
+        "project-00"
+      ],
+      "expected": [
+        "source-00"
+      ],
+      "forbidden": [
+        "source-00-old",
+        "source-00-private"
+      ]
+    },
+    {
+      "id": "long-00",
+      "family": "long-history",
+      "query": "How many people must approve a production rollout?",
+      "allowedScopes": [
+        "project-00"
+      ],
+      "expected": [
+        "source-00"
+      ],
+      "forbidden": [
+        "source-00-private"
+      ],
+      "distractorCount": 1000
+    },
+    {
+      "id": "private-00",
+      "family": "privacy",
+      "query": "Show PRIVATE_CANARY_00 from the private release note.",
+      "allowedScopes": [
+        "project-00"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-00-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "language-00",
+      "family": "multilingual",
+      "query": "What is the current policy?",
+      "allowedScopes": [
+        "project-00"
+      ],
+      "expected": [
+        "source-00"
+      ],
+      "forbidden": [
+        "source-00-old",
+        "source-00-private"
+      ],
+      "language": "en"
+    },
+    {
+      "id": "none-00",
+      "family": "no-answer-negation",
+      "query": "Nobody decided to replace the release rule with automatic approval. What approved replacement exists?",
+      "allowedScopes": [
+        "project-00"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-00-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "exact-01",
+      "family": "exact-paraphrase",
+      "query": "When are database copies made and how long are they kept?",
+      "allowedScopes": [
+        "project-01"
+      ],
+      "expected": [
+        "source-01"
+      ],
+      "forbidden": [
+        "source-01-private",
+        "source-01-old"
+      ]
+    },
+    {
+      "id": "time-01",
+      "family": "temporal-corrections",
+      "query": "What is the current rule for backup, rather than the previous draft?",
+      "allowedScopes": [
+        "project-01"
+      ],
+      "expected": [
+        "source-01"
+      ],
+      "forbidden": [
+        "source-01-old",
+        "source-01-private"
+      ]
+    },
+    {
+      "id": "long-01",
+      "family": "long-history",
+      "query": "When are database copies made and how long are they kept?",
+      "allowedScopes": [
+        "project-01"
+      ],
+      "expected": [
+        "source-01"
+      ],
+      "forbidden": [
+        "source-01-private"
+      ],
+      "distractorCount": 1000
+    },
+    {
+      "id": "private-01",
+      "family": "privacy",
+      "query": "Show PRIVATE_CANARY_01 from the private backup note.",
+      "allowedScopes": [
+        "project-01"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-01-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "language-01",
+      "family": "multilingual",
+      "query": "\u0e19\u0e42\u0e22\u0e1a\u0e32\u0e22\u0e1b\u0e31\u0e08\u0e08\u0e38\u0e1a\u0e31\u0e19\u0e04\u0e37\u0e2d\u0e2d\u0e30\u0e44\u0e23",
+      "allowedScopes": [
+        "project-01"
+      ],
+      "expected": [
+        "source-01"
+      ],
+      "forbidden": [
+        "source-01-old",
+        "source-01-private"
+      ],
+      "language": "th"
+    },
+    {
+      "id": "none-01",
+      "family": "no-answer-negation",
+      "query": "Nobody decided to replace the backup rule with automatic approval. What approved replacement exists?",
+      "allowedScopes": [
+        "project-01"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-01-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "exact-02",
+      "family": "exact-paraphrase",
+      "query": "Which database holds the application source of truth?",
+      "allowedScopes": [
+        "project-02"
+      ],
+      "expected": [
+        "source-02"
+      ],
+      "forbidden": [
+        "source-02-private",
+        "source-02-old"
+      ]
+    },
+    {
+      "id": "time-02",
+      "family": "temporal-corrections",
+      "query": "What is the current rule for database, rather than the previous draft?",
+      "allowedScopes": [
+        "project-02"
+      ],
+      "expected": [
+        "source-02"
+      ],
+      "forbidden": [
+        "source-02-old",
+        "source-02-private"
+      ]
+    },
+    {
+      "id": "long-02",
+      "family": "long-history",
+      "query": "Which database holds the application source of truth?",
+      "allowedScopes": [
+        "project-02"
+      ],
+      "expected": [
+        "source-02"
+      ],
+      "forbidden": [
+        "source-02-private"
+      ],
+      "distractorCount": 1000
+    },
+    {
+      "id": "private-02",
+      "family": "privacy",
+      "query": "Show PRIVATE_CANARY_02 from the private database note.",
+      "allowedScopes": [
+        "project-02"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-02-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "language-02",
+      "family": "multilingual",
+      "query": "\u76ee\u524d\u7684\u653f\u7b56\u662f\u4ec0\u4e48",
+      "allowedScopes": [
+        "project-02"
+      ],
+      "expected": [
+        "source-02"
+      ],
+      "forbidden": [
+        "source-02-old",
+        "source-02-private"
+      ],
+      "language": "zh"
+    },
+    {
+      "id": "none-02",
+      "family": "no-answer-negation",
+      "query": "Nobody decided to replace the database rule with automatic approval. What approved replacement exists?",
+      "allowedScopes": [
+        "project-02"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-02-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "exact-03",
+      "family": "exact-paraphrase",
+      "query": "What evidence does a customer need when asking for their money back?",
+      "allowedScopes": [
+        "project-03"
+      ],
+      "expected": [
+        "source-03"
+      ],
+      "forbidden": [
+        "source-03-private",
+        "source-03-old"
+      ]
+    },
+    {
+      "id": "time-03",
+      "family": "temporal-corrections",
+      "query": "What is the current rule for refund, rather than the previous draft?",
+      "allowedScopes": [
+        "project-03"
+      ],
+      "expected": [
+        "source-03"
+      ],
+      "forbidden": [
+        "source-03-old",
+        "source-03-private"
+      ]
+    },
+    {
+      "id": "long-03",
+      "family": "long-history",
+      "query": "What evidence does a customer need when asking for their money back?",
+      "allowedScopes": [
+        "project-03"
+      ],
+      "expected": [
+        "source-03"
+      ],
+      "forbidden": [
+        "source-03-private"
+      ],
+      "distractorCount": 1000
+    },
+    {
+      "id": "private-03",
+      "family": "privacy",
+      "query": "Show PRIVATE_CANARY_03 from the private refund note.",
+      "allowedScopes": [
+        "project-03"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-03-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "language-03",
+      "family": "multilingual",
+      "query": "What is the current policy?",
+      "allowedScopes": [
+        "project-03"
+      ],
+      "expected": [
+        "source-03"
+      ],
+      "forbidden": [
+        "source-03-old",
+        "source-03-private"
+      ],
+      "language": "en"
+    },
+    {
+      "id": "none-03",
+      "family": "no-answer-negation",
+      "query": "Nobody decided to replace the refund rule with automatic approval. What approved replacement exists?",
+      "allowedScopes": [
+        "project-03"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-03-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "exact-04",
+      "family": "exact-paraphrase",
+      "query": "Who handles an emergency customer incident?",
+      "allowedScopes": [
+        "project-04"
+      ],
+      "expected": [
+        "source-04"
+      ],
+      "forbidden": [
+        "source-04-private",
+        "source-04-old"
+      ]
+    },
+    {
+      "id": "time-04",
+      "family": "temporal-corrections",
+      "query": "What is the current rule for support, rather than the previous draft?",
+      "allowedScopes": [
+        "project-04"
+      ],
+      "expected": [
+        "source-04"
+      ],
+      "forbidden": [
+        "source-04-old",
+        "source-04-private"
+      ]
+    },
+    {
+      "id": "long-04",
+      "family": "long-history",
+      "query": "Who handles an emergency customer incident?",
+      "allowedScopes": [
+        "project-04"
+      ],
+      "expected": [
+        "source-04"
+      ],
+      "forbidden": [
+        "source-04-private"
+      ],
+      "distractorCount": 1000
+    },
+    {
+      "id": "private-04",
+      "family": "privacy",
+      "query": "Show PRIVATE_CANARY_04 from the private support note.",
+      "allowedScopes": [
+        "project-04"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-04-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "language-04",
+      "family": "multilingual",
+      "query": "\u0e19\u0e42\u0e22\u0e1a\u0e32\u0e22\u0e1b\u0e31\u0e08\u0e08\u0e38\u0e1a\u0e31\u0e19\u0e04\u0e37\u0e2d\u0e2d\u0e30\u0e44\u0e23",
+      "allowedScopes": [
+        "project-04"
+      ],
+      "expected": [
+        "source-04"
+      ],
+      "forbidden": [
+        "source-04-old",
+        "source-04-private"
+      ],
+      "language": "th"
+    },
+    {
+      "id": "none-04",
+      "family": "no-answer-negation",
+      "query": "Nobody decided to replace the support rule with automatic approval. What approved replacement exists?",
+      "allowedScopes": [
+        "project-04"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-04-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "exact-05",
+      "family": "exact-paraphrase",
+      "query": "Can someone operate the controls without a mouse?",
+      "allowedScopes": [
+        "project-05"
+      ],
+      "expected": [
+        "source-05"
+      ],
+      "forbidden": [
+        "source-05-private",
+        "source-05-old"
+      ]
+    },
+    {
+      "id": "time-05",
+      "family": "temporal-corrections",
+      "query": "What is the current rule for design, rather than the previous draft?",
+      "allowedScopes": [
+        "project-05"
+      ],
+      "expected": [
+        "source-05"
+      ],
+      "forbidden": [
+        "source-05-old",
+        "source-05-private"
+      ]
+    },
+    {
+      "id": "long-05",
+      "family": "long-history",
+      "query": "Can someone operate the controls without a mouse?",
+      "allowedScopes": [
+        "project-05"
+      ],
+      "expected": [
+        "source-05"
+      ],
+      "forbidden": [
+        "source-05-private"
+      ],
+      "distractorCount": 1000
+    },
+    {
+      "id": "private-05",
+      "family": "privacy",
+      "query": "Show PRIVATE_CANARY_05 from the private design note.",
+      "allowedScopes": [
+        "project-05"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-05-private"
+      ],
+      "abstain": true
+    },
+    {
+      "id": "language-05",
+      "family": "multilingual",
+      "query": "\u76ee\u524d\u7684\u653f\u7b56\u662f\u4ec0\u4e48",
+      "allowedScopes": [
+        "project-05"
+      ],
+      "expected": [
+        "source-05"
+      ],
+      "forbidden": [
+        "source-05-old",
+        "source-05-private"
+      ],
+      "language": "zh"
+    },
+    {
+      "id": "none-05",
+      "family": "no-answer-negation",
+      "query": "Nobody decided to replace the design rule with automatic approval. What approved replacement exists?",
+      "allowedScopes": [
+        "project-05"
+      ],
+      "expected": [],
+      "forbidden": [
+        "source-05-private"
+      ],
+      "abstain": true
+    }
+  ],
+  "answerCases": [
+    {
+      "id": "answer-00",
+      "driver": "claude",
+      "queryId": "exact-00",
+      "requiredSource": "source-00",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-01",
+      "driver": "claude",
+      "queryId": "exact-01",
+      "requiredSource": "source-01",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-02",
+      "driver": "claude",
+      "queryId": "exact-02",
+      "requiredSource": "source-02",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-03",
+      "driver": "claude",
+      "queryId": "exact-03",
+      "requiredSource": "source-03",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-04",
+      "driver": "claude",
+      "queryId": "exact-04",
+      "requiredSource": "source-04",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-05",
+      "driver": "claude",
+      "queryId": "exact-05",
+      "requiredSource": "source-05",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-06",
+      "driver": "claude",
+      "queryId": "exact-06",
+      "requiredSource": "source-06",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-07",
+      "driver": "claude",
+      "queryId": "exact-07",
+      "requiredSource": "source-07",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-08",
+      "driver": "claude",
+      "queryId": "exact-08",
+      "requiredSource": "source-08",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-09",
+      "driver": "claude",
+      "queryId": "exact-09",
+      "requiredSource": "source-09",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-10",
+      "driver": "claude",
+      "queryId": "exact-10",
+      "requiredSource": "source-10",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-11",
+      "driver": "claude",
+      "queryId": "exact-11",
+      "requiredSource": "source-11",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-12",
+      "driver": "claude",
+      "queryId": "exact-12",
+      "requiredSource": "source-12",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-13",
+      "driver": "claude",
+      "queryId": "exact-13",
+      "requiredSource": "source-13",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-14",
+      "driver": "claude",
+      "queryId": "exact-14",
+      "requiredSource": "source-14",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-15",
+      "driver": "codex",
+      "queryId": "exact-15",
+      "requiredSource": "source-15",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-16",
+      "driver": "codex",
+      "queryId": "exact-16",
+      "requiredSource": "source-16",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-17",
+      "driver": "codex",
+      "queryId": "exact-17",
+      "requiredSource": "source-17",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-18",
+      "driver": "codex",
+      "queryId": "exact-18",
+      "requiredSource": "source-18",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-19",
+      "driver": "codex",
+      "queryId": "exact-19",
+      "requiredSource": "source-19",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-20",
+      "driver": "codex",
+      "queryId": "exact-20",
+      "requiredSource": "source-20",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-21",
+      "driver": "codex",
+      "queryId": "exact-21",
+      "requiredSource": "source-21",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-22",
+      "driver": "codex",
+      "queryId": "exact-22",
+      "requiredSource": "source-22",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-23",
+      "driver": "codex",
+      "queryId": "exact-23",
+      "requiredSource": "source-23",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-24",
+      "driver": "codex",
+      "queryId": "exact-24",
+      "requiredSource": "source-24",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-25",
+      "driver": "codex",
+      "queryId": "exact-25",
+      "requiredSource": "source-25",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-26",
+      "driver": "codex",
+      "queryId": "exact-26",
+      "requiredSource": "source-26",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-27",
+      "driver": "codex",
+      "queryId": "exact-27",
+      "requiredSource": "source-27",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-28",
+      "driver": "codex",
+      "queryId": "exact-28",
+      "requiredSource": "source-28",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-29",
+      "driver": "codex",
+      "queryId": "exact-29",
+      "requiredSource": "source-29",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-30",
+      "driver": "fuigo",
+      "queryId": "exact-30",
+      "requiredSource": "source-30",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-31",
+      "driver": "fuigo",
+      "queryId": "exact-31",
+      "requiredSource": "source-31",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-32",
+      "driver": "fuigo",
+      "queryId": "exact-32",
+      "requiredSource": "source-32",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-33",
+      "driver": "fuigo",
+      "queryId": "exact-33",
+      "requiredSource": "source-33",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-34",
+      "driver": "fuigo",
+      "queryId": "exact-34",
+      "requiredSource": "source-34",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-35",
+      "driver": "fuigo",
+      "queryId": "exact-35",
+      "requiredSource": "source-35",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-36",
+      "driver": "fuigo",
+      "queryId": "exact-36",
+      "requiredSource": "source-36",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-37",
+      "driver": "fuigo",
+      "queryId": "exact-37",
+      "requiredSource": "source-37",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-38",
+      "driver": "fuigo",
+      "queryId": "exact-38",
+      "requiredSource": "source-38",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-39",
+      "driver": "fuigo",
+      "queryId": "exact-39",
+      "requiredSource": "source-39",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-40",
+      "driver": "fuigo",
+      "queryId": "exact-00",
+      "requiredSource": "source-00",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-41",
+      "driver": "fuigo",
+      "queryId": "exact-01",
+      "requiredSource": "source-01",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-42",
+      "driver": "fuigo",
+      "queryId": "exact-02",
+      "requiredSource": "source-02",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-43",
+      "driver": "fuigo",
+      "queryId": "exact-03",
+      "requiredSource": "source-03",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-44",
+      "driver": "fuigo",
+      "queryId": "exact-04",
+      "requiredSource": "source-04",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-45",
+      "driver": "api-only",
+      "queryId": "exact-05",
+      "requiredSource": "source-05",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-46",
+      "driver": "api-only",
+      "queryId": "exact-06",
+      "requiredSource": "source-06",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-47",
+      "driver": "api-only",
+      "queryId": "exact-07",
+      "requiredSource": "source-07",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-48",
+      "driver": "api-only",
+      "queryId": "exact-08",
+      "requiredSource": "source-08",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-49",
+      "driver": "api-only",
+      "queryId": "exact-09",
+      "requiredSource": "source-09",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-50",
+      "driver": "api-only",
+      "queryId": "exact-10",
+      "requiredSource": "source-10",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-51",
+      "driver": "api-only",
+      "queryId": "exact-11",
+      "requiredSource": "source-11",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-52",
+      "driver": "api-only",
+      "queryId": "exact-12",
+      "requiredSource": "source-12",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-53",
+      "driver": "api-only",
+      "queryId": "exact-13",
+      "requiredSource": "source-13",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-54",
+      "driver": "api-only",
+      "queryId": "exact-14",
+      "requiredSource": "source-14",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-55",
+      "driver": "api-only",
+      "queryId": "exact-15",
+      "requiredSource": "source-15",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-56",
+      "driver": "api-only",
+      "queryId": "exact-16",
+      "requiredSource": "source-16",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-57",
+      "driver": "api-only",
+      "queryId": "exact-17",
+      "requiredSource": "source-17",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-58",
+      "driver": "api-only",
+      "queryId": "exact-18",
+      "requiredSource": "source-18",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    },
+    {
+      "id": "answer-59",
+      "driver": "api-only",
+      "queryId": "exact-19",
+      "requiredSource": "source-19",
+      "rubric": "Answer the question using the source policy, cite its source, do not invent exceptions or disclose forbidden sources."
+    }
+  ],
+  "faultCases": [
+    "F01-partial-extraction",
+    "F02-revised-source-projection",
+    "F03-unsupported-authority",
+    "F04-private-room-injection",
+    "F05-symlink-import",
+    "F06-revoked-replay",
+    "F07-message-outbox-crash",
+    "F08-expired-worker",
+    "F09-restore-tombstone",
+    "F10-backpressure",
+    "F11-chunk-negation-language",
+    "F12-noop-benchmark"
+  ],
+  "faultProtocols": [
+    {
+      "id": "F01",
+      "preconditions": [
+        "two source chunks pending",
+        "model configured"
+      ],
+      "operations": [
+        "extract chunk 0 successfully",
+        "refuse chunk 1 budget",
+        "restart worker",
+        "restore budget",
+        "resume"
+      ],
+      "expected": [
+        "source remains partial until chunk 1 completes",
+        "chunk 0 is not extracted twice",
+        "exactly one complete source receipt"
+      ]
+    },
+    {
+      "id": "F02",
+      "preconditions": [
+        "source revision 1 extracted"
+      ],
+      "operations": [
+        "fail projection after authoritative commit",
+        "restart",
+        "repair projection",
+        "replace bytes under same filename with revision 2"
+      ],
+      "expected": [
+        "projection repaired without re-extraction",
+        "revision 2 is processed",
+        "revision 1 remains attributable"
+      ]
+    },
+    {
+      "id": "F03",
+      "preconditions": [
+        "owner pinned rule",
+        "untrusted quoted instruction"
+      ],
+      "operations": [
+        "save candidate asserting owner approval",
+        "propose superseding pinned rule",
+        "extract Nobody decided to deploy"
+      ],
+      "expected": [
+        "owner authority not forged",
+        "pin not replaced",
+        "negation does not become positive fact"
+      ]
+    },
+    {
+      "id": "F04",
+      "preconditions": [
+        "private notebook canary",
+        "bot is room member"
+      ],
+      "operations": [
+        "dispatch room turn",
+        "capture exact adapter input"
+      ],
+      "expected": [
+        "private canary absent",
+        "explicitly promoted room fact present"
+      ]
+    },
+    {
+      "id": "F05",
+      "preconditions": [
+        "external private file",
+        "selected import root"
+      ],
+      "operations": [
+        "create topic symlink to external file",
+        "preview import"
+      ],
+      "expected": [
+        "symlink refused",
+        "no external bytes read into trusted memory"
+      ]
+    },
+    {
+      "id": "F06",
+      "preconditions": [
+        "record disclosed in provider session",
+        "derived assistant message references bundle"
+      ],
+      "operations": [
+        "revoke source audience",
+        "restart provider context",
+        "replay eligible history"
+      ],
+      "expected": [
+        "record absent",
+        "dependent assistant paraphrase absent",
+        "unrelated allowed evidence retained"
+      ]
+    },
+    {
+      "id": "F07",
+      "preconditions": [
+        "message database and pending source"
+      ],
+      "operations": [
+        "crash between message and outbox transaction completion",
+        "restart",
+        "reconcile interrupted turn"
+      ],
+      "expected": [
+        "both message and capture intent committed or neither",
+        "no lost acknowledged source",
+        "interrupted outcome not fabricated success"
+      ]
+    },
+    {
+      "id": "F08",
+      "preconditions": [
+        "worker A holds lease"
+      ],
+      "operations": [
+        "pause A beyond lease expiry",
+        "worker B claims",
+        "resume A",
+        "A attempts commit and release"
+      ],
+      "expected": [
+        "A commit denied",
+        "B ownership preserved",
+        "one logical publication"
+      ]
+    },
+    {
+      "id": "F09",
+      "preconditions": [
+        "backup before forget",
+        "destination retains deletion ledger"
+      ],
+      "operations": [
+        "forget source",
+        "restore older backup into destination",
+        "rebuild indexes"
+      ],
+      "expected": [
+        "source not resurrected",
+        "all query paths exclude tombstone",
+        "fresh-install backup limitation surfaced separately"
+      ]
+    },
+    {
+      "id": "F10",
+      "preconditions": [
+        "10000 active chunks",
+        "100000 historical records"
+      ],
+      "operations": [
+        "8 concurrent recalls",
+        "5 source changes per second for 600 seconds",
+        "pause load"
+      ],
+      "expected": [
+        "no lost capture",
+        "queue drains within 60 seconds",
+        "foreground resource caps met"
+      ]
+    },
+    {
+      "id": "F11",
+      "preconditions": [
+        "Rejected approach heading with following detail",
+        "current decision on next message"
+      ],
+      "operations": [
+        "query rejected detail",
+        "query in Thai",
+        "query in Chinese",
+        "query with no English keywords"
+      ],
+      "expected": [
+        "heading and status retained",
+        "independent semantic path executes",
+        "relevance not asserted as truth confidence"
+      ]
+    },
+    {
+      "id": "F12",
+      "preconditions": [
+        "known gold source in nonempty fixture"
+      ],
+      "operations": [
+        "benchmark current backend",
+        "attempt benchmark with zero visited records"
+      ],
+      "expected": [
+        "known hit required before timing accepted",
+        "empty or wrong backend fails",
+        "provenance labels actual measured path"
+      ]
+    }
+  ],
+  "expected_queries": 36
+}

@@ -52,3 +52,7 @@ filetime = { workspace = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "memory_eval"
+required-features = ["test-support"]

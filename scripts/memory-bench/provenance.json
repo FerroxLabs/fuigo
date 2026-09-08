@@ -1,0 +1,9 @@
+{
+  "donor": "FerroxLabs/murage",
+  "path": "server/memory/testing/corpus.json",
+  "checkout_head": "1d0ceaa5",
+  "working_tree": "dirty; exact corpus hash is authoritative",
+  "sha256": "7dc0a4d0690c002b62602518846b2768ed877e02505d93769f46dfc4e1fe236f",
+  "license": "Apache-2.0",
+  "scope": "Synthetic corpus only; no private memory read"
+}

@@ -1,0 +1,62 @@
+diff --git a/docs/memory.md b/docs/memory.md
+index bc94a831..8b2f9fab 100644
+--- a/docs/memory.md
++++ b/docs/memory.md
+@@ -47,3 +47,7 @@ Feature rollback means selecting Off or Paused with the compatible binary. Do no
+ ## Intel macOS
+ 
+ Intel Macs use keyword retrieval in this release because the pinned native semantic runtime does not provide an Intel macOS binding. Owner review, corrections, sharing, pins, forgetting and source recovery remain available. Unavailable semantic-model downloads are refused on Intel Macs; no semantic inference is claimed there. Apple Silicon, Windows x64 and Linux x64 retain the native local-model path.
++
++### Fuigo memory ownership
++
++Murage owns persistent memory for Fuigo turns and always launches its private ACP process with `--no-memory`. Murage memory being off does not activate a second engine store. This does not change standalone Fuigo defaults, edit user configuration, delete existing memories, or disable ordinary conversation history.
+diff --git a/server/drivers/acp/fuigo.test.ts b/server/drivers/acp/fuigo.test.ts
+index 6e083a37..0b8debf9 100644
+--- a/server/drivers/acp/fuigo.test.ts
++++ b/server/drivers/acp/fuigo.test.ts
+@@ -227,6 +227,7 @@ describe("fuigo argv — the ordering trap", () => {
+     expect(argv).toEqual([
+       "--permission-mode",
+       "default",
++      "--no-memory",
+       "agent",
+       "--no-leader",
+       "-m",
+@@ -247,6 +248,14 @@ describe("fuigo argv — the ordering trap", () => {
+     expect(argv.indexOf("--reasoning-effort")).toBeLessThan(stdioAt);
+   });
+ 
++  it.each(["0", "1"])("Murage owns memory despite FUIGO_MEMORY=%s", async (value) => {
++    await runTurn({ environment: { FUIGO_MEMORY: value } });
++    const { argv, env } = dump("agent");
++    expect(argv.filter(arg => arg === "--no-memory")).toHaveLength(1);
++    expect(argv.indexOf("--no-memory")).toBeLessThan(argv.indexOf("agent"));
++    expect(env.FUIGO_MEMORY).toBe(value);
++  });
++
+   it("keeps --permission-mode BEFORE `agent` — it is a top-level flag", async () => {
+     await runTurn({ model: "flux-auto" });
+     const { argv } = dump("agent");
+@@ -265,7 +274,7 @@ describe("fuigo argv — the ordering trap", () => {
+ 
+   it("omits -m entirely when the turn names no model", async () => {
+     await runTurn({});
+-    expect(dump("agent").argv).toEqual(["--permission-mode", "default", "agent", "--no-leader", "stdio"]);
++    expect(dump("agent").argv).toEqual(["--permission-mode", "default", "--no-memory", "agent", "--no-leader", "stdio"]);
+   });
+ });
+ 
+diff --git a/server/drivers/acp/fuigo.ts b/server/drivers/acp/fuigo.ts
+index c5202690..03b4f5f9 100644
+--- a/server/drivers/acp/fuigo.ts
++++ b/server/drivers/acp/fuigo.ts
+@@ -303,6 +303,9 @@ const support: AcpSupport = {
+   spawnArgs: (config, turn) => [
+     "--permission-mode",
+     config.fullAuto ? "bypassPermissions" : "default",
++    // Murage owns persistent memory. Override ambient Fuigo config without
++    // changing the user's standalone memory policy or touching their store.
++    "--no-memory",
+     "agent",
+     // `[cli] use_leader = true` in the user's own ~/.fuigo/config.toml makes
+     // `fuigo agent` ATTACH to a running leader on ~/.fuigo/leader.sock instead

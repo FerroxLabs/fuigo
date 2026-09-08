@@ -1,0 +1,53 @@
+{
+  "model": "Xenova/paraphrase-multilingual-MiniLM-L12-v2@2c4055b12046f11709e9df2c122e59ffbdc2f900",
+  "selected_semantic_min_score": 0.55,
+  "development": [
+    {
+      "threshold": 0.35,
+      "cases": 36,
+      "recall": 0.6666666666666666,
+      "precision": 0.7619047619047619,
+      "abstention": 0.6666666666666666,
+      "forbidden": 0
+    },
+    {
+      "threshold": 0.45,
+      "cases": 36,
+      "recall": 0.5833333333333334,
+      "precision": 0.875,
+      "abstention": 0.8333333333333334,
+      "forbidden": 0
+    },
+    {
+      "threshold": 0.55,
+      "cases": 36,
+      "recall": 0.375,
+      "precision": 1.0,
+      "abstention": 1.0,
+      "forbidden": 0
+    },
+    {
+      "threshold": 0.65,
+      "cases": 36,
+      "recall": 0.08333333333333333,
+      "precision": 1.0,
+      "abstention": 1.0,
+      "forbidden": 0
+    }
+  ],
+  "heldout_sha256": "8c6120f7aac89c7d0271391c59fd79d2fe3d7f5e1bffac67d18c19bc8bc93676",
+  "heldout_default": {
+    "cases": 24,
+    "recall": 0.08333333333333333,
+    "precision": 1.0,
+    "abstention": 1.0,
+    "forbidden": 0
+  },
+  "heldout_calibrated": {
+    "cases": 24,
+    "recall": 1.0,
+    "precision": 1.0,
+    "abstention": 1.0,
+    "forbidden": 0
+  }
+}

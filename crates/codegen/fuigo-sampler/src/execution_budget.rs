@@ -44,6 +44,12 @@ impl ExecutionBudget {
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
+    /// Advisory only; admission remains atomic and cannot exceed the cap.
+    pub fn remaining_calls(&self) -> Option<u64> {
+        self.max_calls
+            .map(|max| max.saturating_sub(self.calls.load(Ordering::Acquire)))
+    }
+
     pub fn admit(&self) -> Result<(), &'static str> {
         if self.expired() {
             return Err(WALL_LIMIT);
