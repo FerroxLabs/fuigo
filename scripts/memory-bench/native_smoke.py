@@ -24,7 +24,7 @@ results=[]
 try:
     for enabled in (True,False):
         root=a.out/str(enabled);root.mkdir();home=root/"home";home.mkdir();work=root/"work";work.mkdir()
-        subprocess.run(["rtk","proxy","git","init","-q",str(work)],check=True)
+        subprocess.run(b.COMMAND_PREFIX+["git","init","-q",str(work)],check=True)
         # Deliberately enabled even for off arm: root CLI must win.
         (home/"config.toml").write_text(b.CONFIG.format(port=proxy.server_port,enabled="true"))
         sid=None;before=len(seen)

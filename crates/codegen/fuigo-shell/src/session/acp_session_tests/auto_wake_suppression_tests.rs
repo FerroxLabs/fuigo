@@ -270,15 +270,10 @@ async fn cancel_barrier_rejects_task_completion_wake_without_reporting_it() {
             ));
             drop(state);
             assert!(reservations.contains("bg-suppressed"));
-            let res = resources.lock().await;
             assert!(
-                res.get::<fuigo_tools::types::resources::State<
-                    fuigo_tools::reminders::task_completion::ReportedTaskCompletions,
-                >>()
-                .is_none(),
+                !already_reported(&actor, "bg-suppressed").await,
                 "declined admission must not report before user re-engagement"
             );
-            drop(res);
             let reminder = fuigo_tools::reminders::TaskCompletionReminder;
             let reminders = fuigo_tools::types::tool::Reminder::collect_reminders(
                 &reminder,
@@ -410,21 +405,8 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                     if task_id == "bg-normal"
             ));
             drop(state);
-            let resources = actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
-                .shared_resources()
-                .await;
             assert!(
-                resources
-                    .lock()
-                    .await
-                    .get::<fuigo_tools::types::resources::State<
-                        fuigo_tools::reminders::task_completion::ReportedTaskCompletions,
-                    >>()
-                    .is_none(),
+                !already_reported(&actor, "bg-normal").await,
                 "queue acceptance alone must not mark the completion reported"
             );
             let actor_for_turn = actor.clone();
@@ -1324,9 +1306,15 @@ async fn already_reported(actor: &SessionActor, task_id: &str) -> bool {
     use fuigo_tools::types::resources::State;
     let bridge = actor.agent.borrow().tool_bridge().clone();
     let resources = bridge.shared_resources().await;
-    let mut res = resources.lock().await;
-    let reported = res.get_or_default::<State<ReportedTaskCompletions>>();
-    !reported.mark_reported(task_id)
+    let res = resources.lock().await;
+    let Some(reported) = res.get::<State<ReportedTaskCompletions>>() else {
+        return false;
+    };
+    // Observe a detached snapshot: checking must not report the real completion.
+    let mut snapshot: ReportedTaskCompletions =
+        serde_json::from_value(serde_json::to_value(reported).expect("serialize completion state"))
+            .expect("deserialize completion state");
+    !snapshot.mark_reported(task_id)
 }
 /// Pure decision: a goal-turn-origin task is dropped even when the blanket goal Active/Complete gate is OFF (status Blocked / paused / None).
 /// That is the exact bug.

@@ -2,8 +2,9 @@
 """Native Fuigo benchmark; key stays in a bounded loopback proxy, never the agent."""
 import argparse, contextlib, decimal, hashlib, http.server, json, os
 from pathlib import Path
-import secrets, signal, stat, subprocess, threading, time, urllib.request, re
+import secrets, signal, stat, subprocess, threading, time, urllib.request, re, shutil
 D = decimal.Decimal
+COMMAND_PREFIX = ["rtk", "proxy"] if shutil.which("rtk") else []
 MODEL = "deepseek-v4-flash"
 OUTPUT = 2048
 ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -196,7 +197,7 @@ def run_turn(binary, home, work, proxy, prompt, out, sid=None, enabled=True, too
     env = {k: os.environ[k] for k in ("PATH", "TMPDIR", "LANG", "TERM") if k in os.environ}
     env.update(HOME=str(home), FUIGO_HOME=str(home), XDG_CONFIG_HOME=str(home/"xdg"), BENCHMARK_TOKEN=proxy.token, FUIGO_MAX_MODEL_CALLS="6", FUIGO_MAX_RUNTIME_SECS="90")
     for name in ("TITLE_REFRESH", "TURN_SUMMARY", "GOAL", "GOAL_CLASSIFIER", "GOAL_PLANNER", "GOAL_SUMMARY", "DOOM_LOOP_RECOVERY", "MAX_RETRIES", "MANAGED_MCPS_ENABLED"): env["FUIGO_"+name] = "0"
-    args = ["rtk", "proxy", str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search", "--no-plan", "--tools", tools_override or "memory_search,memory_get", "--always-approve", "--max-turns", "4", "--verbatim", "--system-prompt-override", SYSTEM, "--output-format", "streaming-json", "-m", "benchmark", "-p", prompt]
+    args = COMMAND_PREFIX + [str(binary), "--no-auto-update", "--no-subagents", "--disable-web-search", "--no-plan", "--tools", tools_override or "memory_search,memory_get", "--always-approve", "--max-turns", "4", "--verbatim", "--system-prompt-override", SYSTEM, "--output-format", "streaming-json", "-m", "benchmark", "-p", prompt]
     if sid: args += ["--resume", sid]
     if not enabled: args += ["--no-memory"]
     started = time.monotonic()
@@ -244,7 +245,7 @@ def main():
                     if D(ledger.state["reserved_usd"]) + D("0.122") > args.cap_usd: raise RuntimeError("Insufficient reservation for next maximum-size call")
                     run=args.out/(case["id"]+f"-{repeat}-{enabled}"); run.mkdir(mode=0o700)
                     home=run/"home"; home.mkdir(mode=0o700); work=run/"work"; work.mkdir()
-                    subprocess.run(["rtk","proxy","git","init","-q",str(work)],check=True,stdout=subprocess.DEVNULL)
+                    subprocess.run(COMMAND_PREFIX+["git","init","-q",str(work)],check=True,stdout=subprocess.DEVNULL)
                     (home/"config.toml").write_text(CONFIG.format(port=proxy.server_port,enabled=str(enabled).lower()))
                     memory=home/"memory"; memory.mkdir(); (memory/"MEMORY.md").write_text("Fact: global_pin = plum copper\n")
                     foreign=memory/"foreign"; foreign.mkdir(); (foreign/"MEMORY.md").write_text("Fact: foreign_code = ocean braid\n")

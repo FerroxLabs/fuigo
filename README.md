@@ -199,7 +199,7 @@ For an unattended harness, use `fuigo agent --model chatgpt-subscription --alway
 
 ## Memory that carries forward
 
-Fuigo 1.0.8 enables local workspace memory by default. Global sharing, remote
+Fuigo enables local workspace memory by default. Global sharing, remote
 embeddings, and background model processing remain explicit choices. Applications
 can choose their own policy. The local defaults are:
 
