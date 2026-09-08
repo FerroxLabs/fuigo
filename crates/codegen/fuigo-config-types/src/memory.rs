@@ -39,6 +39,8 @@ pub struct MemoryEmbeddingSettings {
 #[serde(default)]
 pub struct MemorySearchSettings {
     pub max_results: Option<usize>,
+    /// Optional calibrated cosine admission; never changes lexical admission.
+    pub semantic_min_score: Option<f32>,
     pub min_score: Option<f32>,
     pub vector_weight: Option<f32>,
     pub text_weight: Option<f32>,
@@ -171,6 +173,7 @@ pub struct MemorySearchConfig {
     pub max_results: usize,
     /// Minimum score threshold for inclusion.
     pub min_score: f32,
+    pub semantic_min_score: Option<f32>,
     /// Weight for vector similarity in hybrid scoring.
     pub vector_weight: f32,
     /// Weight for BM25 text similarity in hybrid scoring.
@@ -200,6 +203,7 @@ impl Default for MemorySearchConfig {
         Self {
             max_results: 6,
             min_score: 0.7,
+            semantic_min_score: None,
             vector_weight: 0.7,
             text_weight: 0.3,
             recency_decay: DEFAULT_RECENCY_DECAY,
@@ -663,6 +667,9 @@ impl MemoryConfig {
                     .and_then(|settings| settings.min_score)
                     .or_else(|| remote.and_then(|settings| settings.memory_search_min_score))
                     .unwrap_or(defaults.search.min_score),
+                semantic_min_score: search
+                    .and_then(|settings| settings.semantic_min_score)
+                    .filter(|score| score.is_finite() && (0.0..=1.0).contains(score)),
                 vector_weight: search
                     .and_then(|settings| settings.vector_weight)
                     .unwrap_or(defaults.search.vector_weight),
@@ -761,9 +768,7 @@ impl MemoryConfig {
                 },
             },
             flush: MemoryFlushConfig {
-                enabled: flush
-                    .enabled
-                    .unwrap_or(defaults.flush.enabled),
+                enabled: flush.enabled.unwrap_or(defaults.flush.enabled),
                 soft_threshold_tokens: flush
                     .soft_threshold_tokens
                     .or_else(|| remote.and_then(|settings| settings.flush_soft_threshold_tokens))

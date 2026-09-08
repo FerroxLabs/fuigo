@@ -465,6 +465,10 @@ impl MemoryBackend for MemoryBackendImpl {
         let mut search_config = self.search_config.clone();
         search_config.max_results = max_results;
         search_config.min_score = min_score as f32;
+        if min_score as f32 != self.search_config.min_score {
+            // A per-call minimum overrides both calibrated admission routes.
+            search_config.semantic_min_score = None;
+        }
 
         let candidate_limit = search_config.max_results * 3;
         let primary = index.search_fts(query, candidate_limit);

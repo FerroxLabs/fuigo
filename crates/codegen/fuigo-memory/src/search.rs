@@ -317,7 +317,19 @@ pub(super) fn hybrid_search_merge(
         let display_score =
             (base_score * decay_multiplier * source_weight.min(1.0)).clamp(0.0, 1.0);
 
-        if display_score >= config.min_score as f64 {
+        // Cosine and lexical coverage are different scales. Only an explicit,
+        // model-calibrated semantic setting can admit a vector-supported hit
+        // below the existing lexical threshold. No vector means no bypass.
+        let semantic_score = vec_scores.get(chunk_id).copied().unwrap_or(0.0)
+            * decay_multiplier
+            * source_weight.min(1.0);
+        let semantic_admitted = config.semantic_min_score.is_some_and(|threshold| {
+            threshold.is_finite()
+                && (0.0..=1.0).contains(&threshold)
+                && vec_scores.contains_key(chunk_id)
+                && semantic_score >= f64::from(threshold)
+        });
+        if display_score >= config.min_score as f64 || semantic_admitted {
             ranked.push((
                 raw_score,
                 SearchResult {
@@ -325,7 +337,11 @@ pub(super) fn hybrid_search_merge(
                     path: chunk.path.clone(),
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
-                    score: display_score,
+                    score: if semantic_admitted {
+                        display_score.max(semantic_score)
+                    } else {
+                        display_score
+                    },
                     snippet: chunk.text.clone(),
                     source: chunk.source.clone(),
                     created_at: chunk.created_at,

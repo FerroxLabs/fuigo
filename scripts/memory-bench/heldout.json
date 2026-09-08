@@ -1,0 +1,741 @@
+{
+  "version": 1,
+  "expected_queries": 24,
+  "provenance": "Fresh authored heldout topics, frozen before threshold selection; no tuning after results",
+  "sources": [
+    {
+      "id": "held-source-0",
+      "revision": 1,
+      "scope": "held-observatory",
+      "text": "The observatory closes to visitors at 21:30.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-observatory",
+      "messageId": "held-source-0",
+      "role": "user"
+    },
+    {
+      "id": "held-source-0-old",
+      "revision": 1,
+      "scope": "held-observatory",
+      "text": "An obsolete draft about observatory was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-observatory",
+      "messageId": "held-source-0-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-0-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_0: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-observatory",
+      "messageId": "held-source-0-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-1",
+      "revision": 1,
+      "scope": "held-seedbank",
+      "text": "The seed bank keeps reserve packets at minus eighteen degrees Celsius.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-seedbank",
+      "messageId": "held-source-1",
+      "role": "user"
+    },
+    {
+      "id": "held-source-1-old",
+      "revision": 1,
+      "scope": "held-seedbank",
+      "text": "An obsolete draft about seedbank was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-seedbank",
+      "messageId": "held-source-1-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-1-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_1: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-seedbank",
+      "messageId": "held-source-1-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-2",
+      "revision": 1,
+      "scope": "held-ferry",
+      "text": "The island ferry departs from pier seven.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-ferry",
+      "messageId": "held-source-2",
+      "role": "user"
+    },
+    {
+      "id": "held-source-2-old",
+      "revision": 1,
+      "scope": "held-ferry",
+      "text": "An obsolete draft about ferry was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-ferry",
+      "messageId": "held-source-2-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-2-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_2: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-ferry",
+      "messageId": "held-source-2-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-3",
+      "revision": 1,
+      "scope": "held-pottery",
+      "text": "The pottery workshop needs clay orders submitted by Thursday.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-pottery",
+      "messageId": "held-source-3",
+      "role": "user"
+    },
+    {
+      "id": "held-source-3-old",
+      "revision": 1,
+      "scope": "held-pottery",
+      "text": "An obsolete draft about pottery was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-pottery",
+      "messageId": "held-source-3-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-3-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_3: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-pottery",
+      "messageId": "held-source-3-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-4",
+      "revision": 1,
+      "scope": "held-telescope",
+      "text": "The telescope lens must be cleaned with distilled water.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-telescope",
+      "messageId": "held-source-4",
+      "role": "user"
+    },
+    {
+      "id": "held-source-4-old",
+      "revision": 1,
+      "scope": "held-telescope",
+      "text": "An obsolete draft about telescope was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-telescope",
+      "messageId": "held-source-4-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-4-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_4: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-telescope",
+      "messageId": "held-source-4-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-5",
+      "revision": 1,
+      "scope": "held-orchard",
+      "text": "The orchard harvest team meets beside the north gate.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-orchard",
+      "messageId": "held-source-5",
+      "role": "user"
+    },
+    {
+      "id": "held-source-5-old",
+      "revision": 1,
+      "scope": "held-orchard",
+      "text": "An obsolete draft about orchard was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-orchard",
+      "messageId": "held-source-5-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-5-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_5: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-orchard",
+      "messageId": "held-source-5-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-6",
+      "revision": 1,
+      "scope": "held-radio",
+      "text": "The community radio archive uses the FLAC audio format.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-radio",
+      "messageId": "held-source-6",
+      "role": "user"
+    },
+    {
+      "id": "held-source-6-old",
+      "revision": 1,
+      "scope": "held-radio",
+      "text": "An obsolete draft about radio was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-radio",
+      "messageId": "held-source-6-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-6-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_6: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-radio",
+      "messageId": "held-source-6-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-7",
+      "revision": 1,
+      "scope": "held-museum",
+      "text": "The museum requires two staff members to open the collection vault.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-museum",
+      "messageId": "held-source-7",
+      "role": "user"
+    },
+    {
+      "id": "held-source-7-old",
+      "revision": 1,
+      "scope": "held-museum",
+      "text": "An obsolete draft about museum was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-museum",
+      "messageId": "held-source-7-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-7-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_7: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-museum",
+      "messageId": "held-source-7-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-8",
+      "revision": 1,
+      "scope": "held-canal",
+      "text": "Canal inspections take place every six weeks.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-canal",
+      "messageId": "held-source-8",
+      "role": "user"
+    },
+    {
+      "id": "held-source-8-old",
+      "revision": 1,
+      "scope": "held-canal",
+      "text": "An obsolete draft about canal was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-canal",
+      "messageId": "held-source-8-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-8-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_8: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-canal",
+      "messageId": "held-source-8-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-9",
+      "revision": 1,
+      "scope": "held-bakery",
+      "text": "The bakery reserves ten loaves for the evening shelter delivery.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-bakery",
+      "messageId": "held-source-9",
+      "role": "user"
+    },
+    {
+      "id": "held-source-9-old",
+      "revision": 1,
+      "scope": "held-bakery",
+      "text": "An obsolete draft about bakery was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-bakery",
+      "messageId": "held-source-9-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-9-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_9: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-bakery",
+      "messageId": "held-source-9-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-10",
+      "revision": 1,
+      "scope": "held-weaving",
+      "text": "The weaving class supplies cotton thread to beginners.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-weaving",
+      "messageId": "held-source-10",
+      "role": "user"
+    },
+    {
+      "id": "held-source-10-old",
+      "revision": 1,
+      "scope": "held-weaving",
+      "text": "An obsolete draft about weaving was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-weaving",
+      "messageId": "held-source-10-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-10-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_10: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-weaving",
+      "messageId": "held-source-10-foreign",
+      "role": "user"
+    },
+    {
+      "id": "held-source-11",
+      "revision": 1,
+      "scope": "held-garden",
+      "text": "The botanical garden waters the fern house at dawn.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-garden",
+      "messageId": "held-source-11",
+      "role": "user"
+    },
+    {
+      "id": "held-source-11-old",
+      "revision": 1,
+      "scope": "held-garden",
+      "text": "An obsolete draft about garden was withdrawn.",
+      "state": "superseded",
+      "assertion": "owner-statement",
+      "threadId": "held-garden",
+      "messageId": "held-source-11-old",
+      "role": "user"
+    },
+    {
+      "id": "held-source-11-foreign",
+      "revision": 1,
+      "scope": "foreign",
+      "text": "PRIVATE_FOREIGN_11: unrelated private personal detail.",
+      "state": "active",
+      "assertion": "owner-statement",
+      "threadId": "held-garden",
+      "messageId": "held-source-11-foreign",
+      "role": "user"
+    }
+  ],
+  "queries": [
+    {
+      "id": "held-positive-0",
+      "family": "paraphrase",
+      "query": "At what time does the observatory stop admitting visitors?",
+      "allowedScopes": [
+        "held-observatory"
+      ],
+      "expected": [
+        "held-source-0"
+      ],
+      "forbidden": [
+        "held-source-0-old",
+        "held-source-0-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-0",
+      "family": "no-answer",
+      "query": "What is the observatory emergency contact telephone number?",
+      "allowedScopes": [
+        "held-observatory"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-0-old",
+        "held-source-0-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-1",
+      "family": "paraphrase",
+      "query": "What storage temperature is used for reserve seed packets?",
+      "allowedScopes": [
+        "held-seedbank"
+      ],
+      "expected": [
+        "held-source-1"
+      ],
+      "forbidden": [
+        "held-source-1-old",
+        "held-source-1-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-1",
+      "family": "no-answer",
+      "query": "What is the seedbank emergency contact telephone number?",
+      "allowedScopes": [
+        "held-seedbank"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-1-old",
+        "held-source-1-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-2",
+      "family": "paraphrase",
+      "query": "Which pier does the island boat leave from?",
+      "allowedScopes": [
+        "held-ferry"
+      ],
+      "expected": [
+        "held-source-2"
+      ],
+      "forbidden": [
+        "held-source-2-old",
+        "held-source-2-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-2",
+      "family": "no-answer",
+      "query": "What is the ferry emergency contact telephone number?",
+      "allowedScopes": [
+        "held-ferry"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-2-old",
+        "held-source-2-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-3",
+      "family": "paraphrase",
+      "query": "When is the deadline for ordering workshop clay?",
+      "allowedScopes": [
+        "held-pottery"
+      ],
+      "expected": [
+        "held-source-3"
+      ],
+      "forbidden": [
+        "held-source-3-old",
+        "held-source-3-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-3",
+      "family": "no-answer",
+      "query": "What is the pottery emergency contact telephone number?",
+      "allowedScopes": [
+        "held-pottery"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-3-old",
+        "held-source-3-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-4",
+      "family": "paraphrase",
+      "query": "What liquid is approved for cleaning the telescope lens?",
+      "allowedScopes": [
+        "held-telescope"
+      ],
+      "expected": [
+        "held-source-4"
+      ],
+      "forbidden": [
+        "held-source-4-old",
+        "held-source-4-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-4",
+      "family": "no-answer",
+      "query": "What is the telescope emergency contact telephone number?",
+      "allowedScopes": [
+        "held-telescope"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-4-old",
+        "held-source-4-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-5",
+      "family": "paraphrase",
+      "query": "Where does the fruit picking crew assemble?",
+      "allowedScopes": [
+        "held-orchard"
+      ],
+      "expected": [
+        "held-source-5"
+      ],
+      "forbidden": [
+        "held-source-5-old",
+        "held-source-5-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-5",
+      "family": "no-answer",
+      "query": "What is the orchard emergency contact telephone number?",
+      "allowedScopes": [
+        "held-orchard"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-5-old",
+        "held-source-5-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-6",
+      "family": "paraphrase",
+      "query": "Which audio format holds the community radio recordings?",
+      "allowedScopes": [
+        "held-radio"
+      ],
+      "expected": [
+        "held-source-6"
+      ],
+      "forbidden": [
+        "held-source-6-old",
+        "held-source-6-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-6",
+      "family": "no-answer",
+      "query": "What is the wireless network password?",
+      "allowedScopes": [
+        "held-radio"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-6-old",
+        "held-source-6-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-7",
+      "family": "paraphrase",
+      "query": "How many employees must be present to open the museum vault?",
+      "allowedScopes": [
+        "held-museum"
+      ],
+      "expected": [
+        "held-source-7"
+      ],
+      "forbidden": [
+        "held-source-7-old",
+        "held-source-7-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-7",
+      "family": "no-answer",
+      "query": "Who approved the lunar lander launch?",
+      "allowedScopes": [
+        "held-museum"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-7-old",
+        "held-source-7-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-8",
+      "family": "paraphrase",
+      "query": "How often is the canal inspected?",
+      "allowedScopes": [
+        "held-canal"
+      ],
+      "expected": [
+        "held-source-8"
+      ],
+      "forbidden": [
+        "held-source-8-old",
+        "held-source-8-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-8",
+      "family": "no-answer",
+      "query": "What is the emergency blood donation schedule?",
+      "allowedScopes": [
+        "held-canal"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-8-old",
+        "held-source-8-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-9",
+      "family": "paraphrase",
+      "query": "How many loaves are set aside for the shelter?",
+      "allowedScopes": [
+        "held-bakery"
+      ],
+      "expected": [
+        "held-source-9"
+      ],
+      "forbidden": [
+        "held-source-9-old",
+        "held-source-9-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-9",
+      "family": "no-answer",
+      "query": "What is the wireless network password?",
+      "allowedScopes": [
+        "held-bakery"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-9-old",
+        "held-source-9-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-10",
+      "family": "paraphrase",
+      "query": "What thread material do new weaving students receive?",
+      "allowedScopes": [
+        "held-weaving"
+      ],
+      "expected": [
+        "held-source-10"
+      ],
+      "forbidden": [
+        "held-source-10-old",
+        "held-source-10-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-10",
+      "family": "no-answer",
+      "query": "Who approved the lunar lander launch?",
+      "allowedScopes": [
+        "held-weaving"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-10-old",
+        "held-source-10-foreign"
+      ]
+    },
+    {
+      "id": "held-positive-11",
+      "family": "paraphrase",
+      "query": "When does the fern greenhouse get watered?",
+      "allowedScopes": [
+        "held-garden"
+      ],
+      "expected": [
+        "held-source-11"
+      ],
+      "forbidden": [
+        "held-source-11-old",
+        "held-source-11-foreign"
+      ]
+    },
+    {
+      "id": "held-negative-11",
+      "family": "no-answer",
+      "query": "What is the emergency blood donation schedule?",
+      "allowedScopes": [
+        "held-garden"
+      ],
+      "expected": [],
+      "forbidden": [
+        "held-source-11-old",
+        "held-source-11-foreign"
+      ]
+    }
+  ]
+}

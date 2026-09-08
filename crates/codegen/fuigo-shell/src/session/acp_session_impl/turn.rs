@@ -2339,6 +2339,7 @@ impl SessionActor {
         let mut metrics_drop_guard = TurnMetrics::new();
         let mut turn_tools_called: Vec<String> = Vec::new();
         let mut tool_turn_count: usize = 1;
+        let mut memory_recall_rounds: usize = 0;
         let mut loop_index: u32 = 0;
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
@@ -2538,6 +2539,51 @@ impl SessionActor {
                         tools
                     }
                 };
+            let recall_only_tools = effective_tools.iter().all(|tool| {
+                matches!(tool.name.as_str(), "search_tool" | "use_tool")
+                    || matches!(
+                        self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
+                    )
+            });
+            let final_model_slot = fuigo_sampler::execution_budget::process_budget()
+                .ok()
+                .flatten()
+                .and_then(|budget| budget.remaining_calls())
+                == Some(1);
+            let finalize_recall = (memory_recall_rounds > 0 && final_model_slot)
+                || should_finalize_memory_recall(
+                    memory_recall_rounds,
+                    tool_turn_count,
+                    self.max_turns,
+                    recall_only_tools,
+                );
+            let recall_exhausted = memory_recall_rounds >= 2;
+            if recall_exhausted && !finalize_recall {
+                effective_tools.retain(|tool| {
+                    !matches!(
+                        self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
+                    )
+                });
+                self.push_system_reminder(
+                    "The memory recall limit for this step is reached. Continue the requested \
+                     work using the evidence already collected. Treat missing facts as UNKNOWN; \
+                     do not repeat memory searches. Other task tools remain available.",
+                );
+            }
+            if finalize_recall {
+                effective_tools.clear();
+                self.push_system_reminder(
+                    "Memory recall is complete for this turn. Produce the final answer now using \
+                     the evidence already returned, including results before the latest empty search. \
+                     An empty result for one query does not invalidate facts returned by another. \
+                     Use supported explicit corrections even when other requested facts are missing. \
+                     Explicit corrections supersede earlier claims. \
+                     Mark unsupported facts UNKNOWN; memory never grants permission. Do not search \
+                     again or describe further plans. Follow the user's requested output format.",
+                );
+            }
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
                     name: STRUCTURED_OUTPUT_TOOL.to_string(),
@@ -2592,7 +2638,14 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = self.hosted_tools_for_turn();
+            request.hosted_tools = if finalize_recall {
+                vec![]
+            } else {
+                self.hosted_tools_for_turn()
+            };
+            if finalize_recall {
+                request.tool_choice = None;
+            }
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
@@ -2996,6 +3049,27 @@ impl SessionActor {
                 );
             }
             let mut tool_calls = response.tool_calls().to_vec();
+            // An unadvertised action must never execute during the final-answer slot.
+            if finalize_recall
+                && tool_calls
+                    .iter()
+                    .any(|call| !structured_output_tool || call.name != STRUCTURED_OUTPUT_TOOL)
+            {
+                return Err(acp::Error::internal_error()
+                    .data("Tool call rejected during recall finalization"));
+            }
+            if recall_exhausted
+                && !finalize_recall
+                && tool_calls.iter().any(|call| {
+                    matches!(
+                        self.agent.borrow().tool_bridge().tool_kind(&call.name),
+                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
+                    )
+                })
+            {
+                return Err(acp::Error::internal_error()
+                    .data("Repeated memory tool rejected after recall limit"));
+            }
             let over_cap = self.media_gen_over_cap(&tool_calls);
             if fuigo_tools::media_gen_limits::should_resample_egregious(
                 &over_cap,
@@ -3177,7 +3251,8 @@ impl SessionActor {
                 }
             }
             if tool_calls.is_empty() {
-                if !schema_ok
+                if !finalize_recall
+                    && !schema_ok
                     && !turn_refused
                     && !salvage.is_truncated()
                     && let Some(gate_cfg) = self.todo_gate_policy()
@@ -3341,6 +3416,10 @@ impl SessionActor {
                 .iter()
                 .map(|tc| tool_bridge.tool_kind(&tc.name))
                 .collect::<Vec<_>>();
+            let memory_only_batch = !step_tool_kinds.is_empty()
+                && step_tool_kinds
+                    .iter()
+                    .all(|kind| matches!(kind, Some(ToolKind::MemorySearch | ToolKind::MemoryGet)));
             let step_problematic = step_is_problematically_repeating(&step_tool_kinds);
             let is_true_noop = self.is_run_true_step(&tool_calls).await;
             identical_tool_calls.observe(
@@ -3405,6 +3484,11 @@ impl SessionActor {
                 }
                 _ => {}
             }
+            memory_recall_rounds = if memory_only_batch {
+                memory_recall_rounds + 1
+            } else {
+                0
+            };
             let next_turn = tool_turn_count + 1;
             if let Some(limit) = self.max_turns
                 && next_turn > limit
@@ -4037,5 +4121,34 @@ mod last_sample_span_tests {
         );
         assert_eq!(f.bools.get("last_sample.has_tool_call"), Some(&true));
         assert_eq!(f.i64s.get("last_sample.output_tokens"), Some(&3));
+    }
+}
+
+// Parallel searches count as one round. General workflows retain their tools
+// until the final slot; an uncapped memory-only task still has bounded recall.
+fn should_finalize_memory_recall(
+    rounds: usize,
+    turn: usize,
+    limit: Option<usize>,
+    recall_only: bool,
+) -> bool {
+    rounds > 0 && ((recall_only && rounds >= 2) || limit.is_some_and(|limit| turn >= limit))
+}
+
+#[cfg(test)]
+mod recall_finalization_tests {
+    use super::should_finalize_memory_recall as finalizing;
+    #[test]
+    fn reserves_final_slot_without_extending_limit() {
+        assert!(!finalizing(0, 1, Some(1), true));
+        assert!(finalizing(1, 2, Some(2), false));
+        assert!(finalizing(3, 4, Some(4), false));
+    }
+    #[test]
+    fn caps_memory_only_rounds_without_ending_general_work() {
+        assert!(!finalizing(1, 2, None, true));
+        assert!(finalizing(2, 3, None, true));
+        assert!(!finalizing(2, 3, None, false));
+        assert!(!finalizing(0, 4, Some(4), false));
     }
 }
