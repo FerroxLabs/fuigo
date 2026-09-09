@@ -59,10 +59,13 @@ pub struct AgentPipes {
 /// Stand up `MvpAgent` plus its ACP connection and IO tasks on the current `LocalSet`.
 /// Callers wanting another topology build the same pieces elsewhere and hand [`connect_client`] the pipes.
 pub fn spawn_agent_local() -> AgentPipes {
+    spawn_agent_local_with_config(AgentConfig::default())
+}
+
+pub fn spawn_agent_local_with_config(agent_config: AgentConfig) -> AgentPipes {
     let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
 
-    let agent_config = AgentConfig::default();
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let agent = MvpAgent::new(GatewaySender::new(gw_tx), &agent_config, auth_manager, None)

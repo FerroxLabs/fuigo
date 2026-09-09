@@ -55,6 +55,7 @@ fn write_compacted_session_fixture(session_dir: &std::path::Path, ckpt_id: &str)
     std::fs::create_dir_all(session_dir.join("compaction_checkpoints")).unwrap();
 
     let ckpt_file = CompactionCheckpointFile {
+        inherited_prefix_len: None,
         checkpoint_id: ckpt_id.to_string(),
         prompt_index_at_compaction: 5,
         compacted_history: vec![

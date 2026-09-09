@@ -190,8 +190,14 @@ pub(crate) async fn dispatch(
     let resolver = resolver.ok_or(SamplingError::InvalidConfiguration(
         "subscription auth must be reattached after loading config",
     ))?;
-    let bearer = resolver.resolve().await?;
+    let bearer = if let Some(remaining) = crate::request_accounting::remaining_time()? {
+        tokio::time::timeout(remaining, resolver.resolve()).await.map_err(|_|
+            SamplingError::InvalidConfiguration("execution deadline exhausted during subscription authentication"))??
+    } else {
+        resolver.resolve().await?
+    };
     authorize_request(&mut request, bearer, kind)?;
+    crate::request_accounting::clamp_deadline(&mut request)?;
     let client = SubscriptionClient::new(kind.recipient())
         .map_err(|_| SamplingError::InvalidConfiguration("subscription HTTP client unavailable"))?;
     #[cfg(test)]
@@ -204,11 +210,13 @@ pub(crate) async fn dispatch(
         let client =
             fuigo_extra_ca::build_reqwest_client(|b| b.redirect(reqwest::redirect::Policy::none()))
                 .unwrap();
+        crate::request_accounting::dispatched();
         let response = fuigo_extra_ca::dispatch::execute(&client, request)
             .await
             .unwrap();
         return classify(response);
     }
+    crate::request_accounting::dispatched();
     let response = client.execute(request).await.map_err(|_| {
         SamplingError::InvalidConfiguration("subscription transport failed; no API-key fallback")
     })?;

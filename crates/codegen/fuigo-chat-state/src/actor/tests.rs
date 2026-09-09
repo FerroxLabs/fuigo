@@ -4,6 +4,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use fuigo_sampling_types::{ConversationItem, SamplingConfig};
 
 use crate::StrictAppendAck;
@@ -961,6 +962,63 @@ async fn compaction_reseed_carries_provider_overhead() {
         total <= 51_000,
         "reseed must never exceed the pre-compaction provider total, got {total}"
     );
+}
+
+#[tokio::test]
+async fn compaction_commit_rejects_stale_and_cancelled_candidates() {
+    let h = TestHarness::new();
+    let (epoch, _, _) = h.handle.compaction_snapshot().await.unwrap();
+    h.handle.push_user_message(ConversationItem::user("Correction: retain the original files"));
+    let candidate = vec![ConversationItem::system("summary")];
+    assert!(h.handle.commit_compaction(epoch, candidate.clone(), CancellationToken::new(), async {
+        panic!("stale candidate must not reach persistence")
+    }).await.is_err());
+    let (epoch, _, before) = h.handle.compaction_snapshot().await.unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(h.handle.commit_compaction(epoch, candidate, cancel, async {
+        panic!("cancelled candidate must not reach persistence")
+    }).await.is_err());
+    assert_eq!(serde_json::to_value(h.handle.get_conversation().await).unwrap(), serde_json::to_value(before).unwrap());
+}
+
+#[tokio::test]
+async fn compaction_commit_failure_retains_old_and_success_serializes_later_events() {
+    let h = TestHarness::new();
+    let (epoch, _, before) = h.handle.compaction_snapshot().await.unwrap();
+    let candidate = vec![ConversationItem::system("committed summary")];
+    assert!(h.handle.commit_compaction(epoch, candidate.clone(), CancellationToken::new(), async {
+        Err(crate::commands::CompactionCommitError::NotCommitted(std::io::Error::other("file sync fault")))
+    }).await.is_err());
+    assert_eq!(serde_json::to_value(h.handle.get_conversation().await).unwrap(), serde_json::to_value(before).unwrap());
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let handle = h.handle.clone();
+    let commit = tokio::spawn(async move {
+        handle.commit_compaction(epoch, candidate, CancellationToken::new(), async move {
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            Ok(())
+        }).await
+    });
+    started_rx.await.unwrap();
+    h.handle.push_user_message(ConversationItem::user("later instruction"));
+    release_tx.send(()).unwrap();
+    commit.await.unwrap().unwrap();
+    let live = h.handle.get_conversation().await;
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0].text_content(), "committed summary");
+    assert!(live[1].text_content().contains("later instruction"));
+}
+
+#[tokio::test]
+async fn compaction_committed_fault_converges_without_success_receipt() {
+    let h = TestHarness::new();
+    let (epoch, _, _) = h.handle.compaction_snapshot().await.unwrap();
+    assert!(h.handle.commit_compaction(epoch, vec![ConversationItem::system("new authority")], CancellationToken::new(), async {
+        Err(crate::commands::CompactionCommitError::Committed(std::io::Error::other("marker sync fault")))
+    }).await.is_err());
+    assert_eq!(h.handle.get_conversation().await[0].text_content(), "new authority");
 }
 
 #[tokio::test]

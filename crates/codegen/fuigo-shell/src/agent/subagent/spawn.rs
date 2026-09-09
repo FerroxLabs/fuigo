@@ -90,6 +90,11 @@ impl coordinator::ChildRunner for ShellChildRunner {
         fuigo_tools::implementations::fuigo_build::task::types::SubagentDescribeOutcome,
     >;
     fn run(&self, run: coordinator::ChildRunRequest<Self::Control>) -> Self::RunFuture {
+        // Freeze ownership before queue/runtime awaits. A late queued child may
+        // not borrow a new prompt's grant from the same parent session.
+        let execution_parent = run.request.parent_prompt_id.as_deref().and_then(|prompt_id|
+            crate::session::execution_state::Execution::for_prompt(&run.request.parent_session_id, prompt_id));
+        let execution_required = fuigo_sampler::execution_budget::process_budget().map_or(true, |budget| budget.is_some());
         let agent_ref = self.agent_ref.clone();
         Box::pin(async move {
             let this = agent_ref.get();
@@ -115,6 +120,17 @@ impl coordinator::ChildRunner for ShellChildRunner {
                     snapshot_ref: None,
                 };
             };
+            if execution_required && execution_parent.is_none() {
+                return coordinator::ChildRunOutput {
+                    result: fuigo_tools::implementations::fuigo_build::task::types::SubagentResult {
+                        success: false,
+                        error: Some("Parent execution grant is absent or stale; child was not dispatched.".into()),
+                        subagent_id: run.request.id.clone(), child_session_id: run.request.id,
+                        ..Default::default()
+                    }, completion_data: Default::default(), snapshot_ref: None,
+                };
+            }
+            ctx.execution_parent = execution_parent;
             let parent_handle = {
                 let parent_sid = acp::SessionId::new(parent_sid);
                 this.resident_handle(&parent_sid)

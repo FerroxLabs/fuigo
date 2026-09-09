@@ -33,7 +33,11 @@ pub fn format_memory_reminder_with_storage(
             fuigo_memory::safety::is_safe_memory(&r.snippet)
                 && storage
                     .read_file(std::path::Path::new(&r.path), None, None)
-                    .is_ok()
+                    .is_ok_and(|content| {
+                        r.source_revision.as_deref().is_some_and(|revision| {
+                            blake3::hash(content.as_bytes()).to_hex().as_str() == revision
+                        })
+                    })
         })
         .cloned()
         .collect();
@@ -41,12 +45,9 @@ pub fn format_memory_reminder_with_storage(
     let sources: Vec<_> = current
         .iter()
         .filter_map(|r| {
-            let content = storage
-                .read_file(std::path::Path::new(&r.path), None, None)
-                .ok()?;
             Some((
                 r.path.clone(),
-                blake3::hash(content.as_bytes()).to_hex().to_string(),
+                r.source_revision.clone()?,
             ))
         })
         .collect();
@@ -225,6 +226,7 @@ mod tests {
     #[test]
     fn test_format_single_result() {
         let results = vec![MemorySearchResult {
+            source_revision: None,
             chunk_id: "test:0".to_string(),
             path: "MEMORY.md".to_string(),
             start_line: 0,
@@ -245,6 +247,7 @@ mod tests {
     #[test]
     fn test_format_preserves_newlines() {
         let results = vec![MemorySearchResult {
+            source_revision: None,
             chunk_id: "test:0".to_string(),
             path: "MEMORY.md".to_string(),
             start_line: 0,
@@ -264,6 +267,7 @@ mod tests {
     #[test]
     fn test_format_truncates_long_snippets() {
         let results = vec![MemorySearchResult {
+            source_revision: None,
             chunk_id: "test:0".to_string(),
             path: "test.md".to_string(),
             start_line: 0,
@@ -283,6 +287,7 @@ mod tests {
     fn test_format_multiple_results() {
         let results = vec![
             MemorySearchResult {
+                source_revision: None,
                 chunk_id: "a:0".to_string(),
                 path: "MEMORY.md".to_string(),
                 start_line: 0,
@@ -293,6 +298,7 @@ mod tests {
                 created_at: None,
             },
             MemorySearchResult {
+                source_revision: None,
                 chunk_id: "b:0".to_string(),
                 path: "session.md".to_string(),
                 start_line: 10,
@@ -316,6 +322,7 @@ mod tests {
 
     fn sample_result() -> MemorySearchResult {
         MemorySearchResult {
+            source_revision: None,
             chunk_id: "test:0".into(),
             path: "MEMORY.md".into(),
             start_line: 0,
@@ -372,6 +379,7 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         let results = vec![MemorySearchResult {
+            source_revision: None,
             chunk_id: "s:0".into(),
             path: "session.md".into(),
             start_line: 0,
@@ -395,6 +403,7 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         let results = vec![MemorySearchResult {
+            source_revision: None,
             chunk_id: "w:0".into(),
             path: "MEMORY.md".into(),
             start_line: 0,
@@ -454,6 +463,7 @@ mod tests {
     fn test_format_memory_reminder_with_results_is_some() {
         use fuigo_tools::types::memory_backend::MemorySearchResult;
         let results = vec![MemorySearchResult {
+            source_revision: None,
             chunk_id: "test:0".into(),
             path: "/mem/MEMORY.md".into(),
             start_line: 0,
@@ -483,6 +493,7 @@ mod tests {
         let mut result = sample_result();
         result.path = source.display().to_string();
         result.snippet = "Decision: color = cobalt".into();
+        result.source_revision = Some(blake3::hash(result.snippet.as_bytes()).to_hex().to_string());
         let block = format_memory_reminder_with_storage(&[result.clone()], &storage).unwrap();
         let mut conversation = vec![ConversationItem::system(format!(
             "Keep this prompt.\n{block}"
@@ -502,6 +513,7 @@ mod tests {
         };
         assert!(sys.content.contains("Keep this prompt."));
         result.snippet = "Correction: color = amber".into();
+        result.source_revision = Some(blake3::hash(result.snippet.as_bytes()).to_hex().to_string());
         let block = format_memory_reminder_with_storage(&[result], &storage).unwrap();
         let mut deleted = vec![ConversationItem::system(block.clone())];
         let other = fuigo_memory::storage::MemoryStorage::with_paths(
@@ -516,6 +528,25 @@ mod tests {
             &mut deleted,
             Some(&storage)
         ));
+    }
+
+    #[test]
+    fn search_revision_cannot_be_rebound_after_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("memory");
+        let storage = fuigo_memory::storage::MemoryStorage::with_paths(root.clone(), root.join("workspace"));
+        storage.ensure_initialized().unwrap();
+        let source = storage.workspace_dir().join("facts.md");
+        let mut result = sample_result();
+        result.path = source.display().to_string();
+        result.snippet = "Decision: color = cobalt".into();
+        std::fs::write(&source, &result.snippet).unwrap();
+        result.source_revision = Some(blake3::hash(result.snippet.as_bytes()).to_hex().to_string());
+        assert!(format_memory_reminder_with_storage(&[result.clone()], &storage).is_some());
+        std::fs::write(&source, "Correction: color = amber").unwrap();
+        assert!(format_memory_reminder_with_storage(&[result.clone()], &storage).is_none());
+        result.source_revision = None;
+        assert!(format_memory_reminder_with_storage(&[result], &storage).is_none());
     }
 
     #[test]

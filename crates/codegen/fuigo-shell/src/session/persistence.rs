@@ -208,6 +208,16 @@ pub struct SessionStateCopy {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PersistenceMsg {
+    ExecutionState {
+        mutation: crate::session::execution_state::ExecutionMutation,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::execution_state::Snapshot>>,
+    },
+    CommitCompactionAndAck {
+        checkpoint: crate::extensions::notification::CompactionCheckpointFile,
+        activation: SessionUpdate,
+        cancel: tokio_util::sync::CancellationToken,
+        respond_to: tokio::sync::oneshot::Sender<Result<(), fuigo_chat_state::commands::CompactionCommitError>>,
+    },
     Update(SessionUpdate),
     AppendUpdateDurablyAndAck {
         update: SessionUpdate,
@@ -331,6 +341,51 @@ pub enum PersistenceMsg {
     CopyFile {
         one_shot: tokio::sync::oneshot::Sender<anyhow::Result<SessionStateCopy>>,
     },
+}
+
+/// Scripted compaction fixtures retain their observation channel while using
+/// real temporary checkpoint/activation writes for the mandatory acknowledgement.
+#[cfg(test)]
+pub(crate) async fn compaction_fixture_persistence(
+    observed: mpsc::UnboundedSender<PersistenceMsg>,
+) -> mpsc::UnboundedSender<PersistenceMsg> {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let info = Info { id: acp::SessionId::new("compaction-fixture"), cwd: "/tmp".into() };
+    storage.init_session(&info, default_model_id()).await.unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let _owned_dir = dir;
+        while let Some(message) = rx.recv().await {
+            match message {
+                PersistenceMsg::CommitCompactionAndAck { checkpoint, activation, cancel, respond_to } => {
+                    use fuigo_chat_state::commands::CompactionCommitError;
+                    let result = async {
+                        if cancel.is_cancelled() {
+                            return Err(CompactionCommitError::NotCommitted(io::Error::other("cancelled fixture")));
+                        }
+                        storage.write_compaction_checkpoint(&info, &checkpoint).await.map_err(CompactionCommitError::NotCommitted)?;
+                        storage.append_update_durable_commit_aware(&info, &activation).await.map_err(|error| match error {
+                            crate::session::storage::AppendUpdateError::NotCommitted(error) => CompactionCommitError::NotCommitted(error),
+                            crate::session::storage::AppendUpdateError::Committed(error) => CompactionCommitError::Committed(error),
+                        })?;
+                        let _ = observed.send(PersistenceMsg::CompactionCheckpoint(checkpoint));
+                        let _ = observed.send(PersistenceMsg::Update(activation));
+                        Ok(())
+                    }.await;
+                    let _ = respond_to.send(result);
+                }
+                // In this scripted fixture the ordinary messages are observations,
+                // not disk writes. FIFO acknowledgment ensures the observer sees
+                // all messages preceding the barrier before inspecting its queue.
+                PersistenceMsg::FlushAndAck { respond_to } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                other => { let _ = observed.send(other); }
+            }
+        }
+    });
+    tx
 }
 
 pub use fuigo_shared::session::session_dir;
@@ -2158,6 +2213,10 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to persist git HEAD");
                     }
                 }
+                PersistenceMsg::ExecutionState { mutation, respond_to } => {
+                    let result = crate::session::execution_state::apply(&session_dir(&self.info), mutation).await;
+                    let _ = respond_to.send(result);
+                }
                 PersistenceMsg::CompactionCheckpoint(checkpoint) => {
                     if let Err(e) = self
                         .storage
@@ -2166,6 +2225,25 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to write compaction checkpoint file");
                     }
+                }
+                PersistenceMsg::CommitCompactionAndAck { checkpoint, activation, cancel, respond_to } => {
+                    use fuigo_chat_state::commands::CompactionCommitError;
+                    let result = async {
+                        if cancel.is_cancelled() {
+                            return Err(CompactionCommitError::NotCommitted(io::Error::other("compaction cancelled before prepare")));
+                        }
+                        self.storage.write_compaction_checkpoint(&self.info, &checkpoint).await.map_err(CompactionCommitError::NotCommitted)?;
+                        if cancel.is_cancelled() {
+                            // Retain prepared files as raw evidence; without a
+                            // marker they have no replay authority.
+                            return Err(CompactionCommitError::NotCommitted(io::Error::other("compaction cancelled before activation")));
+                        }
+                        self.handle_durable_append(activation).await.map_err(|error| match error {
+                            crate::session::storage::AppendUpdateError::NotCommitted(error) => CompactionCommitError::NotCommitted(error),
+                            crate::session::storage::AppendUpdateError::Committed(error) => CompactionCommitError::Committed(error),
+                        })
+                    }.await;
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CompactionRequest(request) => {
                     if let Err(e) = self
@@ -2485,6 +2563,7 @@ const WORKTREE_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 
 /// What the actor is handed once and holds for the life of the session.
 pub(crate) struct SessionDeps {
+    pub(crate) title_policy: crate::agent::config::TitlePolicy,
     pub(crate) sampling_client: OaiCompatClient,
     pub(crate) storage_mode: StorageMode,
     pub(crate) auth_manager: Option<Arc<crate::auth::AuthManager>>,
@@ -2504,6 +2583,7 @@ pub(crate) async fn new(
     deps: SessionDeps,
 ) -> io::Result<PersistenceHandle> {
     let SessionDeps {
+        title_policy,
         sampling_client,
         storage_mode,
         auth_manager,
@@ -2539,6 +2619,7 @@ pub(crate) async fn new(
     let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let info_clone = info.clone();
+    let title_session_id = info.id.to_string();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&summary, storage_mode, auth_manager)?;
     tokio::task::spawn(async move {
@@ -2552,6 +2633,8 @@ pub(crate) async fn new(
             relay_sync,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
+                    session_id: title_session_id,
+                    policy: title_policy,
                     sampling_client,
                     model: session_summary_model,
                     persistence_tx: summary_tx,
@@ -2617,6 +2700,7 @@ pub(crate) async fn new_with_explicit_dir(
     let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let info_clone = info.clone();
+    let title_session_id = info.id.to_string();
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     tokio::task::spawn(async move {
         let persistence = SessionPersistence {
@@ -2629,6 +2713,8 @@ pub(crate) async fn new_with_explicit_dir(
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
+                    session_id: title_session_id,
+                    policy: Default::default(),
                     sampling_client,
                     model: session_summary_model,
                     persistence_tx: summary_tx,
@@ -2693,6 +2779,7 @@ pub(crate) async fn load_light(
     deps: SessionDeps,
 ) -> io::Result<(PersistedInfo, PersistenceHandle)> {
     let SessionDeps {
+        title_policy,
         sampling_client,
         storage_mode,
         auth_manager,
@@ -2707,7 +2794,7 @@ pub(crate) async fn load_light(
     let storage: Box<dyn StorageAdapter> =
         Box::new(JsonlStorageAdapter::with_root(root_dir.clone()));
 
-    let (persisted, loaded_info) = match storage.load_session_without_updates(info).await {
+    let (mut persisted, loaded_info) = match storage.load_session_without_updates(info).await {
         Ok(p) => (p, info.clone()),
         Err(e) => match backend {
             Some(client) => {
@@ -2723,6 +2810,25 @@ pub(crate) async fn load_light(
 
     let updates_file_path = storage.updates_file_path(&loaded_info);
     let rewind_points_file_path = storage.rewind_points_file_path(&loaded_info);
+
+    if let Some(updates_path) = updates_file_path.as_ref()
+        && let Some(checkpoint) = crate::session::helpers::replay::find_latest_compaction_checkpoint(updates_path)? {
+        let file = storage.read_compaction_checkpoint(&loaded_info, &checkpoint.checkpoint_file).await?;
+        if file.schema_version != 1 || checkpoint.schema_version != 1 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
+        }
+        // Legacy checkpoints were written before prefix resolution; their
+        // chat_history remains authoritative for ordinary resume.
+        if let Some(prefix_len) = file.inherited_prefix_len {
+            let replay = crate::session::helpers::replay::replay_to_prompt(
+                updates_path, &session_dir(&loaded_info), usize::MAX,
+            )?;
+            if replay.last_compaction_prompt_index == Some(file.prompt_index_at_compaction) {
+                persisted.chat_history = replay.conversation;
+                persisted.summary.inherited_prefix_len = (prefix_len > 0).then_some(prefix_len);
+            }
+        }
+    }
 
     let persisted_info = PersistedInfo {
         summary: persisted.summary,
@@ -2746,6 +2852,8 @@ pub(crate) async fn load_light(
     tokio::task::spawn(async move {
         let mut summary_gen = crate::session::summary::SummaryGenerator::new(
             crate::session::summary::SummaryConfig {
+                session_id: loaded_info.id.to_string(),
+                policy: title_policy,
                 sampling_client,
                 model: session_summary_model,
                 persistence_tx: summary_tx,

@@ -337,6 +337,7 @@ async fn test_inference_metrics_single_response() {
     let actor_handle = tokio::spawn(actor.run());
 
     handle.record_inference_metrics(InferenceLatencyStats {
+        last_attempt_total_tokens: None,
         time_to_first_token_ms: Some(150),
         time_to_last_byte_ms: 2500,
         chunk_count: 20,
@@ -435,6 +436,7 @@ async fn test_inference_metrics_multi_response_aggregation() {
 
     // Response 1: 10 intervals
     handle.record_inference_metrics(InferenceLatencyStats {
+        last_attempt_total_tokens: None,
         time_to_first_token_ms: Some(100),
         time_to_last_byte_ms: 1000,
         chunk_count: 10,
@@ -448,6 +450,7 @@ async fn test_inference_metrics_multi_response_aggregation() {
 
     // Response 2: 11 intervals
     handle.record_inference_metrics(InferenceLatencyStats {
+        last_attempt_total_tokens: None,
         time_to_first_token_ms: Some(120),
         time_to_last_byte_ms: 2000,
         chunk_count: 20,
@@ -461,6 +464,7 @@ async fn test_inference_metrics_multi_response_aggregation() {
 
     // Response 3: 5 intervals
     handle.record_inference_metrics(InferenceLatencyStats {
+        last_attempt_total_tokens: None,
         time_to_first_token_ms: Some(90),
         time_to_last_byte_ms: 1500,
         chunk_count: 30,
@@ -752,6 +756,7 @@ async fn test_restore_signals_full_round_trip() {
     handle1.record_model_usage("grok-3");
 
     handle1.record_inference_metrics(InferenceLatencyStats {
+        last_attempt_total_tokens: None,
         time_to_first_token_ms: Some(100),
         time_to_last_byte_ms: 1000,
         chunk_count: 6,

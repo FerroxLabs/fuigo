@@ -195,6 +195,7 @@ async fn create_test_actor_with_memory(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
@@ -655,6 +656,7 @@ async fn test_first_turn_reminder_skips_when_block_persisted() {
             let persisted_block =
                 crate::session::helpers::memory_context::format_memory_reminder(&[
                     fuigo_tools::types::memory_backend::MemorySearchResult {
+                        source_revision: None,
                         chunk_id: "prev:0".into(),
                         path: "MEMORY.md".into(),
                         start_line: 0,

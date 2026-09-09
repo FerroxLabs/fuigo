@@ -23,6 +23,8 @@ pub(crate) const SUPPRESS_UNTIL_SUCCESS: u8 = 3;
 /// Auth-expired auto-compact: suppress until login/token refresh, not until 200.
 /// Waiting for a sample deadlocks when context is already over the window.
 pub(crate) const SUPPRESS_AUTH: u8 = 4;
+/// Wait for one provider usage observation before automatic rearming.
+pub(crate) const SUPPRESS_VALIDATING: u8 = 5;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreviousModelInfo {
@@ -178,6 +180,7 @@ pub(crate) struct CompactionConfig {
     pub prefire: PrefireState,
     /// Sticky once a forked session releases its inherited prefix under compaction pressure (see `run_compact_inner`), so it stops re-pinning it.
     pub prefix_released: AtomicBool,
+    pub validation_tokens_before: AtomicU64,
     /// User/stop cancel for the current compact generation.
     pub cancel: CompactCancelGate,
 }

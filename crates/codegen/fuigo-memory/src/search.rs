@@ -66,6 +66,7 @@ pub(super) async fn resolve_query_embedding(
 /// A search result with merged scoring from FTS and vector search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    pub source_revision: Option<String>,
     pub chunk_id: String,
     pub path: String,
     pub start_line: usize,
@@ -284,7 +285,10 @@ pub(super) fn hybrid_search_merge(
         };
 
         // Filter at search time (not index time) so already-indexed stubs are excluded without requiring a reindex
-        if !index.chunk_is_current(&chunk) || is_content_free(&chunk.text, &chunk.source) {
+        let Some(source_revision) = index.chunk_source_revision(&chunk) else {
+            continue;
+        };
+        if is_content_free(&chunk.text, &chunk.source) {
             continue;
         }
 
@@ -333,6 +337,7 @@ pub(super) fn hybrid_search_merge(
             ranked.push((
                 raw_score,
                 SearchResult {
+                    source_revision: Some(source_revision),
                     chunk_id: chunk_id.clone(),
                     path: chunk.path.clone(),
                     start_line: chunk.start_line,

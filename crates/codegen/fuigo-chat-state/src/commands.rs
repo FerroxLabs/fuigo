@@ -53,7 +53,28 @@ pub enum StrictAppendError {
 }
 
 /// Commands sent to the ChatStateActor via mpsc channel.
+#[derive(Debug)]
+pub enum CompactionCommitError {
+    NotCommitted(std::io::Error),
+    /// Marker bytes landed, but stable-media acknowledgement failed. Converge
+    /// live authority while returning the failure; this is never a success receipt.
+    Committed(std::io::Error),
+}
+
 pub enum ChatStateCommand {
+    /// Immutable input and mutation epoch captured by the state owner.
+    GetCompactionSnapshot {
+        reply: oneshot::Sender<(u64, usize, Vec<ConversationItem>)>,
+    },
+    /// Serialize durable activation with all conversation mutations. The commit
+    /// future must only persist; it must never query this actor.
+    CommitCompaction {
+        epoch: u64,
+        items: Vec<ConversationItem>,
+        cancel: tokio_util::sync::CancellationToken,
+        commit: std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), CompactionCommitError>> + Send>>,
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
     // ═══ Mutations (fire-and-forget) ═══
     /// Push a user message into the conversation.
     PushUserMessage { item: ConversationItem },

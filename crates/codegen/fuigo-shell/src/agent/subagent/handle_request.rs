@@ -433,6 +433,14 @@ pub(crate) async fn run_shell_child(
     ) {
         return child_run_output(failure_result(&request, &error), completion_data, None);
     }
+    // Admission precedes mutating worktree/bootstrap preparation, not merely
+    // the child's first model request.
+    let execution_parent_grant = if let Some(parent) = &ctx.execution_parent {
+        match parent.grant_child(&request.id, request.resume_from.clone(), request.run_in_background || definition.background.unwrap_or(false)).await {
+            Ok(grant) => Some(grant),
+            Err(_) => return child_run_output(failure_result(&request, "Durable parent execution grant unavailable; child was not dispatched."), completion_data, None),
+        }
+    } else { None };
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != fuigo_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
@@ -1264,6 +1272,7 @@ pub(crate) async fn run_shell_child(
         None,
         initial_child_tokens,
         crate::session::StartupHints {
+            execution_parent_grant,
             inherited_prefix_len: Some(inherited_prefix_len),
             is_subagent: true,
             non_interactive: ctx.parent_non_interactive,

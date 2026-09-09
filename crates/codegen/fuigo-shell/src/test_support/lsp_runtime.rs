@@ -18,6 +18,7 @@ pub(crate) fn test_gateway_with_receiver() -> (GatewaySender, mpsc::UnboundedRec
 pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnContext {
     let (tx, _rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
+        execution_parent: None,
         lsp: None,
         process_scope: None,
         parent_max_turns: None,

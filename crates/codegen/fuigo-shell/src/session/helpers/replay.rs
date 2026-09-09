@@ -268,6 +268,9 @@ impl ReplayState {
         info: &CompactionCheckpointInfo,
         session_dir: &Path,
     ) -> io::Result<ReplayAction> {
+        if info.schema_version != 1 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
+        }
         if self.target < info.prompt_index_at_compaction {
             // Target is before this compaction, so don't load the compacted history (we'll reconstruct from raw updates)
             // But the checkpoint is still required for original_user_info
@@ -294,6 +297,9 @@ impl ReplayState {
             };
             match serde_json::from_slice::<CompactionCheckpointFile>(&bytes) {
                 Ok(file) => {
+                    if file.schema_version != 1 {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
+                    }
                     if self.original_user_info.is_none() {
                         self.original_user_info = file.original_user_info;
                     }
@@ -359,7 +365,7 @@ impl ReplayState {
                 }
             };
 
-            if file.schema_version > 1 {
+            if file.schema_version != 1 {
                 tracing::error!(
                     schema_version = file.schema_version,
                     path = %checkpoint_path.display(),
@@ -734,6 +740,30 @@ mod tests {
         }))
     }
 
+    #[test]
+    fn compaction_replay_uses_exact_resolved_projection_and_ignores_prepared_files() {
+        for retained in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let mut projection = vec![ConversationItem::system("canonical instructions")];
+            if retained {
+                projection.push(ConversationItem::user("inherited correction: preserve originals"));
+                projection.push(ConversationItem::assistant("inherited response"));
+            }
+            projection.push(ConversationItem::user("current request"));
+            projection.push(ConversationItem::assistant("summary"));
+            write_checkpoint_file(dir.path(), "prepared", 1, projection.clone());
+            let old = replay_updates(&[make_user_update("test", "old authority")], dir.path(), usize::MAX);
+            assert_eq!(old.conversation.len(), 1);
+            assert!(old.conversation[0].text_content().contains("old authority"));
+            let activated = replay_updates(&[make_checkpoint("prepared", 1, None)], dir.path(), usize::MAX);
+            assert_eq!(serde_json::to_value(&activated.conversation).unwrap(), serde_json::to_value(&projection).unwrap());
+            projection.push(ConversationItem::user("later instruction"));
+            write_checkpoint_file(dir.path(), "second", 2, projection.clone());
+            let second = replay_updates(&[make_checkpoint("prepared", 1, None), make_checkpoint("second", 2, None)], dir.path(), usize::MAX);
+            assert_eq!(serde_json::to_value(second.conversation).unwrap(), serde_json::to_value(projection).unwrap());
+        }
+    }
+
     fn make_checkpoint(
         checkpoint_id: &str,
         prompt_index_at_compaction: usize,
@@ -762,6 +792,7 @@ mod tests {
         let dir = session_dir.join("compaction_checkpoints");
         std::fs::create_dir_all(&dir).unwrap();
         let file = CompactionCheckpointFile {
+            inherited_prefix_len: None,
             checkpoint_id: checkpoint_id.to_string(),
             prompt_index_at_compaction,
             compacted_history,

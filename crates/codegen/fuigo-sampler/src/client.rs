@@ -699,8 +699,17 @@ impl SamplingClient {
     }
 
     async fn dispatch_request(&self, mut request: reqwest::Request, streaming: bool) -> Result<reqwest::Response> {
+        use crate::request_accounting::{Attempt, Outcome};
+        // Low-level callers still receive a receipt, but without guessing purpose
+        // or claiming that receiving response headers settled streaming usage.
+        let fallback = (!crate::request_accounting::is_scoped()).then(||
+            Attempt::new(&ConversationRequest::new(), &uuid::Uuid::new_v4().to_string(), 1));
+        let dispatch = async {
+        crate::request_accounting::admit_current().await.map_err(|_|
+            SamplingError::InvalidConfiguration("execution admission denied or could not be persisted"))?;
         if let Some(budget) = crate::execution_budget::process_budget().map_err(SamplingError::InvalidConfiguration)? {
-            budget.admit().map_err(SamplingError::InvalidConfiguration)?;
+            let (purpose, scope) = crate::request_accounting::current_policy();
+            budget.admit_for_scope(purpose, scope.as_deref()).map_err(SamplingError::InvalidConfiguration)?;
             if let Some(remaining) = budget.remaining() {
                 let timeout = request.timeout().copied().map_or(remaining, |timeout| timeout.min(remaining));
                 *request.timeout_mut() = Some(timeout);
@@ -709,7 +718,17 @@ impl SamplingClient {
         if let Some(kind) = self.subscription {
             return crate::subscription::dispatch(kind, self.subscription_resolver.as_ref(), request).await;
         }
+        crate::request_accounting::clamp_deadline(&mut request)?;
+        crate::request_accounting::dispatched();
         fuigo_extra_ca::dispatch::execute(&self.http, request).await.map_err(|error| dispatch_error(error, streaming))
+        };
+        if let Some(receipt) = fallback {
+            let result = receipt.scope(dispatch).await;
+            receipt.finish(if result.is_ok() { Outcome::Unknown } else { Outcome::Failed }, None, None);
+            result
+        } else {
+            dispatch.await
+        }
     }
 
     pub fn api_backend(&self) -> ApiBackend {
@@ -2038,6 +2057,8 @@ impl SamplingClient {
         idle_timeout: std::time::Duration,
     ) -> Result<ConversationResponse> {
         let request_id = crate::types::RequestId::random();
+        let receipt = crate::request_accounting::Attempt::new(&request, request_id.as_str(), 1);
+        let collect = async {
         let length_policy = request.length_policy;
         let result = match self.api_backend() {
             ApiBackend::ChatCompletions => {
@@ -2062,6 +2083,18 @@ impl SamplingClient {
             .map(|(response, _metrics)| response)
             .map_err(stream_collect_error)?;
         apply_length_policy(length_policy, response)
+        };
+        let result = receipt.scope(collect).await;
+        match &result {
+            Ok(response) => receipt.finish(crate::request_accounting::Outcome::Completed,
+                response.usage.clone(), response.cost_usd_ticks),
+            Err(_) => receipt.finish(crate::request_accounting::Outcome::Failed, None, None),
+        }
+        if result.is_ok() {
+            receipt.settle_execution().await.map_err(|_|
+                SamplingError::InvalidConfiguration("execution receipt settlement could not be persisted"))?;
+        }
+        result
     }
 }
 

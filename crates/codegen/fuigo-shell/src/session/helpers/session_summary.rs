@@ -105,11 +105,7 @@ fn strip_system_reminder_blocks(text: &str) -> String {
 /// Stripping runs before the cap so a leading reminder larger than the cap is still removed.
 fn title_source_text(user_message: &str) -> String {
     let without_reminders = strip_system_reminder_blocks(user_message);
-    let base = if without_reminders.is_empty() {
-        user_message
-    } else {
-        &without_reminders
-    };
+    let base = &without_reminders;
     let mut display = fuigo_tools::implementations::skills::skill::extract_skill_display_text(base)
         .unwrap_or_else(|| base.to_string());
     display.truncate(floor_char_boundary(&display, TITLE_SOURCE_MAX_BYTES));
@@ -118,16 +114,27 @@ fn title_source_text(user_message: &str) -> String {
 
 pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
     let text = title_source_text(user_message);
-    let s = text
-        .split_whitespace()
-        .take(10)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if s.is_empty() {
-        "New session".to_string()
-    } else {
-        s
-    }
+    // Never copy arbitrary user words into a public-facing title: pattern-based
+    // secret redaction cannot recognize private names or novel credential formats.
+    // A small fixed vocabulary still makes common development tasks recognizable.
+    let words: Vec<_> = text.split(|c: char| !c.is_alphabetic())
+        .filter(|s| !s.is_empty()).map(str::to_ascii_lowercase).collect();
+    let action = match words.first().map(String::as_str) {
+        Some("fix" | "debug" | "repair") => "Fix",
+        Some("build" | "create" | "implement" | "add") => "Build",
+        Some("review" | "audit" | "check") => "Review",
+        Some("test") => "Test",
+        Some("deploy") => return "Deployment task".into(),
+        _ => return "New session".into(),
+    };
+    let topic = [
+        ("auth", "authentication"), ("authentication", "authentication"),
+        ("rendering", "rendering"), ("game", "game"),
+        ("tests", "tests"), ("database", "database"),
+        ("api", "API"), ("docs", "documentation"),
+    ].into_iter().find_map(|(word, label)| words.iter().any(|w| w == word).then_some(label))
+        .unwrap_or("project");
+    format!("{action} {topic}")
 }
 
 /// Generate the initial session title from the first user message, for the fast first-prompt path ([`crate::session::summary::SummaryGenerator`]).
@@ -136,9 +143,33 @@ pub async fn generate_session_summary(
     user_message: String,
     client: OaiCompatClient,
     model: &str,
+    session_id: &str,
+    execution_admission: Option<std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>>,
 ) -> String {
     let clean_message = title_source_text(&user_message);
-    let request = ConversationRequest::from_items(vec![
+    let mut request = initial_title_request(&clean_message, model, session_id);
+    request.execution_admission = execution_admission;
+    match client.conversation_collect(request).await {
+        Ok(response) => {
+            if let Some(a) = response.assistant()
+                && let Some(tool_call) = a.tool_calls.first()
+                && let Ok(result) = serde_json::from_str::<SessionTitle>(&tool_call.arguments)
+                && !result.session_title.trim().is_empty()
+            {
+                return clean_title_text(&result.session_title);
+            }
+            tracing::debug!(model = %model, "session title response had no usable title");
+        }
+        Err(_) => {
+            // Provider errors may echo request content; cosmetic failures need no raw error.
+            tracing::warn!(model = %model, "session title failed; using a local task label");
+        }
+    }
+    title_fallback_from_user_text(&clean_message)
+}
+
+fn initial_title_request(clean_message: &str, model: &str, session_id: &str) -> ConversationRequest {
+    let mut request = ConversationRequest::from_items(vec![
         ConversationItem::system(
             r#"You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
 We describe the session title below
@@ -156,6 +187,7 @@ Just generate the session_title and nothing else"#,
             clean_message
         )),
     ])
+    .with_purpose(fuigo_sampling_types::RequestPurpose::Title)
     .with_model(model)
     .with_tools(vec![ToolSpec {
         name: "session_title".to_owned(),
@@ -175,29 +207,8 @@ Just generate the session_title and nothing else"#,
     .with_max_output_tokens(100)
     .with_temperature(1.0)
     .with_tool_choice(ConversationToolChoice::Function("session_title".to_owned()));
-
-    match client.conversation_collect(request).await {
-        Ok(response) => {
-            if let Some(a) = response.assistant()
-                && let Some(tool_call) = a.tool_calls.first()
-                && let Ok(result) = serde_json::from_str::<SessionTitle>(&tool_call.arguments)
-            {
-                return result.session_title;
-            }
-            tracing::debug!(
-                model = %model,
-                "session title generation: response did not contain a session_title tool call"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                model = %model,
-                error = %e,
-                "session title generation failed, falling back to truncated user text"
-            );
-        }
-    }
-    title_fallback_from_user_text(&clean_message)
+    request.x_fuigo_session_id = Some(session_id.to_owned());
+    request
 }
 
 /// Instruction turn appended to a conversation snapshot to refresh the auto title.
@@ -361,17 +372,17 @@ mod tests {
                      now.\n</system-reminder>\n\nbuild a mario platformer game in html";
         assert_eq!(
             title_fallback_from_user_text(input),
-            "build a mario platformer game in html"
+            "Build game"
         );
     }
 
     #[test]
-    fn fallback_trims_to_words() {
+    fn fallback_uses_generic_label_for_uncertain_text() {
         assert_eq!(
             title_fallback_from_user_text(
                 "one two three four five six seven eight nine ten eleven"
             ),
-            "one two three four five six seven eight nine ten"
+            "New session"
         );
     }
 
@@ -387,7 +398,7 @@ mod tests {
                       <command-args>fix the rendering bug</command-args>";
         assert_eq!(
             title_fallback_from_user_text(input),
-            "/implement fix the rendering bug",
+            "Build rendering",
         );
     }
 
@@ -395,14 +406,37 @@ mod tests {
     fn fallback_strips_skill_xml_no_args() {
         let input = "<command-name>deploy</command-name>\n\
                       <command-message>/deploy</command-message>";
-        assert_eq!(title_fallback_from_user_text(input), "/deploy");
+        assert_eq!(title_fallback_from_user_text(input), "Deployment task");
     }
 
     #[test]
     fn fallback_plain_text_unaffected() {
         assert_eq!(
             title_fallback_from_user_text("fix the auth bug in login.rs"),
-            "fix the auth bug in login.rs",
+            "Fix authentication",
         );
+    }
+
+    #[test]
+    fn fallback_never_copies_secrets_or_controls() {
+        for input in [
+            "fix auth sk-live-private012345 password=hunter2",
+            "fix auth for private@example.com",
+            "fix auth \u{1b}[31m\u{202e}secret",
+            "fix auth unusual-secret-with-no-known-format",
+        ] {
+            assert_eq!(title_fallback_from_user_text(input), "Fix authentication");
+        }
+        assert_eq!(title_fallback_from_user_text("private@example.com"), "New session");
+        assert_eq!(title_fallback_from_user_text("<system-reminder>fix auth secret</system-reminder>"), "New session");
+    }
+
+    #[test]
+    fn initial_title_request_has_title_purpose_and_explicit_model() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let request = super::initial_title_request("fix auth", "selected-model", &session_id);
+        assert_eq!(request.purpose, fuigo_sampling_types::RequestPurpose::Title);
+        assert_eq!(request.model.as_deref(), Some("selected-model"));
+        assert_eq!(request.x_fuigo_session_id.as_deref(), Some(session_id.as_str()));
     }
 }
