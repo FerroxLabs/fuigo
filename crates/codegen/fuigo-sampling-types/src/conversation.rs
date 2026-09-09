@@ -621,9 +621,49 @@ impl LengthPolicy {
     }
 }
 
+/// Local accounting purpose. Never serialized into a provider prompt or request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPurpose {
+    Work,
+    Completion,
+    Title,
+    Recap,
+    Compaction,
+    Memory,
+    Verification,
+    GoalControl,
+    #[default]
+    Unknown,
+}
+
+#[cfg(test)]
+mod request_purpose_tests {
+    use super::*;
+
+    #[test]
+    fn purpose_does_not_change_any_provider_payload() {
+        let plain = ConversationRequest::from_items(vec![ConversationItem::user("hello")])
+            .with_model("test-model");
+        let labeled = plain.clone().with_purpose(RequestPurpose::Title);
+        let chat_a: crate::ChatCompletionRequest = plain.clone().into();
+        let chat_b: crate::ChatCompletionRequest = labeled.clone().into();
+        assert_eq!(serde_json::to_value(chat_a).unwrap(), serde_json::to_value(chat_b).unwrap());
+        let responses_a: crate::rs::CreateResponse = (&plain).into();
+        let responses_b: crate::rs::CreateResponse = (&labeled).into();
+        assert_eq!(serde_json::to_value(responses_a).unwrap(), serde_json::to_value(responses_b).unwrap());
+        assert_eq!(serde_json::to_value(build_messages_request(&plain)).unwrap(),
+            serde_json::to_value(build_messages_request(&labeled)).unwrap());
+    }
+}
+
 /// A complete conversation request that can be sent to either API.
 #[derive(Debug, Clone, Default)]
 pub struct ConversationRequest {
+    /// Local execution authority, cloned across sampler retries and never serialized.
+    pub execution_admission: Option<std::sync::Arc<dyn crate::ExecutionAdmission>>,
+    /// Local-only accounting label; unknown is deliberately not inferred as work.
+    pub purpose: RequestPurpose,
     /// The conversation items (messages)
     pub items: Vec<ConversationItem>,
     /// Available tools (client-side, sent as Function definitions)
@@ -1746,6 +1786,11 @@ impl ConversationRequest {
     /// Create a new empty conversation request
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_purpose(mut self, purpose: RequestPurpose) -> Self {
+        self.purpose = purpose;
+        self
     }
 
     /// Create from a list of conversation items

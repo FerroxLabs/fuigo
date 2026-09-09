@@ -4,6 +4,7 @@
 //! The persistence actor just calls [`SummaryGenerator::update`]; all state transitions are internal.
 
 use crate::extensions::notification::{SessionNotification, SessionUpdate as FuigoSessionUpdate};
+use crate::agent::config::TitlePolicy;
 use crate::sampling::Client as OaiCompatClient;
 use crate::session::helpers::session_summary::generate_session_summary;
 use crate::session::info::Info;
@@ -22,6 +23,8 @@ enum State {
 pub(crate) struct SummaryConfig {
     pub(crate) sampling_client: OaiCompatClient,
     pub(crate) model: String,
+    pub(crate) policy: TitlePolicy,
+    pub(crate) session_id: String,
     /// Channel back to the persistence actor for sequential storage writes.
     /// Weak: a strong sender here would keep the actor's own channel and task alive.
     pub(crate) persistence_tx: mpsc::WeakUnboundedSender<PersistenceMsg>,
@@ -50,6 +53,10 @@ impl SummaryGenerator {
         match self.state {
             State::Done => {}
             State::Idle => {
+                if self.config.policy == TitlePolicy::Host {
+                    self.state = State::Done;
+                    return;
+                }
                 // No text to generate a title from (e.g. image-only message).
                 // Stay Idle so the next ContentChunk with actual text retries.
                 if content.trim().is_empty() {
@@ -59,14 +66,25 @@ impl SummaryGenerator {
                 // Transition to Done so subsequent ContentChunk messages don't spawn duplicate title generation tasks
                 self.state = State::Done;
 
+                if self.config.policy == TitlePolicy::Local {
+                    let title = crate::session::helpers::session_summary::title_fallback_from_user_text(&content);
+                    if let Some(tx) = self.config.persistence_tx.upgrade() {
+                        let _ = tx.send(PersistenceMsg::GeneratedTitle(title));
+                    }
+                    return;
+                }
+
                 let sampling_client = self.config.sampling_client.clone();
                 let model = self.config.model.clone();
+                let session_id = self.config.session_id.clone();
+                let execution_admission = crate::session::execution_state::Execution::current(&session_id)
+                    .map(|execution| execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
                 let persistence_tx = self.config.persistence_tx.clone();
 
                 // A background task runs the LLM call so the persistence actor keeps processing messages (updates, flushes)
                 tokio::spawn(async move {
                     let mut title =
-                        generate_session_summary(content.clone(), sampling_client, &model).await;
+                        generate_session_summary(content.clone(), sampling_client, &model, &session_id, execution_admission).await;
                     if title.trim().is_empty() {
                         title =
                             crate::session::helpers::session_summary::title_fallback_from_user_text(
@@ -169,6 +187,50 @@ pub(crate) fn session_info_update_unpinned(session_id: acp::SessionId) -> acp::S
 mod tests {
     use super::*;
 
+    fn policy_generator(policy: TitlePolicy) -> (SummaryGenerator, mpsc::UnboundedSender<PersistenceMsg>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let generator = SummaryGenerator::new(SummaryConfig {
+            sampling_client: OaiCompatClient::new(fuigo_sampler::SamplerConfig::default()).unwrap(),
+            model: "unavailable-model".into(),
+            policy,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            persistence_tx: tx.downgrade(),
+        });
+        // Keep the actor sender alive exactly as production does.
+        (generator, tx, rx)
+    }
+
+    // These tests deliberately have no async runtime. A model branch would try
+    // to spawn an inference task and fail, making the zero-dispatch contract observable.
+    #[test]
+    fn local_title_is_synchronous_safe_and_generated_once() {
+        let (mut generator, _tx, mut rx) = policy_generator(TitlePolicy::Local);
+        generator.update("fix auth with secret=do-not-copy".into());
+        assert!(matches!(rx.try_recv(), Ok(PersistenceMsg::GeneratedTitle(title)) if title == "Fix authentication"));
+        generator.update("build game".into());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn host_policy_never_generates_initial_title_even_after_reset() {
+        let (mut generator, _tx, mut rx) = policy_generator(TitlePolicy::Host);
+        generator.update("fix auth".into());
+        generator.reset();
+        generator.update("build game".into());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn local_policy_preserves_resumed_title_and_skips_empty_input() {
+        let (mut generator, _tx, mut rx) = policy_generator(TitlePolicy::Local);
+        generator.update(" \n\t".into());
+        assert!(generator.is_idle());
+        assert!(rx.try_recv().is_err());
+        generator.mark_done();
+        generator.update("build game".into());
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn session_info_update_manual_carries_meta_and_raw_title() {
         let n = session_info_update_manual(acp::SessionId::new("s"), "a &amp; b");
@@ -221,6 +283,8 @@ mod tests {
         let mut generator = SummaryGenerator::new(SummaryConfig {
             sampling_client,
             model: String::new(),
+            policy: TitlePolicy::default(),
+            session_id: uuid::Uuid::new_v4().to_string(),
             persistence_tx: tx.downgrade(),
         });
         assert!(generator.is_idle());

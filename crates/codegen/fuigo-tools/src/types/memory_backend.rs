@@ -76,6 +76,8 @@ fn format_age(days: f64) -> String {
 /// A single search result from memory.
 #[derive(Debug, Clone)]
 pub struct MemorySearchResult {
+    /// Digest of the authoritative source snapshot that validated this excerpt.
+    pub source_revision: Option<String>,
     /// Unique chunk identifier (e.g., `"/path/to/file.md:0"`).
     pub chunk_id: String,
     /// Source file path.

@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pause_marks_user_paused_and_resume_replays() {
+    async fn pause_marks_user_paused_and_resume_rejects_unknown_effect() {
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
         let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
@@ -1105,7 +1105,8 @@ mod tests {
         let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
 
         use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
-        let spawn_req = subagent_rx.recv().await.expect("spawn request");
+        let spawn_req = tokio::time::timeout(std::time::Duration::from_secs(5), subagent_rx.recv())
+            .await.expect("initial spawn timed out").expect("spawn request");
         let SubagentEvent::Spawn(_spawn) = spawn_req else {
             panic!("expected spawn request");
         };
@@ -1115,7 +1116,8 @@ mod tests {
             crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
             "pause() must mark UserPaused immediately"
         );
-        let outcome = outcome_rx.await.unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
+            .await.expect("pause did not drain").unwrap();
         assert!(matches!(outcome, WorkflowOutcome::Cancelled));
         let state = manager.tracker.lock().get(&run_id).unwrap();
         assert_eq!(
@@ -1134,26 +1136,17 @@ mod tests {
                 },
             )
             .unwrap();
-        let spawn_req = subagent_rx.recv().await.expect("respawned agent");
-        use fuigo_tools::implementations::fuigo_build::task::types::SubagentResult;
-        if let SubagentEvent::Spawn(req) = spawn_req {
-            let id = req.id.clone();
-            let _ = req.result_tx.send(SubagentResult {
-                success: true,
-                output: std::sync::Arc::from("resumed output"),
-                subagent_id: id,
-                ..Default::default()
-            });
-        } else {
-            panic!("expected spawn event");
-        }
-        let outcome = outcome_rx.await.unwrap();
+        // The first child was dispatched, but its result is unknown. V2 journals
+        // must not blindly replay that effect, even after a clean user pause.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
+            .await.expect("resume did not report its outcome").unwrap();
         match outcome {
-            WorkflowOutcome::Completed { result } => {
-                assert_eq!(result, serde_json::json!("resumed output"));
+            WorkflowOutcome::Failed { error } => {
+                assert!(error.contains("unknown outcome"), "{error}");
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected unknown-outcome failure, got {other:?}"),
         }
+        assert!(subagent_rx.try_recv().is_err(), "unknown effect must not respawn");
     }
 
     #[tokio::test]

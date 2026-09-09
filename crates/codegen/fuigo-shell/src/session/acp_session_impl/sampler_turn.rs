@@ -1654,8 +1654,11 @@ impl SessionActor {
 
     async fn submit_turn_request(
         self: &Arc<Self>,
-        request: ConversationRequest,
+        mut request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, fuigo_sampler::SamplingErrorInfo> {
+        if request.purpose == fuigo_sampling_types::RequestPurpose::Unknown {
+            request.purpose = fuigo_sampling_types::RequestPurpose::Work;
+        }
         // Install the per-request stream-drain barrier before submitting so the drainer can acknowledge the fully processed terminal event
         let request_id = fuigo_sampler::RequestId::random();
         let stream_drained_rx = {

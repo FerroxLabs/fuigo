@@ -112,6 +112,8 @@ impl SessionActor {
             session_id.clone()
         };
         ConversationRequest {
+            execution_admission: crate::session::execution_state::Execution::current(&session_id)
+                .map(|execution| execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>),
             items: fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
                 .into_items(),
             tools: call.tools,
@@ -184,7 +186,7 @@ impl SessionActor {
             backend: setup.client.api_backend(),
             conv_id: x_fuigo_conv_id,
             req_id: x_fuigo_req_id,
-        })
+        }).with_purpose(fuigo_sampling_types::RequestPurpose::Recap)
     }
 
     /// Invalidate in-flight recap-style side-calls when a real user prompt is accepted (at queue time or turn start).

@@ -3,6 +3,7 @@ import argparse, hashlib, json, subprocess, threading
 from decimal import Decimal
 from pathlib import Path
 import deepseek_bench as b
+from smoke_requests import is_recall_request, is_title_request
 
 p=argparse.ArgumentParser();p.add_argument("--binary",type=Path,required=True);p.add_argument("--out",type=Path,required=True);p.add_argument("--force-recall-loop",action="store_true");p.add_argument("--hostile-final-tool",action="store_true");p.add_argument("--general-tools",action="store_true");a=p.parse_args()
 a.out=a.out.resolve();a.out.mkdir(mode=0o700,parents=True,exist_ok=False)
@@ -11,8 +12,10 @@ def transport(key,raw):
     request=json.loads(raw);seen.append(request)
     message={"role":"assistant","content":"ACK"};finish="stop"
     last=request.get("messages",[])[-1]
-    recalling=any(m.get("role")=="user" and "CURRENT" in (m.get("content") or "") for m in request.get("messages",[]))
-    if (a.force_recall_loop and recalling) or (last.get("role")=="user" and "CURRENT" in (last.get("content") or "")):
+    recalling=is_recall_request(request)
+    if is_title_request(request):
+        message={"role":"assistant","content":None,"tool_calls":[{"id":"fixture-title","type":"function","function":{"name":"session_title","arguments":json.dumps({"session_title":"Synthetic memory recall check"})}}]};finish="tool_calls"
+    elif (a.force_recall_loop and recalling) or (last.get("role")=="user" and "CURRENT" in (last.get("content") or "")):
         tool=next((t["function"] for t in request.get("tools",[]) if t["function"]["name"]=="memory_search"),None)
         if tool:
             message={"role":"assistant","content":None,"tool_calls":[{"id":"recall-one","type":"function","function":{"name":"memory_search","arguments":json.dumps({"query":"cedar_route","max_results":5})}}]};finish="tool_calls"
@@ -36,11 +39,17 @@ try:
             result=b.run_turn(a.binary.resolve(),home,work,proxy,"What is the CURRENT cedar_route?",root/"recall.jsonl",enabled=True,tools_override="memory_search,memory_get,Read" if a.general_tools else None)
             if a.hostile_final_tool:
                 assert not result["completed"],"Unadvertised final tool must fail closed"
-                assert "Tool call rejected during recall finalization" in (root/"recall.jsonl").read_text()
+                raw_log=(root/"recall.jsonl").read_text()
+                assert "Tool call rejected during finalization" in raw_log
+                for line in raw_log.splitlines():
+                    try: event=json.loads(line)
+                    except ValueError: continue
+                    if isinstance(event,dict) and event.get("type") in ("tool_call","tool_call_update"):
+                        assert event.get("toolCallId")!="forbidden-final","Forbidden final tool was dispatched"
             else:
                 assert result["completed"] and result["session_id"]!=sid,result
             if a.force_recall_loop:
-                recall_calls=[req for req in seen[before:] if any(m.get("role")=="user" and "CURRENT" in (m.get("content") or "") for m in req["messages"])]
+                recall_calls=[req for req in seen[before:] if is_recall_request(req)]
                 assert len(recall_calls)==3,recall_calls
                 if a.general_tools:
                     names=[tool["function"]["name"] for tool in recall_calls[-1].get("tools",[])]

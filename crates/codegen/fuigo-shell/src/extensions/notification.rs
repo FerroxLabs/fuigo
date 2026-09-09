@@ -1278,6 +1278,9 @@ pub struct AutoContinueInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CompactionCheckpointFile {
+    /// Resolved inherited prefix; zero means released. Missing on legacy files.
+    #[serde(default)]
+    pub inherited_prefix_len: Option<usize>,
     /// Unique checkpoint identifier (matches [`CompactionCheckpointInfo::checkpoint_id`]).
     pub checkpoint_id: String,
     /// The prompt index at the time compaction completed.

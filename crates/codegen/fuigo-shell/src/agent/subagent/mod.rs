@@ -109,6 +109,7 @@ impl AutoCompactThresholdTiers {
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know about the full agent struct).
 /// Built by `MvpAgent::build_subagent_spawn_context()`.
 pub(crate) struct SubagentSpawnContext {
+    pub execution_parent: Option<Arc<crate::session::execution_state::Execution>>,
     /// Parent's LSP runtime, inherited via ToolContext, same as fs/terminal.
     pub lsp: Option<std::sync::Arc<dyn fuigo_tools::implementations::lsp::LspBackend>>,
     /// Root session's process scope, inherited so the subagent's own child processes are reaped when the parent session closes.

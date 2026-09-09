@@ -536,6 +536,9 @@ pub struct FeedbackContext {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupHints {
+    /// Runtime-captured durable parent grant; never accepted from client metadata.
+    #[serde(skip)]
+    pub(crate) execution_parent_grant: Option<std::sync::Arc<crate::session::execution_state::ChildGrant>>,
     #[serde(default)]
     pub non_interactive: bool,
     #[serde(default)]
