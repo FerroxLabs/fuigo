@@ -4,9 +4,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 import deepseek_bench as bench
+from smoke_requests import is_recall_request
 
 
 class StreamParserTests(unittest.TestCase):
+    def test_title_is_excluded_but_all_three_recall_stages_count(self):
+        query = {"messages": [{"role": "user", "content": "What is CURRENT?"}]}
+        title = dict(query, tools=[{"function": {"name": "session_title"}}],
+                     tool_choice={"type": "function", "function": {"name": "session_title"}})
+        calls = [title, dict(query, tools=[{"function": {"name": "memory_search"}}]),
+                 dict(query, tools=[{"function": {"name": "memory_search"}}]), query]
+        self.assertEqual(sum(is_recall_request(call) for call in calls), 3)
+        self.assertTrue(is_recall_request(dict(query, tools=[{"function": {"name": "session_title"}}])))
+
     def run_fixture(self, rows, code):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
