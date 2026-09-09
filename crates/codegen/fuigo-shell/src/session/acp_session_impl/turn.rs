@@ -2622,7 +2622,12 @@ impl SessionActor {
                     || self.max_turns.is_some_and(|limit| tool_turn_count >= limit)
                     || fuigo_sampler::execution_budget::process_budget().ok().flatten().is_some_and(|b| b.working_capacity_exhausted());
                 if finalizing || finalize_recall {
-                    execution.finalize().await.map_err(|_| acp::Error::internal_error().data("Execution finalization not durable"))?;
+                    let finalized = if finalize_recall && !finalizing {
+                        execution.finalize_recall().await
+                    } else {
+                        execution.finalize().await
+                    };
+                    finalized.map_err(|_| acp::Error::internal_error().data("Execution finalization not durable"))?;
                 }
                 finalizing
             } else { false };

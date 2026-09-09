@@ -46,6 +46,8 @@ pub struct Snapshot {
     pub(crate) max_calls: u64,
     pub(crate) calls: u64,
     pub(crate) completion_admitted: bool,
+    #[serde(default)]
+    recall_finalization: bool,
     pub(crate) max_tool_rounds: Option<u64>,
     pub(crate) tool_rounds: u64,
     pub(crate) pending_tools: BTreeSet<String>,
@@ -106,6 +108,7 @@ pub(crate) enum Change {
     },
     Read,
     Finalize,
+    FinalizeRecall,
     Admit {
         completion: bool,
         optional: bool,
@@ -180,6 +183,7 @@ pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result
                 max_calls: *max_calls,
                 calls: 0,
                 completion_admitted: false,
+                recall_finalization: false,
                 deadline_ms: *deadline_ms,
                 max_tool_rounds: *max_tool_rounds,
                 tool_rounds: 0,
@@ -283,6 +287,14 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                 return Err(denied("execution is terminal"));
             }
             state.phase = Phase::Finalizing;
+            state.recall_finalization = false;
+        }
+        Change::FinalizeRecall => {
+            if state.phase != Phase::Working {
+                return Err(denied("recall cannot reopen finalizing execution"));
+            }
+            state.phase = Phase::Finalizing;
+            state.recall_finalization = true;
         }
         Change::Admit {
             completion,
@@ -337,7 +349,7 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                         .iter()
                         .any(|id| !state.optional_attempts.contains(id))
                     || !state.pending_tools.is_empty()
-                    || state.phase == Phase::Finalizing;
+                    || (state.phase == Phase::Finalizing && !state.recall_finalization);
                 state.terminal = Some(TerminalReceipt {
                     id: uuid::Uuid::new_v4().to_string(), execution_id: state.execution_id.clone(),
                     partial, pending_attempts: state.pending.iter().cloned().collect(),
@@ -587,6 +599,9 @@ impl Execution {
     pub(crate) async fn finalize(&self) -> io::Result<()> {
         self.change(Change::Finalize).await.map(|_| ())
     }
+    pub(crate) async fn finalize_recall(&self) -> io::Result<()> {
+        self.change(Change::FinalizeRecall).await.map(|_| ())
+    }
     pub(crate) async fn tools(&self, ids: Vec<String>) -> io::Result<()> {
         if let Some(parent) = &self.parent_grant {
             parent.tools(ids.clone()).await?;
@@ -726,6 +741,25 @@ mod tests {
         assert!(should_terminalize(false, true, Phase::Working));
         assert!(should_terminalize(true, true, Phase::Finalizing));
         assert!(should_terminalize(true, true, Phase::Terminal));
+    }
+
+    #[tokio::test]
+    async fn settled_recall_can_complete_but_budget_stop_and_pending_work_cannot() {
+        for (recall, succeeded, pending) in [(true, true, false), (false, true, false), (true, false, false), (true, true, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = apply(dir.path(), mutation(&key(), Change::Open {
+                max_calls: 4, deadline_ms: None, max_tool_rounds: Some(3), limits: TokenLimits::default(),
+            })).await.unwrap();
+            if pending {
+                transition(&mut state, Change::Tools { ids: vec!["unresolved".into()] }, 0).unwrap();
+            }
+            transition(&mut state, if recall { Change::FinalizeRecall } else { Change::Finalize }, 0).unwrap();
+            let attempt = uuid::Uuid::new_v4().to_string();
+            transition(&mut state, Change::Admit { completion: true, optional: false, attempt_id: attempt.clone() }, 0).unwrap();
+            transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(Default::default()) }, 0).unwrap();
+            transition(&mut state, Change::Terminal { succeeded }, 0).unwrap();
+            assert_eq!(state.terminal.unwrap().partial, !recall || !succeeded || pending);
+        }
     }
 
     #[tokio::test]

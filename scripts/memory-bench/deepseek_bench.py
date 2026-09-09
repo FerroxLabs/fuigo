@@ -212,6 +212,12 @@ def run_turn(binary, home, work, proxy, prompt, out, sid=None, enabled=True, too
     for line in out.read_text().splitlines():
         try: row=json.loads(line)
         except ValueError: continue
+        # stdout and stderr share this log: a diagnostic may itself be valid
+        # JSON without being a streaming event. Keep the raw log and count it;
+        # never let diagnostics supply completion or mask the process exit.
+        if not isinstance(row, dict):
+            result["non_event_json_lines"] = result.get("non_event_json_lines", 0) + 1
+            continue
         if row.get("type")=="text":
             result["text"] += row.get("data", ""); result["final_text"] += row.get("data", "")
         if row.get("type")=="tool_call":
