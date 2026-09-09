@@ -1692,6 +1692,7 @@ pub(crate) async fn spawn_session_actor(
             force_compact: force_compact.clone(),
             context_window_override,
             count: std::sync::atomic::AtomicU64::new(0),
+            validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
             compaction_mode,

@@ -94,6 +94,13 @@ impl MvpAgent {
         &self,
         primary: &SamplingConfig,
     ) -> Result<(OaiCompatClient, String), acp::Error> {
+        if self.cfg.borrow().session.title_policy.unwrap_or_default()
+            != crate::agent::config::TitlePolicy::Model
+        {
+            return OaiCompatClient::new(primary.clone())
+                .map(|client| (client, primary.model.clone()))
+                .map_err(map_sampling_err_to_acp);
+        }
         let slug = self.resolve_session_summary_model();
         let session_key = self.auth_manager.current_or_expired().map(|a| a.key.clone());
         let models = self.models_manager.models();
@@ -4987,10 +4994,10 @@ impl Drop for LocalWorkspaceReapGuard {
     }
 }
 
-fn summary_fallback_config(primary: &SamplingConfig, slug: String) -> SamplingConfig {
-    let mut fallback=primary.clone();
-    if fallback.subscription.is_none() { fallback.model=slug; }
-    fallback
+fn summary_fallback_config(primary: &SamplingConfig, _slug: String) -> SamplingConfig {
+    // An unavailable auxiliary model must not be sent to the selected endpoint.
+    // Preserve its model and authentication together for both API and subscription.
+    primary.clone()
 }
 
 #[cfg(test)]
@@ -5002,7 +5009,7 @@ mod subscription_summary_tests {
         let fallback=summary_fallback_config(&primary,"flux-fast".into());
         assert_eq!(fallback.model,primary.model);assert_eq!(fallback.subscription,primary.subscription);
         let api=SamplingConfig { model:"regular-model".into(),..Default::default() };
-        assert_eq!(summary_fallback_config(&api,"flux-fast".into()).model,"flux-fast");
+        assert_eq!(summary_fallback_config(&api,"flux-fast".into()).model,"regular-model");
     }
 }
 

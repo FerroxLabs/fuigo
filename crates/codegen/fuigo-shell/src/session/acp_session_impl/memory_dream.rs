@@ -521,6 +521,7 @@ impl SessionActor {
             .unwrap_or_default();
         let session_id = self.session_info.id.to_string();
         let request = ConversationRequest {
+            purpose: fuigo_sampling_types::RequestPurpose::Memory,
             items: vec![
                 ConversationItem::system(crate::session::memory::dream::DREAM_SYSTEM_PROMPT),
                 ConversationItem::user(user_message),
@@ -643,6 +644,7 @@ impl SessionActor {
             );
             let session_id = self.session_info.id.to_string();
             let request = ConversationRequest {
+                purpose: fuigo_sampling_types::RequestPurpose::Memory,
                 items,
                 model: Some(model),
                 x_fuigo_conv_id: Some(format!("flush-{}", uuid::Uuid::new_v4())),
@@ -905,6 +907,7 @@ impl SessionActor {
         ];
 
         let request = ConversationRequest {
+            purpose: fuigo_sampling_types::RequestPurpose::Memory,
             items,
             tools: vec![],
             model: Some("grok-4.6".to_owned()),

@@ -5474,7 +5474,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "semver",
 ]

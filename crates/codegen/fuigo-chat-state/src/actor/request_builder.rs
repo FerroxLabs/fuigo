@@ -90,6 +90,8 @@ impl ChatStateActor {
 
         // Step 4: Assemble request
         ConversationRequest {
+            purpose: Default::default(),
+            execution_admission: Default::default(),
             items,
             tools: tool_definitions,
             hosted_tools: vec![],

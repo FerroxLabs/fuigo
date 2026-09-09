@@ -6,7 +6,7 @@ use super::is_project_instructions;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
     AsyncCompactionCache, SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
-    SUPPRESS_UNTIL_SUCCESS,
+    SUPPRESS_UNTIL_SUCCESS, SUPPRESS_VALIDATING,
 };
 use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
@@ -791,6 +791,23 @@ impl SessionActor {
             std::sync::atomic::Ordering::Relaxed,
         );
     }
+
+    /// One observation, no retry loop. Missing or ineffective usage leaves a
+    /// conservative suppression until a manual compaction or context change.
+    pub(crate) async fn observe_compaction_validation(&self, reported_total: Option<u64>) {
+        if self.compaction.auto_compact_suppressed.load(std::sync::atomic::Ordering::Relaxed) != SUPPRESS_VALIDATING {
+            return;
+        }
+        let before = self.compaction.validation_tokens_before.load(std::sync::atomic::Ordering::Relaxed);
+        let window = self.chat_state_handle.get_sampling_config().await
+            .map(|config| config.context_window.get()).unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        let reduced = reported_total.is_some_and(|total| total > 0 && total < before
+            && !fuigo_token_estimation::exceeds_threshold(total, window, self.compaction.threshold_percent.get()));
+        let _ = self.compaction.auto_compact_suppressed.compare_exchange(
+            SUPPRESS_VALIDATING, if reduced { SUPPRESS_NONE } else { SUPPRESS_STICKY },
+            std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     /// Credit or auth suppress; a model switch cannot clear these.
     fn is_account_state_suppressed(&self) -> bool {
         matches!(
@@ -806,14 +823,14 @@ impl SessionActor {
     /// A release also sets the sticky flag and records the release span field (this runs within the `run_compact_inner` span).
     ///
     /// This runtime release compensates for a verbatim mirror-fork that pinned its whole parent transcript.
-    async fn resolve_forked_compacted_history(
+    fn resolve_forked_compacted_history(
         &self,
+        full_conv: &[ConversationItem],
         compacted_history: Vec<ConversationItem>,
         prefix_len: usize,
         tokens_before: u64,
         context_window: u64,
-    ) -> Vec<ConversationItem> {
-        let full_conv = self.chat_state_handle.get_conversation().await;
+    ) -> (Vec<ConversationItem>, bool) {
         let compacted_len = compacted_history.len();
         let release_candidate = compacted_history.clone();
         match preserve_inherited_prefix(&full_conv, compacted_history, prefix_len) {
@@ -828,9 +845,6 @@ impl SessionActor {
                     context_window,
                     self.compaction.threshold_percent.get(),
                 ) {
-                    self.compaction
-                        .prefix_released
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::Span::current().record("compaction_prefix_released", true);
                     tracing::info!(
                         session_id = %self.session_info.id.0,
@@ -838,7 +852,7 @@ impl SessionActor {
                         projected_preserved,
                         "compaction: releasing inherited prefix under pressure"
                     );
-                    release_candidate
+                    (release_candidate, true)
                 } else {
                     tracing::info!(
                         session_id = %self.session_info.id.0,
@@ -846,7 +860,7 @@ impl SessionActor {
                         compacted_len,
                         "Preserving inherited prefix across compaction"
                     );
-                    preserved
+                    (preserved, false)
                 }
             }
             Err(original) => {
@@ -856,7 +870,7 @@ impl SessionActor {
                     conversation_len = full_conv.len(),
                     "Inherited prefix invalid, using compacted history as-is"
                 );
-                original
+                (original, true)
             }
         }
     }
@@ -964,11 +978,15 @@ impl SessionActor {
         .await;
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
-        let (conv_len, system_message, full_conversation) = tokio::join!(
-            self.chat_state_handle.get_conversation_len(),
-            self.chat_state_handle.get_system_message(),
-            self.chat_state_handle.get_conversation(),
-        );
+        let (compaction_epoch, prompt_index_at_compaction, full_conversation) = self
+            .chat_state_handle.compaction_snapshot().await
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        let conv_len = full_conversation.len();
+        let system_message = full_conversation.iter().find_map(|item| match item {
+            ConversationItem::System(_) => Some(item.clone()),
+            _ => None,
+        });
+        let input_conversation = full_conversation.clone();
         let assembly_start = std::time::Instant::now();
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
             fuigo_chat_state::compaction_utils::prepare_conversation_for_segment(
@@ -1324,7 +1342,7 @@ impl SessionActor {
         };
         let generate_session_compact = compact_output.content.clone();
         let user_message_prefix = self.build_user_message_prefix().await;
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let conversation = input_conversation;
         let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) =
             if use_short_prompt {
                 let empty_edited: std::collections::BTreeSet<String> = Default::default();
@@ -1740,7 +1758,6 @@ impl SessionActor {
             })
         };
         let post_compaction_ms = apply_start.elapsed().as_millis() as u64;
-        let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
         let original_user_info = self
             .chat_state_handle
             .get_conversation_item_at(1)
@@ -1762,14 +1779,6 @@ impl SessionActor {
         let segments_queued = u32::from(
             self.persist_compaction_segment(&segment_messages, &generate_session_compact),
         );
-        self.chat_state_handle
-            .record_compaction_at(prompt_index_at_compaction);
-        self.persist_compaction_checkpoint(
-            &compacted_history,
-            prompt_index_at_compaction,
-            auto_continue,
-            original_user_info,
-        );
         let prefix_len = if self
             .compaction
             .prefix_released
@@ -1779,20 +1788,29 @@ impl SessionActor {
         } else {
             self.startup_hints.inherited_prefix_len.unwrap_or(0)
         };
-        let compacted_history = if prefix_len == 0 {
-            compacted_history
+        let (compacted_history, prefix_released) = if prefix_len == 0 {
+            (compacted_history, self.compaction.prefix_released.load(std::sync::atomic::Ordering::Relaxed))
         } else {
             self.resolve_forked_compacted_history(
+                &conversation,
                 compacted_history,
                 prefix_len,
                 tokens_before,
                 context_window,
             )
-            .await
         };
         let new_len = compacted_history.len();
-        self.chat_state_handle
-            .replace_conversation_for_compaction(compacted_history);
+        self.persist_compaction_checkpoint(
+            compacted_history,
+            compaction_epoch,
+            prompt_index_at_compaction,
+            auto_continue,
+            original_user_info,
+            cancel.clone(),
+            if prefix_released { 0 } else { prefix_len },
+        ).await?;
+        self.compaction.prefix_released.store(prefix_released, std::sync::atomic::Ordering::Relaxed);
+        self.compaction.validation_tokens_before.store(tokens_before, std::sync::atomic::Ordering::Relaxed);
         if self.startup_hints.inherited_prefix_len.is_some() {
             let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
             if fuigo_token_estimation::exceeds_threshold(
@@ -1812,12 +1830,12 @@ impl SessionActor {
             } else {
                 self.compaction
                     .auto_compact_suppressed
-                    .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+                    .store(SUPPRESS_VALIDATING, std::sync::atomic::Ordering::Relaxed);
             }
         } else {
             self.compaction
                 .auto_compact_suppressed
-                .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+                .store(SUPPRESS_VALIDATING, std::sync::atomic::Ordering::Relaxed);
         }
         self.last_idle_flush_conversation_len
             .store(new_len, std::sync::atomic::Ordering::Relaxed);
@@ -2276,13 +2294,16 @@ impl SessionActor {
     /// Writes the compacted history to a separate file and records a `CompactionCheckpoint` marker in `updates.jsonl`.
     ///
     /// `auto_continue` should be `Some` when this compaction was triggered by auto-compact and an auto-continue prompt will follow.
-    fn persist_compaction_checkpoint(
+    async fn persist_compaction_checkpoint(
         &self,
-        compacted_history: &[ConversationItem],
+        compacted_history: Vec<ConversationItem>,
+        epoch: u64,
         prompt_index_at_compaction: usize,
         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
         original_user_info: Option<String>,
-    ) {
+        cancel: tokio_util::sync::CancellationToken,
+        inherited_prefix_len: usize,
+    ) -> Result<(), acp::Error> {
         use crate::extensions::notification::{
             CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as FuigoSessionUpdate,
         };
@@ -2293,19 +2314,12 @@ impl SessionActor {
             checkpoint_id: checkpoint_id.clone(),
             prompt_index_at_compaction,
             compacted_history: compacted_history.to_vec(),
+            inherited_prefix_len: Some(inherited_prefix_len),
             schema_version: 1,
             created_at: created_at.clone(),
             original_user_info,
             reread_file_paths: vec![],
         };
-        if self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::CompactionCheckpoint(file_data))
-            .is_err()
-        {
-            tracing::warn!("Failed to send compaction checkpoint file to persistence channel");
-        }
         let info = CompactionCheckpointInfo {
             checkpoint_id,
             prompt_index_at_compaction,
@@ -2314,11 +2328,28 @@ impl SessionActor {
             schema_version: 1,
             created_at,
         };
-        self.persist_fuigo_update_only(FuigoSessionUpdate::CompactionCheckpoint(Box::new(info)));
+        let activation = crate::session::storage::SessionUpdate::Fuigo(Box::new(
+            crate::extensions::notification::SessionNotification {
+                session_id: self.session_info.id.clone(),
+                update: FuigoSessionUpdate::CompactionCheckpoint(Box::new(info)),
+                meta: Some(self.build_notification_meta()),
+            }
+        ));
+        let persistence_tx = self.notifications.persistence_tx.clone();
+        let persist_cancel = cancel.clone();
+        self.chat_state_handle.commit_compaction(epoch, compacted_history, cancel, async move {
+            use fuigo_chat_state::commands::CompactionCommitError;
+            let (respond_to, ack) = tokio::sync::oneshot::channel();
+            persistence_tx.send(PersistenceMsg::CommitCompactionAndAck {
+                checkpoint: file_data, activation, cancel: persist_cancel, respond_to,
+            }).map_err(|_| CompactionCommitError::NotCommitted(std::io::Error::other("compaction persistence actor stopped")))?;
+            ack.await.map_err(|_| CompactionCommitError::NotCommitted(std::io::Error::other("compaction persistence acknowledgement lost")))?
+        }).await.map_err(|e| acp::Error::internal_error().data(format!("compaction commit failed: {e}")))?;
         tracing::info!(
             prompt_index_at_compaction,
             "Persisted compaction checkpoint"
         );
+        Ok(())
     }
 }
 #[cfg(test)]

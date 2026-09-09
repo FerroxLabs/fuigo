@@ -540,6 +540,7 @@ impl MemoryBackend for MemoryBackendImpl {
         Ok(results
             .into_iter()
             .map(|r| MemorySearchResult {
+                source_revision: r.source_revision,
                 chunk_id: r.chunk_id,
                 path: r.path,
                 start_line: r.start_line,

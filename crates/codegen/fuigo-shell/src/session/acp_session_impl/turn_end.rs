@@ -400,9 +400,30 @@ impl SessionActor {
         cancellation_context: Option<serde_json::Value>,
         elapsed_ms: Option<u64>,
     ) {
+        let mut extra = serde_json::Map::new();
+        // handle_turn_input freezes the result and durable receipt before returning
+        // to any completion rail. Cancellation already carries a non-success result.
+        // Never rewrite only this notification and contradict the ACP response.
+        if let Some(execution) = crate::session::execution_state::Execution::for_prompt(&self.session_info.id.to_string(), &prompt_id) {
+            let active_goal = self.goal_tracker.lock().status() == Some(crate::session::goal_tracker::GoalStatus::Active);
+            let state = execution.snapshot().await;
+            let succeeded = mapped.as_ref().is_ok_and(|stop| *stop == acp::StopReason::EndTurn);
+            if !active_goal || !succeeded || state.as_ref().is_ok_and(|s| crate::session::execution_state::should_terminalize(active_goal, succeeded, s.phase)) {
+                let terminal = async {
+                    execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await?;
+                    execution.terminal(succeeded).await
+                }.await;
+                match terminal {
+                    Ok(receipt) => {
+                        extra.insert("executionReceipt".into(), serde_json::to_value(receipt).unwrap_or_default());
+                        execution.release(&self.session_info.id.to_string());
+                    }
+                    Err(_) => { extra.insert("executionReceiptUnavailable".into(), serde_json::json!(true)); }
+                }
+            }
+        }
         let (stop_reason, agent_result, error_kind) =
             crate::sampling::error::prompt_complete_fields(mapped);
-        let mut extra = serde_json::Map::new();
         if let Some(t) = cancel_trigger {
             extra.insert("cancelTrigger".to_string(), serde_json::json!(t));
         }

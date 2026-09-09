@@ -101,7 +101,7 @@ impl SessionActor {
             backend: sampling_client.api_backend(),
             conv_id: btw_session_id.clone(),
             req_id: format!("fuigo-btw-{}", uuid::Uuid::new_v4()),
-        });
+        }).with_purpose(fuigo_sampling_types::RequestPurpose::Work);
 
         // conversation_collect is one-shot (no sampler-actor retry)
         // /btw adds its own bounded transient-failure retry (the policy and predicate above)

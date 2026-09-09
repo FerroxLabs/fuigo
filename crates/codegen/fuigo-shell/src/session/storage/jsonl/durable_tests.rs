@@ -11,6 +11,40 @@ fn info() -> Info {
     }
 }
 
+#[tokio::test]
+async fn compaction_checkpoint_round_trip_and_directory_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let checkpoint = crate::extensions::notification::CompactionCheckpointFile {
+        inherited_prefix_len: Some(0),
+        checkpoint_id: "resolved-prefix".into(),
+        prompt_index_at_compaction: 2,
+        compacted_history: vec![ConversationItem::system("exact resolved projection")],
+        schema_version: 1,
+        created_at: "2026-09-09T00:00:00Z".into(),
+        original_user_info: None,
+        reread_file_paths: vec![],
+    };
+    adapter.write_compaction_checkpoint(&info(), &checkpoint).await.unwrap();
+    let loaded = adapter.read_compaction_checkpoint(&info(), "compaction_checkpoints/resolved-prefix.json").await.unwrap();
+    assert_eq!(serde_json::to_value(loaded).unwrap(), serde_json::to_value(&checkpoint).unwrap());
+    let blocked = tempfile::tempdir().unwrap();
+    std::fs::write(blocked.path().join("compaction_checkpoints"), "not a directory").unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(blocked.path().to_path_buf());
+    assert!(adapter.write_compaction_checkpoint(&info(), &checkpoint).await.is_err());
+    assert!(!blocked.path().join("updates.jsonl").exists());
+    let sync_fault = tempfile::tempdir().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(sync_fault.path().to_path_buf())
+        .with_file_sync_probe(|| Err(std::io::Error::other("injected checkpoint file sync fault")));
+    assert!(adapter.write_compaction_checkpoint(&info(), &checkpoint).await.is_err());
+    assert!(!sync_fault.path().join("compaction_checkpoints/resolved-prefix.json").exists());
+    let dir_fault = tempfile::tempdir().unwrap();
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir_fault.path().to_path_buf())
+        .with_parent_sync_probe(|| Err(std::io::Error::other("injected first-directory sync fault")));
+    assert!(adapter.write_compaction_checkpoint(&info(), &checkpoint).await.is_err());
+    assert!(!dir_fault.path().join("compaction_checkpoints/resolved-prefix.json").exists());
+}
+
 fn update(info: &Info, text: String) -> SessionUpdate {
     SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
         info.id.clone(),
