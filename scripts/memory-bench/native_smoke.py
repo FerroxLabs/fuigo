@@ -39,7 +39,13 @@ try:
             result=b.run_turn(a.binary.resolve(),home,work,proxy,"What is the CURRENT cedar_route?",root/"recall.jsonl",enabled=True,tools_override="memory_search,memory_get,Read" if a.general_tools else None)
             if a.hostile_final_tool:
                 assert not result["completed"],"Unadvertised final tool must fail closed"
-                assert "Tool call rejected during recall finalization" in (root/"recall.jsonl").read_text()
+                raw_log=(root/"recall.jsonl").read_text()
+                assert "Tool call rejected during finalization" in raw_log
+                for line in raw_log.splitlines():
+                    try: event=json.loads(line)
+                    except ValueError: continue
+                    if isinstance(event,dict) and event.get("type") in ("tool_call","tool_call_update"):
+                        assert event.get("toolCallId")!="forbidden-final","Forbidden final tool was dispatched"
             else:
                 assert result["completed"] and result["session_id"]!=sid,result
             if a.force_recall_loop:
