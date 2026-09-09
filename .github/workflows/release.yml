@@ -269,6 +269,18 @@ jobs:
           python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --hostile-final-tool --out "$RUNNER_TEMP/memory-hostile"
           python3 scripts/memory-bench/native_smoke.py --binary "$BIN" --force-recall-loop --general-tools --out "$RUNNER_TEMP/memory-general"
 
+      - name: Preserve memory smoke evidence
+        if: always() && matrix.npm_platform == 'darwin-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-smoke-evidence
+          path: |
+            ${{ runner.temp }}/memory-final
+            ${{ runner.temp }}/memory-hostile
+            ${{ runner.temp }}/memory-general
+          retention-days: 3
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: fuigo-${{ matrix.npm_platform }}
@@ -313,6 +325,8 @@ jobs:
           cargo test --locked -p fuigo-memory -p fuigo-config-types --lib -- --test-threads=1
           cargo test --locked -p fuigo-sampler --lib execution_budget -- --test-threads=1
           cargo test --locked -p fuigo-shell --lib recall_finalization_tests -- --test-threads=1
+          cargo test --locked -p fuigo-shell --lib settled_recall_can_complete -- --test-threads=1
+          python3 -m unittest discover -s scripts/memory-bench -p test_stream_parser.py
 
   publish:
     name: assemble and publish
