@@ -22,6 +22,7 @@ async fn create_test_actor(
     gateway_tx: mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
 ) -> SessionActor {
+    let persistence_tx = crate::session::persistence::compaction_fixture_persistence(persistence_tx).await;
     let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
@@ -133,6 +134,7 @@ async fn create_test_actor(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
@@ -543,6 +545,7 @@ async fn create_test_actor_with_memory(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {

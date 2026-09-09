@@ -109,6 +109,7 @@ pub fn mmr_rerank(results: &mut Vec<SearchResult>, relevance: &[f64], config: &M
 /// Placeholder to enable moving results out of the vec without Clone.
 fn placeholder_result() -> SearchResult {
     SearchResult {
+        source_revision: None,
         chunk_id: String::new(),
         path: String::new(),
         start_line: 0,
@@ -126,6 +127,7 @@ mod tests {
 
     fn make_result(id: &str, snippet: &str, score: f64) -> SearchResult {
         SearchResult {
+            source_revision: None,
             chunk_id: id.to_string(),
             path: format!("{id}.md"),
             start_line: 0,

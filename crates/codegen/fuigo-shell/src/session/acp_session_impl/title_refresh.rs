@@ -146,7 +146,7 @@ impl SessionActor {
             backend: setup.client.api_backend(),
             conv_id: format!("title-refresh-{}", uuid::Uuid::new_v4()),
             req_id: format!("fuigo-title-refresh-{}", uuid::Uuid::new_v4()),
-        });
+        }).with_purpose(fuigo_sampling_types::RequestPurpose::Title);
 
         let response = match tokio::time::timeout(
             TITLE_REFRESH_MODEL_TIMEOUT,

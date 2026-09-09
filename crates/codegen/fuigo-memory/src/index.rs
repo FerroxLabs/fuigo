@@ -254,16 +254,23 @@ impl MemoryIndex {
 
     /// Check source bytes at use time too: watcher delivery is asynchronous.
     pub fn chunk_is_current(&self, chunk: &ChunkRecord) -> bool {
+        self.chunk_source_revision(chunk).is_some()
+    }
+
+    /// Bind the indexed excerpt to the same immutable source bytes used to validate it.
+    pub fn chunk_source_revision(&self, chunk: &ChunkRecord) -> Option<String> {
         self.storage
             .read_file(Path::new(&chunk.path), None, None)
-            .is_ok_and(|text| {
-                super::safety::is_safe_memory(&text)
+            .ok()
+            .and_then(|text| {
+                (super::safety::is_safe_memory(&text)
                     && chunk_markdown(&text, &self.chunk_config)
                         .iter()
                         .any(|candidate| {
                             candidate.start_line == chunk.start_line
                                 && chunk_hash(&candidate.text) == chunk.hash
-                        })
+                        }))
+                    .then(|| blake3::hash(text.as_bytes()).to_hex().to_string())
             })
     }
 

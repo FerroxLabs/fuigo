@@ -450,6 +450,7 @@ async fn write_checkpoint_file(adapter: &JsonlStorageAdapter, info: &Info, id: &
         .write_compaction_checkpoint(
             info,
             &CompactionCheckpointFile {
+                inherited_prefix_len: None,
                 checkpoint_id: id.to_string(),
                 prompt_index_at_compaction: 1,
                 compacted_history: vec![],

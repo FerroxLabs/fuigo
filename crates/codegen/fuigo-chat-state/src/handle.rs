@@ -253,6 +253,23 @@ impl ChatStateHandle {
         self.send_replace(items, true);
     }
 
+    pub async fn compaction_snapshot(&self) -> std::io::Result<(u64, usize, Vec<ConversationItem>)> {
+        self.query("GetCompactionSnapshot", |reply| ChatStateCommand::GetCompactionSnapshot { reply })
+            .await.ok_or_else(|| std::io::Error::other("chat-state actor unavailable"))
+    }
+
+    pub async fn commit_compaction(
+        &self,
+        epoch: u64,
+        items: Vec<ConversationItem>,
+        cancel: tokio_util::sync::CancellationToken,
+        commit: impl std::future::Future<Output = Result<(), crate::commands::CompactionCommitError>> + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.query("CommitCompaction", |reply| ChatStateCommand::CommitCompaction {
+            epoch, items, cancel, commit: Box::pin(commit), reply,
+        }).await.unwrap_or_else(|| Err(std::io::Error::other("compaction acknowledgement lost")))
+    }
+
     fn send_replace(&self, items: Vec<ConversationItem>, is_compaction: bool) {
         let _ = self.cmd_tx.send(ChatStateCommand::ReplaceConversation {
             items,

@@ -169,6 +169,7 @@ pub(crate) fn build_goal_evaluator_request(
         "plan": plan.unwrap_or("(no plan available)"),
     });
     ConversationRequest {
+        purpose: fuigo_sampling_types::RequestPurpose::Verification,
         items: vec![
             ConversationItem::system(SYSTEM_PROMPT),
             ConversationItem::user(input.to_string()),

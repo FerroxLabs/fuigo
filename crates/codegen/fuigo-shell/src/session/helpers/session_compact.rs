@@ -597,6 +597,7 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::Responses => {
             // Send `ConversationItem`s directly; this preserves encrypted reasoning
             let request = ConversationRequest {
+                purpose: fuigo_sampling_types::RequestPurpose::Compaction,
                 items: chat_history,
                 tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
                 tools,
@@ -720,6 +721,7 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::Messages => {
             // Messages API uses similar streaming to Responses.
             let request = ConversationRequest {
+                purpose: fuigo_sampling_types::RequestPurpose::Compaction,
                 items: chat_history,
                 // Prefix-cache alignment (see doc comment).
                 tools,

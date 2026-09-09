@@ -1,8 +1,8 @@
 //! Opt-in aggregate inference limits for a private engine process.
 //! Admissions are conservative: failed requests are never refunded.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub const CALL_LIMIT: &str = "execution budget: model dispatch limit exhausted";
@@ -12,7 +12,13 @@ pub const WALL_LIMIT: &str = "execution budget: wall deadline exhausted";
 pub struct ExecutionBudget {
     max_calls: Option<u64>,
     deadline: Option<Instant>,
-    calls: AtomicU64,
+    state: Mutex<AdmissionState>,
+}
+
+#[derive(Debug, Default)]
+struct AdmissionState {
+    calls: u64,
+    reserved: BTreeSet<String>,
 }
 
 impl ExecutionBudget {
@@ -30,7 +36,7 @@ impl ExecutionBudget {
         Ok(Self {
             max_calls,
             deadline,
-            calls: AtomicU64::new(0),
+            state: Mutex::new(AdmissionState::default()),
         })
     }
 
@@ -46,24 +52,67 @@ impl ExecutionBudget {
 
     /// Advisory only; admission remains atomic and cannot exceed the cap.
     pub fn remaining_calls(&self) -> Option<u64> {
-        self.max_calls
-            .map(|max| max.saturating_sub(self.calls.load(Ordering::Acquire)))
+        self.max_calls.map(|max| {
+            max.saturating_sub(self.state.lock().unwrap_or_else(|e| e.into_inner()).calls)
+        })
     }
 
     pub fn admit(&self) -> Result<(), &'static str> {
+        self.admit_for_scope(fuigo_sampling_types::RequestPurpose::Unknown, None)
+    }
+
+    pub fn reserve_completion(&self, scope: &str) -> Result<(), &'static str> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.reserved.contains(scope) {
+            return Ok(());
+        }
+        if self
+            .max_calls
+            .is_some_and(|max| max.saturating_sub(state.calls) <= state.reserved.len() as u64)
+        {
+            return Err(CALL_LIMIT);
+        }
+        state.reserved.insert(scope.to_owned());
+        Ok(())
+    }
+
+    pub fn release_completion(&self, scope: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reserved
+            .remove(scope);
+    }
+
+    pub fn working_capacity_exhausted(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.max_calls
+            .is_some_and(|max| max.saturating_sub(state.calls) <= state.reserved.len() as u64)
+    }
+
+    pub fn admit_for_scope(
+        &self,
+        purpose: fuigo_sampling_types::RequestPurpose,
+        scope: Option<&str>,
+    ) -> Result<(), &'static str> {
         if self.expired() {
             return Err(WALL_LIMIT);
         }
-        self.calls
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |calls| {
-                if self.max_calls.is_some_and(|max| calls >= max) {
-                    None
-                } else {
-                    calls.checked_add(1)
-                }
-            })
-            .map(|_| ())
-            .map_err(|_| CALL_LIMIT)
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let completion = purpose == fuigo_sampling_types::RequestPurpose::Completion
+            && scope.is_some_and(|scope| state.reserved.contains(scope));
+        let reserve = state.reserved.len() as u64 - u64::from(completion);
+        if self
+            .max_calls
+            .is_some_and(|max| state.calls >= max.saturating_sub(reserve))
+        {
+            return Err(CALL_LIMIT);
+        }
+        state.calls = state.calls.checked_add(1).ok_or(CALL_LIMIT)?;
+        if completion {
+            state.reserved.remove(scope.unwrap());
+        }
+        Ok(())
     }
 }
 
@@ -111,6 +160,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reserved_scopes_survive_concurrent_titles_and_other_sessions() {
+        use fuigo_sampling_types::RequestPurpose;
+        let budget = Arc::new(ExecutionBudget::new(Some(4), None).unwrap());
+        budget.reserve_completion("a").unwrap();
+        budget.reserve_completion("b").unwrap();
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let budget = budget.clone();
+                std::thread::spawn(move || {
+                    budget
+                        .admit_for_scope(RequestPurpose::Title, Some("a"))
+                        .is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|t| usize::from(t.join().unwrap()))
+                .sum::<usize>(),
+            2
+        );
+        assert!(
+            budget
+                .admit_for_scope(RequestPurpose::Completion, Some("c"))
+                .is_err()
+        );
+        assert!(
+            budget
+                .admit_for_scope(RequestPurpose::Completion, Some("a"))
+                .is_ok()
+        );
+        assert!(budget.admit_for_scope(RequestPurpose::Title, None).is_err());
+        assert!(
+            budget
+                .admit_for_scope(RequestPurpose::Completion, Some("b"))
+                .is_ok()
+        );
+        assert_eq!(budget.remaining_calls(), Some(0));
+    }
+
+    #[test]
     fn aggregate_admissions_do_not_overshoot_under_concurrency() {
         let budget = Arc::new(ExecutionBudget::new(Some(7), None).unwrap());
         let threads: Vec<_> = (0..32)
@@ -126,7 +217,7 @@ mod tests {
                 .sum::<usize>(),
             7
         );
-        assert_eq!(budget.calls.load(Ordering::Acquire), 7);
+        assert_eq!(budget.state.lock().unwrap().calls, 7);
         assert_eq!(budget.admit(), Err(CALL_LIMIT));
     }
 
@@ -135,10 +226,10 @@ mod tests {
         let budget = ExecutionBudget {
             max_calls: Some(3),
             deadline: Some(Instant::now()),
-            calls: AtomicU64::new(0),
+            state: Mutex::new(AdmissionState::default()),
         };
         assert_eq!(budget.admit(), Err(WALL_LIMIT));
-        assert_eq!(budget.calls.load(Ordering::Acquire), 0);
+        assert_eq!(budget.state.lock().unwrap().calls, 0);
     }
 
     #[test]

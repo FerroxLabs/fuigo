@@ -1844,11 +1844,23 @@ impl StorageAdapter for JsonlStorageAdapter {
         checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
     ) -> io::Result<()> {
         let dir = self.session_dir(info).join("compaction_checkpoints");
-        tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(format!("{}.json", checkpoint.checkpoint_id));
         let bytes = serde_json::to_vec_pretty(checkpoint)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        tokio::fs::write(path, bytes).await
+        let adapter = self.clone();
+        tokio::task::spawn_blocking(move || {
+            super::create_dir_all_durable_with(&dir, |path| std::fs::create_dir_all(path), |dir| {
+                #[cfg(test)]
+                if let Some(probe) = &adapter.parent_sync_probe { probe()?; }
+                super::sync_dir_durable(dir)
+            })?;
+            let _ = &adapter;
+            super::write_bytes_atomic_with(&path, &bytes, |file| {
+                #[cfg(test)]
+                if let Some(probe) = &adapter.file_sync_probe { probe()?; }
+                super::sync_file_durable(file)
+            }, || super::sync_parent_dir_durable(&path))
+        }).await.map_err(io::Error::other)?
     }
     async fn write_compaction_request(
         &self,

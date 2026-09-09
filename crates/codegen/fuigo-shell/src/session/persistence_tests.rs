@@ -38,6 +38,8 @@ fn test_actor_inner(
         crate::session::summary::SummaryGenerator::new(crate::session::summary::SummaryConfig {
             sampling_client,
             model: String::new(),
+            policy: Default::default(),
+            session_id: info.id.to_string(),
             persistence_tx: tx.downgrade(),
         });
     if mark_summary_done {

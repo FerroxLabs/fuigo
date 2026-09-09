@@ -232,7 +232,9 @@ pub(crate) async fn run_request_task(
             .lock()
             .expect("accounting ledger")
             .begin_attempt();
-        let outcome = run_one_attempt(
+        let receipt = crate::request_accounting::Attempt::new(
+            &request, request_id.as_str(), retry_count + doom_retry_count + 1);
+        let mut outcome = receipt.scope(run_one_attempt(
             &client,
             request.clone(),
             request_id.clone(),
@@ -242,8 +244,22 @@ pub(crate) async fn run_request_task(
             doom_check,
             Arc::clone(&output_observed),
         )
-        .instrument(sampling_span.clone())
+        .instrument(sampling_span.clone()))
         .await;
+
+        let attempt_accounting = event_tx.ledger.lock().expect("accounting ledger").current.clone();
+        let receipt_outcome = match &outcome {
+            AttemptOutcome::Completed { .. } => crate::request_accounting::Outcome::Completed,
+            AttemptOutcome::Cancelled => crate::request_accounting::Outcome::Cancelled,
+            _ => crate::request_accounting::Outcome::Failed,
+        };
+        receipt.finish(receipt_outcome, attempt_accounting.usage, attempt_accounting.cost_usd_ticks);
+        if matches!(&outcome, AttemptOutcome::Completed { .. })
+            && receipt.settle_execution().await.is_err()
+        {
+            outcome = AttemptOutcome::InitFailed { error: SamplingError::InvalidConfiguration(
+                "execution receipt settlement could not be persisted") };
+        }
 
         let effective_max_retries =
             if retry_policy.retry_only_before_output && output_observed.load(Ordering::Relaxed) {
@@ -257,6 +273,8 @@ pub(crate) async fn run_request_task(
                 mut response,
                 mut metrics,
             } => {
+                metrics.last_attempt_total_tokens = response.usage.as_ref()
+                    .map(|usage| u64::from(usage.total_tokens));
                 let accounting = event_tx.snapshot();
                 response.usage = accounting.usage;
                 response.cost_usd_ticks = accounting.cost_usd_ticks;
@@ -1209,6 +1227,9 @@ mod tests {
             panic!("accepted response");
         };
         assert_eq!(response.message_id.as_deref(), Some("accepted-id"));
+        // Context-pressure validation must use this last-attempt value, not the
+        // cumulative billing snapshot (60 below).
+        assert_eq!(response.usage.as_ref().unwrap().total_tokens, 40);
         assert_eq!(response.assistant().unwrap().content.as_ref(), "accepted");
         let total = tx.snapshot();
         assert_eq!(total.usage.unwrap().total_tokens, 60);

@@ -317,6 +317,7 @@ pub(crate) async fn create_test_actor_with_terminal(
             tool_choice: crate::util::config::CompactionToolChoice::Auto,
             prefire: crate::session::compaction_config::PrefireState::default(),
             prefix_released: std::sync::atomic::AtomicBool::new(false),
+            validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {

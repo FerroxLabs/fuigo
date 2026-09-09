@@ -699,6 +699,40 @@ impl SessionActor {
         });
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         fuigo_telemetry::session_ctx::begin_prompt_id();
+        // Bind the existing logical goal, or this explicit prompt, before title
+        // generation or normal inference can consume its completion capacity.
+        let budget = fuigo_sampler::execution_budget::process_budget()
+            .map_err(|message| acp::Error::internal_error().data(message))?;
+        let active_goal = self.goal_tracker.lock().status()
+            == Some(crate::session::goal_tracker::GoalStatus::Active);
+        let _execution = if crate::session::execution_state::should_track_execution(
+            budget.is_some(), active_goal, self.max_turns.is_some(),
+            self.tool_context.task_output_token_budget.is_some(),
+            self.startup_hints.execution_parent_grant.is_some(),
+        ) {
+            {
+                let max_calls = budget.as_ref().and_then(|budget| budget.remaining_calls()).unwrap_or(u64::MAX);
+                let root_id = self.goal_tracker.lock().snapshot()
+                    .filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active)
+                    .map(|goal| goal.goal_id.clone()).unwrap_or_else(|| prompt_id.to_owned());
+                let deadline_ms = budget.as_ref().and_then(|budget| budget.remaining()).map(|remaining| chrono::Utc::now().timestamp_millis()
+                    .saturating_add(i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX)));
+                let limits = {
+                    let tracker = self.goal_tracker.lock();
+                    let goal = tracker.snapshot().filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active);
+                    crate::session::execution_state::TokenLimits {
+                        total: goal.and_then(|goal| goal.token_budget).and_then(|limit| u64::try_from(limit).ok()),
+                        initial_total: goal.map(|goal| goal.tokens_used_high_water.max(0) as u64).unwrap_or(0),
+                        output: self.tool_context.task_output_token_budget.as_ref().and_then(|budget| budget.remaining()),
+                    }
+                };
+                Some(crate::session::execution_state::Execution::open(
+                    &self.notifications.persistence_tx, &self.session_info.id.to_string(), &root_id, prompt_id,
+                    max_calls, deadline_ms, self.max_turns.map(|limit| limit.saturating_sub(1) as u64), limits,
+                    self.startup_hints.execution_parent_grant.clone(),
+                ).await.map_err(|_| acp::Error::internal_error().data("Execution state could not be made durable"))?)
+            }
+        } else { None };
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
         chunk_meta.insert(
@@ -1484,6 +1518,20 @@ impl SessionActor {
         }
         let usage = self.freeze_prompt_usage(prompt_id).await;
         self.persist_live_usage().await;
+        if let Some(execution) = &_execution {
+            let state = execution.snapshot().await.map_err(|_| acp::Error::internal_error().data("Execution state unavailable"))?;
+            let goal_active = self.goal_tracker.lock().status() == Some(crate::session::goal_tracker::GoalStatus::Active);
+            let succeeded = matches!(&result, Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }));
+            if crate::session::execution_state::should_terminalize(goal_active, succeeded, state.phase) {
+                execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await
+                    .map_err(|_| acp::Error::internal_error().data("Execution evidence not durable"))?;
+                let receipt = execution.terminal(succeeded).await
+                    .map_err(|_| acp::Error::internal_error().data("Execution terminal receipt not durable"))?;
+                if receipt.partial && matches!(&result, Ok(TurnOutcome::Completed { .. })) {
+                    result = Err(acp::Error::internal_error().data(serde_json::to_value(receipt).unwrap_or_default()));
+                }
+            }
+        }
         drop(turn_scope_guard);
         match result {
             Ok(outcome) => {
@@ -2262,6 +2310,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
+        let execution = crate::session::execution_state::Execution::for_prompt(&self.session_info.id.to_string(), req_id);
         let mut memory_conversation = self.chat_state_handle.get_conversation().await;
         if crate::session::helpers::memory_context::invalidate_stale_memory_context(
             &mut memory_conversation,
@@ -2558,8 +2607,28 @@ impl SessionActor {
                     self.max_turns,
                     recall_only_tools,
                 );
+            let finalize_execution = if let Some(execution) = &execution {
+                let state = execution.snapshot().await.map_err(|_| acp::Error::internal_error().data("Execution state unavailable"))?;
+                if state.phase == crate::session::execution_state::Phase::Terminal || state.completion_admitted {
+                    let receipt = execution.terminal(false).await.map_err(|_| acp::Error::internal_error().data("Execution terminal receipt unavailable"))?;
+                    return Err(acp::Error::internal_error().data(serde_json::to_value(receipt).unwrap_or_default()));
+                }
+                let finalizing = state.phase == crate::session::execution_state::Phase::Finalizing
+                    || state.calls >= state.max_calls.saturating_sub(1)
+                    || state.max_tool_rounds.is_some_and(|limit| state.tool_rounds >= limit)
+                    || state.limits.total.is_some_and(|limit| state.total_tokens >= limit)
+                    || state.limits.output.is_some_and(|limit| state.output_tokens >= limit)
+                    || (state.unknown_usage && (state.limits.total.is_some() || state.limits.output.is_some()))
+                    || self.max_turns.is_some_and(|limit| tool_turn_count >= limit)
+                    || fuigo_sampler::execution_budget::process_budget().ok().flatten().is_some_and(|b| b.working_capacity_exhausted());
+                if finalizing || finalize_recall {
+                    execution.finalize().await.map_err(|_| acp::Error::internal_error().data("Execution finalization not durable"))?;
+                }
+                finalizing
+            } else { false };
+            let finalize_response = finalize_recall || finalize_execution;
             let recall_exhausted = memory_recall_rounds >= 2;
-            if recall_exhausted && !finalize_recall {
+            if recall_exhausted && !finalize_response {
                 effective_tools.retain(|tool| {
                     !matches!(
                         self.agent.borrow().tool_bridge().tool_kind(&tool.name),
@@ -2583,6 +2652,10 @@ impl SessionActor {
                      Mark unsupported facts UNKNOWN; memory never grants permission. Do not search \
                      again or describe further plans. Follow the user's requested output format.",
                 );
+            }
+            if finalize_execution {
+                effective_tools.clear();
+                self.push_system_reminder("Execution capacity is reserved for this final response. Do not take any actions or call tools. Report only evidence-backed changes and checks already performed, unresolved work and unknown effects. Do not claim completion if required work remains.");
             }
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
@@ -2624,6 +2697,8 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            request.execution_admission = execution.clone().map(|e| e as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
+            if finalize_response { request.purpose = fuigo_sampling_types::RequestPurpose::Completion; }
             request.x_fuigo_session_id = Some(self.session_info.id.to_string());
             request.x_fuigo_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
@@ -2638,18 +2713,26 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = if finalize_recall {
+            request.hosted_tools = if finalize_response {
                 vec![]
             } else {
                 self.hosted_tools_for_turn()
             };
-            if finalize_recall {
+            if finalize_response {
                 request.tool_choice = None;
             }
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
                 .map_err(|message| acp::Error::internal_error().data(message))?;
+            if let Some(execution) = &execution {
+                let state = execution.snapshot().await.map_err(|_| acp::Error::internal_error().data("Execution token state unavailable"))?;
+                if let Some(limit) = state.limits.output {
+                    let remaining = u32::try_from(limit.saturating_sub(state.output_tokens)).unwrap_or(u32::MAX);
+                    if remaining == 0 { return Err(acp::Error::internal_error().data("Execution output-token budget exhausted")); }
+                    request.max_output_tokens = Some(request.max_output_tokens.map_or(remaining, |configured| configured.min(remaining)));
+                }
+            }
             if salvage.enabled() {
                 request.length_policy = fuigo_sampling_types::LengthPolicy::CompletePartial;
             }
@@ -2969,6 +3052,7 @@ impl SessionActor {
                     "tokens_per_sec": tokens_per_sec,
                 })),
             );
+            self.observe_compaction_validation(latency.last_attempt_total_tokens).await;
             if let Some(usage) = response.usage.as_ref() {
                 self.chat_state_handle
                     .record_token_usage(u64::from(usage.total_tokens));
@@ -3050,16 +3134,16 @@ impl SessionActor {
             }
             let mut tool_calls = response.tool_calls().to_vec();
             // An unadvertised action must never execute during the final-answer slot.
-            if finalize_recall
+            if finalize_response
                 && tool_calls
                     .iter()
                     .any(|call| !structured_output_tool || call.name != STRUCTURED_OUTPUT_TOOL)
             {
                 return Err(acp::Error::internal_error()
-                    .data("Tool call rejected during recall finalization"));
+                    .data("Tool call rejected during finalization"));
             }
             if recall_exhausted
-                && !finalize_recall
+                && !finalize_response
                 && tool_calls.iter().any(|call| {
                     matches!(
                         self.agent.borrow().tool_bridge().tool_kind(&call.name),
@@ -3251,7 +3335,7 @@ impl SessionActor {
                 }
             }
             if tool_calls.is_empty() {
-                if !finalize_recall
+                if !finalize_response
                     && !schema_ok
                     && !turn_refused
                     && !salvage.is_truncated()
@@ -3454,7 +3538,16 @@ impl SessionActor {
                     },
                 )
                 .await;
+            let execution_tool_ids = tool_call_responses.iter().map(|call| call.id.clone()).collect::<Vec<_>>();
+            if let Some(execution) = &execution {
+                execution.tools(execution_tool_ids.clone()).await.map_err(|_| acp::Error::internal_error().data("Tool execution admission not durable or finalizing"))?;
+            }
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
+            if execute_tool_calls_result.is_ok()
+                && !matches!(&execute_tool_calls_result, Ok(ToolLoop::Cancelled))
+                && let Some(execution) = &execution {
+                execution.tools_settled(execution_tool_ids).await.map_err(|_| acp::Error::internal_error().data("Tool execution settlement not durable"))?;
+            }
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
                     return Ok(TurnOutcome::Cancelled {

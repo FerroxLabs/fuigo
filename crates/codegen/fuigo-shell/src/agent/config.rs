@@ -1638,9 +1638,53 @@ pub struct AgentSelectionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_label: Option<String>,
 }
+/// Cosmetic title ownership; semantic summaries and compaction are independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TitlePolicy {
+    Local,
+    #[default]
+    Model,
+    Host,
+}
+
+#[cfg(test)]
+mod title_policy_tests {
+    use super::*;
+
+    #[test]
+    fn title_policy_defaults_to_model_and_round_trips_explicit_ownership() {
+        let default: SessionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.title_policy.unwrap_or_default(), TitlePolicy::Model);
+        assert!(serde_json::to_value(default).unwrap().get("title_policy").is_none());
+        for (wire, policy) in [("local", TitlePolicy::Local), ("model", TitlePolicy::Model), ("host", TitlePolicy::Host)] {
+            let session: SessionConfig = serde_json::from_value(serde_json::json!({"title_policy": wire})).unwrap();
+            assert_eq!(session.title_policy, Some(policy));
+            assert_eq!(serde_json::to_value(session).unwrap()["title_policy"], wire);
+        }
+        assert!(serde_json::from_value::<SessionConfig>(serde_json::json!({"title_policy": "unknown"})).is_err());
+    }
+
+    #[test]
+    fn title_policy_disables_refresh_without_disabling_semantic_summaries() {
+        let mut config = Config::default();
+        config.features.title_refresh = Some(true);
+        let semantic_summary = config.is_feature_enabled(Feature::TurnSummary);
+        for policy in [TitlePolicy::Local, TitlePolicy::Host] {
+            config.session.title_policy = Some(policy);
+            assert!(!config.is_title_refresh_enabled());
+            assert_eq!(config.is_feature_enabled(Feature::TurnSummary), semantic_summary);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SessionConfig {
+    /// `local` derives a safe task label without inference; `host` leaves titles to the host.
+    /// Unset retains model-polished interactive titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_policy: Option<TitlePolicy>,
     /// Context window usage percentage (0-100) at which auto-compact is triggered.
     /// `None` means the user didn't set it.
     /// The resolver in `crate::util::config::resolve_auto_compact_threshold_percent` falls through to remote tiers and then the hardcoded default 85.
@@ -2647,7 +2691,8 @@ impl Config {
         self.feature(feature).value
     }
     pub(crate) fn is_title_refresh_enabled(&self) -> bool {
-        self.resolve_title_refresh().value
+        self.session.title_policy.unwrap_or_default() == TitlePolicy::Model
+            && self.resolve_title_refresh().value
     }
     /// Not a registry row: a row's default is a value, this one is another feature's answer read at call time.
     /// Pinnable anyway, the pin being its own tier.
