@@ -494,7 +494,7 @@ impl SessionActor {
             super::refresh_classifier_transcript(&self.permissions, &conversation);
         }
         let mcp_surface_requested = tool_calls.iter().any(|c| {
-            c.function.name == "search_tool"
+            (c.function.name == "search_tool" && !crate::session::tool_presentation::native_search_arguments(&c.function.arguments))
                 || c.function.name == "use_tool"
                 || c.function
                     .name
@@ -588,7 +588,7 @@ impl SessionActor {
                 }
             }
         }
-        if approved.iter().any(|p| p.tool_name == "search_tool") {
+        if approved.iter().any(|p| p.tool_name == "search_tool" && p.parsed_args.get("scope").and_then(|v| v.as_str()) != Some("native")) {
             self.retry_auth_required_servers().await;
         }
         if mcp_surface_requested {
@@ -1005,7 +1005,7 @@ impl SessionActor {
                     }
                     let followups = bridge_result?;
                     deferred_followups.extend(followups);
-                    if prepared.tool_name == "search_tool" {
+                    if prepared.tool_name == "search_tool" && prepared.parsed_args.get("scope").and_then(|v| v.as_str()) != Some("native") {
                         let pi = self.chat_state_handle.get_prompt_index().await as i64;
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);

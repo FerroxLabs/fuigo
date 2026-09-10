@@ -112,6 +112,7 @@ pub(crate) struct ServerMetadata {
 /// Updated when MCP tools are registered or re-initialized.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolMetadataSnapshot {
+    pub native_presentation: crate::session::tool_presentation::NativePresentation,
     pub tools: Vec<ToolMetadata>,
     pub servers: Vec<ServerMetadata>,
     pub mcp_initialized: bool,
@@ -133,6 +134,9 @@ impl Bm25ToolSearchIndex {
 }
 
 impl ToolSearchIndex for Bm25ToolSearchIndex {
+    fn discover_native(&self, query: &str, limit: usize) -> serde_json::Value {
+        self.snapshot.lock().unwrap().native_presentation.discover(query, limit)
+    }
     fn search_snapshot(&self, query: &str, limit: usize) -> SearchSnapshot {
         let snapshot = self.snapshot.lock().unwrap().clone();
 
