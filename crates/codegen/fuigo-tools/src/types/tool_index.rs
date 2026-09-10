@@ -56,6 +56,11 @@ pub struct ServerSummary {
 /// in `Resources`. No MCP-specific concepts — the concrete implementation
 /// in `fuigo-shell` maps `mcp_initialized` to `is_ready`.
 pub trait ToolSearchIndex: Send + Sync {
+    /// Presentation discovery only, never approval or execution. Old backends
+    /// have no native catalog and retain their existing MCP behavior.
+    fn discover_native(&self, _query: &str, _limit: usize) -> serde_json::Value {
+        serde_json::json!({"results": [], "available": false, "note": "Native discovery unavailable"})
+    }
     /// Search and return results + metadata from a single consistent snapshot.
     fn search_snapshot(&self, query: &str, limit: usize) -> SearchSnapshot;
 
