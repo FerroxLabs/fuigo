@@ -274,6 +274,12 @@ impl fuigo_tool_runtime::Tool for SearchTool {
         };
         let tool_index = tool_index.0.clone();
 
+        if input.scope == types::SearchScope::Native {
+            return Ok(ToolOutput::Text(
+                tool_index.discover_native(&input.query, input.limit.unwrap_or(3) as usize).to_string().into(),
+            ));
+        }
+
         let limit = input.limit.unwrap_or(5) as usize;
         let snapshot = tool_index.search_snapshot(&input.query, limit);
 
@@ -412,6 +418,7 @@ mod tests {
                 ctx,
                 SearchToolInput {
                     query: "grafana".into(),
+                    scope: Default::default(),
                     limit: Some(5),
                 },
             )
@@ -454,6 +461,7 @@ mod tests {
                 ctx,
                 SearchToolInput {
                     query: "confluence".into(),
+                    scope: Default::default(),
                     limit: Some(5),
                 },
             )
