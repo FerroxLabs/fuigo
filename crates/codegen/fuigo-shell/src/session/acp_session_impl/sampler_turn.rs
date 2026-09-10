@@ -333,11 +333,19 @@ impl SessionActor {
     /// Shared with `SnapshotToolDefinitions` so verbatim mirrors preserve the parent schema.
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
         let backend_search_active = self.backend_search_active();
-        defs.iter()
+        let tools = defs.iter()
             .filter(|td| !backend_search_active || td.function.name != "web_search")
             .cloned()
             .map(ToolSpec::from)
-            .collect()
+            .collect();
+        self.present_tool_specs(tools)
+    }
+
+    pub(crate) fn present_tool_specs(&self, mut tools: Vec<ToolSpec>) -> Vec<ToolSpec> {
+        crate::session::tool_presentation::present(
+            &mut tools, matches!(self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode().as_str(), "compact" | "adaptive"),
+        );
+        tools
     }
 
     /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.

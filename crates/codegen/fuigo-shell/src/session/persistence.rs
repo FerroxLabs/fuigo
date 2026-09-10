@@ -208,6 +208,10 @@ pub struct SessionStateCopy {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PersistenceMsg {
+    PresentationHints {
+        hints: crate::session::tool_presentation::PresentationHints,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     ExecutionState {
         mutation: crate::session::execution_state::ExecutionMutation,
         respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::execution_state::Snapshot>>,
@@ -1845,6 +1849,10 @@ impl SessionPersistence {
                 spawn_worktree_touch(&self.info);
             }
             match msg {
+                PersistenceMsg::PresentationHints { hints, respond_to } => {
+                    let result = crate::session::tool_presentation::persist_hints(&session_dir(&self.info), &hints).await;
+                    let _ = respond_to.send(result);
+                }
                 PersistenceMsg::UpgradeToWriteback { auth_manager } => {
                     self.upgrade_to_writeback(auth_manager).await;
                 }

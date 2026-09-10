@@ -9,6 +9,7 @@ fn make_snapshot_with_servers(
     servers: Vec<ServerMetadata>,
 ) -> Arc<Mutex<ToolMetadataSnapshot>> {
     Arc::new(Mutex::new(ToolMetadataSnapshot {
+        native_presentation: Default::default(),
         tools,
         servers,
         mcp_initialized: true,
@@ -288,6 +289,7 @@ fn local_mcp_tool_indexing_still_uses_qualified_name() {
 #[test]
 fn gateway_only_snapshot_can_stay_partial() {
     let index = Bm25ToolSearchIndex::new(Arc::new(Mutex::new(ToolMetadataSnapshot {
+        native_presentation: Default::default(),
         tools: vec![ToolMetadata {
             qualified_name: "grafana__search_dashboards".into(),
             server_name: "grafana".into(),

@@ -2574,7 +2574,7 @@ impl SessionActor {
                         crate::agent::subagent::strip_ask_user_question_tool(&mut tools);
                         crate::agent::subagent::strip_workflow_tool(&mut tools);
                     }
-                    tools
+                    self.present_tool_specs(tools)
                 } else {
                     let tools = self.turn_base_tool_specs(&tool_definitions);
                     if self.startup_hints.is_subagent {
@@ -2673,6 +2673,32 @@ impl SessionActor {
                     parameters: schema,
                 });
             }
+            // Presentation is applied AFTER recall-only classification and all
+            // finalization/child restrictions. It cannot confer eligibility.
+            let adaptive = self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() == "adaptive";
+            let deferred_native: std::collections::BTreeMap<String, String> = if adaptive {
+                effective_tools.iter().filter(|tool| !self.delivery_tools.borrow().contains(&tool.name) && matches!(
+                    self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+                    Some(ToolKind::ImageGen | ToolKind::VideoGen | ToolKind::ImageToVideo | ToolKind::ReferenceToVideo)
+                )).map(|tool| (tool.name.clone(), crate::session::tool_presentation::fingerprint(tool))).collect()
+            } else { Default::default() };
+            if adaptive {
+                let enabled = !finalize_response && effective_tools.iter().any(|tool| tool.name == "search_tool");
+                effective_tools = self.tool_metadata_snapshot.lock().unwrap().native_presentation.project(
+                    req_id, effective_tools, &deferred_native.keys().cloned().collect(), enabled,
+                );
+            }
+            let presentation_checkpoint = self.tool_metadata_snapshot.lock().unwrap().native_presentation.pending_checkpoint();
+            if let Some(hints) = presentation_checkpoint {
+                let (respond_to, receive) = tokio::sync::oneshot::channel();
+                self.notifications.persistence_tx.send(crate::session::persistence::PersistenceMsg::PresentationHints {
+                    hints: hints.clone(), respond_to,
+                }).map_err(|_| acp::Error::internal_error().data("Presentation persistence channel closed"))?;
+                receive.await.map_err(|_| acp::Error::internal_error().data("Presentation persistence acknowledgment lost"))?
+                    .map_err(|error| acp::Error::internal_error().data(format!("Presentation persistence failed: {error}")))?;
+                self.tool_metadata_snapshot.lock().unwrap().native_presentation.checkpoint_saved(hints);
+            }
+            let advertised_native: std::collections::BTreeSet<String> = effective_tools.iter().map(|t| t.name.clone()).collect();
             let build_req_start = std::time::Instant::now();
             let request = self
                 .chat_state_handle
@@ -3138,6 +3164,19 @@ impl SessionActor {
                 );
             }
             let mut tool_calls = response.tool_calls().to_vec();
+            if !deferred_native.is_empty() && tool_calls.iter().any(|call| deferred_native.contains_key(&call.name)) {
+                let current = self.present_tool_specs(self.prepare_tool_definitions().await.into_iter().map(ToolSpec::from).collect());
+                for call in &tool_calls {
+                    if let Some(expected) = deferred_native.get(&call.name) {
+                        if !advertised_native.contains(&call.name) {
+                            return Err(acp::Error::internal_error().data("Native tool was not advertised in this request; discover its schema with search_tool scope=native before calling it"));
+                        }
+                        if !current.iter().any(|tool| tool.name == call.name && crate::session::tool_presentation::fingerprint(tool) == *expected) {
+                            return Err(acp::Error::internal_error().data("Native tool schema changed during inference; refresh discovery before execution"));
+                        }
+                    }
+                }
+            }
             // An unadvertised action must never execute during the final-answer slot.
             if finalize_response
                 && tool_calls

@@ -434,6 +434,7 @@ pub(crate) async fn spawn_session_actor(
         .count();
     let initial_conversation_len = conversation.len();
     let title_session_dir = crate::session::persistence::session_dir(&session_info);
+    let initial_native_presentation = crate::session::tool_presentation::NativePresentation::load(&title_session_dir);
     let title_refresh_watermark =
         crate::session::helpers::session_summary::load_title_refresh_watermark(&title_session_dir);
     let title_refresh_turns_at_spawn =
@@ -1816,7 +1817,10 @@ pub(crate) async fn spawn_session_actor(
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
-        tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
+        tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(crate::session::tool_index::ToolMetadataSnapshot {
+            native_presentation: initial_native_presentation,
+            ..Default::default()
+        })),
         mcp_announcements: Mutex::new(
             persisted_announcement_state
                 .map(crate::session::announcement_state::McpAnnounced::from_persisted)
