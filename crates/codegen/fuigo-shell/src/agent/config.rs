@@ -3614,6 +3614,10 @@ pub(crate) fn resolve_model_list(
     // Config entries that neither extend a catalog/prefetched base nor set `context_window` carry the 200K fallback;
     // they are the entries a same-slug catalog sibling should donate its real window to (and must never donate)
     let mut window_unset: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Config entries whose backend was set explicitly (on the entry or via its `[model_providers.<id>]`); `chat_completions` equals the enum default,
+    // so same-slug propagation below must tell an explicit choice apart from a field that was never set
+    let mut explicit_api_backend_keys: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
@@ -3638,6 +3642,9 @@ pub(crate) fn resolve_model_list(
             }
         });
         let effective = with_provider.as_ref().unwrap_or(model_override);
+        if effective.api_backend.is_some() {
+            explicit_api_backend_keys.insert(key.clone());
+        }
         let mut entry = effective.apply(key, base, &cfg.endpoints);
         if effective.agent_type.is_some() {
             explicit_agent_type.insert(key.clone());
@@ -3712,7 +3719,8 @@ pub(crate) fn resolve_model_list(
                     );
                     entry.info.context_window = *donor_cw;
                 }
-                if entry.info.api_backend == ApiBackend::default()
+                if !explicit_api_backend_keys.contains(key)
+                    && entry.info.api_backend == ApiBackend::default()
                     && *donor_backend != ApiBackend::default()
                 {
                     entry.info.api_backend.clone_from(donor_backend);
