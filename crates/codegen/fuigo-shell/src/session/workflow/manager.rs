@@ -1211,10 +1211,10 @@ mod tests {
 
         assert_eq!(
             manager.tracker.lock().get(&run_id).unwrap().agents_used,
-            1,
-            "resume reconciles agents_used from the journal (1 dispatched spawn) and the refused \
-             replay reserves nothing more; without the reconcile-then-refuse pairing the leaked \
-             in-memory slot plus a re-reservation would double-charge to 2"
+            0,
+            "resume reconciles agents_used from the journal (0 recorded reservations) and the \
+             refused replay reserves nothing; without the reconcile the slot leaked at pause would \
+             stay charged and any later re-reservation would double-charge"
         );
     }
 
