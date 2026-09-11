@@ -445,6 +445,44 @@ mod tests {
         assert!(!prompt.contains("${%"), "No unresolved template blocks");
     }
 
+    /// The documented `apply_patch` call must use the tool's real input schema (`{"patch": string}`) and carry a patch the parser accepts.
+    #[test]
+    fn test_apply_patch_template_example_matches_tool_schema() {
+        use fuigo_tools::implementations::codex::apply_patch::{ApplyPatchInput, parse_patch};
+        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
+        let line = prompt
+            .lines()
+            .find(|l| l.contains("Use the `apply_patch` tool to edit files"))
+            .expect("apply_patch usage line");
+        let start = line.find('{').expect("example call object");
+        let end = line.rfind('}').expect("example call object end");
+        let example = &line[start..=end];
+        let value: serde_json::Value =
+            serde_json::from_str(example).expect("example call must be valid JSON");
+        let keys: Vec<&String> = value
+            .as_object()
+            .expect("example call must be an object")
+            .keys()
+            .collect();
+        assert_eq!(keys, ["patch"], "apply_patch takes exactly one argument, `patch`");
+        let input: ApplyPatchInput =
+            serde_json::from_value(value).expect("example must deserialize as ApplyPatchInput");
+        assert!(input.patch.starts_with("*** Begin Patch\n*** Update File: "));
+        parse_patch(&input.patch).expect("example patch must parse");
+    }
+
+    /// The base prompt asks for parallel independent tool calls and whole-file reads, and keeps the dedicated-tool rule.
+    #[test]
+    fn test_base_prompt_guides_parallel_calls_and_whole_file_reads() {
+        let prompt = render_base(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("Issue independent tool calls in parallel, in a single response"));
+        assert!(prompt.contains("read a whole relevant file"));
+        assert!(
+            prompt.contains("`read_file` for reading files instead of cat/head/tail"),
+            "the dedicated file-tool rule must stay"
+        );
+    }
+
     #[test]
     fn test_apply_patch_template_plan_absent_omits_planning() {
         // Renderer without Plan tool
