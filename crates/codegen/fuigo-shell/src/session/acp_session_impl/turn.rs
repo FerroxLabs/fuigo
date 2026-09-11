@@ -2725,8 +2725,9 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            // Hosted tools are part of `tools` too, so they stay; `tool_choice` is what closes the final-answer slot.
-            request.hosted_tools = self.hosted_tools_for_turn();
+            // Hosted tools (including the programmatic-tool-calling runtime) are part of `tools` too, so they stay
+            // on the finalize call; `tool_choice` is what closes the final-answer slot.
+            request.hosted_tools = self.hosted_tools_for_agent_turn();
             if finalize_response {
                 // The final slot either produces the structured answer through its tool or calls nothing at all
                 request.tool_choice = Some(if structured_output_tool && json_schema.is_some() {

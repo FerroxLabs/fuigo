@@ -6,12 +6,14 @@
 mod chat_completions;
 mod messages;
 mod responses;
+pub mod responses_ptc;
 
 pub use chat_completions::{conversation_item_to_chat_message, conversation_to_chat_messages};
 pub use messages::build_messages_request;
 pub use responses::{
     custom_tool_call, extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items,
 };
+pub use responses_ptc::{ProgramItem, ProgramOutputItem, patch_request_body};
 
 use std::sync::Arc;
 
@@ -339,6 +341,8 @@ impl BackendToolCallItem {
             BackendToolKind::WebSearch(ws) => ws.id.as_str(),
             BackendToolKind::XSearch(ct) => ct.id.as_str(),
             BackendToolKind::CodeInterpreter(ci) => ci.id.as_str(),
+            BackendToolKind::Program(p) => p.id.as_str(),
+            BackendToolKind::ProgramOutput(o) => o.id.as_str(),
         }
     }
 
@@ -375,6 +379,9 @@ impl BackendToolCallItem {
                     .unwrap_or_default();
                 format!("[backend code_interpreter] {code_preview}")
             }
+            BackendToolKind::Program(_) | BackendToolKind::ProgramOutput(_) => {
+                responses_ptc::text_summary(&self.kind).unwrap_or_default()
+            }
         }
     }
 }
@@ -391,6 +398,10 @@ pub enum BackendToolKind {
     XSearch(rs::CustomToolCall),
     /// Server-side code interpreter execution.
     CodeInterpreter(rs::CodeInterpreterToolCall),
+    /// A programmatic-tool-calling `program` item (the JavaScript the model wrote for the hosted V8 runtime).
+    Program(ProgramItem),
+    /// The terminal `program_output` of a programmatic-tool-calling run.
+    ProgramOutput(ProgramOutputItem),
 }
 
 // ============================================================================
@@ -590,8 +601,14 @@ mod tool_spec_freeform_tests {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedTool {
-    WebSearch { options: Option<WebSearchOptions> },
-    XSearch { options: Option<XSearchOptions> },
+    WebSearch {
+        options: Option<WebSearchOptions>,
+    },
+    XSearch {
+        options: Option<XSearchOptions>,
+    },
+    /// OpenAI Responses programmatic tool calling: the hosted runtime that lets the model call client tools from a program.
+    ProgrammaticToolCalling,
 }
 
 impl HostedTool {
@@ -599,6 +616,7 @@ impl HostedTool {
         match self {
             HostedTool::WebSearch { .. } => "web_search",
             HostedTool::XSearch { .. } => "x_search",
+            HostedTool::ProgrammaticToolCalling => responses_ptc::PTC_TOOL_TYPE,
         }
     }
 }
@@ -631,6 +649,7 @@ pub fn apply_tool_overrides(
                 }
                 applied.web_search = drop_empty(options.clone(), WebSearchOptions::is_empty);
             }
+            HostedTool::ProgrammaticToolCalling => {}
         }
     }
     applied
@@ -2546,6 +2565,10 @@ mod chat_completions_tests;
 #[cfg(test)]
 #[path = "conversation/responses_tests.rs"]
 mod responses_tests;
+
+#[cfg(test)]
+#[path = "conversation/responses_ptc_tests.rs"]
+mod responses_ptc_tests;
 
 #[cfg(test)]
 #[path = "conversation/messages_tests.rs"]

@@ -439,6 +439,16 @@ impl SessionActor {
         }
     }
 
+    /// [`Self::hosted_tools_for_turn`] plus the programmatic-tool-calling runtime when the model opted in.
+    /// Agent turns only: compaction, recap and side calls carry no client tools for a program to call.
+    pub(crate) fn hosted_tools_for_agent_turn(&self) -> Vec<fuigo_sampling_types::HostedTool> {
+        let mut tools = self.hosted_tools_for_turn();
+        if self.programmatic_tool_calling.get() {
+            tools.push(fuigo_sampling_types::HostedTool::ProgrammaticToolCalling);
+        }
+        tools
+    }
+
     /// The applied overrides to echo, or `None` when backend search is off.
     pub(crate) fn effective_tool_overrides(&self) -> Option<fuigo_sampling_types::ToolOverrides> {
         if !self.backend_search_active() {
@@ -822,6 +832,7 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            programmatic_tool_calling: self.programmatic_tool_calling.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             // The sampler sends the opt-in header itself when this is set.

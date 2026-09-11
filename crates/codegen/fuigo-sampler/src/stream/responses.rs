@@ -410,6 +410,13 @@ pub(crate) fn stream_responses_tracked<'a>(
                         rs::OutputItem::CustomToolCall(ct) if client_tools.contains(&ct.name) => {
                             Some((ct.call_id, ct.name))
                         }
+                        // A programmatic-tool-calling carrier (program / program_output) starting to stream
+                        rs::OutputItem::CustomToolCall(ct) => {
+                            if let Some(event) = super::responses_ptc::started_event(&request_id, &ct) {
+                                yield event;
+                            }
+                            None
+                        }
                         _ => None,
                     };
                     if let Some((call_id, name)) = started {
@@ -574,13 +581,18 @@ pub(crate) fn stream_responses_tracked<'a>(
                         // Use "x_search" consistently (matching the Started event)
                         // The specific sub-type is in the serialized result payload and extracted by the pager from raw_output.name
                         rs::OutputItem::CustomToolCall(ct) => {
-                            let result = serde_json::to_value(ct).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ct.id.clone(),
-                                name: "x_search".to_string(),
-                                result,
-                            };
+                            // A programmatic-tool-calling carrier completes as `programmatic_tool_calling`, never as x_search
+                            if let Some(event) = super::responses_ptc::completed_event(&request_id, ct) {
+                                yield event;
+                            } else {
+                                let result = serde_json::to_value(ct).ok();
+                                yield SamplingEvent::BackendToolCallCompleted {
+                                    request_id: request_id.clone(),
+                                    call_id: ct.id.clone(),
+                                    name: "x_search".to_string(),
+                                    result,
+                                };
+                            }
                         }
                         // Code interpreter: the full call (code and outputs) rides the done item
                         // The completed event uses the shared "code_interpreter" name (matching the Started event)

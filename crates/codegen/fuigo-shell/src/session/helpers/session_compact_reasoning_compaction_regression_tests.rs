@@ -190,6 +190,7 @@ fn test_config(base_url: &str) -> SamplerConfig {
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: false,
+        programmatic_tool_calling: false,
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,
