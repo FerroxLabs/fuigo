@@ -6,6 +6,7 @@ fn read_file_tool() -> ToolSpec {
         name: "read_file".to_string(),
         description: Some("Read a file".to_string()),
         parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        freeform: None,
     }
 }
 
@@ -285,7 +286,7 @@ fn response_with_program_carrier_maps_to_conversation_items() {
         "parallel_tool_calls": true
     }))
     .expect("typed response");
-    let items = response_to_conversation_items(response);
+    let items = response_to_conversation_items(response, |_| false);
     assert_eq!(items.len(), 2);
     let ConversationItem::BackendToolCall(b) = &items[0] else {
         panic!("expected program item first, got {:?}", items[0]);

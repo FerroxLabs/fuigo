@@ -136,6 +136,7 @@ pub(crate) fn completed_event(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use super::*;
     use fuigo_sampling_types::responses_ptc::{PROGRAM_CARRIER_NAME, PROGRAM_OUTPUT_CARRIER_NAME};
 
@@ -266,6 +267,7 @@ mod tests {
             RequestId::from("ptc"),
             Duration::from_secs(60),
             None,
+            HashSet::new(),
         ));
         while let Some(ev) = s.next().await {
             events.push(ev);
