@@ -724,6 +724,9 @@ async fn read_parent_sampling_config(
                     inherited_bearer_resolver(ctx, &cfg.model, &inherited_base_url)
                 },
                 supports_backend_search,
+                programmatic_tool_calling: ctx
+                    .models_manager
+                    .model_programmatic_tool_calling(catalog_model_id.0.as_ref()),
                 compactions_remaining: ctx
                     .models_manager
                     .model_compactions_remaining(catalog_model_id.0.as_ref()),
