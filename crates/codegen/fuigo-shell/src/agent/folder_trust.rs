@@ -875,6 +875,46 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn project_scope_allowed_denies_untrusted_instruction_only_repo() {
+        // A clone whose ONLY project content is an AGENTS.md must gate: its instructions would otherwise reach the model ungated
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("FUIGO_HOME", home.path());
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+        let tmp = repo_tmp();
+        std::fs::write(tmp.path().join("AGENTS.md"), "# project instructions\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(
+            !project_scope_allowed(&subdir),
+            "instruction-only untrusted repo must be denied from a subdirectory"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn project_scope_allowed_denies_untrusted_skill_only_repo() {
+        // A clone whose ONLY project content is a `.fuigo/skills` skill must gate the same way
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("FUIGO_HOME", home.path());
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+        let tmp = repo_tmp();
+        let skill_dir = tmp.path().join(".fuigo").join("skills").join("repo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: repo-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        assert!(
+            !project_scope_allowed(tmp.path()),
+            "skill-only untrusted repo must be denied"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn kill_switch_allows_untrusted_repo_after_authoritative_resolve() {
         // Regression (chat/load-path kill-switch)
         // An untrusted folder WITH repo configs under a remote kill-switch (folder_trust_enabled = Some(false)) must resolve ALLOWED

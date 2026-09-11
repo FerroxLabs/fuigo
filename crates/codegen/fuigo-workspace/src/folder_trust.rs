@@ -582,6 +582,58 @@ mod tests {
     }
 
     #[test]
+    fn repo_configs_present_detects_agents_md_from_subdir() {
+        let tmp = repo_tmp();
+        std::fs::write(tmp.path().join("AGENTS.md"), "# project\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["instructions"]);
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_rules_from_subdir() {
+        let tmp = repo_tmp();
+        let rules = tmp.path().join(".fuigo").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("style.md"), "# style\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["instructions"]);
+    }
+
+    #[test]
+    fn repo_configs_present_detects_empty_skill_roots_only_in_project_chain() {
+        for config in [".fuigo", ".agents", ".claude", ".cursor"] {
+            for leaf in ["skills", "commands"] {
+                let tmp = repo_tmp();
+                let repo = tmp.path().join("repo");
+                std::fs::create_dir_all(&repo).unwrap();
+                git2::Repository::init(&repo).unwrap();
+                let outside = tmp.path().join(config).join(leaf);
+                std::fs::create_dir_all(outside).unwrap();
+                let subdir = repo.join("nested");
+                std::fs::create_dir_all(&subdir).unwrap();
+                let cwd = subdir.join("inner");
+                std::fs::create_dir_all(cwd.join("child").join(config).join(leaf)).unwrap();
+                assert!(repo_config_kinds(&cwd).is_empty());
+
+                for dir in [&repo, &subdir, &cwd] {
+                    let config_dir = dir.join(config);
+                    std::fs::create_dir_all(&config_dir).unwrap();
+                    assert!(repo_config_kinds(&cwd).is_empty());
+                    let marker = config_dir.join(leaf);
+                    std::fs::write(&marker, "not a directory").unwrap();
+                    assert!(repo_config_kinds(&cwd).is_empty());
+                    std::fs::remove_file(&marker).unwrap();
+                    std::fs::create_dir(&marker).unwrap();
+                    assert_eq!(repo_config_kinds(&cwd), vec!["skills"]);
+                    std::fs::remove_dir(&marker).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn repo_configs_present_detects_project_agents() {
         // A `.fuigo/agents`-only clone must be gated
         // A project agent definition can carry an inline `hooks:` block (code-exec) and can shadow a built-in subagent by name
