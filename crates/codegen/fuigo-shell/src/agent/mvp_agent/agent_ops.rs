@@ -4353,6 +4353,10 @@ impl MvpAgent {
                 model_agent_type_inferred,
             )
         };
+        crate::agent::mvp_agent::carry_stock_profile_subagent_choice(
+            &mut agent_definition,
+            session_default_agent_profile.as_deref(),
+        );
         {
             let cfg = self.cfg.borrow();
             let overrides = &cfg.cli_agent_overrides;

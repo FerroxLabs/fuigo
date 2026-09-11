@@ -151,7 +151,11 @@ pub(crate) async fn apply(
                 agent.plugin_registry_handle.snapshot().as_deref(),
             );
             match resolved {
-                Some(def) => {
+                Some(mut def) => {
+                    crate::agent::mvp_agent::carry_stock_profile_subagent_choice(
+                        &mut def,
+                        handle.session_default_agent_profile.as_deref(),
+                    );
                     tracing::info!(
                         session_id = %session_id.0,
                         model_id = %model_id.0,
