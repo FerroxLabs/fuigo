@@ -3026,6 +3026,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             system_prompt_label: None,
             use_concise: false,
             agent_type: config::default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
@@ -7488,4 +7489,208 @@ async fn acp_config_model_applies_through_existing_switch() {
         agent.resident_handle(&sid).unwrap().model_id.0.as_ref(),
         "config-selectable"
     );
+}
+
+fn with_fuigo_agent_env<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+    let prev = std::env::var("FUIGO_AGENT").ok();
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var("FUIGO_AGENT", v),
+            None => std::env::remove_var("FUIGO_AGENT"),
+        }
+    }
+    let out = body();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("FUIGO_AGENT", v),
+            None => std::env::remove_var("FUIGO_AGENT"),
+        }
+    }
+    out
+}
+/// An inferred codex harness (OpenAI model, no configured `agent_type`) replaces the stock session profiles a client derives from its flags.
+#[test]
+#[serial_test::serial]
+fn inferred_model_harness_replaces_stock_session_profiles() {
+    with_fuigo_agent_env(None, || {
+        let tmp = tempfile::tempdir().unwrap();
+        for stock in [
+            "fuigo-build",
+            "fuigo-build-plan",
+            "fuigo-build-plan-no-subagents",
+            "fuigo-build-ask-user",
+        ] {
+            let profile = fuigo_agent::discovery::by_name(stock).expect("stock profile resolves");
+            let def = MvpAgent::resolve_agent_definition_for_model(
+                tmp.path(),
+                None,
+                &config::AgentSelectionConfig::default(),
+                Some(profile),
+                Some("codex"),
+                true,
+            );
+            assert_eq!(def.name, "codex", "inferred codex must replace stock profile `{stock}`");
+        }
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            None,
+            &config::AgentSelectionConfig::default(),
+            None,
+            Some("codex"),
+            true,
+        );
+        assert_eq!(def.name, "codex", "inferred codex must replace the built-in default");
+    });
+}
+/// Every explicit agent choice outranks an inferred harness: a custom ACP profile, `--agent-profile`, `[agent] definition`, `[agent] name`.
+#[test]
+#[serial_test::serial]
+fn inferred_model_harness_yields_to_explicit_agent_choices() {
+    with_fuigo_agent_env(None, || {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = fuigo_agent::AgentDefinition::from_json(&serde_json::json!({
+            "name": "custom-devbox-profile",
+            "description": "Custom devbox profile",
+        }))
+        .expect("agent definition must parse");
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            None,
+            &config::AgentSelectionConfig::default(),
+            Some(custom),
+            Some("codex"),
+            true,
+        );
+        assert_eq!(def.name, "custom-devbox-profile");
+        let profile_path = tmp.path().join("cli-profile.md");
+        std::fs::write(
+            &profile_path,
+            "---\nname: cli-profile\ndescription: cli test\n---\nYou are a CLI profile.\n",
+        )
+        .unwrap();
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            Some(&profile_path),
+            &config::AgentSelectionConfig::default(),
+            None,
+            Some("codex"),
+            true,
+        );
+        assert_eq!(def.name, "cli-profile");
+        let by_definition = config::AgentSelectionConfig {
+            name: None,
+            definition: Some(profile_path.clone()),
+            system_prompt_label: None,
+        };
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            None,
+            &by_definition,
+            None,
+            Some("codex"),
+            true,
+        );
+        assert_eq!(def.name, "cli-profile");
+        let by_name = config::AgentSelectionConfig {
+            name: Some("fuigo-build".to_string()),
+            definition: None,
+            system_prompt_label: None,
+        };
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            None,
+            &by_name,
+            None,
+            Some("codex"),
+            true,
+        );
+        assert_eq!(def.name, "fuigo-build");
+    });
+}
+/// `FUIGO_AGENT` outranks an inferred harness, as it does an explicit one.
+#[test]
+#[serial_test::serial]
+fn fuigo_agent_env_outranks_inferred_model_harness() {
+    with_fuigo_agent_env(Some("fuigo-build-concise"), || {
+        let tmp = tempfile::tempdir().unwrap();
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            None,
+            &config::AgentSelectionConfig::default(),
+            None,
+            Some("codex"),
+            true,
+        );
+        assert_eq!(def.name, "fuigo-build-concise");
+    });
+}
+/// A configured (not inferred) `agent_type = "codex"` keeps its existing precedence over a custom ACP profile.
+#[test]
+#[serial_test::serial]
+fn explicit_model_harness_still_outranks_custom_acp_profile() {
+    with_fuigo_agent_env(None, || {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = fuigo_agent::AgentDefinition::from_json(&serde_json::json!({
+            "name": "custom-devbox-profile",
+            "description": "Custom devbox profile",
+        }))
+        .expect("agent definition must parse");
+        let def = MvpAgent::resolve_agent_definition_for_model(
+            tmp.path(),
+            None,
+            &config::AgentSelectionConfig::default(),
+            Some(custom),
+            Some("codex"),
+            false,
+        );
+        assert_eq!(def.name, "codex");
+    });
+}
+#[test]
+fn harness_switch_decision_keeps_explicit_rules_and_relaxes_inferred_ones() {
+    use crate::agent::mvp_agent::{HarnessSwitch, harness_switch_decision};
+    // (active, required, target_inferred, active_inferred, before_first_turn, explicit_selection) -> decision
+    let cases = [
+        (Some("fuigo-build-plan"), "codex", false, false, true, false, HarnessSwitch::Rebuild),
+        (Some("fuigo-build-plan"), "codex", false, false, false, false, HarnessSwitch::Reject),
+        (Some("codex"), "fuigo-build-plan", false, false, false, false, HarnessSwitch::Reject),
+        (Some("fuigo-build"), "fuigo-build-plan", false, false, false, false, HarnessSwitch::Keep),
+        (None, "codex", false, false, false, false, HarnessSwitch::Keep),
+        (Some("fuigo-build-plan"), "codex", true, false, true, false, HarnessSwitch::Rebuild),
+        (Some("fuigo-build-ask-user"), "codex", true, false, true, false, HarnessSwitch::Rebuild),
+        (Some("fuigo-build-plan"), "codex", true, false, false, false, HarnessSwitch::Keep),
+        (Some("fuigo-build-plan"), "codex", true, false, true, true, HarnessSwitch::Keep),
+        (Some("custom-devbox-profile"), "codex", true, false, true, false, HarnessSwitch::Keep),
+        (Some("codex"), "codex", true, false, false, false, HarnessSwitch::Keep),
+        (Some("codex"), "fuigo-build-plan", false, true, true, false, HarnessSwitch::Rebuild),
+        (Some("codex"), "fuigo-build-plan", false, true, false, false, HarnessSwitch::Keep),
+    ];
+    for (active, required, target_inferred, active_inferred, first, explicit, expected) in cases {
+        assert_eq!(
+            harness_switch_decision(active, required, target_inferred, active_inferred, first, explicit),
+            expected,
+            "active={active:?} required={required} target_inferred={target_inferred} active_inferred={active_inferred} before_first_turn={first} explicit={explicit}"
+        );
+    }
+}
+
+/// A model harness that replaces `fuigo-build-plan-no-subagents` must not bring `spawn_subagent` back; other profiles keep it.
+#[test]
+fn stock_no_subagents_profile_strips_spawn_from_replacing_harness() {
+    use crate::agent::mvp_agent::carry_stock_profile_subagent_choice;
+    let spawns = |def: &fuigo_agent::AgentDefinition| {
+        def.tool_config.tools.iter().any(|t| t.id == "FuigoBuild:task")
+    };
+    assert!(spawns(&fuigo_agent::AgentDefinition::codex()), "codex ships spawn_subagent");
+    for (profile, keeps) in [
+        (Some("fuigo-build-plan-no-subagents"), false),
+        (Some("fuigo-build-plan"), true),
+        (Some("fuigo-build-ask-user"), true),
+        (Some("custom-devbox-profile"), true),
+        (None, true),
+    ] {
+        let mut def = fuigo_agent::AgentDefinition::codex();
+        carry_stock_profile_subagent_choice(&mut def, profile);
+        assert_eq!(spawns(&def), keeps, "profile {profile:?}");
+    }
 }

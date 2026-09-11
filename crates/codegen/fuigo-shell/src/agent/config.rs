@@ -41,6 +41,8 @@ pub enum AgentMode {
 }
 /// Default agent type when the server or user config doesn't specify one.
 pub const DEFAULT_AGENT_TYPE: &str = "fuigo-build-plan";
+/// Harness an OpenAI model gets when nothing configures its `agent_type`: the Codex toolset (shell, `apply_patch`, codex file tools) and prompt.
+pub const OPENAI_DEFAULT_AGENT_TYPE: &str = "codex";
 /// Serde default for `ModelInfo.agent_type` and `ModelEntryConfig.agent_type`.
 pub(crate) fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
@@ -3556,6 +3558,8 @@ pub(crate) fn resolve_model_list(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
+    let mut explicit_agent_type: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
             models_base_url = ?cfg.endpoints.models_base_url,
@@ -3564,6 +3568,7 @@ pub(crate) fn resolve_model_list(
         );
     } else {
         let defaults = default_model_entries(&cfg.endpoints);
+        explicit_agent_type = default_model_keys_with_agent_type();
         tracing::debug!(count = defaults.len(), "loaded default models");
         resolved.extend(defaults);
     }
@@ -3597,6 +3602,13 @@ pub(crate) fn resolve_model_list(
                 tracing::debug!(model_key = %key, "prefetched model overriding default");
             }
         }
+        explicit_agent_type = prefetched
+            .iter()
+            .filter(|(key, entry)| {
+                entry.info.agent_type != DEFAULT_AGENT_TYPE || explicit_agent_type.contains(*key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
         resolved = prefetched;
     }
     for (key, model_override) in &cfg.config_models {
@@ -3621,6 +3633,9 @@ pub(crate) fn resolve_model_list(
         });
         let effective = with_provider.as_ref().unwrap_or(model_override);
         let mut entry = effective.apply(key, base, &cfg.endpoints);
+        if effective.agent_type.is_some() {
+            explicit_agent_type.insert(key.clone());
+        }
         let session_bearer_unsafe = !crate::util::is_fuigo_api_bearer_url(&entry.info.base_url)
             || entry
                 .api_base_url
@@ -3707,6 +3722,8 @@ pub(crate) fn resolve_model_list(
                 entry.info.agent_type = global_agent_type.clone();
             }
         }
+    } else {
+        infer_openai_agent_types(&mut resolved, &explicit_agent_type);
     }
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
@@ -3772,6 +3789,42 @@ fn apply_global_scalar_defaults(
             info.stream_tool_calls.get_or_insert(v);
         }
     }
+}
+/// Layer 5b of [`resolve_model_list`]: an OpenAI model defaults to the Codex harness ([`OPENAI_DEFAULT_AGENT_TYPE`]).
+/// Only while `agent_type` is still the serde default and nothing set it: not the bundled catalog entry, the remote list (any non-default value), or `[model.<id>].agent_type`.
+/// The caller skips this layer entirely when the deprecated `[models].agent_type` is set.
+/// The entry is marked [`ModelInfo::agent_type_inferred`], so explicit agent selection still wins and model switches never fail on it.
+fn infer_openai_agent_types(
+    resolved: &mut IndexMap<String, ModelEntry>,
+    explicit_agent_type: &std::collections::HashSet<String>,
+) {
+    for (key, entry) in resolved.iter_mut() {
+        if entry.info.agent_type == DEFAULT_AGENT_TYPE
+            && !explicit_agent_type.contains(key)
+            && entry.info.is_openai_model()
+        {
+            tracing::debug!(
+                model_key = %key,
+                model = %entry.info.model,
+                "OpenAI model without a configured agent_type: using the codex harness"
+            );
+            OPENAI_DEFAULT_AGENT_TYPE.clone_into(&mut entry.info.agent_type);
+            entry.info.agent_type_inferred = true;
+        }
+    }
+}
+/// Keys of bundled catalog entries that set `agent_type` themselves (an explicit stock value keeps an OpenAI model off the inferred harness).
+fn default_model_keys_with_agent_type() -> std::collections::HashSet<String> {
+    let root: serde_json::Value = serde_json::from_str(crate::models::DEFAULT_MODELS_JSON)
+        .expect("default_models.json: invalid JSON");
+    root.get("models")
+        .and_then(|models| models.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|m| m.get("agent_type").is_some())
+        .filter_map(|m| m.get("id").or_else(|| m.get("model")))
+        .filter_map(|key| key.as_str().map(str::to_owned))
+        .collect()
 }
 /// Built-in default models. Prefer `resolve_model_list()`.
 pub(crate) fn default_model_entries(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntry> {
@@ -4267,6 +4320,11 @@ pub struct ModelInfo {
     /// Always has a value; defaults to `"fuigo-build-plan"` when the server or user config doesn't specify one.
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
+    /// True when `agent_type` was inferred from the model family (OpenAI models get `codex`) instead of being configured.
+    /// An inferred harness yields to an explicit agent choice and never rejects a mid-session model switch.
+    /// Set by `resolve_model_list`; never serialized.
+    #[serde(skip)]
+    pub agent_type_inferred: bool,
     /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
@@ -4303,7 +4361,31 @@ pub struct ModelInfo {
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
 }
+/// Whether `slug` names an OpenAI model: `gpt-*` (including `gpt-oss`), `chatgpt-*`, `codex-*`, or an `o<N>` reasoning model (`o3`, `o4-mini`).
+/// Case-insensitive; a provider prefix such as `openai/` and the FluxRouter `flux-pinned-` lane prefix are ignored.
+pub fn is_openai_model_slug(slug: &str) -> bool {
+    let name = slug.rsplit('/').next().unwrap_or(slug).to_ascii_lowercase();
+    let name = name.strip_prefix("flux-pinned-").unwrap_or(&name);
+    if ["gpt-", "chatgpt-", "codex-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+    {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix('o') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && (digits == rest.len() || rest.as_bytes()[digits] == b'-')
+}
 impl ModelInfo {
+    /// Whether this is an OpenAI model: catalog family `openai`, or a slug [`is_openai_model_slug`] recognizes.
+    pub fn is_openai_model(&self) -> bool {
+        self.model_family
+            .as_deref()
+            .is_some_and(|family| family.eq_ignore_ascii_case("openai"))
+            || is_openai_model_slug(&self.model)
+    }
     /// Minimal fallback descriptor for an unknown model slug.
     /// Used when a configured model ID isn't found in presets or remote models.
     pub fn fallback(slug: &str) -> Self {
@@ -4328,6 +4410,7 @@ impl ModelInfo {
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
@@ -4367,6 +4450,7 @@ impl ModelInfo {
             system_prompt_label: entry.system_prompt_label.clone(),
             use_concise: entry.use_concise,
             agent_type: entry.agent_type.clone(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: entry.inference_idle_timeout_secs,
             max_retries: entry.max_retries,
             subagent_rate_limit_max_attempts: entry.subagent_rate_limit_max_attempts,
@@ -5193,6 +5277,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 system_prompt_label: None,
                 use_concise: false,
                 agent_type: default_agent_type(),
+                agent_type_inferred: false,
                 inference_idle_timeout_secs: None,
                 max_retries: None,
                 subagent_rate_limit_max_attempts: None,
@@ -5432,6 +5517,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,

@@ -1099,6 +1099,7 @@ fn test_model_entry(
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
@@ -6837,6 +6838,7 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             context_window: NonZeroU64::new(context_window).unwrap(),
             use_concise: false,
             agent_type: default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
@@ -7774,4 +7776,208 @@ fn explicit_discovery_config_propagates_without_claude_enable_import() {
     let skills: fuigo_agent::prompt::skills::SkillsConfig =
         toml::from_str("auto_discover = false").unwrap();
     assert_eq!(skills.auto_discover, Some(false));
+}
+
+fn resolve_agent_type_models(raw: &str) -> IndexMap<String, ModelEntry> {
+    let raw_config: toml::Value = toml::from_str(raw).expect("test TOML parses");
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+    resolve_model_list(&cfg, None)
+}
+/// A custom OpenAI model with no `agent_type` anywhere runs on the Codex harness, marked as inferred.
+#[test]
+fn openai_custom_model_without_agent_type_infers_codex() {
+    let resolved = resolve_agent_type_models(
+        r#"
+            [model.sol]
+            model = "gpt-5.6-sol"
+            base_url = "https://api.example.com/v1"
+            context_window = 400000
+
+            [model.routed]
+            model = "openai/o4-mini"
+            base_url = "https://api.example.com/v1"
+            context_window = 200000
+
+            [model.lane]
+            model = "my-proxy-lane"
+            model_family = "openai"
+            base_url = "https://api.example.com/v1"
+            context_window = 200000
+            "#,
+    );
+    for key in ["sol", "routed", "lane"] {
+        let info = &resolved.get(key).expect("model should exist").info;
+        assert_eq!(info.agent_type, OPENAI_DEFAULT_AGENT_TYPE, "{key}");
+        assert!(info.agent_type_inferred, "{key} must be marked inferred");
+    }
+}
+/// An explicit `[model.<id>].agent_type` wins on an OpenAI model, including the default value spelled out.
+#[test]
+fn explicit_agent_type_on_openai_model_is_kept() {
+    for explicit in [DEFAULT_AGENT_TYPE, "fuigo-build", "codex"] {
+        let resolved = resolve_agent_type_models(&format!(
+            r#"
+                [model.sol]
+                model = "gpt-5.6-sol"
+                base_url = "https://api.example.com/v1"
+                context_window = 400000
+                agent_type = "{explicit}"
+                "#
+        ));
+        let info = &resolved.get("sol").expect("model should exist").info;
+        assert_eq!(info.agent_type, explicit);
+        assert!(!info.agent_type_inferred, "explicit {explicit} must not be marked inferred");
+    }
+}
+/// The deprecated global `[models].agent_type` is a configuration too: it suppresses the OpenAI default.
+#[test]
+fn deprecated_global_agent_type_blocks_openai_inference() {
+    let resolved = resolve_agent_type_models(
+        r#"
+            [models]
+            agent_type = "fuigo-build"
+
+            [model.sol]
+            model = "gpt-5.6-sol"
+            base_url = "https://api.example.com/v1"
+            context_window = 400000
+            "#,
+    );
+    let info = &resolved.get("sol").expect("model should exist").info;
+    assert_eq!(info.agent_type, "fuigo-build");
+    assert!(!info.agent_type_inferred);
+}
+/// Claude, Grok, DeepSeek, Gemini and FluxRouter lanes keep the stock harness.
+#[test]
+fn non_openai_models_keep_the_default_harness() {
+    for slug in [
+        "claude-sonnet-5",
+        "anthropic/claude-opus-5",
+        "grok-4.5",
+        "deepseek-v4-flash",
+        "gemini-3-1-pro",
+        "flux-auto",
+        "ollama-llama3",
+        "opus-4",
+    ] {
+        let resolved = resolve_agent_type_models(&format!(
+            r#"
+                [model.custom]
+                model = "{slug}"
+                base_url = "https://api.example.com/v1"
+                context_window = 200000
+                "#
+        ));
+        let info = &resolved.get("custom").expect("model should exist").info;
+        assert_eq!(info.agent_type, DEFAULT_AGENT_TYPE, "{slug}");
+        assert!(!info.agent_type_inferred, "{slug}");
+    }
+}
+/// The bundled catalog's `gpt-5` (family `openai`, no `agent_type`) infers codex, also under a `[model.gpt-5]` override that leaves `agent_type` alone; the other lanes stay stock.
+#[test]
+fn bundled_catalog_openai_entry_infers_codex() {
+    let empty = resolve_agent_type_models("");
+    let overridden = resolve_agent_type_models(
+        r#"
+            [model.gpt-5]
+            context_window = 272000
+            "#,
+    );
+    for resolved in [&empty, &overridden] {
+        let gpt = &resolved.get("gpt-5").expect("bundled gpt-5 entry").info;
+        assert_eq!(gpt.agent_type, OPENAI_DEFAULT_AGENT_TYPE);
+        assert!(gpt.agent_type_inferred);
+        for key in ["flux-auto", "claude-opus", "gemini-pro"] {
+            let info = &resolved.get(key).expect("bundled entry").info;
+            assert_eq!(info.agent_type, DEFAULT_AGENT_TYPE, "{key}");
+            assert!(!info.agent_type_inferred, "{key}");
+        }
+    }
+}
+/// A remote model list entry that names a harness keeps it; one without infers codex for an OpenAI slug.
+#[test]
+fn prefetched_openai_model_infers_codex_unless_remote_sets_agent_type() {
+    let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default()))
+        .expect("empty config parses");
+    let mut prefetched = IndexMap::new();
+    let bare = test_model_entry("gpt-5.6", "https://test.api/v1", None, None, None);
+    let mut pinned = test_model_entry("gpt-5.6-mini", "https://test.api/v1", None, None, None);
+    pinned.info.agent_type = "fuigo-build".to_owned();
+    prefetched.insert("gpt-5.6".to_owned(), bare);
+    prefetched.insert("gpt-5.6-mini".to_owned(), pinned);
+    let resolved = resolve_model_list(&cfg, Some(prefetched));
+    let bare = &resolved.get("gpt-5.6").expect("bare").info;
+    assert_eq!(bare.agent_type, OPENAI_DEFAULT_AGENT_TYPE);
+    assert!(bare.agent_type_inferred);
+    let pinned = &resolved.get("gpt-5.6-mini").expect("pinned").info;
+    assert_eq!(pinned.agent_type, "fuigo-build");
+    assert!(!pinned.agent_type_inferred);
+}
+#[test]
+fn is_openai_model_slug_recognizes_openai_slugs_only() {
+    for yes in [
+        "gpt-5",
+        "GPT-5.6-sol",
+        "gpt-oss-120b",
+        "openai/gpt-5.1-codex",
+        "flux-pinned-gpt-5",
+        "o1",
+        "o3",
+        "o4-mini",
+        "chatgpt-4o-latest",
+        "codex-mini-latest",
+    ] {
+        assert!(is_openai_model_slug(yes), "{yes}");
+    }
+    for no in [
+        "claude-sonnet-5",
+        "grok-4.5",
+        "deepseek-v4",
+        "flux-auto",
+        "ollama-llama3",
+        "opus-4",
+        "o",
+        "omni-1",
+        "my-gpt-wrapper",
+    ] {
+        assert!(!is_openai_model_slug(no), "{no}");
+    }
+}
+/// The hardbench `fuigo -p -m benchmark` config: a custom Responses-API GPT entry with no `agent_type` resolves to the Codex harness.
+/// A headless session on it therefore advertises `apply_patch` and, being non-interactive, no `ask_user_question`.
+#[test]
+#[serial]
+fn benchmark_style_custom_gpt_responses_entry_resolves_to_codex_harness() {
+    let resolved = resolve_agent_type_models(
+        r#"
+            [model.benchmark]
+            model = "gpt-5.6-sol"
+            api_backend = "responses"
+            base_url = "https://api.example.com/v1"
+            context_window = 400000
+            "#,
+    );
+    let info = &resolved.get("benchmark").expect("benchmark model should exist").info;
+    assert_eq!(info.api_backend, ApiBackend::Responses);
+    assert_eq!(info.agent_type, OPENAI_DEFAULT_AGENT_TYPE);
+    assert!(info.agent_type_inferred);
+    let prev_agent = std::env::var("FUIGO_AGENT").ok();
+    unsafe { std::env::remove_var("FUIGO_AGENT") };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let definition = crate::agent::mvp_agent::MvpAgent::resolve_agent_definition_for_model(
+        tmp.path(),
+        None,
+        &AgentSelectionConfig::default(),
+        None,
+        Some(info.agent_type.as_str()),
+        info.agent_type_inferred,
+    );
+    if let Some(v) = prev_agent {
+        unsafe { std::env::set_var("FUIGO_AGENT", v) };
+    }
+    assert_eq!(definition.name, OPENAI_DEFAULT_AGENT_TYPE);
+    assert!(
+        !crate::upload::turn::resolve_ask_user_question_enabled(None, true, || true),
+        "a headless session must not advertise ask_user_question"
+    );
 }

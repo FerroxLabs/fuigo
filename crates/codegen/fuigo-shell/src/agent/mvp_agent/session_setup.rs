@@ -364,6 +364,7 @@ impl MvpAgent {
             });
         let session_info = session_info_for(&session_id, &cwd);
         let mut model_agent_type: Option<String> = None;
+        let mut model_agent_type_inferred = false;
         let mut session_sampling_override: Option<SamplingConfig> = None;
         let mut disallowed_custom: Option<String> = None;
         let session_initial_model = chat_initial_model(is_chat_kind, custom_model_id);
@@ -395,6 +396,7 @@ impl MvpAgent {
             {
                 Ok(model) if model.info.user_selectable => {
                     model_agent_type = Some(model.info().agent_type.clone());
+                    model_agent_type_inferred = model.info().agent_type_inferred;
                     let origin_client = self
                         .origin_client_info_from_meta(arguments.meta.as_ref());
                     session_sampling_override = Some(
@@ -427,6 +429,7 @@ impl MvpAgent {
                 self.resolve_model_id(&self.models_manager.current_model_id())
         {
             model_agent_type = Some(default_model.info().agent_type.clone());
+            model_agent_type_inferred = default_model.info().agent_type_inferred;
         } else if model_agent_type.is_none() && custom_model_id.is_some() {
             tracing::debug!(
                 custom_model = ?custom_model_id,
@@ -545,6 +548,7 @@ impl MvpAgent {
                     persisted_announcement_state: None,
                     session_meta: arguments.meta.as_ref(),
                     model_agent_type: model_agent_type.as_deref(),
+                    model_agent_type_inferred,
                     session_model_id,
                     initial_reasoning_effort: spawn_effort,
                     session_yolo_mode,
@@ -999,6 +1003,7 @@ impl MvpAgent {
                     persisted_announcement_state,
                     session_meta: request_meta.as_ref(),
                     model_agent_type: persisted_agent_name.as_deref(),
+                    model_agent_type_inferred: false,
                     session_model_id: summary.current_model_id.clone(),
                     initial_reasoning_effort: None,
                     session_yolo_mode,
