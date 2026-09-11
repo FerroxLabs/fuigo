@@ -323,6 +323,12 @@ pub fn fuigo_build_hashline_toolset(
         behavior_preset: None,
     }
 }
+/// The codex harness keeps the `grep_files` name its prompt uses, but the tool behind it is the
+/// content grep (`GrepTool`: matching lines with -A/-B/-C context, output modes, head_limit), not the
+/// paths-only `CodexGrepFilesTool`; the model gets matching lines in one call.
+fn codex_grep_tool_config() -> ToolConfig {
+    ToolConfig::from(&fuigo_build::GrepTool).with_name("grep_files")
+}
 fn codex_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -330,10 +336,11 @@ fn codex_toolset() -> ToolServerConfig {
             (&codex::CodexReadFileTool).into(),
             (&codex::ApplyPatchTool).into(),
             (&codex::CodexListDirTool).into(),
-            (&codex::CodexGrepFilesTool).into(),
+            codex_grep_tool_config(),
             kill_task_tool_config(),
             (&fuigo_build::TodoWriteTool).into(),
             task_output_tool_config(),
+            task_tool_config(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
         ],
@@ -1803,6 +1810,30 @@ mod tests {
                  change is intentional.",
             );
         }
+    }
+    /// `grep_files` in the codex toolset is the content grep, renamed; the paths-only codex port is gone.
+    #[test]
+    fn codex_toolset_grep_files_is_the_content_grep() {
+        let tools = codex_toolset().tools;
+        let grep = tools
+            .iter()
+            .find(|t| t.name_override.as_deref() == Some("grep_files"))
+            .expect("codex toolset advertises grep_files");
+        assert_eq!(grep.id, ToolConfig::from(&fuigo_build::GrepTool).id);
+        assert!(
+            !tools.iter().any(|t| t.id == ToolConfig::from(&codex::CodexGrepFilesTool).id),
+            "paths-only grep_files must not be advertised"
+        );
+    }
+    /// OpenAI models default to the codex harness, so it keeps subagent spawning like the stock fuigo-build sets.
+    #[test]
+    fn codex_toolset_keeps_subagent_spawn() {
+        let task_id = task_tool_config().id;
+        assert!(
+            codex_toolset().tools.iter().any(|t| t.id == task_id),
+            "codex toolset must ship spawn_subagent"
+        );
+        assert!(AgentDefinition::codex().is_strict_harness());
     }
     #[test]
     fn is_strict_harness_agent_type_classifies_by_name() {

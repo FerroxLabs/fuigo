@@ -338,6 +338,15 @@ model = "my-custom-model"
 supports_backend_search = true
 ```
 
+To let an OpenAI Responses model (GPT-5.6 and later) batch client tool calls inside a hosted program ([programmatic tool calling](https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling)), opt the entry in; it only applies with `api_backend = "responses"` on an OpenAI-family model, and `FUIGO_PROGRAMMATIC_TOOL_CALLING=1` (or `0`) overrides the setting for every model:
+
+```toml
+[model.gpt-5-6-sol]
+model = "gpt-5.6-sol"
+api_backend = "responses"
+programmatic_tool_calling = true
+```
+
 ---
 
 ## Using Custom Models

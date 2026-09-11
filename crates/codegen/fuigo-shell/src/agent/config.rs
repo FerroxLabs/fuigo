@@ -41,6 +41,8 @@ pub enum AgentMode {
 }
 /// Default agent type when the server or user config doesn't specify one.
 pub const DEFAULT_AGENT_TYPE: &str = "fuigo-build-plan";
+/// Harness an OpenAI model gets when nothing configures its `agent_type`: the Codex toolset (shell, `apply_patch`, codex file tools) and prompt.
+pub const OPENAI_DEFAULT_AGENT_TYPE: &str = "codex";
 /// Serde default for `ModelInfo.agent_type` and `ModelEntryConfig.agent_type`.
 pub(crate) fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
@@ -1648,6 +1650,19 @@ pub enum TitlePolicy {
     Host,
 }
 
+impl TitlePolicy {
+    /// The first-prompt title policy for one session attachment.
+    /// Non-interactive sessions (`fuigo -p`, SDK) never pay for a model title: `Model` becomes the zero-dispatch `Local` label,
+    /// so session lists and the `/resume` picker still name the run instead of showing "(no prompt)".
+    /// `Host` and `Local` already send no request and pass through.
+    pub(crate) fn for_attachment(self, non_interactive: bool) -> Self {
+        match self {
+            Self::Model if non_interactive => Self::Local,
+            policy => policy,
+        }
+    }
+}
+
 #[cfg(test)]
 mod title_policy_tests {
     use super::*;
@@ -1663,6 +1678,16 @@ mod title_policy_tests {
             assert_eq!(serde_json::to_value(session).unwrap()["title_policy"], wire);
         }
         assert!(serde_json::from_value::<SessionConfig>(serde_json::json!({"title_policy": "unknown"})).is_err());
+    }
+
+    #[test]
+    fn non_interactive_attachment_never_dispatches_a_model_title() {
+        assert_eq!(TitlePolicy::Model.for_attachment(true), TitlePolicy::Local);
+        assert_eq!(TitlePolicy::Model.for_attachment(false), TitlePolicy::Model);
+        for policy in [TitlePolicy::Local, TitlePolicy::Host] {
+            assert_eq!(policy.for_attachment(true), policy);
+            assert_eq!(policy.for_attachment(false), policy);
+        }
     }
 
     #[test]
@@ -3533,6 +3558,8 @@ pub(crate) fn resolve_model_list(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
+    let mut explicit_agent_type: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
             models_base_url = ?cfg.endpoints.models_base_url,
@@ -3541,6 +3568,7 @@ pub(crate) fn resolve_model_list(
         );
     } else {
         let defaults = default_model_entries(&cfg.endpoints);
+        explicit_agent_type = default_model_keys_with_agent_type();
         tracing::debug!(count = defaults.len(), "loaded default models");
         resolved.extend(defaults);
     }
@@ -3574,11 +3602,24 @@ pub(crate) fn resolve_model_list(
                 tracing::debug!(model_key = %key, "prefetched model overriding default");
             }
         }
+        explicit_agent_type = prefetched
+            .iter()
+            .filter(|(key, entry)| {
+                entry.info.agent_type != DEFAULT_AGENT_TYPE || explicit_agent_type.contains(*key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
         resolved = prefetched;
     }
+    // Config entries that neither extend a catalog/prefetched base nor set `context_window` carry the 200K fallback;
+    // they are the entries a same-slug catalog sibling should donate its real window to (and must never donate)
+    let mut window_unset: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
+        if !had_base && model_override.context_window.is_none() {
+            window_unset.insert(key.clone());
+        }
         if !had_base {
             tracing::debug!(model_key = %key, "config model adding new entry (not in defaults/prefetched)");
             if model_override.context_window.is_none() {
@@ -3598,6 +3639,9 @@ pub(crate) fn resolve_model_list(
         });
         let effective = with_provider.as_ref().unwrap_or(model_override);
         let mut entry = effective.apply(key, base, &cfg.endpoints);
+        if effective.agent_type.is_some() {
+            explicit_agent_type.insert(key.clone());
+        }
         let session_bearer_unsafe = !crate::util::is_fuigo_api_bearer_url(&entry.info.base_url)
             || entry
                 .api_base_url
@@ -3646,18 +3690,20 @@ pub(crate) fn resolve_model_list(
         let default_cw = DEFAULT_CONTEXT_WINDOW;
         let donors: std::collections::HashMap<String, (std::num::NonZeroU64, ApiBackend)> =
             resolved
-                .values()
-                .filter(|e| e.info.context_window.get() != default_cw)
-                .map(|e| {
+                .iter()
+                .filter(|(key, e)| {
+                    e.info.context_window.get() != default_cw && !window_unset.contains(*key)
+                })
+                .map(|(_, e)| {
                     (
                         e.info.model.clone(),
                         (e.info.context_window, e.info.api_backend.clone()),
                     )
                 })
                 .collect();
-        for entry in resolved.values_mut() {
+        for (key, entry) in resolved.iter_mut() {
             if let Some((donor_cw, donor_backend)) = donors.get(&entry.info.model) {
-                if entry.info.context_window.get() == default_cw {
+                if entry.info.context_window.get() == default_cw || window_unset.contains(key) {
                     tracing::debug!(
                         model = %entry.info.model,
                         from = default_cw,
@@ -3684,6 +3730,8 @@ pub(crate) fn resolve_model_list(
                 entry.info.agent_type = global_agent_type.clone();
             }
         }
+    } else {
+        infer_openai_agent_types(&mut resolved, &explicit_agent_type);
     }
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
@@ -3749,6 +3797,42 @@ fn apply_global_scalar_defaults(
             info.stream_tool_calls.get_or_insert(v);
         }
     }
+}
+/// Layer 5b of [`resolve_model_list`]: an OpenAI model defaults to the Codex harness ([`OPENAI_DEFAULT_AGENT_TYPE`]).
+/// Only while `agent_type` is still the serde default and nothing set it: not the bundled catalog entry, the remote list (any non-default value), or `[model.<id>].agent_type`.
+/// The caller skips this layer entirely when the deprecated `[models].agent_type` is set.
+/// The entry is marked [`ModelInfo::agent_type_inferred`], so explicit agent selection still wins and model switches never fail on it.
+fn infer_openai_agent_types(
+    resolved: &mut IndexMap<String, ModelEntry>,
+    explicit_agent_type: &std::collections::HashSet<String>,
+) {
+    for (key, entry) in resolved.iter_mut() {
+        if entry.info.agent_type == DEFAULT_AGENT_TYPE
+            && !explicit_agent_type.contains(key)
+            && entry.info.is_openai_model()
+        {
+            tracing::debug!(
+                model_key = %key,
+                model = %entry.info.model,
+                "OpenAI model without a configured agent_type: using the codex harness"
+            );
+            OPENAI_DEFAULT_AGENT_TYPE.clone_into(&mut entry.info.agent_type);
+            entry.info.agent_type_inferred = true;
+        }
+    }
+}
+/// Keys of bundled catalog entries that set `agent_type` themselves (an explicit stock value keeps an OpenAI model off the inferred harness).
+fn default_model_keys_with_agent_type() -> std::collections::HashSet<String> {
+    let root: serde_json::Value = serde_json::from_str(crate::models::DEFAULT_MODELS_JSON)
+        .expect("default_models.json: invalid JSON");
+    root.get("models")
+        .and_then(|models| models.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|m| m.get("agent_type").is_some())
+        .filter_map(|m| m.get("id").or_else(|| m.get("model")))
+        .filter_map(|key| key.as_str().map(str::to_owned))
+        .collect()
 }
 /// Built-in default models. Prefer `resolve_model_list()`.
 pub(crate) fn default_model_entries(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntry> {
@@ -3819,6 +3903,8 @@ struct DefaultModelJson {
     #[serde(default)]
     supports_backend_search: bool,
     #[serde(default)]
+    programmatic_tool_calling: bool,
+    #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
     compaction_at_tokens: Option<CompactionAtTokens>,
@@ -3885,6 +3971,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_efforts: m.reasoning_efforts,
                 variants: m.variants,
                 supports_backend_search: m.supports_backend_search,
+                programmatic_tool_calling: m.programmatic_tool_calling,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -3996,6 +4083,10 @@ pub struct ModelEntryConfig {
     pub supported_in_api: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_backend_search: bool,
+    /// Opt this model into OpenAI Responses programmatic tool calling (see `docs/ptc-contract.md`).
+    /// Only takes effect with `api_backend = "responses"` on an OpenAI-family model; `FUIGO_PROGRAMMATIC_TOOL_CALLING` overrides it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub programmatic_tool_calling: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4075,6 +4166,7 @@ pub struct ConfigModelOverride {
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: Option<bool>,
+    pub programmatic_tool_calling: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`; serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4172,6 +4264,9 @@ impl ConfigModelOverride {
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
         }
+        if let Some(v) = self.programmatic_tool_calling {
+            entry.info.programmatic_tool_calling = v;
+        }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
         }
@@ -4244,6 +4339,11 @@ pub struct ModelInfo {
     /// Always has a value; defaults to `"fuigo-build-plan"` when the server or user config doesn't specify one.
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
+    /// True when `agent_type` was inferred from the model family (OpenAI models get `codex`) instead of being configured.
+    /// An inferred harness yields to an explicit agent choice and never rejects a mid-session model switch.
+    /// Set by `resolve_model_list`; never serialized.
+    #[serde(skip)]
+    pub agent_type_inferred: bool,
     /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
@@ -4267,6 +4367,9 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<ModelVariant>,
     pub supports_backend_search: bool,
+    /// Per-model opt-in for OpenAI Responses programmatic tool calling; resolved by `crate::agent::programmatic_tools`.
+    #[serde(default)]
+    pub programmatic_tool_calling: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
@@ -4280,7 +4383,31 @@ pub struct ModelInfo {
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
 }
+/// Whether `slug` names an OpenAI model: `gpt-*` (including `gpt-oss`), `chatgpt-*`, `codex-*`, or an `o<N>` reasoning model (`o3`, `o4-mini`).
+/// Case-insensitive; a provider prefix such as `openai/` and the FluxRouter `flux-pinned-` lane prefix are ignored.
+pub fn is_openai_model_slug(slug: &str) -> bool {
+    let name = slug.rsplit('/').next().unwrap_or(slug).to_ascii_lowercase();
+    let name = name.strip_prefix("flux-pinned-").unwrap_or(&name);
+    if ["gpt-", "chatgpt-", "codex-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+    {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix('o') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && (digits == rest.len() || rest.as_bytes()[digits] == b'-')
+}
 impl ModelInfo {
+    /// Whether this is an OpenAI model: catalog family `openai`, or a slug [`is_openai_model_slug`] recognizes.
+    pub fn is_openai_model(&self) -> bool {
+        self.model_family
+            .as_deref()
+            .is_some_and(|family| family.eq_ignore_ascii_case("openai"))
+            || is_openai_model_slug(&self.model)
+    }
     /// Minimal fallback descriptor for an unknown model slug.
     /// Used when a configured model ID isn't found in presets or remote models.
     pub fn fallback(slug: &str) -> Self {
@@ -4305,6 +4432,7 @@ impl ModelInfo {
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
@@ -4315,6 +4443,7 @@ impl ModelInfo {
             reasoning_efforts: Vec::new(),
             variants: Vec::new(),
             supports_backend_search: false,
+            programmatic_tool_calling: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4344,6 +4473,7 @@ impl ModelInfo {
             system_prompt_label: entry.system_prompt_label.clone(),
             use_concise: entry.use_concise,
             agent_type: entry.agent_type.clone(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: entry.inference_idle_timeout_secs,
             max_retries: entry.max_retries,
             subagent_rate_limit_max_attempts: entry.subagent_rate_limit_max_attempts,
@@ -4354,6 +4484,7 @@ impl ModelInfo {
             reasoning_efforts: entry.reasoning_efforts.clone(),
             variants: entry.variants.clone(),
             supports_backend_search: entry.supports_backend_search,
+            programmatic_tool_calling: entry.programmatic_tool_calling,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
@@ -5170,6 +5301,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 system_prompt_label: None,
                 use_concise: false,
                 agent_type: default_agent_type(),
+                agent_type_inferred: false,
                 inference_idle_timeout_secs: None,
                 max_retries: None,
                 subagent_rate_limit_max_attempts: None,
@@ -5180,6 +5312,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 reasoning_efforts: Vec::new(),
                 variants: Vec::new(),
                 supports_backend_search: false,
+                programmatic_tool_calling: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -5340,6 +5473,7 @@ pub(crate) fn sampling_config_for_model(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
+        programmatic_tool_calling: crate::agent::programmatic_tools::enabled_for(info),
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -5409,6 +5543,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             system_prompt_label: None,
             use_concise: false,
             agent_type: default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,
@@ -5420,6 +5555,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             reasoning_efforts: Vec::new(),
             variants: Vec::new(),
             supports_backend_search: false,
+            programmatic_tool_calling: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,

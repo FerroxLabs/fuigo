@@ -5,6 +5,7 @@ fn tool(name: &str, description: Option<&str>, parameters: serde_json::Value) ->
         name: name.into(),
         description: description.map(str::to_owned),
         parameters,
+        freeform: None,
     }
 }
 

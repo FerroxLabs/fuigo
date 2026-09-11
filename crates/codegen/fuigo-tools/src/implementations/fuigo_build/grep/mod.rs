@@ -44,11 +44,40 @@ pub enum OutputMode {
     Count,
 }
 
+/// `pattern` accepts one regex string or a JSON array of regexes; an array is
+/// OR-ed into one alternation (`(?:a)|(?:b)`) so related searches cost one call.
+fn deserialize_pattern<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PatternArg {
+        One(String),
+        Many(Vec<String>),
+    }
+    match PatternArg::deserialize(d)? {
+        PatternArg::One(s) => Ok(s),
+        PatternArg::Many(list) => {
+            let list: Vec<String> = list.into_iter().filter(|p| !p.trim().is_empty()).collect();
+            match list.len() {
+                0 => Err(serde::de::Error::custom(
+                    "pattern list must contain at least one non-empty pattern",
+                )),
+                1 => Ok(list.into_iter().next().expect("one pattern")),
+                _ => Ok(list
+                    .iter()
+                    .map(|p| format!("(?:{p})"))
+                    .collect::<Vec<_>>()
+                    .join("|")),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GrepSearchInput {
     #[schemars(
-        description = "The regular expression pattern to search for in file contents (rg --regexp)"
+        description = "The regular expression pattern to search for in file contents (rg --regexp). Search several things in one call with alternation: `foo|bar|baz` (a JSON array of patterns is also accepted and OR-ed)."
     )]
+    #[serde(deserialize_with = "deserialize_pattern")]
     pub pattern: String,
 
     #[schemars(
@@ -245,7 +274,8 @@ impl crate::types::tool_metadata::ToolMetadata for GrepTool {
         r#"Search file contents with regular expressions (ripgrep).
 
 - Full regex syntax, so escape literal special characters: `functionCall\(`, or `interface\{\}` to find interface{} in Go.
-- Pass ${{ params.search.pattern }} as a raw regex string — no surrounding quotes.
+- Pass ${{ params.search.pattern }} as a raw regex string — no surrounding quotes. Combine related searches into one call with alternation (`foo|bar|baz`; a JSON array of patterns is also accepted and OR-ed) instead of one call per term.
+- Results are the matching lines with file and line number; add -C (or -A/-B) for surrounding context lines in the same call.
 - Respects .gitignore unless you pass a broad glob like '--glob *'.
 - Only filter by '${{ params.search.type }}' or '${{ params.search.glob }}' when you are sure of the file type; import paths may not match source file types (.js vs .ts).
 - Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report "at least" counts."#
@@ -1678,6 +1708,32 @@ mod tests {
     fn tool_name_and_description() {
         let tool = GrepTool;
         assert_eq!(fuigo_tool_runtime::Tool::id(&tool).as_str(), "grep");
+    }
+
+    #[test]
+    fn pattern_accepts_list_and_joins_with_alternation() {
+        let one: GrepSearchInput =
+            serde_json::from_value(serde_json::json!({"pattern": "foo"})).unwrap();
+        assert_eq!(one.pattern, "foo");
+        let many: GrepSearchInput =
+            serde_json::from_value(serde_json::json!({"pattern": ["foo", "bar baz", ""]})).unwrap();
+        assert_eq!(many.pattern, "(?:foo)|(?:bar baz)");
+        let single_in_list: GrepSearchInput =
+            serde_json::from_value(serde_json::json!({"pattern": ["only"]})).unwrap();
+        assert_eq!(single_in_list.pattern, "only");
+        assert!(serde_json::from_value::<GrepSearchInput>(serde_json::json!({"pattern": []})).is_err());
+        let schema = serde_json::to_value(schemars::schema_for!(GrepSearchInput)).unwrap();
+        assert_eq!(schema["properties"]["pattern"]["type"], "string", "schema stays a string");
+        assert!(
+            schema["properties"]["pattern"]["description"].as_str().unwrap().contains("alternation"),
+            "schema documents alternation"
+        );
+    }
+
+    #[test]
+    fn description_mentions_context_lines_and_alternation() {
+        let d = <GrepTool as crate::types::tool_metadata::ToolMetadata>::description_template(&GrepTool);
+        assert!(d.contains("alternation") && d.contains("matching lines") && d.contains("-A/-B"), "{d}");
     }
 
     #[test]

@@ -30,14 +30,19 @@ pub struct TaskToolInput {
 
     /// Whether to run the subagent in the background.
     ///
-    /// Returns immediately with a subagent_id. Use the task output tool to
-    /// retrieve results. This is set to true by default.
+    /// Defaults to `false`: the child runs to completion and its final report
+    /// is returned in this same call. `true` returns a subagent_id
+    /// immediately; the parent continues its own work and fetches the report
+    /// once with the task output tool (timeout_ms omitted), never polling.
     #[schemars(
-        description = "Returns immediately with a subagent_id. Use the task output tool to \
-            retrieve results. This is set to true by default."
+        description = "Default false: the subagent runs to completion and its final report is \
+            returned in this same call, so no follow-up call is needed. Set true only for work \
+            you do not need before your next step: the call then returns a subagent_id \
+            immediately; continue your own work, and when you need the report fetch it once \
+            with the task output tool with timeout_ms omitted (it waits for completion). Never poll."
     )]
     #[serde(
-        default = "default_true",
+        default,
         deserialize_with = "crate::serde_lenient::deserialize_lenient_bool"
     )]
     pub run_in_background: bool,
@@ -140,9 +145,6 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
     })
 }
 
-fn default_true() -> bool {
-    true
-}
 
 /// Capability mode controlling which tool classes a child agent can use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -260,7 +262,7 @@ impl SubagentCompletedOutput {
 /// Harness-owned reminders go through `format_with_reminders` with
 /// `system_reminder_tag`.
 pub const BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK: &str =
-    "Do not only poll the child. Continue unfinished parent work now.";
+    "Continue unfinished parent work now; when you need the child's result, fetch it once with the retrieval call above (it waits for completion); never poll.";
 
 /// How many asks *before* the latest one may still count as leftover parent
 /// exec. Older implement/fix history after the user switched to review-only
@@ -395,7 +397,8 @@ impl BackgroundNoticeNaming<'static> {
 }
 
 /// Shared retrieval line for background notices: names this id and the
-/// host-facing get-output tool/params. Polling policy lives in the system prompt.
+/// host-facing get-output tool/params, and says to fetch once with the wait
+/// parameter omitted (the tool then waits for completion) rather than poll.
 fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming) -> String {
     let BackgroundNoticeNaming {
         task_output_tool,
@@ -403,7 +406,7 @@ fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming) ->
         timeout_ms_param,
     } = *naming;
     format!(
-        "When you need its result, use {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] and a positive {timeout_ms_param}."
+        "When you need its result, call {task_output_tool} once with {task_ids_param}=[\"{subagent_id}\"] and {timeout_ms_param} omitted (it waits for completion); never poll with repeated calls."
     )
 }
 
@@ -527,7 +530,7 @@ pub struct TaskOutputToolInput {
     /// with "Provide a non-empty task_ids list", after which they abandoned
     /// the background-task workflow for shell polling.
     #[schemars(
-        description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot."
+        description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With timeout_ms omitted or positive, multiple ids wait until all complete. Pass timeout_ms=0 for a non-blocking snapshot."
     )]
     #[serde(
         default,
@@ -536,13 +539,15 @@ pub struct TaskOutputToolInput {
     )]
     pub task_ids: Vec<String>,
 
-    /// When set and positive, wait up to this many milliseconds; omit or `0` polls.
+    /// Omitted: wait up to [`DEFAULT_TASK_OUTPUT_WAIT_MS`] while a task is
+    /// still running. Positive: wait up to that long, raised to
+    /// [`MIN_TASK_OUTPUT_WAIT_MS`] when shorter. `0`: non-blocking snapshot.
     ///
     /// `{max_wait_ms}` is resolved at finalize from the session's wait ceiling,
     /// which also pins it as the schema `maximum` — the tool description cannot
     /// carry the bound alone, since randomization may replace it wholesale.
     #[schemars(
-        description = "Max wait time in milliseconds, up to {max_wait_ms}. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
+        description = "Max wait time in milliseconds, up to {max_wait_ms}. Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot."
     )]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -569,7 +574,7 @@ impl TaskOutputToolInput {
         resolve_task_ids(&self.task_ids)
     }
 
-    /// True only when `timeout_ms` is set and greater than zero.
+    /// True unless `timeout_ms` is an explicit `0` (omitted waits by default).
     pub fn waits(&self) -> bool {
         task_output_waits(self.timeout_ms)
     }
@@ -577,9 +582,27 @@ impl TaskOutputToolInput {
 
 /// Whether `get_task_output` should wait, from optional `timeout_ms`.
 ///
-/// Positive `timeout_ms` waits; omit or `0` polls without blocking.
+/// Omitted or positive `timeout_ms` waits; an explicit `0` polls without blocking.
 pub fn task_output_waits(timeout_ms: Option<u64>) -> bool {
-    timeout_ms.is_some_and(|ms| ms > 0)
+    timeout_ms.is_none_or(|ms| ms > 0)
+}
+
+/// Blocking wait applied when `timeout_ms` is omitted and a task is still running.
+pub const DEFAULT_TASK_OUTPUT_WAIT_MS: u64 = 120_000;
+
+/// Floor for positive `timeout_ms` values: a shorter poll costs a whole model
+/// call and almost never finds the task finished.
+pub const MIN_TASK_OUTPUT_WAIT_MS: u64 = 5_000;
+
+/// The wait a `get_task_output` call actually performs, before the session cap:
+/// omitted → [`DEFAULT_TASK_OUTPUT_WAIT_MS`]; positive below the floor →
+/// [`MIN_TASK_OUTPUT_WAIT_MS`]; `0` → `None` (non-blocking snapshot).
+pub fn effective_task_output_wait_ms(timeout_ms: Option<u64>) -> Option<u64> {
+    match timeout_ms {
+        None => Some(DEFAULT_TASK_OUTPUT_WAIT_MS),
+        Some(0) => None,
+        Some(ms) => Some(ms.max(MIN_TASK_OUTPUT_WAIT_MS)),
+    }
 }
 
 /// Default ceiling on a single blocking wait (`get_task_output` with a positive
@@ -1118,7 +1141,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          {agent_lines}\n\n\
          ## Usage notes\n\
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
-         - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
+         - {run_in_background_param}: defaults to false. The subagent runs to completion and its final report is returned in this same call, so no follow-up call is needed; several {task_tool} calls in one response still run in parallel. Set {run_in_background_param}=true only for work you do not need before your next step: the call then returns a subagent_id immediately; continue your own work, and when you need the report fetch it once with {background_retrieval_tool} with timeout_ms omitted (it waits for completion). Never poll.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\
          - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
@@ -1267,12 +1290,14 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
         None => String::new(),
     };
     let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
+    let default_wait = DEFAULT_TASK_OUTPUT_WAIT_MS;
+    let min_wait = MIN_TASK_OUTPUT_WAIT_MS;
 
     format!(
         "Get output and status from a background task{target_suffix}.\n\n\
          Usage notes:\n\
-         - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
-         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
+         - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with {timeout_ms_param} omitted or positive wait until all complete\n\
+         - Omit {timeout_ms_param} to wait up to {default_wait} ms for completion; a positive {timeout_ms_param} waits up to that many milliseconds, capped at {wait_cap} (values below {min_wait} ms are raised to {min_wait} ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -1366,13 +1391,13 @@ mod tests {
     }
 
     #[test]
-    fn task_tool_input_defaults_background_true() {
+    fn task_tool_input_defaults_background_false() {
         let input: TaskToolInput =
             serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
         assert!(
-            input.run_in_background,
-            "run_in_background should default to true"
+            !input.run_in_background,
+            "run_in_background should default to false (synchronous spawn)"
         );
 
         let foreground: TaskToolInput = serde_json::from_str(
@@ -1511,8 +1536,15 @@ mod tests {
         assert!(desc.contains("- **code-reviewer**: Reviews code."));
         assert!(desc.contains("## Usage notes"));
         assert!(desc.contains(
-            "run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. This is set to true by default."
+            "run_in_background: defaults to false. The subagent runs to completion and its final report is returned in this same call, so no follow-up call is needed"
         ));
+        assert!(desc.contains(
+            "Set run_in_background=true only for work you do not need before your next step: the call then returns a subagent_id immediately; continue your own work, and when you need the report fetch it once with get_task_output with timeout_ms omitted (it waits for completion). Never poll."
+        ));
+        assert!(
+            !desc.contains("one long timeout_ms") && !desc.contains("short polls"),
+            "background retrieval must be a single fetch with timeout_ms omitted, never a long poll: {desc}"
+        );
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains(
             "When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding."
@@ -1708,9 +1740,34 @@ mod tests {
         assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
         assert!(desc.contains("${{ tools.by_kind.read }}"));
         assert!(desc.contains(
-            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. This is set to true by default."
+            "${{ params.task.run_in_background }}: defaults to false. The subagent runs to completion and its final report is returned in this same call"
+        ));
+        assert!(desc.contains(
+            "fetch it once with ${{ tools.by_kind.background_task_action }} with timeout_ms omitted"
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
+    }
+
+    #[test]
+    fn omitted_timeout_waits_and_short_waits_are_floored() {
+        assert!(task_output_waits(None), "omitted timeout_ms waits by default");
+        assert!(!task_output_waits(Some(0)), "explicit 0 stays a snapshot");
+        assert!(task_output_waits(Some(1)));
+        assert_eq!(
+            effective_task_output_wait_ms(None),
+            Some(DEFAULT_TASK_OUTPUT_WAIT_MS)
+        );
+        assert_eq!(effective_task_output_wait_ms(Some(0)), None);
+        assert_eq!(
+            effective_task_output_wait_ms(Some(1_000)),
+            Some(MIN_TASK_OUTPUT_WAIT_MS),
+            "sub-floor polls are raised to the floor"
+        );
+        assert_eq!(effective_task_output_wait_ms(Some(30_000)), Some(30_000));
+        assert!(task_output_waits_from_json(&serde_json::json!({"task_ids": ["t"]})));
+        assert!(!task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["t"], "timeout_ms": 0})
+        ));
     }
 
     // ── Lifecycle tool descriptions ──────────────────────────────────────
@@ -1820,7 +1877,7 @@ mod tests {
             "renamed task_ids must appear: {desc}"
         );
         assert!(
-            desc.contains("positive max_wait wait") && desc.contains("Omit max_wait or pass 0"),
+            desc.contains("max_wait omitted or positive wait") && desc.contains("Omit max_wait to wait up to"),
             "renamed timeout_ms must appear: {desc}"
         );
         assert!(
@@ -1848,8 +1905,8 @@ mod tests {
             desc,
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
-             - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n\
+             - Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at {max_wait_ms} (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1870,8 +1927,8 @@ mod tests {
             desc,
             "Get output and status from a background task or subagent.\n\n\
              Usage notes:\n\
-             - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n\
+             - Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at {max_wait_ms} (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1909,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn background_spawn_notice_keeps_poll_hint_and_open_parent_work() {
+    fn background_spawn_notice_keeps_fetch_once_hint_and_open_parent_work() {
         let naming = BackgroundNoticeNaming {
             task_output_tool: "get_command_or_subagent_output",
             ..BackgroundNoticeNaming::CANONICAL
@@ -1926,8 +1983,13 @@ mod tests {
             "id must stay pollable: {with_cta}"
         );
         assert!(
-            with_cta.contains("get_command_or_subagent_output") && with_cta.contains("timeout_ms"),
-            "poll instruction must remain: {with_cta}"
+            with_cta.contains("call get_command_or_subagent_output once with task_ids=[\"sa-1\"] and timeout_ms omitted")
+                && with_cta.contains("never poll"),
+            "fetch-once instruction must remain: {with_cta}"
+        );
+        assert!(
+            !with_cta.contains("one long") && !with_cta.contains("120000") && !with_cta.contains("short polls"),
+            "spawn notice must not suggest a long timed wait or polling: {with_cta}"
         );
         assert!(
             !with_cta.contains("to wait for results")
@@ -1952,7 +2014,7 @@ mod tests {
             false,
         );
         assert!(
-            poll_only.contains("timeout_ms")
+            poll_only.contains("timeout_ms omitted")
                 && !poll_only.contains(BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK),
             "no leftover parent work must not get the CTA: {poll_only}"
         );
@@ -1969,8 +2031,8 @@ mod tests {
         };
         let spawn = format_subagent_started_background("sa-9", "explore", "scan", &naming, false);
         assert!(
-            spawn.contains("use FetchJobResult with job_ids=[\"sa-9\"]")
-                && spawn.contains("a positive max_wait"),
+            spawn.contains("call FetchJobResult once with job_ids=[\"sa-9\"]")
+                && spawn.contains("max_wait omitted"),
             "renamed tool/params must appear: {spawn}"
         );
         assert!(
@@ -1983,8 +2045,8 @@ mod tests {
         assert!(
             auto.contains("moved to the background")
                 && auto.contains("you will be notified when it completes")
-                && auto.contains("use FetchJobResult with job_ids=[\"sa-9\"]")
-                && auto.contains("a positive max_wait"),
+                && auto.contains("call FetchJobResult once with job_ids=[\"sa-9\"]")
+                && auto.contains("max_wait omitted"),
             "auto-bg notice must share the renamed retrieval line: {auto}"
         );
         assert!(

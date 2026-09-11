@@ -4,7 +4,8 @@
 use crate::agent::config;
 use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
 use crate::agent::mvp_agent::{
-    MvpAgent, agent_name_after_model_switch, harnesses_are_compatible, resolve_required_agent_type,
+    HarnessSwitch, MvpAgent, agent_name_after_model_switch, explicit_agent_selection,
+    harness_switch_decision, harnesses_are_compatible, resolve_required_agent_type,
 };
 use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
@@ -83,6 +84,26 @@ pub(crate) async fn apply(
         let is_mismatch = active_agent_type
             .as_ref()
             .is_some_and(|active| !harnesses_are_compatible(active, required));
+        let target_inferred = model.info().agent_type_inferred;
+        let active_inferred = {
+            let models = agent.models_manager.models();
+            config::find_model_by_id(&models, &previous_model_id).is_some_and(|previous| {
+                previous.info.agent_type_inferred
+                    && active_agent_type.as_deref() == Some(previous.info.agent_type.as_str())
+            })
+        };
+        let explicit_selection = {
+            let cfg = agent.cfg.borrow();
+            explicit_agent_selection(&cfg.agent, cfg.agent_profile_path.as_deref())
+        };
+        let decision = harness_switch_decision(
+            active_agent_type.as_deref(),
+            required,
+            target_inferred,
+            active_inferred,
+            turn_count == 0,
+            explicit_selection,
+        );
         tracing::info!(
             session_id = %session_id.0,
             model_id = %model_id.0,
@@ -90,9 +111,12 @@ pub(crate) async fn apply(
             ?active_agent_type,
             turn_count,
             is_mismatch,
+            target_inferred,
+            active_inferred,
+            ?decision,
             "set_session_model: agent type compatibility check"
         );
-        if is_mismatch && turn_count > 0 {
+        if decision == HarnessSwitch::Reject {
             tracing::warn!(
                 session_id = %session_id.0,
                 model_id = %model_id.0,
@@ -119,7 +143,7 @@ pub(crate) async fn apply(
             };
             return Err(err_payload.into_acp_error());
         }
-        if is_mismatch && turn_count == 0 {
+        if decision == HarnessSwitch::Rebuild {
             let cwd = handle.tool_context.cwd.as_path();
             let resolved = fuigo_agent::discovery::by_name_in_cwd_with_plugins(
                 required,
@@ -127,7 +151,11 @@ pub(crate) async fn apply(
                 agent.plugin_registry_handle.snapshot().as_deref(),
             );
             match resolved {
-                Some(def) => {
+                Some(mut def) => {
+                    crate::agent::mvp_agent::carry_stock_profile_subagent_choice(
+                        &mut def,
+                        handle.session_default_agent_profile.as_deref(),
+                    );
                     tracing::info!(
                         session_id = %session_id.0,
                         model_id = %model_id.0,

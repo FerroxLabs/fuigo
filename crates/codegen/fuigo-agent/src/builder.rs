@@ -79,6 +79,9 @@ pub struct AgentBuilder {
     memory_global_path: Option<String>,
     memory_workspace_path: Option<String>,
     is_non_interactive: bool,
+    /// Whether any MCP server (local config, client-passed, in-process SDK, managed) is configured
+    /// for this session at build time. When false the MCP meta-tools are not advertised.
+    mcp_configured: bool,
     system_prompt_label: String,
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
@@ -127,12 +130,19 @@ pub struct AgentBuilder {
     preloaded_skills: Option<Vec<fuigo_tools::implementations::skills::types::SkillInfo>>,
 }
 /// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`) are present in the tool config.
-fn ensure_plan_mode_tools(tool_config: &mut fuigo_tools::registry::types::ToolServerConfig) {
+///
+/// `inject_plan_mode` is false for non-interactive sessions: the TUI plan-mode keybind is what needs
+/// `enter_plan_mode`/`exit_plan_mode` injected, and a headless session has no keybind. A curated plan
+/// profile still carries them in its own toolset, so an explicit plan request keeps them.
+fn ensure_plan_mode_tools(
+    tool_config: &mut fuigo_tools::registry::types::ToolServerConfig,
+    inject_plan_mode: bool,
+) {
     use fuigo_tools::implementations::fuigo_build;
     let existing: std::collections::HashSet<&str> =
         tool_config.tools.iter().map(|tc| tc.id.as_str()).collect();
-    let missing_enter = !existing.contains("FuigoBuild:enter_plan_mode");
-    let missing_exit = !existing.contains("FuigoBuild:exit_plan_mode");
+    let missing_enter = inject_plan_mode && !existing.contains("FuigoBuild:enter_plan_mode");
+    let missing_exit = inject_plan_mode && !existing.contains("FuigoBuild:exit_plan_mode");
     let missing_ask = !existing.contains("FuigoBuild:ask_user_question");
     drop(existing);
     if missing_enter {
@@ -215,6 +225,7 @@ impl AgentBuilder {
             memory_global_path: None,
             memory_workspace_path: None,
             is_non_interactive: false,
+            mcp_configured: true,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             session_env: None,
             state_path: None,
@@ -345,6 +356,13 @@ impl AgentBuilder {
     /// Mark this session as non-interactive (headless / SDK / stdio / generic-ACP).
     /// Suppresses prompt sections that assume a human at the TUI prompt (the `! <command>` shell-prefix tip and the `<user_guide>` TUI pointer).
     /// Stamps `non_interactive` into the ask_user_question params so an unanswered questionnaire returns no-operator text instead of "user declined".
+    /// Whether MCP servers are configured for the session. False drops `search_tool`/`use_tool`
+    /// from the advertised toolset (they can only reach MCP servers). Defaults to true so hosts
+    /// that do not compute the signal keep the tools.
+    pub fn with_mcp_configured(mut self, value: bool) -> Self {
+        self.mcp_configured = value;
+        self
+    }
     pub fn with_is_non_interactive(mut self, value: bool) -> Self {
         self.is_non_interactive = value;
         self
@@ -724,7 +742,7 @@ impl AgentBuilder {
                     .tools
                     .push((&fuigo_tools::implementations::opencode::OpenCodeWriteTool).into());
             }
-            ensure_plan_mode_tools(&mut tool_config);
+            ensure_plan_mode_tools(&mut tool_config, !self.is_non_interactive);
         }
         let active_agent_message = fuigo_tools::registry::types::ToolConfig::for_tool::<
             fuigo_tools::implementations::fuigo_build::SendSubagentMessageTool,
@@ -770,6 +788,31 @@ impl AgentBuilder {
                 fuigo_tools::types::tool::ToolNamespace::FuigoBuild,
             );
             tool_config.tools.retain(|tool| tool.id != ask_user_id);
+        }
+        if self.is_non_interactive {
+            // A todo list is rendered only by an interactive client; in a headless
+            // session nobody sees it, so every todo_write call is a wasted model turn.
+            tool_config
+                .tools
+                .retain(|tool| tool.kind != Some(ToolKind::Plan));
+            // Plan mode exists for the TUI keybind; headless it is only meaningful when the
+            // session explicitly asked for a plan profile. Curated non-plan profiles
+            // (e.g. fuigo-build-ask-user) list the tools in their own toolset, so strip here.
+            let explicit_plan_profile = definition.name
+                == BuiltinAgentName::FuigoBuildPlan.to_string()
+                || definition.name == BuiltinAgentName::FuigoBuildPlanNoSubagents.to_string();
+            if !explicit_plan_profile {
+                tool_config.tools.retain(|tool| {
+                    !matches!(tool.kind, Some(ToolKind::EnterPlan | ToolKind::ExitPlan))
+                });
+            }
+        }
+        if !self.mcp_configured {
+            // search_tool/use_tool only reach MCP servers; with none configured at
+            // session start they are dead schema bytes in every request.
+            tool_config.tools.retain(|tool| {
+                !matches!(tool.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
+            });
         }
         apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
         let task_tool_id = format!(
@@ -1234,7 +1277,9 @@ Prefer doing the work yourself unless delegation is clearly necessary.\n\
 \n\
 Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \n\
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
+${{ params.task.run_in_background }}: default false (runs to completion; the report is this call's result). \n\
+true only for work not needed before your next step; then fetch the report once with the task output \n\
+tool, timeout_ms omitted; never poll.";
 /// CLI [`fuigo_tool_types::SubagentToolNaming`]: each kind maps to its `${{ tools.by_kind.* }}` template placeholder.
 /// Rendering a built-in's `tools_template` thus reproduces the placeholders for the CLI's `TemplateRenderer` to resolve at finalize time.
 const SUBAGENT_TOOL_NAMING: fuigo_tool_types::SubagentToolNaming<'static> =
@@ -1249,6 +1294,10 @@ const SUBAGENT_TOOL_NAMING: fuigo_tool_types::SubagentToolNaming<'static> =
     };
 /// Return the tool-access fragment for a built-in subagent type from the shared [`fuigo_tool_types`] catalog.
 /// Rendering with [`SUBAGENT_TOOL_NAMING`] re-emits the `${{ tools.by_kind.* }}` placeholders for the CLI's `TemplateRenderer`.
+///
+/// The web-search and plan (todo) kinds are optional in a session (web search can be disabled,
+/// todo_write is absent headless); their list items are guarded so an absent kind renders no
+/// dangling ", , and ." instead of an empty name.
 fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
     let subagent = match name {
         BuiltinAgentName::GeneralPurpose => fuigo_tool_types::GENERAL_PURPOSE_SUBAGENT,
@@ -1256,7 +1305,16 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
         BuiltinAgentName::Plan => fuigo_tool_types::PLAN_SUBAGENT,
         _ => return String::new(),
     };
-    subagent.render_tools(&SUBAGENT_TOOL_NAMING)
+    subagent
+        .render_tools(&SUBAGENT_TOOL_NAMING)
+        .replace(
+            ", ${{ tools.by_kind.web_search }}",
+            "${%- if tools.by_kind.web_search %}, ${{ tools.by_kind.web_search }}${%- endif %}",
+        )
+        .replace(
+            ", and ${{ tools.by_kind.plan }}",
+            "${%- if tools.by_kind.plan %}, and ${{ tools.by_kind.plan }}${%- endif %}",
+        )
 }
 const TASK_MODEL_PARAM: &str = "${{ params.task.model }}";
 fn task_model_guidance(model_slugs: &[String]) -> String {
@@ -1465,8 +1523,10 @@ mod tests {
         ];
         let desc = build_task_description(&subagents, &[]);
         assert!(
-            desc.contains(fuigo_tool_types::GENERAL_PURPOSE_SUBAGENT.tools_template),
-            "should include general-purpose tool names"
+            desc.contains(
+                "Has access to: ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}${%- if tools.by_kind.web_search %}, ${{ tools.by_kind.web_search }}${%- endif %}${%- if tools.by_kind.plan %}, and ${{ tools.by_kind.plan }}${%- endif %}."
+            ),
+            "should include general-purpose tool names with optional kinds guarded: {desc}"
         );
         assert!(
             desc.contains(fuigo_tool_types::EXPLORE_SUBAGENT.tools_template),
@@ -2044,6 +2104,75 @@ mod tests {
             .await
             .expect("finalize must insert Params for the injected ask_user_question");
         assert_eq!(applied.0.non_interactive, Some(true));
+    }
+    async fn tool_names(definition: crate::config::AgentDefinition, non_interactive: bool, mcp_configured: bool) -> Vec<String> {
+        use fuigo_tools::computer::local::LocalTerminalBackend;
+        use fuigo_tools::notification::ToolNotificationHandle;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_is_non_interactive(non_interactive)
+        .with_mcp_configured(mcp_configured)
+        .build()
+        .await
+        .expect("agent should build");
+        agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect()
+    }
+    /// Headless sessions drop todo_write (nobody renders the list) and the injected plan-mode
+    /// tools (no keybind); an interactive session keeps all of them.
+    #[tokio::test]
+    async fn non_interactive_build_drops_todo_write_and_injected_plan_mode_tools() {
+        let headless = tool_names(crate::config::AgentDefinition::default_fuigo_build(), true, true).await;
+        for dropped in ["todo_write", "enter_plan_mode", "exit_plan_mode"] {
+            assert!(!headless.contains(&dropped.to_string()), "headless must not advertise {dropped}; got {headless:?}");
+        }
+        assert!(headless.contains(&"read_file".to_string()));
+        let interactive = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, true).await;
+        for kept in ["todo_write", "enter_plan_mode", "exit_plan_mode"] {
+            assert!(interactive.contains(&kept.to_string()), "interactive must keep {kept}; got {interactive:?}");
+        }
+    }
+    /// An explicit plan profile carries the plan-mode tools in its own toolset, so a headless
+    /// session that asked for it keeps them.
+    #[tokio::test]
+    async fn non_interactive_plan_profile_keeps_plan_mode_tools() {
+        let names = tool_names(crate::config::AgentDefinition::fuigo_build_plan(), true, true).await;
+        for kept in ["enter_plan_mode", "exit_plan_mode"] {
+            assert!(names.contains(&kept.to_string()), "plan profile must keep {kept}; got {names:?}");
+        }
+        assert!(!names.contains(&"todo_write".to_string()), "headless still drops todo_write; got {names:?}");
+        // A curated non-plan profile that lists the plan tools itself (the pager's default
+        // `fuigo -p` profile) is not an explicit plan request: headless strips them.
+        let ask_user = tool_names(crate::config::AgentDefinition::fuigo_build_ask_user(), true, true).await;
+        for dropped in ["enter_plan_mode", "exit_plan_mode", "todo_write"] {
+            assert!(!ask_user.contains(&dropped.to_string()), "headless ask-user profile must not advertise {dropped}; got {ask_user:?}");
+        }
+        let ask_user_tui = tool_names(crate::config::AgentDefinition::fuigo_build_ask_user(), false, true).await;
+        for kept in ["enter_plan_mode", "exit_plan_mode", "todo_write"] {
+            assert!(ask_user_tui.contains(&kept.to_string()), "interactive ask-user profile keeps {kept}; got {ask_user_tui:?}");
+        }
+    }
+    /// With no MCP server configured the meta-tools are not advertised; with one they are.
+    #[tokio::test]
+    async fn mcp_meta_tools_follow_the_configured_signal() {
+        let without = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, false).await;
+        assert!(
+            !without.iter().any(|n| n == "search_tool" || n == "use_tool"),
+            "no MCP configured: search_tool/use_tool must be absent; got {without:?}"
+        );
+        let with = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, true).await;
+        assert!(
+            with.contains(&"search_tool".to_string()) && with.contains(&"use_tool".to_string()),
+            "MCP configured: search_tool/use_tool must be present; got {with:?}"
+        );
     }
     async fn build_with_tools(tools: Vec<String>, disallowed: Vec<String>) -> crate::agent::Agent {
         use fuigo_tools::computer::local::LocalTerminalBackend;

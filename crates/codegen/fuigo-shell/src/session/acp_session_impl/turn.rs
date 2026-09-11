@@ -2562,32 +2562,7 @@ impl SessionActor {
                 backend_search_active,
                 "backend_search: turn tool resolution"
             );
-            let mut effective_tools: Vec<ToolSpec> =
-                if let Some(ref override_tools) = self.forked_tool_override {
-                    let bridge = self.agent.borrow().tool_bridge().clone();
-                    let mut tools = child_tool_projection::child_safe_tool_specs(
-                        override_tools.clone(),
-                        child_tool_projection::ChildToolProjection::VerbatimMirror,
-                        |name| bridge.tool_kind(name),
-                    );
-                    if self.startup_hints.is_subagent {
-                        crate::agent::subagent::strip_ask_user_question_tool(&mut tools);
-                        crate::agent::subagent::strip_workflow_tool(&mut tools);
-                    }
-                    self.present_tool_specs(tools)
-                } else {
-                    let tools = self.turn_base_tool_specs(&tool_definitions);
-                    if self.startup_hints.is_subagent {
-                        let bridge = self.agent.borrow().tool_bridge().clone();
-                        child_tool_projection::child_safe_tool_specs(
-                            tools,
-                            child_tool_projection::ChildToolProjection::Rebuilt,
-                            |name| bridge.tool_kind(name),
-                        )
-                    } else {
-                        tools
-                    }
-                };
+            let mut effective_tools: Vec<ToolSpec> = self.main_turn_tool_specs(&tool_definitions);
             let recall_only_tools = effective_tools.iter().all(|tool| {
                 matches!(tool.name.as_str(), "search_tool" | "use_tool")
                     || matches!(
@@ -2633,21 +2608,34 @@ impl SessionActor {
             } else { false };
             let finalize_response = finalize_recall || finalize_execution;
             let recall_exhausted = memory_recall_rounds >= 2;
+            // OpenAI Responses profile: the advertised tool list never changes within a session, because every edit to
+            // `tools` invalidates the whole server-side prompt cache (keep `tools` constant, steer with `tool_choice`).
+            // Restrictions are expressed as reminders plus `tool_choice` (finalize) or execution-time rejection (recall
+            // limit). Every other backend keeps the fail-closed shape: the final-answer slot and the post-limit recall
+            // rounds advertise no callable action, so a model or proxy that ignores `tool_choice` cannot act there
+            // (release gate: scripts/memory-bench/native_smoke.py).
+            let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
+            let openai_responses = self.openai_responses_profile(sampling_cfg.as_ref());
+            let constant_tool_list = openai_responses;
             if recall_exhausted && !finalize_response {
-                effective_tools.retain(|tool| {
-                    !matches!(
-                        self.agent.borrow().tool_bridge().tool_kind(&tool.name),
-                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
-                    )
-                });
+                if !constant_tool_list {
+                    effective_tools.retain(|tool| {
+                        !matches!(
+                            self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+                            Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
+                        )
+                    });
+                }
                 self.push_system_reminder(
                     "The memory recall limit for this step is reached. Continue the requested \
                      work using the evidence already collected. Treat missing facts as UNKNOWN; \
                      do not repeat memory searches. Other task tools remain available.",
                 );
             }
-            if finalize_recall {
+            if finalize_response && !constant_tool_list {
                 effective_tools.clear();
+            }
+            if finalize_recall {
                 self.push_system_reminder(
                     "Memory recall is complete for this turn. Produce the final answer now using \
                      the evidence already returned, including results before the latest empty search. \
@@ -2659,7 +2647,6 @@ impl SessionActor {
                 );
             }
             if finalize_execution {
-                effective_tools.clear();
                 self.push_system_reminder("Execution capacity is reserved for this final response. Do not take any actions or call tools. Report only evidence-backed changes and checks already performed, unresolved work and unknown effects. Do not claim completion if required work remains.");
             }
             if structured_output_tool && let Some(schema) = json_schema.clone() {
@@ -2671,19 +2658,15 @@ impl SessionActor {
                             .to_string(),
                     ),
                     parameters: schema,
+                    freeform: None,
                 });
             }
             // Presentation is applied AFTER recall-only classification and all
             // finalization/child restrictions. It cannot confer eligibility.
             let adaptive = self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() == "adaptive";
-            let deferred_native: std::collections::BTreeMap<String, String> = if adaptive {
-                effective_tools.iter().filter(|tool| !self.delivery_tools.borrow().contains(&tool.name) && matches!(
-                    self.agent.borrow().tool_bridge().tool_kind(&tool.name),
-                    Some(ToolKind::ImageGen | ToolKind::VideoGen | ToolKind::ImageToVideo | ToolKind::ReferenceToVideo)
-                )).map(|tool| (tool.name.clone(), crate::session::tool_presentation::fingerprint(tool))).collect()
-            } else { Default::default() };
+            let deferred_native = if adaptive { self.adaptive_deferred_native(&effective_tools) } else { Default::default() };
             if adaptive {
-                let enabled = !finalize_response && effective_tools.iter().any(|tool| tool.name == "search_tool");
+                let enabled = (constant_tool_list || !finalize_response) && effective_tools.iter().any(|tool| tool.name == "search_tool");
                 effective_tools = self.tool_metadata_snapshot.lock().unwrap().native_presentation.project(
                     req_id, effective_tools, &deferred_native.keys().cloned().collect(), enabled,
                 );
@@ -2698,7 +2681,15 @@ impl SessionActor {
                     .map_err(|error| acp::Error::internal_error().data(format!("Presentation persistence failed: {error}")))?;
                 self.tool_metadata_snapshot.lock().unwrap().native_presentation.checkpoint_saved(hints);
             }
+            // OpenAI-family models on the Responses backend get the request profile Codex uses: freeform
+            // `apply_patch` (a grammar-constrained `custom` tool, no JSON escaping of the patch), `text.verbosity: low`
+            // Both are part of the cached prefix / constant per session, so they are decided once per request from the model
+            if openai_responses {
+                mark_freeform_apply_patch(&mut effective_tools);
+            }
             let advertised_native: std::collections::BTreeSet<String> = effective_tools.iter().map(|t| t.name.clone()).collect();
+            // Cache-aligned side calls replay exactly this list (see `side_call_tool_specs`)
+            *self.last_sent_tool_specs.borrow_mut() = Some(effective_tools.clone());
             let build_req_start = std::time::Instant::now();
             let request = self
                 .chat_state_handle
@@ -2736,6 +2727,10 @@ impl SessionActor {
             request.x_fuigo_agent_id = Some(fuigo_telemetry::id::agent_id());
             request.x_fuigo_transient_retry =
                 (transient_retry_attempts > 0).then(|| transient_retry_attempts.to_string());
+            request.text_verbosity =
+                openai_responses.then_some(fuigo_sampling_types::TextVerbosity::Low);
+            // A reasoning summary is display-only: a non-interactive attachment (`fuigo -p`, SDK) never shows it
+            request.suppress_reasoning_summary = self.attach_non_interactive.get();
             if request.x_fuigo_deployment_id.is_none() {
                 request.x_fuigo_deployment_id = crate::managed_config::resolve_deployment_id(
                     crate::managed_config::resolve_deployment_key().as_deref(),
@@ -2744,13 +2739,27 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = if finalize_response {
+            // Constant tool list: hosted tools (including the programmatic-tool-calling runtime) are part of `tools`
+            // too, so they stay on the finalize call and `tool_choice` closes the final-answer slot. Other backends
+            // strip them with the client tools.
+            request.hosted_tools = if finalize_response && !constant_tool_list {
                 vec![]
             } else {
-                self.hosted_tools_for_turn()
+                self.hosted_tools_for_agent_turn()
             };
             if finalize_response {
-                request.tool_choice = None;
+                // Constant tool list: the final slot either produces the structured answer through its tool or calls
+                // nothing at all. Other backends advertise no action tool here, and a `tool_choice` without `tools`
+                // is rejected by chat-completions providers, so the choice is left open as before.
+                request.tool_choice = if constant_tool_list {
+                    Some(if structured_output_tool && json_schema.is_some() {
+                        fuigo_sampling_types::ConversationToolChoice::Function(STRUCTURED_OUTPUT_TOOL.to_string())
+                    } else {
+                        fuigo_sampling_types::ConversationToolChoice::None
+                    })
+                } else {
+                    None
+                };
             }
             request.max_output_tokens = self
                 .tool_context
@@ -3186,18 +3195,6 @@ impl SessionActor {
                 return Err(acp::Error::internal_error()
                     .data("Tool call rejected during finalization"));
             }
-            if recall_exhausted
-                && !finalize_response
-                && tool_calls.iter().any(|call| {
-                    matches!(
-                        self.agent.borrow().tool_bridge().tool_kind(&call.name),
-                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
-                    )
-                })
-            {
-                return Err(acp::Error::internal_error()
-                    .data("Repeated memory tool rejected after recall limit"));
-            }
             let over_cap = self.media_gen_over_cap(&tool_calls);
             if fuigo_tools::media_gen_limits::should_resample_egregious(
                 &over_cap,
@@ -3582,6 +3579,13 @@ impl SessionActor {
                     },
                 )
                 .await;
+            // Memory tools stay advertised after the recall limit (a constant tool list); a call past the limit is
+            // answered with an error result instead of running, so the model sees the limit without a failed turn.
+            let tool_call_responses = if recall_exhausted && !finalize_response {
+                self.reject_memory_calls_after_limit(tool_call_responses).await?
+            } else {
+                tool_call_responses
+            };
             let execution_tool_ids = tool_call_responses.iter().map(|call| call.id.clone()).collect::<Vec<_>>();
             if let Some(execution) = &execution {
                 execution.tools(execution_tool_ids.clone()).await.map_err(|_| acp::Error::internal_error().data("Tool execution admission not durable or finalizing"))?;
@@ -4287,5 +4291,41 @@ mod recall_finalization_tests {
         assert!(finalizing(2, 3, None, true));
         assert!(!finalizing(2, 3, None, false));
         assert!(!finalizing(0, 4, Some(4), false));
+    }
+}
+
+impl SessionActor {
+    /// Whether the session's model is an OpenAI-family model served over the Responses backend.
+    /// The catalog entry decides (`model_family` or a recognized slug); an unlisted slug falls back to the slug check.
+    pub(crate) fn openai_responses_profile(
+        &self,
+        cfg: Option<&fuigo_sampling_types::SamplingConfig>,
+    ) -> bool {
+        let Some(cfg) = cfg else {
+            return false;
+        };
+        if cfg.api_backend != fuigo_sampling_types::ApiBackend::Responses {
+            return false;
+        }
+        let models = self.models_manager.models();
+        match models.values().find(|entry| entry.info.model == cfg.model) {
+            Some(entry) => entry.info.is_openai_model(),
+            None => crate::agent::config::is_openai_model_slug(&cfg.model),
+        }
+    }
+}
+
+/// Advertise `apply_patch` as a freeform (grammar-constrained `custom`) tool: the patch travels as raw text.
+/// Only the Responses backend understands the marker; the JSON schema stays for the other backends.
+pub(crate) fn mark_freeform_apply_patch(tools: &mut [ToolSpec]) {
+    use fuigo_tools::implementations::codex::apply_patch::tool::{
+        APPLY_PATCH_FREEFORM_DESCRIPTION, APPLY_PATCH_LARK_GRAMMAR,
+    };
+    for tool in tools.iter_mut().filter(|t| t.name == "apply_patch") {
+        tool.description = Some(APPLY_PATCH_FREEFORM_DESCRIPTION.to_string());
+        tool.freeform = Some(fuigo_sampling_types::FreeformFormat {
+            syntax: fuigo_sampling_types::FreeformSyntax::Lark,
+            definition: APPLY_PATCH_LARK_GRAMMAR.to_string(),
+        });
     }
 }

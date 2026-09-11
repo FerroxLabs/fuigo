@@ -575,11 +575,13 @@ fn subagent_tool_filter_removes_ask_user_question() {
                 name: "read_file".to_owned(),
                 description: None,
                 parameters: serde_json::json!({}),
+                freeform: None,
             },
             fuigo_sampling_types::ToolSpec {
                 name: "ask_user_question".to_owned(),
                 description: None,
                 parameters: serde_json::json!({}),
+                freeform: None,
             },
         ];
     strip_ask_user_question_tool(&mut tools);
@@ -593,21 +595,25 @@ fn inherited_child_toolset_cannot_reintroduce_workflow() {
                 name: "read_file".to_owned(),
                 description: None,
                 parameters: serde_json::json!({}),
+                freeform: None,
             },
             fuigo_sampling_types::ToolSpec {
                 name: "workflow".to_owned(),
                 description: None,
                 parameters: serde_json::json!({}),
+                freeform: None,
             },
             fuigo_sampling_types::ToolSpec {
                 name: "FuigoBuild:workflow".to_owned(),
                 description: None,
                 parameters: serde_json::json!({}),
+                freeform: None,
             },
             fuigo_sampling_types::ToolSpec {
                 name: "run_terminal_cmd".to_owned(),
                 description: None,
                 parameters: serde_json::json!({}),
+                freeform: None,
             },
         ];
     strip_workflow_tool(&mut tools);

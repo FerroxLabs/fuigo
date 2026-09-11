@@ -210,7 +210,7 @@ async fn create_test_actor(
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
-        transient_retries_prompt_total: std::cell::Cell::new(0),
+        transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
         transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
@@ -244,6 +244,7 @@ async fn create_test_actor(
         )),
         telemetry_enabled: false,
         supports_backend_search: std::cell::Cell::new(false),
+        programmatic_tool_calling: std::cell::Cell::new(false),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         compactions_remaining: std::cell::Cell::new(None),
@@ -394,6 +395,7 @@ async fn create_test_actor(
         next_title_refresh_idx: std::cell::Cell::new(0),
         turn_summary_enabled: false,
         title_refresh_enabled: false,
+        last_sent_tool_specs: std::cell::RefCell::new(None),
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(
             crate::session::acp_session::StreamingTurnCapture::default(),

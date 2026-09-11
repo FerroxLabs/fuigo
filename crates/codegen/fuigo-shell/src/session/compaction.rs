@@ -153,8 +153,7 @@ impl SessionActor {
                 return None;
             }
         };
-        let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
+        let tools = self.side_call_tool_specs().await;
         let compaction_tool_tokens = fuigo_chat_state::estimate_tool_specs_tokens(&tools);
         let wall_clock_budget_secs = self
             .agent
@@ -1056,19 +1055,9 @@ impl SessionActor {
         }
         let sampling_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
-        let backend_search_active = self.backend_search_active();
-        let effective_tool_defs: Vec<fuigo_sampling_types::ToolDefinition> = self
-            .prepare_tool_definitions()
-            .await
-            .into_iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
-            .collect();
-        let compaction_tool_tokens =
-            fuigo_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
-        let compaction_tools: Vec<fuigo_sampling_types::ToolSpec> = effective_tool_defs
-            .into_iter()
-            .map(fuigo_sampling_types::ToolSpec::from)
-            .collect();
+        // The summarization request replays the conversation, so it also replays the tool list the main turn last sent: same cached prefix
+        let compaction_tools: Vec<fuigo_sampling_types::ToolSpec> = self.side_call_tool_specs().await;
+        let compaction_tool_tokens = fuigo_chat_state::estimate_tool_specs_tokens(&compaction_tools);
         let compaction_hosted_tools: Vec<fuigo_sampling_types::HostedTool> =
             self.hosted_tools_for_turn();
         if lossy_input {

@@ -348,6 +348,69 @@ impl SessionActor {
         tools
     }
 
+    /// The tool specs a main-turn request starts from: the verbatim fork mirror or the presented base list, child-projected for subagents.
+    /// The turn loop then applies per-step restrictions (recall, finalization, structured output) and adaptive projection.
+    pub(crate) fn main_turn_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
+        if let Some(ref override_tools) = self.forked_tool_override {
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            let mut tools = child_tool_projection::child_safe_tool_specs(
+                override_tools.clone(),
+                child_tool_projection::ChildToolProjection::VerbatimMirror,
+                |name| bridge.tool_kind(name),
+            );
+            if self.startup_hints.is_subagent {
+                crate::agent::subagent::strip_ask_user_question_tool(&mut tools);
+                crate::agent::subagent::strip_workflow_tool(&mut tools);
+            }
+            self.present_tool_specs(tools)
+        } else {
+            let tools = self.turn_base_tool_specs(defs);
+            if self.startup_hints.is_subagent {
+                let bridge = self.agent.borrow().tool_bridge().clone();
+                child_tool_projection::child_safe_tool_specs(
+                    tools,
+                    child_tool_projection::ChildToolProjection::Rebuilt,
+                    |name| bridge.tool_kind(name),
+                )
+            } else {
+                tools
+            }
+        }
+    }
+
+    /// Native media tools in `tools` that adaptive presentation may defer, keyed to their schema fingerprint.
+    /// Host delivery tools are never deferred.
+    pub(crate) fn adaptive_deferred_native(
+        &self,
+        tools: &[ToolSpec],
+    ) -> std::collections::BTreeMap<String, String> {
+        use fuigo_tools::types::tool::ToolKind;
+        tools.iter().filter(|tool| !self.delivery_tools.borrow().contains(&tool.name) && matches!(
+            self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+            Some(ToolKind::ImageGen | ToolKind::VideoGen | ToolKind::ImageToVideo | ToolKind::ReferenceToVideo)
+        )).map(|tool| (tool.name.clone(), crate::session::tool_presentation::fingerprint(tool))).collect()
+    }
+
+    /// Function tools for a cache-aligned side call (turn summary, recap, `/btw`, compaction).
+    /// Replays exactly the list the last main-turn request sent, after fork mirroring, child projection, per-step restrictions and presentation.
+    /// The side call's tool prefix is then byte-identical and rides the prompt cache.
+    /// Before this actor has sent one (fresh load, or right after a model or agent switch), previews what the next main turn would advertise without mutating presentation state.
+    /// Hosted tools are deliberately not replayed: they run server-side, so callers keep resolving them live against the active cutoff.
+    pub(crate) async fn side_call_tool_specs(&self) -> Vec<ToolSpec> {
+        let sent = self.last_sent_tool_specs.borrow().clone();
+        if let Some(sent) = sent {
+            return sent;
+        }
+        let tools = self.main_turn_tool_specs(&self.prepare_tool_definitions().await);
+        if self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() != "adaptive" {
+            return tools;
+        }
+        let deferred: std::collections::BTreeSet<String> =
+            self.adaptive_deferred_native(&tools).into_keys().collect();
+        let enabled = tools.iter().any(|tool| tool.name == "search_tool");
+        self.tool_metadata_snapshot.lock().unwrap().native_presentation.preview(tools, &deferred, enabled)
+    }
+
     /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.
     fn resolve_hosted(
         &self,
@@ -374,6 +437,16 @@ impl SessionActor {
         } else {
             Vec::new()
         }
+    }
+
+    /// [`Self::hosted_tools_for_turn`] plus the programmatic-tool-calling runtime when the model opted in.
+    /// Agent turns only: compaction, recap and side calls carry no client tools for a program to call.
+    pub(crate) fn hosted_tools_for_agent_turn(&self) -> Vec<fuigo_sampling_types::HostedTool> {
+        let mut tools = self.hosted_tools_for_turn();
+        if self.programmatic_tool_calling.get() {
+            tools.push(fuigo_sampling_types::HostedTool::ProgrammaticToolCalling);
+        }
+        tools
     }
 
     /// The applied overrides to echo, or `None` when backend search is off.
@@ -759,6 +832,7 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            programmatic_tool_calling: self.programmatic_tool_calling.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             // The sampler sends the opt-in header itself when this is set.

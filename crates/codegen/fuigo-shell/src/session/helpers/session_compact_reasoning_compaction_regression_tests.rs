@@ -190,6 +190,7 @@ fn test_config(base_url: &str) -> SamplerConfig {
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: false,
+        programmatic_tool_calling: false,
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,
@@ -309,6 +310,7 @@ async fn chat_completions_below_trigger_preserves_images_and_tools() {
         name: "read_file".to_string(),
         description: Some("Reads a file".to_string()),
         parameters: json!({"type": "object", "properties": {}}),
+        freeform: None,
     }];
     let client = Client::new(config.clone()).unwrap();
     generate_session_compact(
@@ -467,6 +469,7 @@ async fn responses_below_trigger_preserves_images_and_tools() {
         name: "read_file".to_string(),
         description: Some("Reads a file".to_string()),
         parameters: json!({"type": "object", "properties": {}}),
+        freeform: None,
     }];
     let hosted = vec![HostedTool::WebSearch { options: None }];
     let client = Client::new(config.clone()).unwrap();
