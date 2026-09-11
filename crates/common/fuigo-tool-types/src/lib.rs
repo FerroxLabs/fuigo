@@ -12,6 +12,7 @@ pub use serde_lenient::{
 };
 pub use task::{
     BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK, BUILTIN_SUBAGENTS, BackgroundNoticeNaming,
+    DEFAULT_TASK_OUTPUT_WAIT_MS, MIN_TASK_OUTPUT_WAIT_MS, effective_task_output_wait_ms,
     BuiltinSubagent, EXPLORE_PROMPT, EXPLORE_SUBAGENT, GENERAL_PURPOSE_PROMPT,
     GENERAL_PURPOSE_SUBAGENT, KillTaskOutput, KillTaskResult, KillTaskToolInput,
     KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MAX_WAIT_BLOCK_MS_DEFAULT, MAX_WAIT_MS_PLACEHOLDER,

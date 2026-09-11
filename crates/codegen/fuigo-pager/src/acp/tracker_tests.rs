@@ -3194,7 +3194,7 @@ fn foreground_stamp_waits_on_subagent_from_frame_one() {
         "a foreground-stamped subagent spawn surfaces the wait immediately"
     );
 }
-/// Shell-stamped background (`subagentBackground=true`, the default): the model keeps working.
+/// Shell-stamped background (`subagentBackground=true`, opt-in): the model keeps working.
 /// No subagent wait surfaces, not even a one-frame flash.
 #[test]
 fn background_stamp_never_surfaces_subagent_wait() {
