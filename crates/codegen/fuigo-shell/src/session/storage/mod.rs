@@ -534,6 +534,7 @@ pub(crate) mod chat_rebuild {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                output_order: None,
             });
             self.has_agent_content = false;
             self.item_count += 1;

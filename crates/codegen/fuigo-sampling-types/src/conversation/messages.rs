@@ -385,6 +385,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
             model_id: Some(resp.model),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     }
 }

@@ -7981,3 +7981,40 @@ fn benchmark_style_custom_gpt_responses_entry_resolves_to_codex_harness() {
         "a headless session must not advertise ask_user_question"
     );
 }
+
+/// The bundled `gpt-5.6-*` catalog entries are the donors a custom entry inherits from when it names the same slug:
+/// a benchmark-style `[model.x] model = "gpt-5.6-sol"` entry without `context_window` resolves to the real 1.05M window
+/// (not the 200K fallback), the Responses backend and the inferred codex harness.
+#[test]
+#[serial]
+fn custom_gpt_5_6_entry_inherits_catalog_window_and_infers_codex() {
+    let resolved = resolve_agent_type_models(
+        r#"
+            [model.x]
+            model = "gpt-5.6-sol"
+            api_backend = "responses"
+            base_url = "https://api.example.com/v1"
+
+            [model.terra]
+            model = "gpt-5.6-terra"
+            base_url = "https://api.example.com/v1"
+
+            [model.luna]
+            model = "gpt-5.6-luna"
+            base_url = "https://api.example.com/v1"
+            "#,
+    );
+    for key in ["x", "terra", "luna"] {
+        let info = &resolved.get(key).unwrap_or_else(|| panic!("{key} should resolve")).info;
+        assert_eq!(info.context_window.get(), 1_050_000, "{key}: context window must come from the gpt-5.6 catalog entry");
+        assert_eq!(info.api_backend, ApiBackend::Responses, "{key}");
+        assert_eq!(info.agent_type, OPENAI_DEFAULT_AGENT_TYPE, "{key}");
+        assert!(info.agent_type_inferred, "{key}");
+    }
+    for slug in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        let entry = resolved.values().find(|e| e.info.model == slug && e.info.id.as_deref() == Some(slug))
+            .unwrap_or_else(|| panic!("bundled catalog entry {slug} should exist"));
+        assert_eq!(entry.info.max_completion_tokens, Some(128_000), "{slug}");
+        assert!(entry.info.is_openai_model(), "{slug}");
+    }
+}

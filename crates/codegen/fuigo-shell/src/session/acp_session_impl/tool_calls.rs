@@ -1371,7 +1371,18 @@ impl SessionActor {
         let args_str = crate::session::helpers::tool_input_parsing::normalize_empty_arguments(
             &call.function.arguments,
         );
-        let parse_result = serde_json::from_str::<serde_json::Value>(args_str);
+        // A freeform (Responses `custom`) tool's input is raw text by contract; parsing it as JSON would only mistake
+        // braces inside a patch for concatenated objects. It rides the `raw` envelope the tool's input accepts
+        let freeform_tool = self
+            .last_sent_tool_specs
+            .borrow()
+            .as_ref()
+            .is_some_and(|specs| specs.iter().any(|t| t.name == call.function.name && t.is_freeform()));
+        let parse_result = if freeform_tool {
+            Ok(json!({ "raw": call.function.arguments.clone() }))
+        } else {
+            serde_json::from_str::<serde_json::Value>(args_str)
+        };
         let mut concatenated_json_count: usize = 0;
         let mut raw_input = match &parse_result {
             Ok(value) => value.clone(),

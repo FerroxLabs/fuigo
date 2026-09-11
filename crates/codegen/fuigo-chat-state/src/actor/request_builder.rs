@@ -1,6 +1,8 @@
 //! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
 
-use fuigo_sampling_types::{ConversationItem, ConversationRequest, ToolSpec, TraceContext};
+use fuigo_sampling_types::{
+    ContentPart, ConversationItem, ConversationRequest, SyntheticReason, ToolSpec, TraceContext,
+};
 
 use super::ChatStateActor;
 use crate::events::ChatStateEvent;
@@ -130,10 +132,34 @@ pub(crate) fn should_prune(total_tokens: u64, context_window: std::num::NonZeroU
     total_tokens > context_window.get() / 2
 }
 
+/// Whether a `User` item starts a turn for pruning purposes.
+///
+/// Runtime `<system-reminder>` injections are pushed as `User` items too (one per tool batch, task completion,
+/// hook note, ...). Counting them would age a turn's tool results by several "turns" within a single prompt,
+/// soft-trimming or hard-clearing them early; that rewrites the cached prefix and forces the model to re-read.
+/// Only items that are not system reminders count.
+fn starts_prune_turn(item: &ConversationItem) -> bool {
+    match item {
+        ConversationItem::User(u) => {
+            u.synthetic_reason != Some(SyntheticReason::SystemReminder)
+                // Reminders persisted before `synthetic_reason` existed carry only the tag
+                && !u.content.iter().any(|part| match part {
+                    ContentPart::Text { text } => {
+                        text.trim_start().starts_with(&format!("<{REMINDER_TAG}>"))
+                    }
+                    ContentPart::Image { .. } => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+const REMINDER_TAG: &str = "system-reminder";
+
 /// Prune old, large tool results from the conversation in place.
 ///
 /// Turn age is estimated by walking backward through the conversation and
-/// counting `User` items to determine which "turn" each tool result belongs to.
+/// counting real `User` turns (see [`starts_prune_turn`]) to determine which "turn" each tool result belongs to.
 pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: &PruningConfig) {
     if !config.enabled {
         return;
@@ -144,10 +170,12 @@ pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: 
 
     for i in (0..conversation.len()).rev() {
         if matches!(&conversation[i], ConversationItem::User(_)) {
-            if seen_first_user {
-                turn_from_end += 1;
+            if starts_prune_turn(&conversation[i]) {
+                if seen_first_user {
+                    turn_from_end += 1;
+                }
+                seen_first_user = true;
             }
-            seen_first_user = true;
             continue;
         }
 
@@ -261,6 +289,58 @@ mod tests {
         assert!(!should_prune(1000, cw)); // 10%
         assert!(should_prune(6000, cw)); // 60%
         assert!(!should_prune(5000, cw)); // 50% exact (> not >=)
+    }
+
+    /// System reminders (runtime `User` injections) are not turn boundaries: a tool result from the current prompt
+    /// must survive any number of reminders pushed after it.
+    #[test]
+    fn prune_ignores_system_reminders_as_turn_boundaries() {
+        let big = "x".repeat(10_000);
+        let config = PruningConfig {
+            enabled: true,
+            keep_last_n_turns: 1,
+            soft_trim_threshold: 4000,
+            soft_trim_head: 100,
+            soft_trim_tail: 100,
+            hard_clear_age_turns: 3,
+            ..Default::default()
+        };
+        let mut conv = vec![
+            ConversationItem::user("real prompt"),
+            ConversationItem::assistant_tool_calls(vec![]),
+            ConversationItem::tool_result("c1", big.clone()),
+        ];
+        for n in 0..5 {
+            conv.push(ConversationItem::system_reminder(format!(
+                "<system-reminder>\nreminder {n}\n</system-reminder>"
+            )));
+            // A legacy reminder: tag only, no synthetic reason
+            conv.push(ConversationItem::user(format!(
+                "<system-reminder>\nlegacy reminder {n}\n</system-reminder>"
+            )));
+        }
+        prune_conversation(&mut conv, &config);
+        let ConversationItem::ToolResult(tr) = &conv[2] else {
+            panic!("tool result expected");
+        };
+        assert_eq!(tr.content.len(), 10_000, "reminders must not age the current turn's tool result");
+
+        // A real second prompt does start a new turn: the old result is now one turn old and soft-trimmed,
+        // and three real prompts later it is hard-cleared.
+        conv.push(ConversationItem::user("second prompt"));
+        prune_conversation(&mut conv, &config);
+        let ConversationItem::ToolResult(tr) = &conv[2] else {
+            panic!("tool result expected");
+        };
+        assert!(tr.content.len() < 10_000, "a real prompt ages the tool result");
+        assert!(tr.content.contains(SOFT_TRIM_SEPARATOR));
+        conv.push(ConversationItem::user("third"));
+        conv.push(ConversationItem::user("fourth"));
+        prune_conversation(&mut conv, &config);
+        let ConversationItem::ToolResult(tr) = &conv[2] else {
+            panic!("tool result expected");
+        };
+        assert_eq!(tr.content.as_ref(), HARD_CLEAR_PLACEHOLDER);
     }
 
     #[test]

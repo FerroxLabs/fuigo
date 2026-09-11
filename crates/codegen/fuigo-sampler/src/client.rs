@@ -2068,9 +2068,17 @@ impl SamplingClient {
                 crate::stream::collect_response(events).await
             }
             ApiBackend::Responses => {
+                let client_tools: std::collections::HashSet<String> =
+                    request.tools.iter().map(|t| t.name.clone()).collect();
                 let (raw, meta, doom_loop) = self.conversation_stream_responses(request).await?;
-                let events =
-                    crate::stream::stream_responses(raw, meta, request_id, idle_timeout, doom_loop);
+                let events = crate::stream::stream_responses(
+                    raw,
+                    meta,
+                    request_id,
+                    idle_timeout,
+                    doom_loop,
+                    client_tools,
+                );
                 crate::stream::collect_response(events).await
             }
             ApiBackend::Messages => {
