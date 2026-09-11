@@ -286,6 +286,17 @@ impl MvpAgent {
                 .is_feature_enabled(crate::agent::config::Feature::BackendTools),
             respect_gitignore: self.cfg.borrow().respect_gitignore,
             path_not_found_hints: self.cfg.borrow().path_not_found_hints,
+            tool_params_json: {
+                let cfg = self.cfg.borrow();
+                crate::session::agent_rebuild::ResolvedToolParamsJson {
+                    bash: Some(
+                        cfg.toolset
+                            .bash
+                            .to_bash_params_json_with_remote(cfg.remote_settings.as_ref()),
+                    ),
+                    ask_user_question: None,
+                }
+            },
             plugin_registry: self.plugin_registry_handle.snapshot(),
             models_manager: self.models_manager.clone(),
             file_tool_overrides: {
