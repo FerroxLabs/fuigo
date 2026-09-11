@@ -1744,6 +1744,9 @@ pub(crate) async fn spawn_session_actor(
         },
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(inference_idle_timeout_secs),
+        uncharged_401_park_enabled: crate::util::config::resolve_uncharged_401_park(
+            remote_settings.as_ref().and_then(|r| r.uncharged_401_park),
+        ),
         max_turns,
         max_retries: fuigo_sampler::resolve_max_retries(max_retries),
         rate_limit_waits: RateLimitWaitConfig::with_max_attempts(subagent_rate_limit_max_attempts),

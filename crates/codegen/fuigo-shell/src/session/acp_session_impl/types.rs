@@ -22,12 +22,28 @@ pub(crate) enum RecoveredStore {
     AuthProvider,
 }
 
+/// Whether a turn iteration is a parked uncharged-401 resubmit — see the re-park arm in
+/// `SessionActor::handle_sampling_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnParkState {
+    /// No park in effect: full prepare/preflight cadence.
+    Fresh,
+    /// Parked on the uncharged path since the last successful response.
+    Parked,
+}
+
+impl TurnParkState {
+    pub(crate) fn is_parked(self) -> bool {
+        matches!(self, Self::Parked)
+    }
+}
+
 /// Recovery decision returned by `SessionActor::handle_sampling_failure` for the sampler-based turn loop.
 pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran.
     /// The turn loop should rebuild the request from the compacted conversation and resubmit.
     CompactAndResubmit,
-    /// Auth 401 recovery succeeded; the turn loop should resubmit with the fresh token.
+    /// Resubmit through the auth-retry schedule: recovery succeeded, or the parked credential-less case.
     /// `credential` records what credential the rejected request carried on the wire.
     /// A 401 for a request that carried no credential (a fail-closed send) must not be charged against the per-incident auth-retry budget.
     RefreshAuthAndResubmit {

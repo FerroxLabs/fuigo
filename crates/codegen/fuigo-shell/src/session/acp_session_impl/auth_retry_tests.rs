@@ -13,6 +13,12 @@ fn after_suspend(base: DualClock, wall_ahead: Duration) -> DualClock {
     }
 }
 
+/// Expected escalating pace for the `i`-th (1-indexed) uncharged resubmit:
+/// 1s, 2s, 4s, … capped at [`AuthRetrySchedule::UNCHARGED_PACE_CAP`].
+fn expected_uncharged_delay(i: u32) -> Duration {
+    (Duration::from_millis(500) * 2u32.pow(i.min(20))).min(AuthRetrySchedule::UNCHARGED_PACE_CAP)
+}
+
 /// Pins the exact schedule.
 /// Guards against the `from_millis(1000)` mistake, where the 1000 became the exponent base and real delays came out as 1s, 16m40s, and 11.57 days.
 #[test]
@@ -60,15 +66,21 @@ fn unknown_credential_charges_but_is_not_counted_authenticated() {
     assert_eq!(schedule.incident_counts(), (1, 0));
 }
 
-/// The overnight-failure regression: a 401 with no credential sent never consumes a budget slot; only the runaway guard bounds it.
+/// Rule: a credential-less 401 never consumes a budget slot; only the runaway guard bounds it.
+/// Its resubmits are paced 1s, 2s, 4s, … capped at a minute, so an awake outage cannot burn the guard in seconds.
 #[test]
 fn missing_credential_never_charges_until_runaway_guard() {
     let mut schedule = AuthRetrySchedule::new();
+    assert!(!schedule.is_parked(), "a fresh schedule is not parked");
     for i in 1..=AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS {
         assert_eq!(
             schedule.on_recovered_401(SentCredential::Missing),
-            AuthRetryDecision::UnchargedResubmit { resubmit: i },
+            AuthRetryDecision::UnchargedResubmit {
+                resubmit: i,
+                delay: expected_uncharged_delay(i)
+            },
         );
+        assert!(schedule.is_parked());
     }
     assert_eq!(
         schedule.on_recovered_401(SentCredential::Missing),
@@ -86,7 +98,7 @@ fn missing_credential_never_charges_until_runaway_guard() {
     );
 }
 
-/// A success resets everything: the escalating delays, the attempt numbering, and the runaway counter all restart.
+/// A success resets everything: the escalating delays, the attempt numbering, the runaway counter and the park all restart.
 /// A 200 proves the session is not running away, so a productive multi-day turn can never accumulate into the guard.
 #[test]
 fn success_resets_budget_and_uncharged_counter() {
@@ -97,9 +109,13 @@ fn success_resets_budget_and_uncharged_counter() {
         schedule.on_recovered_401(SentCredential::Missing);
     }
     schedule.reset_on_success();
+    assert!(!schedule.is_parked(), "a success un-parks");
     assert_eq!(
         schedule.on_recovered_401(SentCredential::Missing),
-        AuthRetryDecision::UnchargedResubmit { resubmit: 1 },
+        AuthRetryDecision::UnchargedResubmit {
+            resubmit: 1,
+            delay: Duration::from_secs(1)
+        },
     );
     assert_eq!(
         schedule.on_recovered_401(SentCredential::Sent),
@@ -110,7 +126,34 @@ fn success_resets_budget_and_uncharged_counter() {
     );
 }
 
-/// The uncharged counter survives a suspend reset while the charged budget restarts; the runaway guard exists to span sleep cycles.
+/// Rule: an Api 5xx closes the charged incident but must not un-park.
+#[test]
+fn reset_incident_keeping_park_preserves_uncharged_state() {
+    let mut schedule = AuthRetrySchedule::new();
+    schedule.on_recovered_401(SentCredential::Missing);
+    schedule.on_recovered_401(SentCredential::Missing);
+    schedule.on_recovered_401(SentCredential::Sent);
+    schedule.reset_incident_keeping_park();
+    assert!(schedule.is_parked(), "the park must survive");
+    assert_eq!(
+        schedule.on_recovered_401(SentCredential::Missing),
+        AuthRetryDecision::UnchargedResubmit {
+            resubmit: 3,
+            delay: expected_uncharged_delay(3)
+        },
+        "uncharged counter and pace must survive"
+    );
+    assert_eq!(
+        schedule.on_recovered_401(SentCredential::Sent),
+        AuthRetryDecision::Backoff {
+            attempt: 1,
+            delay: Duration::from_secs(1)
+        },
+        "the charged incident restarts"
+    );
+}
+
+/// Rule: the uncharged counter survives a suspend reset (the guard exists to span sleep cycles).
 #[test]
 fn suspend_reset_preserves_uncharged_counter() {
     let mut schedule = AuthRetrySchedule::new();
@@ -123,7 +166,10 @@ fn suspend_reset_preserves_uncharged_counter() {
     assert!(schedule.reset_if_incident_spans_suspend_at(woke));
     assert_eq!(
         schedule.on_recovered_401_at(SentCredential::Missing, woke),
-        AuthRetryDecision::UnchargedResubmit { resubmit: 3 },
+        AuthRetryDecision::UnchargedResubmit {
+            resubmit: 3,
+            delay: expected_uncharged_delay(3)
+        },
     );
     assert_eq!(
         schedule.on_recovered_401_at(SentCredential::Sent, woke),
@@ -185,5 +231,181 @@ fn suspend_reset_requires_open_incident_and_real_drift() {
             delay: Duration::from_secs(2)
         },
         "the failed reset checks must not charge the budget"
+    );
+}
+
+/// Hard-expired OIDC manager (nothing wire-valid) for pace tests; tempdir must outlive it.
+fn expired_manager_for_pace() -> (tempfile::TempDir, std::sync::Arc<crate::auth::AuthManager>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let am = std::sync::Arc::new(crate::auth::AuthManager::new(
+        dir.path(),
+        crate::auth::FuigoComConfig::default(),
+    ));
+    am.hot_swap(crate::auth::FuigoAuth {
+        key: "expired-key".into(),
+        auth_mode: crate::auth::AuthMode::Oidc,
+        refresh_token: Some("rt".into()),
+        expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        ..crate::auth::FuigoAuth::test_default()
+    });
+    (dir, am)
+}
+
+/// A wire-valid session token for the pace tests.
+fn fresh_auth(key: &str) -> crate::auth::FuigoAuth {
+    crate::auth::FuigoAuth {
+        key: key.into(),
+        auth_mode: crate::auth::AuthMode::Oidc,
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        ..crate::auth::FuigoAuth::test_default()
+    }
+}
+
+/// The early-release branch is gated on the Fuigo authority, which stamps the session token on the wire.
+fn assert_fuigo_authority() {
+    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
+    assert!(
+        ActiveAuthBackend::default().is_fuigo_authority(),
+        "the pace tests below exercise the session-token early-release branch"
+    );
+}
+
+/// Rule: a token landing mid-wait wakes the pace early.
+#[tokio::test(start_paused = true)]
+async fn pace_early_wake_on_token_landing_returns_promptly() {
+    assert_fuigo_authority();
+    let (_dir, am) = expired_manager_for_pace();
+    let started = tokio::time::Instant::now();
+    let waker = am.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waker.hot_swap(fresh_auth("fresh-key"));
+        waker.refresh_notifier().notify_waiters();
+    });
+    super::pace_uncharged_resubmit(
+        super::RecoveredStore::SessionToken,
+        Some(&am),
+        Duration::from_secs(15),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "token landed at 100ms; pace must return promptly, took {elapsed:?}"
+    );
+}
+
+/// Rule: an already-wire-valid token is not slept on — the send is no longer doomed.
+#[tokio::test(start_paused = true)]
+async fn pace_releases_immediately_when_token_already_wire_valid() {
+    assert_fuigo_authority();
+    let (_dir, am) = expired_manager_for_pace();
+    am.hot_swap(fresh_auth("fresh-key"));
+    let started = tokio::time::Instant::now();
+    super::pace_uncharged_resubmit(
+        super::RecoveredStore::SessionToken,
+        Some(&am),
+        AuthRetrySchedule::UNCHARGED_PACE_CAP,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "a wire-valid token must end the pace immediately, took {elapsed:?}"
+    );
+}
+
+/// Rule: a token landed without a notify (adoption paths) is observed within a poll slice.
+#[tokio::test(start_paused = true)]
+async fn pace_wakes_on_token_adopted_without_notify() {
+    assert_fuigo_authority();
+    let (_dir, am) = expired_manager_for_pace();
+    let waker = am.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // No notify: what the disk-adoption and config-watcher paths do.
+        waker.hot_swap(fresh_auth("adopted-key"));
+    });
+    let started = tokio::time::Instant::now();
+    super::pace_uncharged_resubmit(
+        super::RecoveredStore::SessionToken,
+        Some(&am),
+        AuthRetrySchedule::UNCHARGED_PACE_CAP,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "an adopted token must end the pace within a poll slice, took {elapsed:?}"
+    );
+}
+
+/// Rule: a token another process writes to auth.json mid-park releases the pace within a slice
+/// (parked turns suppress the dispatches that adopt disk), and the pace adopts it for the resubmit.
+#[tokio::test(start_paused = true)]
+async fn pace_adopts_token_written_to_auth_json_mid_park() {
+    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
+    assert_fuigo_authority();
+    let (_dir, am) = expired_manager_for_pace();
+    let path = am.auth_json_path().to_path_buf();
+    let scope = ActiveAuthBackend::default().scope_key(&crate::auth::FuigoComConfig::default());
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Disk write only — no hot_swap, no notify — what an external login does.
+        let store = std::collections::BTreeMap::from([(scope, fresh_auth("disk-landed-key"))]);
+        std::fs::write(&path, serde_json::to_string(&store).expect("serialize"))
+            .expect("write auth.json");
+    });
+    let started = tokio::time::Instant::now();
+    super::pace_uncharged_resubmit(
+        super::RecoveredStore::SessionToken,
+        Some(&am),
+        AuthRetrySchedule::UNCHARGED_PACE_CAP,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a token landed on disk must end the pace within a poll slice, took {elapsed:?}"
+    );
+    assert_eq!(
+        am.current_wire_valid().map(|a| a.key),
+        Some("disk-landed-key".into()),
+        "the pace must adopt the disk token so the resubmit carries it"
+    );
+}
+
+/// Rule: a notify without a token change re-arms for the remaining window — notify
+/// bursts cannot turn parked resubmits into back-to-back sends.
+#[tokio::test(start_paused = true)]
+async fn pace_spurious_notify_holds_the_full_delay() {
+    let (_dir, am) = expired_manager_for_pace();
+    let started = tokio::time::Instant::now();
+    let waker = am.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // No token change: fire the notify alone.
+        waker.refresh_notifier().notify_waiters();
+    });
+    let delay = Duration::from_secs(4);
+    super::pace_uncharged_resubmit(super::RecoveredStore::SessionToken, Some(&am), delay).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= delay,
+        "spurious notify must not shorten the pace, took {elapsed:?}"
+    );
+}
+
+/// Rule: non-session stores sleep the full delay — nothing in the `AuthManager` to wait on.
+#[tokio::test(start_paused = true)]
+async fn pace_provider_store_sleeps_the_delay() {
+    let (_dir, am) = expired_manager_for_pace();
+    let started = tokio::time::Instant::now();
+    let delay = Duration::from_secs(2);
+    super::pace_uncharged_resubmit(super::RecoveredStore::AuthProvider, Some(&am), delay).await;
+    assert_eq!(
+        started.elapsed(),
+        delay,
+        "provider store must sleep the delay exactly"
     );
 }
