@@ -251,7 +251,13 @@ fn rate_limit_mid_continuation_stays_terminal() {
             );
             let error = error_with_tiny_window(fuigo_sampler::SamplingErrorKind::RateLimited, 429);
             let Err(err) = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), true)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    true,
+                    crate::session::acp_session::TurnParkState::Fresh,
+                )
                 .await
             else {
                 panic!("a mid-salvage rate limit is still terminal");
@@ -283,7 +289,13 @@ fn suppressed_overflow_mid_continuation_still_completes_truncated() {
             );
             let error = error_with_tiny_window(fuigo_sampler::SamplingErrorKind::Api, 500);
             let Err(err) = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), true)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    true,
+                    crate::session::acp_session::TurnParkState::Fresh,
+                )
                 .await
             else {
                 panic!("the quiet arm returns the typed error");

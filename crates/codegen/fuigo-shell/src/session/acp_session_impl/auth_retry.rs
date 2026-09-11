@@ -1,4 +1,5 @@
-//! Per-turn retry policy for 401s that follow a *successful* auth recovery (fresh token minted, request to be re-sent).
+//! Per-turn retry policy for 401s after an auth recovery attempt: recovery succeeded (resubmit), or
+//! failed transiently on a credential-less request — parked on the uncharged path to wait for a token.
 
 use fuigo_sampling_types::SentCredential;
 use tokio_retry::strategy::ExponentialBackoff;
@@ -7,20 +8,48 @@ use super::RecoveredStore;
 use crate::auth::AuthManager;
 use crate::util::dual_clock::DualClock;
 
-/// Pace an uncharged resubmit.
-/// Wait (bounded) for a session-token refresh when that is the store the recovery minted into and nothing wire-valid has landed yet.
-/// Otherwise floor-pace so the runaway guard can never be a burst of back-to-back requests.
+/// One blind wait inside [`pace_uncharged_resubmit`]: `notify_waiters` stores no permit and the
+/// adoption paths never notify, so re-check wire-validity and poll auth.json every slice.
+const PACE_WAIT_SLICE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Pace an uncharged resubmit: hold the escalating `delay`, releasing early only once a wire-valid
+/// session token exists (the send is no longer doomed). Wakes without a token change re-arm.
 /// Auth policy lives here, not in the turn loop.
 pub(crate) async fn pace_uncharged_resubmit(
     store: RecoveredStore,
-    auth_manager: Option<&std::sync::Arc<AuthManager>>,
+    auth_manager: Option<&AuthManager>,
+    delay: std::time::Duration,
 ) {
+    use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
     match (store, auth_manager) {
-        (RecoveredStore::SessionToken, Some(am)) if am.current_wire_valid().is_none() => {
-            am.wait_for_token_refresh(AuthRetrySchedule::UNCHARGED_REFRESH_WAIT)
-                .await;
+        // Only a Fuigo authority stamps the session token on the wire: elsewhere an early
+        // release would fire unpaced doomed sends straight into the runaway guard.
+        (RecoveredStore::SessionToken, Some(am))
+            if ActiveAuthBackend::default().is_fuigo_authority() =>
+        {
+            let started = tokio::time::Instant::now();
+            loop {
+                if am.current_wire_valid().is_some() {
+                    break;
+                }
+                // Parked turns suppress the refresh dispatches that adopt disk, so
+                // poll for a token another process wrote (`fuigo login` elsewhere).
+                if am.pick_up_sibling_token() {
+                    continue;
+                }
+                let remaining = delay.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    break;
+                }
+                if am
+                    .wait_for_token_refresh(remaining.min(PACE_WAIT_SLICE))
+                    .await
+                {
+                    break;
+                }
+            }
         }
-        _ => tokio::time::sleep(AuthRetrySchedule::UNCHARGED_RESUBMIT_FLOOR).await,
+        _ => tokio::time::sleep(delay).await,
     }
 }
 
@@ -40,9 +69,12 @@ pub(crate) fn human_duration(d: std::time::Duration) -> String {
 /// Decision for one post-recovery 401 (see [`AuthRetrySchedule::on_recovered_401`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthRetryDecision {
-    /// No credential was on the wire, so no slot is charged; resubmit after the refresh lands.
-    /// `resubmit` is the 1-indexed count since the last successful response.
-    UnchargedResubmit { resubmit: u32 },
+    /// No credential was on the wire, so no slot is charged: resubmit after the escalating
+    /// `delay`; `resubmit` is the 1-indexed count since the last successful response.
+    UnchargedResubmit {
+        resubmit: u32,
+        delay: std::time::Duration,
+    },
     /// Charged one escalating slot: back off `delay`, then resubmit.
     Backoff {
         attempt: u32,
@@ -50,8 +82,7 @@ pub(crate) enum AuthRetryDecision {
     },
     /// Per-incident budget exhausted by credentialed 401s; fail the turn.
     Exhausted,
-    /// Runaway guard tripped; fail the turn.
-    /// Recovery kept succeeding while the server rejected `rejections` credential-less requests without a single successful response.
+    /// Runaway guard: `rejections` credential-less rejections with no success in between — fail the turn.
     RunawayGuard { rejections: u32 },
 }
 
@@ -74,6 +105,8 @@ pub(crate) struct AuthRetrySchedule {
     incident_started: Option<DualClock>,
     /// Uncharged fail-closed rejections since the last successful response (survives suspend resets).
     uncharged_resubmits: u32,
+    /// Escalating pace for uncharged resubmits; survives suspend resets, only a success re-arms it.
+    uncharged_delays: ExponentialBackoff,
     /// Suspend-triggered resets since the last successful response.
     suspend_resets: u32,
 }
@@ -81,16 +114,14 @@ pub(crate) struct AuthRetrySchedule {
 impl AuthRetrySchedule {
     /// Consecutive credentialed post-recovery 401s tolerated per incident before the turn fails.
     pub(crate) const MAX_RETRIES: u32 = 3;
-    /// Runaway guard: uncharged (no-credential) rejections tolerated without an intervening successful response.
-    /// At about one per 16-minute sleep cycle this survives more than 13 hours lid-closed.
+    /// Uncharged rejections tolerated without a success in between. Burn rate: ~1 per 16-min
+    /// sleep cycle (>13 h lid-closed survival), or ~1 per pace step awake (≥ ~45 min to fail).
     pub(crate) const MAX_UNCHARGED_RESUBMITS: u32 = 50;
     /// Suspend resets tolerated without an intervening successful response (about 8 sleep cycles of a continuously failing incident).
     /// Beyond this the budget stops resetting and is allowed to exhaust.
     pub(crate) const MAX_SUSPEND_RESETS: u32 = 8;
-    /// Bounded wait for the proactive refresh or wake nudge to land a wire-valid token before an uncharged resubmit.
-    const UNCHARGED_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
-    /// Floor pacing for uncharged resubmits with no refresh to wait on.
-    const UNCHARGED_RESUBMIT_FLOOR: std::time::Duration = std::time::Duration::from_secs(1);
+    /// Cap on the escalating uncharged pace; a landing token wakes the wait early, so it costs no recovery latency.
+    pub(crate) const UNCHARGED_PACE_CAP: std::time::Duration = std::time::Duration::from_secs(60);
     /// Wall-vs-monotonic drift beyond which the machine must have slept: well below a real sleep cycle (minutes), well above NTP step jitter.
     const SUSPEND_DRIFT_MIN: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -105,8 +136,17 @@ impl AuthRetrySchedule {
             incident_authenticated: 0,
             incident_started: None,
             uncharged_resubmits: 0,
+            uncharged_delays: ExponentialBackoff::from_millis(2)
+                .factor(500)
+                .max_delay(Self::UNCHARGED_PACE_CAP),
             suspend_resets: 0,
         }
+    }
+
+    /// Parked on the uncharged path. Parked turns must not drive refreshes — see the
+    /// re-park arm in `handle_sampling_failure`.
+    pub(crate) fn is_parked(&self) -> bool {
+        self.uncharged_resubmits > 0
     }
 
     /// Decision for one post-recovery 401.
@@ -130,6 +170,11 @@ impl AuthRetrySchedule {
             }
             return AuthRetryDecision::UnchargedResubmit {
                 resubmit: self.uncharged_resubmits,
+                // Unbounded iterator (`max_delay`-capped): `next()` always yields.
+                delay: self
+                    .uncharged_delays
+                    .next()
+                    .unwrap_or(Self::UNCHARGED_PACE_CAP),
             };
         }
         self.incident_started.get_or_insert(now);
@@ -169,11 +214,20 @@ impl AuthRetrySchedule {
         if total.saturating_sub(awake) < Self::SUSPEND_DRIFT_MIN {
             return false;
         }
+        self.reset_incident_keeping_park();
+        self.suspend_resets += 1;
+        true
+    }
+
+    /// Close the charged incident but keep the park: the evidence (a transient server error, a suspend)
+    /// proves nothing about the missing credential, and un-parking would re-dispatch recovery (see the re-park arm).
+    pub(crate) fn reset_incident_keeping_park(&mut self) {
         let (uncharged, resets) = (self.uncharged_resubmits, self.suspend_resets);
+        let delays = self.uncharged_delays.clone();
         *self = Self::new();
         self.uncharged_resubmits = uncharged;
-        self.suspend_resets = resets + 1;
-        true
+        self.uncharged_delays = delays;
+        self.suspend_resets = resets;
     }
 
     /// A successful model response ends every open incident.

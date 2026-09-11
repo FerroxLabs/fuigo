@@ -2532,7 +2532,17 @@ impl SessionActor {
             if !salvage.awaiting_continuation() {
                 self.maybe_inject_mcp_reminder().await;
             }
+            // A parked iteration (credential-less 401, recovery failed transiently) must not drive refreshes or
+            // side calls that 401 on their own: prefire pass-1 and the pre-sampling compact would each send credential-less,
+            // and a compact 401 aborts the very turn the park keeps alive.
+            let turn_parked = if self.uncharged_401_park_enabled && auth_retry_schedule.is_parked()
+            {
+                TurnParkState::Parked
+            } else {
+                TurnParkState::Fresh
+            };
             if self.tool_context.task_output_token_budget.is_none()
+                && !turn_parked.is_parked()
                 && self.two_pass_active()
                 && !self.compaction.prefire.has_cache()
                 && self.should_prefire_two_pass().await
@@ -2544,10 +2554,11 @@ impl SessionActor {
                 });
                 self.compaction.prefire.set_handle(handle);
             }
-            if self.tool_context.task_output_token_budget.is_none() {
+            if self.tool_context.task_output_token_budget.is_none() && !turn_parked.is_parked() {
                 self.refresh_token_if_expired().await;
             }
             if self.tool_context.task_output_token_budget.is_none()
+                && !turn_parked.is_parked()
                 && !salvage.awaiting_continuation()
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
                 && let Err(e) = self.run_compact_only(trigger_info, false).await
@@ -2808,6 +2819,7 @@ impl SessionActor {
                         enabled: transient_retry_enabled,
                     },
                     salvage.awaiting_continuation(),
+                    turn_parked,
                 )
                 .await
             {
@@ -2873,8 +2885,10 @@ impl SessionActor {
                     return Err(error);
                 }
                 Ok(SamplerTurnOutcome::RetryTransient { kind, status_code }) => {
+                    // A server error closes the charged incident but proves nothing about a missing credential:
+                    // keep the park so the next credential-less 401 re-parks without a fresh recovery dispatch
                     if matches!(kind, fuigo_sampler::SamplingErrorKind::Api) {
-                        auth_retry_schedule.reset_on_success();
+                        auth_retry_schedule.reset_incident_keeping_park();
                     }
                     let delay = fuigo_sampler::jitter_backoff(transient_backoff_delay(
                         transient_retry_attempts,
@@ -2932,9 +2946,10 @@ impl SessionActor {
                         );
                     }
                     match auth_retry_schedule.on_recovered_401(credential) {
-                        AuthRetryDecision::UnchargedResubmit { resubmit } => {
+                        AuthRetryDecision::UnchargedResubmit { resubmit, delay } => {
                             tracing::warn!(
                                 resubmit,
+                                delay_ms = delay.as_millis() as u64,
                                 "auth 401 retry: no credential was sent; resubmitting uncharged"
                             );
                             fuigo_telemetry::unified_log::warn(
@@ -2944,20 +2959,22 @@ impl SessionActor {
                                     "loop_index": loop_index,
                                     "resubmit": resubmit,
                                     "max_resubmits": AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS,
+                                    "delay_ms": delay.as_millis() as u64,
                                 })),
                             );
                             self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
                                 crate::extensions::notification::RetryState::Retrying {
                                     attempt: resubmit,
                                     max_retries: AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS,
-                                    reason: "Re-authenticated after 401 (request carried no \
+                                    reason: "Re-authenticating after 401 (request carried no \
                                              credential); retrying request"
                                         .to_string(),
                                     error_type: None,
                                 },
                             ))
                             .await;
-                            pace_uncharged_resubmit(store, self.auth_manager.as_ref()).await;
+                            pace_uncharged_resubmit(store, self.auth_manager.as_deref(), delay)
+                                .await;
                             continue;
                         }
                         AuthRetryDecision::Backoff { attempt, delay } => {
@@ -3007,10 +3024,9 @@ impl SessionActor {
                             let msg = match decision {
                                 AuthRetryDecision::RunawayGuard { rejections } => {
                                     format!(
-                                        "Auth recovery kept succeeding but {rejections} requests \
-                                     were rejected (401) before a credential could be sent, \
-                                     with no successful response in between; stopping as a \
-                                     runaway guard.{duration_note}"
+                                        "{rejections} requests were rejected (401) before a \
+                                     credential could be sent, with no successful response \
+                                     in between; stopping as a runaway guard.{duration_note}"
                                     )
                                 }
                                 _ if authenticated == rejections => {
