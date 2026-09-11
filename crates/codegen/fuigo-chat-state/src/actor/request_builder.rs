@@ -328,17 +328,23 @@ mod tests {
         };
         assert_eq!(tr.content.len(), 10_000, "reminders must not age the current turn's tool result");
 
-        // A real second prompt does start a new turn: the old result is now one turn old and soft-trimmed,
-        // and three real prompts later it is hard-cleared.
+        // Real prompts do age it (age = real prompts after it, minus the current one): one later prompt keeps it
+        // in the current window, the second soft-trims it (keep_last_n_turns = 1), the fourth hard-clears it (3).
         conv.push(ConversationItem::user("second prompt"));
+        prune_conversation(&mut conv, &config);
+        let ConversationItem::ToolResult(tr) = &conv[2] else {
+            panic!("tool result expected");
+        };
+        assert_eq!(tr.content.len(), 10_000);
+        conv.push(ConversationItem::user("third"));
         prune_conversation(&mut conv, &config);
         let ConversationItem::ToolResult(tr) = &conv[2] else {
             panic!("tool result expected");
         };
         assert!(tr.content.len() < 10_000, "a real prompt ages the tool result");
         assert!(tr.content.contains(SOFT_TRIM_SEPARATOR));
-        conv.push(ConversationItem::user("third"));
         conv.push(ConversationItem::user("fourth"));
+        conv.push(ConversationItem::user("fifth"));
         prune_conversation(&mut conv, &config);
         let ConversationItem::ToolResult(tr) = &conv[2] else {
             panic!("tool result expected");
