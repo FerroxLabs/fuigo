@@ -1986,6 +1986,14 @@ mod tests {
         };
         assert_eq!(v("rg --pre ./pre.sh TODO ."), ClassifierVerdict::Block);
         assert_eq!(v("rg --pre=./pre.sh TODO ."), ClassifierVerdict::Block);
+        assert_eq!(
+            v("rg --hostname-bin=./payload needle"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("rg --hostname-bin ./payload needle"),
+            ClassifierVerdict::Block
+        );
         assert_eq!(v("rg --pre-glob '*.pdf' TODO ."), ClassifierVerdict::Allow);
         assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
     }

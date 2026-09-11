@@ -5140,6 +5140,7 @@ mod tests {
                     for cmd in [
                         "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                         "rg --pre ./pre.sh TODO .",
+                        "rg --hostname-bin=./payload needle",
                         "ps auxe",
                         "git cat-file --textconv HEAD:x",
                     ] {
@@ -6961,6 +6962,9 @@ mod tests {
         assert!(!is_safe_command(
             "rg --pre-glob '*.pdf' --pre pdftotext pattern"
         ));
+        // --hostname-bin runs a caller-chosen program to compute hyperlink hostnames (exec bypass)
+        assert!(!is_safe_command("rg --hostname-bin=./payload needle"));
+        assert!(!is_safe_command("rg --hostname-bin ./payload needle"));
 
         // The shared unsafe-option table applies to EVERY read-only git verb
         // `--filters`/`--textconv` (and unique long-option abbreviations) run repo-configured content drivers
@@ -7067,6 +7071,10 @@ mod tests {
         // `rg --pre` is not fully safe-listed, so do not narrow to bare `rg`.
         assert_eq!(
             default_always_allow_scope(&words("rg --pre cat pattern")),
+            2
+        );
+        assert_eq!(
+            default_always_allow_scope(&words("rg --hostname-bin=./payload needle")),
             2
         );
         assert_eq!(
