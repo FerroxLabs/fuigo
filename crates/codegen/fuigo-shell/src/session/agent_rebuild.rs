@@ -224,6 +224,7 @@ impl AgentRebuildSpec {
             mcp_state,
             managed_gateway_tool_client,
             is_non_interactive,
+            mcp_configured,
             system_prompt_label,
             owner_session_id,
             parent_scheduler_handle,

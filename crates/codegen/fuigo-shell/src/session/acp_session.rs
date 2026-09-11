@@ -172,9 +172,10 @@ mod length_salvage;
 mod sampler_turn;
 use sampler_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
-mod read_dedupe_hook;
 mod tool_dispatch;
 use tool_dispatch::*;
+#[path = "acp_session_impl/read_dedupe_hook.rs"]
+mod read_dedupe_hook;
 #[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
 use mcp_snapshot::*;

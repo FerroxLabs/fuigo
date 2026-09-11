@@ -235,18 +235,18 @@ pub(crate) fn canonical_path(cwd: &Path, path: &str) -> PathBuf {
     dunce::canonicalize(&joined).unwrap_or(joined)
 }
 
-/// The note that replaces content on a repeat read.
+/// The note that replaces content on a repeat read. `prompt_index` is the session's prompt index
+/// as read during the tool loop, which is already the 1-based turn number.
 pub(crate) fn unchanged_note(display_path: &str, lines: usize, prompt_index: usize) -> String {
     format!(
-        "{display_path} unchanged since your earlier read ({lines} lines, at turn {}); content omitted — that result is still in your context",
-        prompt_index + 1
+        "{display_path} unchanged since your earlier read ({lines} lines, at turn {prompt_index}); content omitted — that result is still in your context"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuigo_sampling_types::{ContentPart, ConversationItem, Message, Role};
+    use fuigo_sampling_types::ConversationItem;
 
     fn key(path: &str) -> ReadKey {
         ReadKey {
@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn user() -> ConversationItem {
-        ConversationItem::User(Message::new(Role::User, vec![ContentPart::text("u")]))
+        ConversationItem::user("u")
     }
 
     fn tool_result(call: &str) -> ConversationItem {
@@ -286,7 +286,7 @@ mod tests {
         assert!(cache.result_intact(hit, &conversation));
         assert_eq!(
             unchanged_note("a.rs", 1, 2),
-            "a.rs unchanged since your earlier read (1 lines, at turn 3); content omitted — that result is still in your context"
+            "a.rs unchanged since your earlier read (1 lines, at turn 2); content omitted — that result is still in your context"
         );
     }
 
