@@ -774,7 +774,10 @@ impl Reminder for TaskCompletionReminder {
                     tasks
                         .iter()
                         .filter(|task| {
+                            // A pure foreground run already replied inline; only a task that
+                            // was (auto-)backgrounded has a completion the model has not seen.
                             task.completed
+                                && task.is_backgrounded
                                 && !reserved_ids.contains(&task.task_id)
                                 && state.reported.insert(task.task_id.clone())
                         })
@@ -1347,6 +1350,8 @@ mod tests {
             self.tasks.clone()
         }
     }
+    /// A completed *background* task (explicit or auto-backgrounded): the only
+    /// kind whose completion the model has not already seen inline.
     fn make_completed(id: &str) -> TaskSnapshot {
         TaskSnapshot {
             task_id: id.into(),
@@ -1367,7 +1372,7 @@ mod tests {
             kill_result_delivered: false,
             owner_session_id: None,
             description: None,
-            is_backgrounded: false,
+            is_backgrounded: true,
             output_total_bytes: 0,
         }
     }
@@ -1507,6 +1512,22 @@ mod tests {
             !joined.contains("parent-task"),
             "another session's task must NOT leak into this session: {joined}"
         );
+    }
+    /// A foreground command that finished inline (never backgrounded) must not
+    /// be re-announced as a "Background task completed" reminder pointing the
+    /// model at the output tool: that invites a wasted poll call.
+    #[tokio::test]
+    async fn foreground_completion_is_not_re_announced() {
+        let mut fg = make_completed("fg-1");
+        fg.is_backgrounded = false;
+        let shared = shared_with(vec![fg, make_completed("bg-1")]);
+        let output = ToolOutput::Dynamic(serde_json::Value::Null.into());
+        let reminders = TaskCompletionReminder
+            .collect_reminders(shared, &output)
+            .await;
+        let joined = reminders.join("\n\n");
+        assert!(joined.contains("bg-1"), "background completion surfaces: {joined}");
+        assert!(!joined.contains("fg-1"), "foreground completion must not surface: {joined}");
     }
     #[tokio::test]
     async fn suppressed_after_kill_task() {
