@@ -4288,7 +4288,7 @@ impl SessionActor {
         if cfg.api_backend != fuigo_sampling_types::ApiBackend::Responses {
             return false;
         }
-        let models = self.agent.borrow().models_manager.models();
+        let models = self.models_manager.models();
         match models.values().find(|entry| entry.info.model == cfg.model) {
             Some(entry) => entry.info.is_openai_model(),
             None => crate::agent::config::is_openai_model_slug(&cfg.model),
