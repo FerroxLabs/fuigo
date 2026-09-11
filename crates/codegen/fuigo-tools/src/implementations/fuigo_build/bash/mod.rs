@@ -169,17 +169,21 @@ pub struct BashParams {
     /// The FG wait deadline is `min(resolved_timeout, foreground_block_budget)`:
     /// - resolved timeout: model `timeout` or [`Self::timeout_secs`] (default 120s),
     ///   clamped by [`Self::max_timeout_secs`] (default 5m).
-    /// - short budget: [`Self::foreground_block_budget_ms`] (default 15s).
+    /// - budget: [`Self::foreground_block_budget_ms`]; unset, it equals the
+    ///   resolved timeout capped at `MAX_FOREGROUND_BLOCK` (300s), so the
+    ///   command blocks for the `timeout` the description advertises.
     ///
-    /// Set `foreground_block_budget_ms: 0` to disable the short budget so only
+    /// Set `foreground_block_budget_ms: 0` to disable the budget so only
     /// the resolved timeout triggers auto-bg (reference-compatible).
     #[serde(default)]
     pub auto_background_on_timeout: bool,
     /// Max FG block before auto-bg when [`Self::auto_background_on_timeout`] is
-    /// true (milliseconds). Independent of model `timeout`.
+    /// true (milliseconds).
     ///
-    /// - `None` → 15_000 (default short budget).
-    /// - `Some(0)` → no short budget; auto-bg only when model/default timeout elapses.
+    /// - `None` → the resolved `timeout` (default 120s), capped at 300s
+    ///   (`FUIGO_MAX_FOREGROUND_BLOCK_MS`); `FUIGO_FOREGROUND_BLOCK_BUDGET_MS`
+    ///   still overrides through the terminal backend.
+    /// - `Some(0)` → no separate budget; auto-bg only when model/default timeout elapses.
     /// - `Some(ms)` → auto-bg after `ms` if still running.
     #[serde(default)]
     pub foreground_block_budget_ms: Option<u64>,
@@ -474,13 +478,10 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
 // the background-task tooling. Absolute safety clamp for configured maxes: 10h.
 pub(crate) const DEFAULT_MAX_TIMEOUT_MS: u64 = 300_000; // 5 minutes
 const ABSOLUTE_MAX_TIMEOUT_MS: u64 = 36_000_000;
-/// Default short FG block before auto-bg when auto_background_on_timeout is on.
-/// Matches terminal `FOREGROUND_BLOCK_BUDGET`.
-///
-/// Currently used by tests / `effective_auto_bg_wait_ms` (description follow-up);
-/// production runtime uses the terminal backend default when budget is unset.
-#[allow(dead_code)] // description follow-up + tests (not yet model-facing)
-pub(crate) const DEFAULT_FOREGROUND_BLOCK_BUDGET_MS: u64 = 15_000;
+// The FG block budget has no fixed default: when unset it equals the resolved
+// `timeout` (default 120s) capped at `MAX_FOREGROUND_BLOCK`, so a command blocks
+// for as long as the description says before auto-bg (see
+// `BashTool::effective_foreground_block_budget`).
 
 /// Internal version discriminant for run_terminal_cmd.
 ///
@@ -978,14 +979,15 @@ fn self_matching_pkill_pattern(command: &str) -> Option<SelfMatchingPkill> {
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(86400); // 24 hours
 
-/// Max time a *non-backgroundable* foreground command may block the turn. Such
-/// a command has only its requested `timeout` (up to 10h), so a long timeout
-/// would wedge the turn; we clamp and kill at this cap instead. Backgroundable
-/// commands use the terminal's `FOREGROUND_BLOCK_BUDGET` instead. Long work
-/// should use `background: true`. Env override: `FUIGO_MAX_FOREGROUND_BLOCK_MS`.
+/// Max time a foreground command may block the turn. A *non-backgroundable*
+/// command has only its requested `timeout` (up to 10h), so a long timeout
+/// would wedge the turn; we clamp and kill at this cap instead. A
+/// backgroundable command blocks up to `min(timeout, this cap)` and is then
+/// moved to the background (never killed). Long work should use
+/// `background: true`. Env override: `FUIGO_MAX_FOREGROUND_BLOCK_MS`.
 const MAX_FOREGROUND_BLOCK: Duration = Duration::from_secs(300); // 5 minutes
 
-fn max_foreground_block() -> Duration {
+pub(crate) fn max_foreground_block() -> Duration {
     std::env::var("FUIGO_MAX_FOREGROUND_BLOCK_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -1315,36 +1317,34 @@ impl BashTool {
 
     /// Per-request FG auto-bg budget for the terminal when auto_bg is on.
     ///
-    /// - `None` when auto_bg is off, **or** when `foreground_block_budget_ms` is
-    ///   unset — leave `TerminalRunRequest.foreground_block_budget` as `None` so
-    ///   the terminal backend default applies (`FUIGO_FOREGROUND_BLOCK_BUDGET_MS`
-    ///   / 15s). Do not materialize a fixed 15s here; that would override the env.
+    /// - `None` when auto_bg is off.
     /// - `Some(Duration::MAX)` when budget is `0` (timeout-only auto-bg).
     /// - `Some(ms)` when an explicit budget is configured.
+    /// - Unset: `Some(min(resolved_timeout, MAX_FOREGROUND_BLOCK))` — the
+    ///   command blocks for the `timeout` the description advertises (default
+    ///   120s, a model-supplied value up to 300s) and is then backgrounded.
+    ///   If `FUIGO_FOREGROUND_BLOCK_BUDGET_MS` is set, `None` is returned so the
+    ///   terminal backend applies that override instead.
     pub(crate) fn effective_foreground_block_budget(
         params: &BashParams,
+        resolved_timeout: std::time::Duration,
     ) -> Option<std::time::Duration> {
         if !Self::auto_background_on_timeout_enabled(params) {
             return None;
         }
         match params.foreground_block_budget_ms {
-            // 0 = disable short budget: only model/default timeout auto-bgs.
+            // 0 = disable the budget: only model/default timeout auto-bgs.
             Some(0) => Some(std::time::Duration::MAX),
             Some(ms) => Some(std::time::Duration::from_millis(ms)),
-            // Unset → backend default (env-overridable).
-            None => None,
+            None if std::env::var_os("FUIGO_FOREGROUND_BLOCK_BUDGET_MS").is_some() => None,
+            None => Some(resolved_timeout.min(max_foreground_block())),
         }
     }
 
-    /// Effective auto-bg wait: min(default_timeout, budget) when auto_bg is on
-    /// and budget is finite; otherwise default_timeout.
-    ///
-    /// When the session does not set `foreground_block_budget_ms`, assumes the
-    /// backend's documented default (15s) for this helper — the real process
-    /// still honors `FUIGO_FOREGROUND_BLOCK_BUDGET_MS` via `None` on the request.
-    ///
-    /// Not yet used in model-facing descriptions (historical auto-bg copy only).
-    #[allow(dead_code)] // description follow-up + unit tests
+    /// Effective auto-bg wait for the omit-`timeout` case:
+    /// `min(default_timeout, budget)` when auto_bg is on and a budget is
+    /// configured; with no budget configured, `min(default_timeout,
+    /// MAX_FOREGROUND_BLOCK)` — the same figure the description advertises.
     pub(crate) fn effective_auto_bg_wait_ms(params: &BashParams) -> Option<u64> {
         if !Self::auto_background_on_timeout_enabled(params) {
             return None;
@@ -1353,9 +1353,15 @@ impl BashTool {
         let budget_ms = match params.foreground_block_budget_ms {
             Some(0) => return Some(default_ms),
             Some(ms) => ms,
-            None => DEFAULT_FOREGROUND_BLOCK_BUDGET_MS,
+            None => max_foreground_block().as_millis() as u64,
         };
         Some(default_ms.min(budget_ms).max(1))
+    }
+
+    /// Longest a foreground command blocks before auto-bg when no budget is
+    /// configured: `min(default_timeout, MAX_FOREGROUND_BLOCK)`, in ms.
+    pub(crate) fn max_foreground_block_ms() -> u64 {
+        max_foreground_block().as_millis() as u64
     }
 
     /// Background retrieval hint naming the get-output tool and its task-ids
@@ -1413,8 +1419,11 @@ impl BashTool {
                             "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}."
                         )
                     } else if auto_bg {
+                        let block_ms = Self::max_foreground_block_ms();
+                        let omit_wait_ms =
+                            Self::effective_auto_bg_wait_ms(params).unwrap_or(default_ms);
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}; foreground commands exceeding it are automatically backgrounded."
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. A foreground command blocks up to this long (omitted: {omit_wait_ms} ms; at most {block_ms} ms of blocking); on expiry it keeps running in the background and returns a task id."
                         )
                     } else {
                         format!(
@@ -1447,13 +1456,12 @@ impl BashTool {
             Some(desc) => desc,
             None => Self::default_description_template(background_enabled),
         };
-        // Template only interpolates max/default timeout numbers + auto_bg flag.
-        // Do not advertise FG block budget ms here yet (follow-up PR).
         let extras = serde_json::json!({
             "auto_background_on_timeout": auto_bg,
             "max_timeout_ms": Self::effective_max_timeout_ms(params),
             "default_timeout_ms": Self::effective_default_timeout_ms(params),
             "max_timeout_configured": Self::max_timeout_configured(params),
+            "max_foreground_block_ms": Self::max_foreground_block_ms(),
         });
         renderer
             .render_with_extra(raw_desc, &extras)
@@ -1471,13 +1479,13 @@ impl BashTool {
     }
 
     fn default_description_template_enabled() -> &'static str {
-        // NOTE: auto-bg wording is intentionally the historical main copy (no
-        // FG-block-budget ms). Runtime auto-bg uses min(timeout, FG budget);
-        // advertising that wait is a separate description PR.
+        // The auto-bg wording states the real runtime behaviour: a foreground
+        // command blocks up to min(timeout, MAX_FOREGROUND_BLOCK) and is then
+        // moved to the background with a task id.
         r#"Run a ${%- if is_windows %} shell command${%- else %} bash command${%- endif %} and return its output.
 
 Usage notes:
-  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
+  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms).${%- if auto_background_on_timeout %} A foreground command blocks up to ${{ params.execute.timeout }} (default ${{ default_timeout_ms | default(120000) }}ms, at most ${{ max_foreground_block_ms | default(300000) }}ms of blocking); on expiry it is not killed: it keeps running in the background and you get a task id. So a test run or build that finishes within the timeout returns its output inline; use ${{ params.execute.is_background }}: true only for servers, watchers, or work you will not wait for.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely${%- if tools.by_kind.kill_task_action %}; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}${%- endif %}.
   - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.
   - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified on completion, so do not poll or sleep-wait for it.${%- elif tools.by_kind.background_task_action %} Check on it later with the ${{ tools.by_kind.background_task_action }} tool.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
@@ -2107,7 +2115,7 @@ impl fuigo_tool_runtime::Tool for BashTool {
                 // existing fuigo_build callers that never opted in are
                 // unaffected.
                 auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params),
-                foreground_block_budget: Self::effective_foreground_block_budget(&params),
+                foreground_block_budget: Self::effective_foreground_block_budget(&params, timeout),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
@@ -4141,23 +4149,71 @@ mod tests {
         fn budget_none_when_auto_bg_off() {
             let params = BashParams::default();
             assert!(!params.auto_background_on_timeout);
-            assert!(BashTool::effective_foreground_block_budget(&params).is_none());
+            assert!(BashTool::effective_foreground_block_budget(&params, DEFAULT_TIMEOUT).is_none());
             assert!(BashTool::effective_auto_bg_wait_ms(&params).is_none());
         }
 
+        /// No configured budget: the command blocks for its resolved timeout
+        /// (default 120s; a model-supplied timeout up to the 300s cap), then
+        /// auto-backgrounds — the behaviour the description advertises.
         #[test]
-        fn unset_budget_leaves_request_none_for_backend_default() {
+        fn unset_budget_equals_resolved_timeout_capped() {
             let params = BashParams {
                 auto_background_on_timeout: true,
                 foreground_block_budget_ms: None,
                 ..BashParams::default()
             };
-            // Must not pin 15s on the request — backend applies env/default.
-            assert!(BashTool::effective_foreground_block_budget(&params).is_none());
-            // Helper still assumes documented 15s default for wait math.
+            assert_eq!(
+                BashTool::effective_foreground_block_budget(&params, DEFAULT_TIMEOUT),
+                Some(DEFAULT_TIMEOUT),
+                "default timeout: block the full 120s before auto-bg"
+            );
+            assert_eq!(
+                BashTool::effective_foreground_block_budget(&params, Duration::from_secs(40)),
+                Some(Duration::from_secs(40)),
+                "a shorter model timeout is honoured as the block budget"
+            );
+            assert_eq!(
+                BashTool::effective_foreground_block_budget(&params, Duration::from_secs(3600)),
+                Some(MAX_FOREGROUND_BLOCK),
+                "a long model timeout blocks at most MAX_FOREGROUND_BLOCK"
+            );
             assert_eq!(
                 BashTool::effective_auto_bg_wait_ms(&params),
-                Some(DEFAULT_FOREGROUND_BLOCK_BUDGET_MS),
+                Some(DEFAULT_TIMEOUT.as_millis() as u64),
+            );
+        }
+
+        /// The rendered description must state the real blocking behaviour.
+        #[test]
+        fn description_states_block_then_background() {
+            let params = BashParams {
+                auto_background_on_timeout: true,
+                ..BashParams::default()
+            };
+            let renderer = TemplateRenderer::new(
+                HashMap::from([(ToolKind::Execute, "run_terminal_command".to_string())]),
+                HashMap::from([(
+                    ToolKind::Execute,
+                    HashMap::from([
+                        ("timeout".to_string(), "timeout".to_string()),
+                        ("is_background".to_string(), "background".to_string()),
+                    ]),
+                )]),
+            );
+            let desc = BashTool::rendered_description(None, &renderer, &params);
+            for text in [
+                "blocks up to",
+                "default 120000ms",
+                "at most 300000ms of blocking",
+                "keeps running in the background and you get a task id",
+                "only for servers, watchers",
+            ] {
+                assert!(desc.contains(text), "missing {text:?} in:\n{desc}");
+            }
+            assert!(
+                !desc.contains("exceeding the default timeout will be automatically backgrounded"),
+                "stale auto-bg wording must be gone:\n{desc}"
             );
         }
 
@@ -4170,7 +4226,7 @@ mod tests {
                 ..BashParams::default()
             };
             assert_eq!(
-                BashTool::effective_foreground_block_budget(&params),
+                BashTool::effective_foreground_block_budget(&params, DEFAULT_TIMEOUT),
                 Some(Duration::MAX),
             );
             // Wait is purely the default timeout when short budget is off.
@@ -4186,7 +4242,7 @@ mod tests {
                 ..BashParams::default()
             };
             assert_eq!(
-                BashTool::effective_foreground_block_budget(&params),
+                BashTool::effective_foreground_block_budget(&params, DEFAULT_TIMEOUT),
                 Some(Duration::from_millis(5_000)),
             );
             assert_eq!(BashTool::effective_auto_bg_wait_ms(&params), Some(5_000));
@@ -4203,8 +4259,8 @@ mod tests {
             assert_eq!(BashTool::effective_auto_bg_wait_ms(&params), Some(10_000));
         }
 
-        /// Descriptions already advertise max/default timeout numbers — those
-        /// must track BashParams. Do **not** require FG-budget ms in copy yet.
+        /// Descriptions advertise max/default timeout numbers — those must
+        /// track BashParams; the auto-bg copy adds the foreground block cap.
         #[test]
         fn schema_timeout_numbers_track_config() {
             let params = BashParams {
@@ -4226,7 +4282,7 @@ mod tests {
                 schema["properties"]["timeout"]["maximum"].as_u64(),
                 Some(60_000)
             );
-            // Historical auto-bg note only when flag on — no budget ms.
+            // Auto-bg copy states the block-then-background behaviour and the cap.
             let auto = BashParams {
                 auto_background_on_timeout: true,
                 max_timeout_secs: Some(60.0),
@@ -4239,8 +4295,9 @@ mod tests {
                 "auto-bg flag must change timeout property copy"
             );
             assert!(
-                !auto_desc.contains("2000") && !auto_desc.contains("FG block"),
-                "must not advertise FG budget ms yet: {auto_desc}"
+                auto_desc.contains("keeps running in the background")
+                    && auto_desc.contains("at most 300000 ms of blocking"),
+                "auto-bg copy must state block-then-background: {auto_desc}"
             );
         }
 

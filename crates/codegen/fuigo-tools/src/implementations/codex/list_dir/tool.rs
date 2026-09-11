@@ -23,7 +23,7 @@ const INDENTATION_SPACES: usize = 2;
 // ─── Description ────────────────────────────────────────────────────
 
 const DESCRIPTION: &str =
-    "Lists entries in a local directory with 1-indexed entry numbers and simple type labels.";
+    "Lists entries in a local directory with 1-indexed entry numbers and simple type labels. Returns up to 200 entries two levels deep by default; raise limit/offset or depth only when the listing says more entries exist.";
 
 // ─── Input ──────────────────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ fn default_offset() -> usize {
     1
 }
 fn default_limit() -> usize {
-    25
+    200
 }
 fn default_depth() -> usize {
     2
@@ -714,5 +714,15 @@ mod tests {
             last.contains("More than 10 entries found"),
             "overflow message should use capped limit, got: {last}"
         );
+    }
+
+    #[test]
+    fn default_limit_is_200_entries_depth_2() {
+        let input: CodexListDirInput =
+            serde_json::from_value(serde_json::json!({"dir_path": "/x"})).unwrap();
+        assert_eq!(input.limit, 200);
+        assert_eq!(input.depth, 2);
+        assert_eq!(input.offset, 1);
+        assert!(DESCRIPTION.contains("200 entries"));
     }
 }

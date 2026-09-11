@@ -3,7 +3,7 @@
 //! Consumes a raw `rs::ResponseStreamEvent` stream and produces [`SamplingEvent`]s.
 //! Pure: no I/O, no shell coupling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -206,6 +206,7 @@ pub fn stream_responses<'a>(
     request_id: RequestId,
     idle_timeout: Duration,
     doom_loop: Option<crate::doom_loop::DoomLoopSignalCollector>,
+    client_tools: HashSet<String>,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     stream_responses_tracked(
         raw_stream,
@@ -215,9 +216,11 @@ pub fn stream_responses<'a>(
         doom_loop,
         Arc::new(AtomicBool::new(false)),
         FailedResponseCapture::default(),
+        client_tools,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_responses_tracked<'a>(
     raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
@@ -226,6 +229,9 @@ pub(crate) fn stream_responses_tracked<'a>(
     doom_loop: Option<crate::doom_loop::DoomLoopSignalCollector>,
     output_observed: Arc<AtomicBool>,
     failed_response: FailedResponseCapture,
+    // Names of the client tools the request advertised: a `custom_tool_call` naming one is a freeform client tool
+    // call (streamed like a function call); any other `custom_tool_call` is backend-executed x_search
+    client_tools: HashSet<String>,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     async_stream::stream! {
         use rs::{ResponseStreamEvent, Status};
@@ -396,9 +402,24 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
-                // Start of a Responses FunctionCall: emit the initial id and name, and remember the output_index to tool_index mapping
+                // Start of a Responses FunctionCall (or a freeform client tool's CustomToolCall): emit the initial id and name,
+                // and remember the output_index to tool_index mapping
                 ResponseStreamEvent::ResponseOutputItemAdded(added_event) => {
-                    if let rs::OutputItem::FunctionCall(fc) = added_event.item {
+                    let started = match added_event.item {
+                        rs::OutputItem::FunctionCall(fc) => Some((fc.call_id, fc.name)),
+                        rs::OutputItem::CustomToolCall(ct) if client_tools.contains(&ct.name) => {
+                            Some((ct.call_id, ct.name))
+                        }
+                        // A programmatic-tool-calling carrier (program / program_output) starting to stream
+                        rs::OutputItem::CustomToolCall(ct) => {
+                            if let Some(event) = super::responses_ptc::started_event(&request_id, &ct) {
+                                yield event;
+                            }
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some((call_id, name)) = started {
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
                         output_to_tool_index.insert(added_event.output_index, tool_index);
@@ -406,9 +427,27 @@ pub(crate) fn stream_responses_tracked<'a>(
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
-                            id: Some(fc.call_id),
-                            name: Some(fc.name),
+                            id: Some(call_id),
+                            name: Some(name),
                             arguments_delta: None,
+                        };
+                    }
+                }
+
+                // Continuation chunk of a freeform client tool's input (raw text, not JSON).
+                // An x_search delta has no mapped output_index and is dropped here; its result rides OutputItemDone below
+                ResponseStreamEvent::ResponseCustomToolCallInputDelta(input_event) => {
+                    let delta = input_event.delta;
+                    if !delta.is_empty()
+                        && let Some(&tool_index) =
+                            output_to_tool_index.get(&input_event.output_index)
+                    {
+                        yield SamplingEvent::ToolCallDelta {
+                            request_id: request_id.clone(),
+                            tool_index,
+                            id: None,
+                            name: None,
+                            arguments_delta: Some(delta),
                         };
                     }
                 }
@@ -536,17 +575,24 @@ pub(crate) fn stream_responses_tracked<'a>(
                                 result,
                             };
                         }
+                        // A freeform client tool call already streamed as ToolCallDelta above; the final response carries it
+                        rs::OutputItem::CustomToolCall(ct) if client_tools.contains(&ct.name) => {}
                         // X search results arrive as CustomToolCall with names like x_keyword_search, x_semantic_search, etc
                         // Use "x_search" consistently (matching the Started event)
                         // The specific sub-type is in the serialized result payload and extracted by the pager from raw_output.name
                         rs::OutputItem::CustomToolCall(ct) => {
-                            let result = serde_json::to_value(ct).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ct.id.clone(),
-                                name: "x_search".to_string(),
-                                result,
-                            };
+                            // A programmatic-tool-calling carrier completes as `programmatic_tool_calling`, never as x_search
+                            if let Some(event) = super::responses_ptc::completed_event(&request_id, ct) {
+                                yield event;
+                            } else {
+                                let result = serde_json::to_value(ct).ok();
+                                yield SamplingEvent::BackendToolCallCompleted {
+                                    request_id: request_id.clone(),
+                                    call_id: ct.id.clone(),
+                                    name: "x_search".to_string(),
+                                    result,
+                                };
+                            }
                         }
                         // Code interpreter: the full call (code and outputs) rides the done item
                         // The completed event uses the shared "code_interpreter" name (matching the Started event)
@@ -563,9 +609,11 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
-                // CustomToolCallInputDelta is x_search in-progress streaming.
-                // Emit a started event on first delta per item_id.
-                ResponseStreamEvent::ResponseCustomToolCallInputDone(ev) => {
+                // CustomToolCallInputDone for an unmapped output_index is x_search: emit its started event.
+                // A freeform client tool's done frame is already covered by the ToolCallDelta stream above
+                ResponseStreamEvent::ResponseCustomToolCallInputDone(ev)
+                    if !output_to_tool_index.contains_key(&ev.output_index) =>
+                {
                     yield SamplingEvent::BackendToolCallStarted {
                         request_id: request_id.clone(),
                         call_id: ev.item_id.clone(),
@@ -651,7 +699,9 @@ pub(crate) fn stream_responses_tracked<'a>(
         // Convert to ConversationItem(s); patch in accumulated reasoning text as a fallback when the final response lacks `content` or `summary`
         // The streaming deltas may have arrived out of band
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
-        let mut items = fuigo_sampling_types::response_to_conversation_items(response);
+        let mut items = fuigo_sampling_types::response_to_conversation_items(response, |name| {
+            client_tools.contains(name)
+        });
         fuigo_sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
 
         let has_tool_calls = items.iter().any(|i| match i {
@@ -893,6 +943,7 @@ mod tests {
                 Some(collector),
                 Arc::new(AtomicBool::new(false)),
                 capture.clone(),
+                Default::default(),
             ))
             .await;
 
@@ -917,6 +968,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -953,6 +1005,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         match events.last().unwrap() {
@@ -1023,6 +1076,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         match events.last().unwrap() {
@@ -1063,6 +1117,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         match events.last().unwrap() {
@@ -1093,6 +1148,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1139,6 +1195,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1176,6 +1233,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1203,6 +1261,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1229,6 +1288,7 @@ mod tests {
             rid(),
             Duration::from_millis(100),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1253,6 +1313,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1325,6 +1386,7 @@ mod tests {
             None,
             Arc::clone(&output_observed),
             FailedResponseCapture::default(),
+            Default::default(),
         ))
         .await;
 
@@ -1364,6 +1426,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
 
@@ -1457,6 +1520,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         let deltas = tool_call_deltas(&evs);
@@ -1487,6 +1551,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         assert_eq!(tool_call_deltas(&evs).len(), 0);
@@ -1508,6 +1573,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         let deltas = tool_call_deltas(&evs);
@@ -1537,6 +1603,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             Some(collector),
+            Default::default(),
         ))
         .await;
 
@@ -1567,6 +1634,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             Some(collector),
+            Default::default(),
         ))
         .await;
         assert!(matches!(
@@ -1607,6 +1675,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             Some(collector),
+            Default::default(),
         ))
         .await;
         match events.last().unwrap() {
@@ -1626,6 +1695,7 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             None,
+            Default::default(),
         ))
         .await;
         match events.last().unwrap() {
@@ -1643,11 +1713,125 @@ mod tests {
             rid(),
             Duration::from_secs(60),
             Some(crate::doom_loop::DoomLoopSignalCollector::default()),
+            Default::default(),
         ))
         .await;
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert!(response.doom_loop_signals.is_empty());
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    fn custom_call_events(name: &str, input: &str) -> Vec<rs::ResponseStreamEvent> {
+        let started = fuigo_sampling_types::custom_tool_call("call_1", name, "", "ctc_1");
+        let done = fuigo_sampling_types::custom_tool_call("call_1", name, input, "ctc_1");
+        let mut response = build_response(rs_types::Status::Completed);
+        response.output = vec![rs_types::OutputItem::CustomToolCall(done.clone())];
+        vec![
+            rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
+                sequence_number: 0,
+                output_index: 0,
+                item: rs_types::OutputItem::CustomToolCall(started),
+            }),
+            rs::ResponseStreamEvent::ResponseCustomToolCallInputDelta(
+                rs_types::ResponseCustomToolCallInputDeltaEvent {
+                    sequence_number: 1,
+                    output_index: 0,
+                    item_id: "ctc_1".into(),
+                    delta: input.to_string(),
+                },
+            ),
+            rs::ResponseStreamEvent::ResponseCustomToolCallInputDone(
+                rs_types::ResponseCustomToolCallInputDoneEvent {
+                    sequence_number: 2,
+                    output_index: 0,
+                    item_id: "ctc_1".into(),
+                    input: input.to_string(),
+                },
+            ),
+            rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+                sequence_number: 3,
+                output_index: 0,
+                item: rs_types::OutputItem::CustomToolCall(done),
+            }),
+            rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+                response,
+                sequence_number: 4,
+            }),
+        ]
+    }
+
+    /// A `custom_tool_call` naming an advertised client tool (freeform apply_patch) streams like a function call:
+    /// id and name on the added frame, the raw input as argument deltas, and a ToolCalls completion whose assistant
+    /// carries the raw text. No backend-tool (x_search) events fire for it.
+    #[tokio::test]
+    async fn custom_tool_call_for_client_tool_streams_as_tool_call() {
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
+        let raw = stream::iter(custom_call_events("apply_patch", patch).into_iter().map(Ok)).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            HashSet::from(["apply_patch".to_string()]),
+        ))
+        .await;
+
+        let deltas: Vec<(Option<&str>, Option<&str>, Option<&str>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                SamplingEvent::ToolCallDelta { id, name, arguments_delta, .. } => {
+                    Some((id.as_deref(), name.as_deref(), arguments_delta.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec![(Some("call_1"), Some("apply_patch"), None), (None, None, Some(patch))]);
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                SamplingEvent::BackendToolCallStarted { .. } | SamplingEvent::BackendToolCallCompleted { .. }
+            )),
+            "a client custom tool is not a backend tool: {events:?}"
+        );
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                let assistant = response.assistant().expect("assistant");
+                assert_eq!(assistant.tool_calls.len(), 1);
+                assert_eq!(assistant.tool_calls[0].name, "apply_patch");
+                assert_eq!(assistant.tool_calls[0].id.as_ref(), "call_1");
+                assert_eq!(assistant.tool_calls[0].arguments.as_ref(), patch);
+                assert!(!response.items.iter().any(|i| matches!(i, ConversationItem::BackendToolCall(_))));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// The same frames for a name the request did not advertise stay the hosted x_search path.
+    #[tokio::test]
+    async fn custom_tool_call_for_unknown_name_stays_backend_x_search() {
+        let raw = stream::iter(custom_call_events("x_keyword_search", "{\"q\":\"rust\"}").into_iter().map(Ok)).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            HashSet::from(["apply_patch".to_string()]),
+        ))
+        .await;
+        assert!(!events.iter().any(|e| matches!(e, SamplingEvent::ToolCallDelta { .. })), "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, SamplingEvent::BackendToolCallStarted { name, .. } if name == "x_search")));
+        assert!(events.iter().any(|e| matches!(e, SamplingEvent::BackendToolCallCompleted { name, call_id, .. } if name == "x_search" && call_id == "ctc_1")));
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                assert!(response.assistant().unwrap().tool_calls.is_empty());
+                assert!(matches!(&response.items[0], ConversationItem::BackendToolCall(b) if b.id() == "ctc_1"));
             }
             other => panic!("expected Completed, got {other:?}"),
         }

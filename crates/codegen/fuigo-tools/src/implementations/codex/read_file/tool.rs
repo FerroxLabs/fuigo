@@ -15,19 +15,48 @@ use super::{indentation, slice};
 
 // ─── Description ─────────────────────────────────────────────────────
 
-/// Tool description — word-for-word copy from codex `create_read_file_tool()` in
-/// `codex-rs/core/src/tools/spec.rs` (line 1233).
-const DESCRIPTION: &str = "Reads a local file with 1-indexed line numbers, supporting slice and indentation-aware block modes.";
+/// Tool description. Started as the codex `create_read_file_tool()` wording;
+/// now states Fuigo's whole-file default, the multi-file form and the byte cap.
+const DESCRIPTION: &str = "Reads whole files by default, with 1-indexed line numbers (L{n}: content; lines longer than 500 characters are cut). Pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files. A call returns at most about 40 KB across its files; past that the read is truncated at a line boundary and the result names the next offset. Indentation mode expands around an anchor line.";
+
+/// Byte cap per call (formatted `L{n}: ` lines, summed across every file in
+/// the call): ~10K tokens, the same order as a shell command's output cap, so
+/// one read never floods the context. Over it the read is cut at a line
+/// boundary with a next-offset hint.
+pub(crate) const MAX_READ_BYTES: usize = 40 * 1024;
+/// Tail of the truncation hint a cut read ends with; a multi-file call treats
+/// a cut file as having exhausted the shared budget.
+const READ_CUT_MARKER: &str = "KB per-call cap); continue with ";
 
 // ─── Input ───────────────────────────────────────────────────────────
 
 /// Input for the codex `read_file` tool.
 ///
 /// Field descriptions match codex `create_read_file_tool()` parameter descriptions.
+/// One file of a multi-file codex `read_file` call.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct CodexReadFileEntry {
+    /// Absolute path to the file
+    pub path: String,
+
+    /// The line number to start reading from. Must be 1 or greater. Only for very large files.
+    #[serde(default)]
+    pub offset: Option<usize>,
+
+    /// The maximum number of lines to return. Only for very large files.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct CodexReadFileInput {
-    /// Absolute path to the file
+    /// Absolute path to the file. Omit it when passing `files`.
+    #[serde(default)]
     pub file_path: String,
+
+    /// Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total.
+    #[serde(default)]
+    pub files: Option<Vec<CodexReadFileEntry>>,
 
     /// The line number to start reading from. Must be 1 or greater.
     #[serde(default = "defaults::offset")]
@@ -94,7 +123,8 @@ mod defaults {
         1
     }
     pub fn limit() -> usize {
-        2000
+        // Whole files by default; `MAX_READ_BYTES` is the practical bound.
+        20_000
     }
     pub fn max_levels() -> usize {
         0
@@ -175,11 +205,135 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
     async fn run(
         &self,
         ctx: fuigo_tool_runtime::ToolCallContext,
-        input: CodexReadFileInput,
+        mut input: CodexReadFileInput,
     ) -> Result<ReadFileOutput, fuigo_tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
+        let mut entries: Vec<CodexReadFileEntry> = input.files.take().unwrap_or_default();
+        entries.retain(|e| !e.path.trim().is_empty());
+        let single_path = !input.file_path.trim().is_empty();
+        if entries.is_empty() {
+            if !single_path {
+                return Ok(ReadFileOutput::FileReadError(
+                    "Provide file_path (one file) or files (a list of {path, offset?, limit?}) to read."
+                        .to_string(),
+                ));
+            }
+            return read_one(&resources, input, MAX_READ_BYTES).await;
+        }
+        if single_path {
+            entries.insert(
+                0,
+                CodexReadFileEntry {
+                    path: std::mem::take(&mut input.file_path),
+                    offset: Some(input.offset),
+                    limit: Some(input.limit),
+                },
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        entries.retain(|e| seen.insert((e.path.clone(), e.offset, e.limit)));
+        let count = entries.len();
+        let mut remaining = MAX_READ_BYTES;
+        let mut content = String::new();
+        let mut raw_output = String::new();
+        let mut total_lines = 0usize;
+        let mut absolute_path: Option<PathBuf> = None;
+        let mut unread = Vec::new();
+        for entry in entries {
+            if remaining == 0 {
+                unread.push(entry.path);
+                continue;
+            }
+            let one = CodexReadFileInput {
+                file_path: entry.path.clone(),
+                files: None,
+                offset: entry.offset.unwrap_or_else(defaults::offset),
+                limit: entry.limit.unwrap_or_else(defaults::limit),
+                mode: ReadMode::Slice,
+                indentation: None,
+            };
+            let output = read_one(&resources, one, remaining).await?;
+            let (body, raw, lines, path, used) = match output {
+                ReadFileOutput::FileContent(fc) => {
+                    // A cut file used up the budget: later files are listed as
+                    // unread rather than read into a sliver.
+                    let used = if fc.content.contains(READ_CUT_MARKER) {
+                        remaining
+                    } else {
+                        fc.content.len()
+                    };
+                    let body = if fc.content.is_empty() {
+                        "(empty file)".to_string()
+                    } else {
+                        fc.content
+                    };
+                    (body, fc.raw_output, fc.total_lines, Some(fc.absolute_path), used)
+                }
+                // The first line no longer fits what earlier files left of the
+                // budget: defer the file to another call instead of reporting
+                // it as an oversized line.
+                ReadFileOutput::FileTooLarge(_) if remaining < MAX_READ_BYTES => {
+                    unread.push(entry.path);
+                    continue;
+                }
+                ReadFileOutput::FileNotFound(msg)
+                | ReadFileOutput::IsADirectory(msg)
+                | ReadFileOutput::PermissionDenied(msg)
+                | ReadFileOutput::FileTooLarge(msg)
+                | ReadFileOutput::FileReadError(msg)
+                | ReadFileOutput::ImageSizeError(msg) => (msg, String::new(), 0, None, 0),
+                ReadFileOutput::ImageContent(_) | ReadFileOutput::PdfPageImages(_) => (
+                    format!("[{}: not a text file]", entry.path),
+                    String::new(),
+                    0,
+                    None,
+                    0,
+                ),
+            };
+            if !content.is_empty() {
+                content.push_str("\n\n");
+                raw_output.push('\n');
+            }
+            content.push_str(&format!("==> {} <==\n", entry.path));
+            content.push_str(&body);
+            raw_output.push_str(&raw);
+            total_lines += lines;
+            if absolute_path.is_none() {
+                absolute_path = path;
+            }
+            remaining = remaining.saturating_sub(used);
+        }
+        if !unread.is_empty() {
+            content.push_str(&format!(
+                "\n\n[{} KB cap reached: {} of {count} files not read: {}. Read them in another call.]",
+                MAX_READ_BYTES / 1024,
+                unread.len(),
+                unread.join(", ")
+            ));
+        }
+        Ok(ReadFileOutput::FileContent(FileContent {
+            content,
+            content_concise: None,
+            absolute_path: absolute_path.unwrap_or_else(|| PathBuf::from("/")),
+            offset: None,
+            limit: None,
+            raw_output,
+            total_lines,
+            extracted_images: Vec::new(),
+        }))
+    }
+}
 
+/// Read one file under `byte_budget` (formatted bytes). A window over the
+/// budget is cut at the last whole line that fits and a hint names the next
+/// offset; a single line that alone exceeds it is a `FileTooLarge`.
+async fn read_one(
+    resources: &SharedResources,
+    input: CodexReadFileInput,
+    byte_budget: usize,
+) -> Result<ReadFileOutput, fuigo_tool_runtime::ToolError> {
+    {
         // 1. Validate. Codex raises here, but we surface these as a structured
         // `FileReadError` (a model-facing error) instead of a hard `Err`, so
         // otherwise-benign validation failures (empty/short files, relative
@@ -241,8 +395,38 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
             }
         };
 
-        // 4. Build formatted output (L{n}: {content} lines joined by \n).
-        let content = collected.join("\n");
+        // 4. Build formatted output (L{n}: {content} lines joined by \n),
+        // cut at the byte budget with a next-offset hint.
+        let mut content = collected.join("\n");
+        let mut kept_lines = collected.len();
+        if content.len() > byte_budget {
+            let mut used = 0usize;
+            let mut kept = 0usize;
+            for line in &collected {
+                let cost = line.len() + usize::from(kept > 0);
+                if used + cost > byte_budget {
+                    break;
+                }
+                used += cost;
+                kept += 1;
+            }
+            if kept == 0 {
+                return Ok(ReadFileOutput::FileTooLarge(format!(
+                    "Line {} alone is {} bytes, above the {} KB per-call cap; use a shell tool (e.g. `cut -c`, `jq`) to extract the part you need.",
+                    input.offset,
+                    content.len(),
+                    byte_budget / 1024
+                )));
+            }
+            let last = input.offset + kept - 1;
+            content = collected[..kept].join("\n");
+            content.push_str(&format!(
+                "\n[... truncated at L{last} ({} KB per-call cap); continue with offset={}]",
+                byte_budget / 1024,
+                last + 1
+            ));
+            kept_lines = kept;
+        }
 
         // 5. Build raw_output — the unformatted file content for the read
         // range. This matches the fuigo-build ReadFileTool semantics where
@@ -263,7 +447,7 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
             content_concise: None,
             absolute_path: path,
             offset: Some(input.offset),
-            limit: Some(input.limit),
+            limit: Some(kept_lines.min(input.limit).max(1)),
             raw_output,
             total_lines,
             extracted_images: Vec::new(),
@@ -303,6 +487,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 2,
             limit: 2,
@@ -331,6 +516,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 100,
             limit: 10,
@@ -364,6 +550,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 1,
             limit: 10,
@@ -392,6 +579,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 1,
             limit: 10,
@@ -420,6 +608,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 1,
             limit: 10,
@@ -454,6 +643,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 1,
             limit: 2000,
@@ -496,6 +686,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 1,
             limit: 2000,
@@ -533,6 +724,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 0,
             limit: 10,
@@ -564,6 +756,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: file_path.to_string_lossy().to_string(),
             offset: 1,
             limit: 0,
@@ -592,6 +785,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: "relative/path.txt".to_string(),
             offset: 1,
             limit: 10,
@@ -620,6 +814,7 @@ mod tests {
         let shared = test_resources(tmp.path()).into_shared();
 
         let input = CodexReadFileInput {
+            files: None,
             file_path: tmp
                 .path()
                 .join("nonexistent.txt")
@@ -639,6 +834,178 @@ mod tests {
                 assert!(msg.contains("Failed to read file"));
             }
             other => panic!("Expected FileReadError, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn whole_file_by_default_and_multi_file_read() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a.txt");
+        let b = tmp.path().join("b.txt");
+        // 2100 short lines (~35 KB formatted): over the old 2000-line default, under the byte cap.
+        let big: String = (1..=2100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&a, &big).unwrap();
+        std::fs::write(&b, "beta\n").unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+
+        // Default limit covers a 2100-line file (the old 2000 default cut it).
+        let single = CodexReadFileInput {
+            files: None,
+            file_path: a.to_string_lossy().to_string(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared.clone()), single)
+            .await
+            .unwrap()
+        {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.contains("L2100: line 2100"), "whole file expected");
+                assert!(!fc.content.contains("truncated"));
+            }
+            other => panic!("expected FileContent, got {other:?}"),
+        }
+
+        let multi = CodexReadFileInput {
+            files: Some(vec![
+                CodexReadFileEntry { path: a.to_string_lossy().to_string(), offset: Some(2099), limit: None },
+                CodexReadFileEntry { path: b.to_string_lossy().to_string(), offset: None, limit: None },
+                CodexReadFileEntry { path: tmp.path().join("missing.txt").to_string_lossy().to_string(), offset: None, limit: None },
+            ]),
+            file_path: String::new(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared.clone()), multi)
+            .await
+            .unwrap()
+        {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.contains(&format!("==> {} <==\nL2099: line 2099\nL2100: line 2100", a.display())), "{}", fc.content);
+                assert!(fc.content.contains(&format!("==> {} <==\nL1: beta", b.display())), "{}", fc.content);
+                assert!(fc.content.contains("missing.txt") && fc.content.contains("Failed to read file"), "{}", fc.content);
+                assert_eq!(fc.total_lines, 2100 + 1);
+            }
+            other => panic!("expected FileContent, got {other:?}"),
+        }
+
+        let empty = CodexReadFileInput {
+            files: None,
+            file_path: String::new(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared), empty)
+            .await
+            .unwrap()
+        {
+            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("file_path") && msg.contains("files")),
+            other => panic!("expected FileReadError, got {other:?}"),
+        }
+    }
+
+    /// Three ~30 KB files under the 40 KB budget: the first comes back whole,
+    /// the second is cut with a next-offset hint and exhausts the budget, the
+    /// third is listed as unread; the whole result stays at about the cap.
+    #[tokio::test]
+    async fn three_files_at_the_cap_read_whole_then_cut_then_unread() {
+        let tmp = TempDir::new().unwrap();
+        let thirty_kb: String = (0..300).map(|_| format!("{}\n", "x".repeat(99))).collect();
+        let paths: Vec<String> = ["a30.txt", "b30.txt", "c30.txt"]
+            .iter()
+            .map(|name| {
+                let path = tmp.path().join(name);
+                std::fs::write(&path, &thirty_kb).unwrap();
+                path.to_string_lossy().to_string()
+            })
+            .collect();
+        let shared = test_resources(tmp.path()).into_shared();
+        let input = CodexReadFileInput {
+            files: Some(paths.iter().map(|p| CodexReadFileEntry { path: p.clone(), offset: None, limit: None }).collect()),
+            file_path: String::new(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared), input)
+            .await
+            .unwrap()
+        {
+            ReadFileOutput::FileContent(fc) => {
+                let b_start = fc.content.find(&format!("==> {} <==", paths[1])).expect("second file header");
+                assert!(!fc.content[..b_start].contains("truncated"), "first file fits whole");
+                assert!(fc.content[b_start..].contains("[... truncated at L"), "second file is cut: {}", &fc.content[b_start..b_start + 120]);
+                assert!(!fc.content.contains(&format!("==> {} <==", paths[2])), "third file is not read");
+                assert!(
+                    fc.content.ends_with(&format!("[40 KB cap reached: 1 of 3 files not read: {}. Read them in another call.]", paths[2])),
+                    "{}",
+                    &fc.content[fc.content.len() - 200..]
+                );
+                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+            }
+            other => panic!("expected FileContent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_cap_truncates_with_next_offset_and_lists_unread_files() {
+        let tmp = TempDir::new().unwrap();
+        let line = "x".repeat(99);
+        let big: String = (0..600).map(|_| format!("{line}\n")).collect(); // ~60 KB
+        let a = tmp.path().join("a.txt");
+        let b = tmp.path().join("b.txt");
+        std::fs::write(&a, &big).unwrap();
+        std::fs::write(&b, "beta\n").unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+        let single = CodexReadFileInput {
+            files: None,
+            file_path: a.to_string_lossy().to_string(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared.clone()), single)
+            .await
+            .unwrap()
+        {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.len() <= MAX_READ_BYTES + 200, "{}", fc.content.len());
+                let hint = fc.content.rsplit('\n').next().unwrap();
+                assert!(hint.starts_with("[... truncated at L") && hint.contains("continue with offset="), "{hint}");
+                let last: usize = hint.split("truncated at L").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+                assert!(hint.contains(&format!("offset={}", last + 1)));
+                assert_eq!(fc.limit, Some(last));
+            }
+            other => panic!("expected FileContent, got {other:?}"),
+        }
+        let multi = CodexReadFileInput {
+            files: Some(vec![
+                CodexReadFileEntry { path: a.to_string_lossy().to_string(), offset: None, limit: None },
+                CodexReadFileEntry { path: b.to_string_lossy().to_string(), offset: None, limit: None },
+            ]),
+            file_path: String::new(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared), multi)
+            .await
+            .unwrap()
+        {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.contains("[... truncated at L"), "{}", fc.content);
+                assert!(fc.content.contains("1 of 2 files not read") && fc.content.contains("b.txt"), "{}", fc.content);
+            }
+            other => panic!("expected FileContent, got {other:?}"),
         }
     }
 }

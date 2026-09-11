@@ -53,8 +53,18 @@ impl ReadFileVersion {
         self == Self::Legacy0_4_10
     }
 }
-pub(crate) const MAX_NUM_TOKENS: usize = 25_000;
-pub const MAX_LINES_READ: usize = 1_000;
+/// Line cap per read window when the client does not configure `max_lines_read`.
+/// High enough that ordinary source files come back whole; the byte cap below
+/// is the practical bound.
+pub const MAX_LINES_READ: usize = 20_000;
+/// Byte cap per `read_file` call (formatted content, summed across every file
+/// in the call): ~10K tokens, the same order as a shell command's output cap,
+/// so one read never floods the context. Past it the read is truncated at a
+/// line boundary and the result names the next offset to continue from.
+pub const MAX_READ_BYTES: usize = 40 * 1024;
+/// Tail of the truncation hint a cut read ends with; a multi-file call treats
+/// a cut file as having exhausted the shared budget.
+pub(crate) const READ_CUT_MARKER: &str = "KB per-call cap); continue with ";
 pub use crate::implementations::read_file::{
     FileMetadata, PDF_MAX_PAGES_PER_READ, bytes_to_metadata, parse_page_range,
 };
@@ -101,25 +111,55 @@ fn extract_pptx_text(file_bytes: Vec<u8>) -> Result<ReadFileOutput, String> {
     Ok(raw_text_to_file_content(text))
 }
 /// Description for default toolset (full/non-concise)
-pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file.
+pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file, or several files in one call.
 
 Usage:
-- The ${{ params.read.target_file }} parameter can be a relative path in the workspace or an absolute path
-- By default, it reads up to {max_lines_read} lines starting from the beginning of the file
+- Reads whole files by default; pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files.
+- The ${{ params.read.target_file }} parameter (or each files[].path) can be a relative path in the workspace or an absolute path
+- A call returns up to {max_lines_read} lines and about 40 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from
 - Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
-- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc).
+- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc); read PDFs and images one per call
 - When reading an image file the contents are presented visually as this tool uses multimodal LLMs."#;
 /// Schema-only advertised default (runtime still treats omit as line 1 via unwrap_or).
 fn schema_default_offset() -> Option<i64> {
     Some(1)
 }
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct ReadFileInput {
-    #[serde(rename = "target_file")]
+/// One file of a multi-file `read_file` call.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadFileEntry {
     #[schemars(
-        description = "The path of the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is."
+        description = "The path of the file to read: a relative path in the workspace or an absolute path."
     )]
     pub path: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::types::schema::deserialize_lenient_i64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(
+        with = "FuigoIntegerSchema",
+        description = "The line number to start reading from. Only provide if the file is too large to read at once."
+    )]
+    pub offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "FuigoIntegerSchema",
+        description = "The number of lines to read. Only provide if the file is too large to read at once."
+    )]
+    pub limit: Option<usize>,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadFileInput {
+    #[serde(rename = "target_file", default)]
+    #[schemars(
+        description = "The path of the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is. Omit it when passing `files`."
+    )]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total."
+    )]
+    pub files: Option<Vec<ReadFileEntry>>,
     #[serde(
         default,
         deserialize_with = "crate::types::schema::deserialize_lenient_i64",
@@ -330,13 +370,195 @@ pub fn extract_file_content_lines(
 /// Always uses the padded `content` field. Concise post-processing
 /// (swapping in `content_concise`) is done by `ReadFileConciseTool` after this
 /// returns.
+///
+/// A `files` list reads every entry in order under one shared
+/// [`MAX_READ_BYTES`] budget and returns one `FileContent` whose `content`
+/// carries a `==> path <==` header per file (errors inline). A single
+/// `target_file` reads that file under the whole budget.
 pub(crate) async fn run_read_file(
+    mut input: ReadFileInput,
+    cwd_override: Option<std::path::PathBuf>,
+    contract_version: Option<&str>,
+    resources: SharedResources,
+    streamable_out: Option<&mut bool>,
+    invoking_param_names: &crate::types::resources::InvokingToolParamNames,
+) -> Result<ReadFileOutput, fuigo_tool_runtime::ToolError> {
+    let mut entries: Vec<ReadFileEntry> = input.files.take().unwrap_or_default();
+    entries.retain(|e| !e.path.trim().is_empty());
+    let single_path = !input.path.trim().is_empty();
+    if entries.is_empty() {
+        if !single_path {
+            let target_param = invoking_param_names.resolve("target_file");
+            return Ok(ReadFileOutput::FileReadError(format!(
+                "Provide {target_param} (one file) or files (a list of {{path, offset?, limit?}}) to read."
+            )));
+        }
+        return run_read_one(
+            input,
+            cwd_override,
+            contract_version,
+            resources,
+            streamable_out,
+            invoking_param_names,
+            MAX_READ_BYTES,
+        )
+        .await;
+    }
+    if single_path {
+        entries.insert(
+            0,
+            ReadFileEntry {
+                path: std::mem::take(&mut input.path),
+                offset: input.offset.take(),
+                limit: input.limit.take(),
+            },
+        );
+    }
+    // Same path twice in one call reads once.
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert((e.path.clone(), e.offset, e.limit)));
+    let mut remaining = MAX_READ_BYTES;
+    let mut content = String::new();
+    let mut content_concise = String::new();
+    let mut raw_output = String::new();
+    let mut total_lines = 0usize;
+    let mut extracted_images = Vec::new();
+    let mut absolute_path: Option<std::path::PathBuf> = None;
+    let count = entries.len();
+    let mut unread: Vec<String> = Vec::new();
+    for entry in entries {
+        if remaining == 0 {
+            unread.push(entry.path);
+            continue;
+        }
+        let header = format!("==> {} <==\n", entry.path);
+        let one = ReadFileInput {
+            path: entry.path.clone(),
+            files: None,
+            offset: entry.offset,
+            limit: entry.limit,
+            pages: None,
+            format: None,
+        };
+        let output = run_read_one(
+            one,
+            cwd_override.clone(),
+            contract_version,
+            resources.clone(),
+            None,
+            invoking_param_names,
+            remaining,
+        )
+        .await?;
+        let (body, body_concise, raw, lines, images, path, used) = match output {
+            ReadFileOutput::FileContent(fc) => {
+                // A cut file used up the budget: whatever is left is under one
+                // line, so later files are listed as unread rather than read
+                // into a sliver.
+                let used = if fc.content.contains(READ_CUT_MARKER) {
+                    remaining
+                } else {
+                    fc.content.len()
+                };
+                let body = if fc.content.is_empty() {
+                    if fc.total_lines == 0 {
+                        "(empty file)".to_string()
+                    } else {
+                        "(no lines returned)".to_string()
+                    }
+                } else {
+                    fc.content
+                };
+                let concise = fc.content_concise.unwrap_or_else(|| body.clone());
+                (
+                    body,
+                    concise,
+                    fc.raw_output,
+                    fc.total_lines,
+                    fc.extracted_images,
+                    Some(fc.absolute_path),
+                    used,
+                )
+            }
+            ReadFileOutput::ImageContent(_) | ReadFileOutput::PdfPageImages(_) => {
+                let note = format!(
+                    "[{}: images and PDFs are returned only by a single-file read; call again with just this path]",
+                    entry.path
+                );
+                (note.clone(), note, String::new(), 0, Vec::new(), None, 0)
+            }
+            // The first line no longer fits what earlier files left of the
+            // budget: defer the file to another call instead of reporting it
+            // as an oversized line.
+            ReadFileOutput::FileTooLarge(_) if remaining < MAX_READ_BYTES => {
+                unread.push(entry.path);
+                continue;
+            }
+            ReadFileOutput::FileNotFound(msg)
+            | ReadFileOutput::IsADirectory(msg)
+            | ReadFileOutput::PermissionDenied(msg)
+            | ReadFileOutput::FileTooLarge(msg)
+            | ReadFileOutput::FileReadError(msg)
+            | ReadFileOutput::ImageSizeError(msg) => {
+                (msg.clone(), msg, String::new(), 0, Vec::new(), None, 0)
+            }
+        };
+        if !content.is_empty() {
+            content.push_str("\n\n");
+            content_concise.push_str("\n\n");
+            raw_output.push('\n');
+        }
+        content.push_str(&header);
+        content.push_str(&body);
+        content_concise.push_str(&header);
+        content_concise.push_str(&body_concise);
+        raw_output.push_str(&raw);
+        total_lines += lines;
+        extracted_images.extend(images);
+        if absolute_path.is_none() {
+            absolute_path = path;
+        }
+        remaining = remaining.saturating_sub(used);
+    }
+    if !unread.is_empty() {
+        let note = format!(
+            "\n\n[{} KB cap reached: {} of {count} files not read: {}. Read them in another call.]",
+            MAX_READ_BYTES / 1024,
+            unread.len(),
+            unread.join(", ")
+        );
+        content.push_str(&note);
+        content_concise.push_str(&note);
+    }
+    if let Some(flag) = streamable_out {
+        *flag = true;
+    }
+    let absolute_path = absolute_path.unwrap_or_else(|| {
+        cwd_override.unwrap_or_else(|| std::path::PathBuf::from("."))
+    });
+    Ok(ReadFileOutput::FileContent(FileContent {
+        content,
+        content_concise: Some(content_concise),
+        absolute_path,
+        offset: None,
+        limit: None,
+        raw_output,
+        total_lines,
+        extracted_images,
+    }))
+}
+/// Read one file. `byte_budget` caps the formatted content; when the window
+/// exceeds it the read is cut at the last whole line that fits and a hint
+/// names the next offset (a single line that alone exceeds the budget is a
+/// `FileTooLarge`, since offset/limit cannot narrow it).
+async fn run_read_one(
     input: ReadFileInput,
     cwd_override: Option<std::path::PathBuf>,
     contract_version: Option<&str>,
     resources: SharedResources,
     streamable_out: Option<&mut bool>,
     invoking_param_names: &crate::types::resources::InvokingToolParamNames,
+    byte_budget: usize,
 ) -> Result<ReadFileOutput, fuigo_tool_runtime::ToolError> {
     let (cwd, display_cwd, fs, hints_enabled);
     {
@@ -506,65 +728,71 @@ pub(crate) async fn run_read_file(
             Some(input.limit.unwrap_or(usize::MAX).min(max_lines)),
         )
     };
-    let extracted = extract_file_content_lines(
+    let mut extracted = extract_file_content_lines(
         &file_content,
         effective_offset,
         effective_limit,
         total_lines,
     );
-    let token_count = crate::util::truncate::estimate_tokens(&extracted.content);
-    if !is_skill_markdown && token_count > MAX_NUM_TOKENS {
-        let (grep_name, execute_name);
-        {
-            let res = resources.lock().await;
-            let renderer = res.require::<TemplateRenderer>()?;
-            grep_name = renderer
-                .render("${{ tools.by_kind.search }}")
-                .map_err(|e| fuigo_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
-            execute_name = renderer
-                .render("${{ tools.by_kind.execute }}")
-                .map_err(|e| fuigo_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+    let mut truncated_to: Option<usize> = None;
+    if !is_skill_markdown && extracted.content.len() > byte_budget {
+        // Keep whole lines while they fit the budget.
+        let mut kept = 0usize;
+        let mut used = 0usize;
+        for line in extracted.content.split_inclusive('\n') {
+            if used + line.len() > byte_budget {
+                break;
+            }
+            used += line.len();
+            kept += 1;
         }
-        let offset_param = invoking_param_names.resolve("offset");
-        let limit_param = invoking_param_names.resolve("limit");
-        let single_content_line = extracted.raw_output.lines().count() <= 1;
-        let single_line_hint = if single_content_line && !execute_name.is_empty() {
-            format!(
-                "\nNote: the requested read is a single very long line, so \
-                 line-based {offset_param}/{limit_param} cannot narrow it further. Use the \
-                 '{execute_name}' tool to extract the parts you need (e.g. \
-                 `jq`, `python3`, or `cut -c`)."
-            )
-        } else {
-            String::new()
-        };
-        let range_specified = input.offset.is_some() || input.limit.is_some();
-        let msg = if range_specified {
-            let off = input
-                .offset
-                .map_or_else(|| "1".to_string(), |v| v.to_string());
-            let lim = input
-                .limit
-                .map_or_else(|| "to end".to_string(), |v| v.to_string());
-            format!(
-                "The requested line range ({offset_param}={off}, {limit_param}={lim}) contains {token_count} tokens, \
-                 which exceeds the maximum allowed tokens ({MAX_NUM_TOKENS} tokens).\n\
-                 Try a smaller `{limit_param}`, a different starting `{offset_param}`, \
-                 or use the '{grep_name}' tool to search for specific content.{single_line_hint}"
-            )
-        } else {
-            format!(
-                "File content ({token_count} tokens) exceeds maximum allowed tokens ({MAX_NUM_TOKENS} tokens).\n\
-                 Please use {offset_param} and {limit_param} parameters to read a shorter range, \
-                 or use the '{grep_name}' to search for specific content.{single_line_hint}"
-            )
-        };
-        return Ok(ReadFileOutput::FileTooLarge(msg));
+        if kept == 0 {
+            let (grep_name, execute_name);
+            {
+                let res = resources.lock().await;
+                let renderer = res.require::<TemplateRenderer>()?;
+                grep_name = renderer
+                    .render("${{ tools.by_kind.search }}")
+                    .map_err(|e| fuigo_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+                execute_name = renderer
+                    .render("${{ tools.by_kind.execute }}")
+                    .map_err(|e| fuigo_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+            }
+            let offset_param = invoking_param_names.resolve("offset");
+            let limit_param = invoking_param_names.resolve("limit");
+            let single_line_hint = if !execute_name.is_empty() {
+                format!(
+                    "\nNote: the requested read is a single very long line, so \
+                     line-based {offset_param}/{limit_param} cannot narrow it further. Use the \
+                     '{execute_name}' tool to extract the parts you need (e.g. \
+                     `jq`, `python3`, or `cut -c`)."
+                )
+            } else {
+                String::new()
+            };
+            let start = resolve_read_start_line(&file_content, effective_offset);
+            return Ok(ReadFileOutput::FileTooLarge(format!(
+                "Line {start} alone is {} bytes, above the {} KB per-call cap, so it cannot be returned.\n\
+                 Use the '{grep_name}' tool to search for specific content.{single_line_hint}",
+                extracted.content.len(),
+                byte_budget / 1024,
+            )));
+        }
+        extracted = extract_file_content_lines(
+            &file_content,
+            effective_offset,
+            Some(kept),
+            total_lines,
+        );
+        truncated_to = Some(kept);
     }
     let (stored_offset, stored_limit) = if is_skill_markdown {
         (None, None)
     } else {
-        (stored_read_offset(input.offset), input.limit)
+        (
+            stored_read_offset(input.offset),
+            truncated_to.or(input.limit),
+        )
     };
     if let Some(flag) = streamable_out {
         *flag = true;
@@ -572,6 +800,20 @@ pub(crate) async fn run_read_file(
     let mut content = extracted.content;
     let mut content_concise = Some(extracted.content_concise);
     let extracted_images = extracted.extracted_images;
+    if let Some(kept) = truncated_to {
+        let start = resolve_read_start_line(&file_content, effective_offset);
+        let last = start + kept - 1;
+        let offset_param = invoking_param_names.resolve("offset");
+        let hint = format!(
+            "\n[... truncated at line {last} of {total_lines} ({} KB per-call cap); continue with {offset_param}={}]",
+            byte_budget / 1024,
+            last + 1
+        );
+        content.push_str(&hint);
+        if let Some(concise) = content_concise.as_mut() {
+            concise.push_str(&hint);
+        }
+    }
     crate::implementations::cursor_rules_on_read::append_cursor_rules_for_read(
         cursor_rules_on_read_enabled(&resources).await,
         resources.clone(),
@@ -767,6 +1009,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let shared = resources.into_shared();
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input)
@@ -794,6 +1037,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let mut ctx = test_ctx(resources.into_shared());
         ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion(
@@ -824,6 +1068,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -847,6 +1092,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result =
             fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
@@ -979,6 +1225,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let mut ctx = test_ctx(resources.into_shared());
         ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion(
@@ -1009,6 +1256,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1032,6 +1280,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1058,6 +1307,7 @@ mod tests {
             limit: Some(2),
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1084,6 +1334,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1107,6 +1358,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1131,6 +1383,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1144,10 +1397,10 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn token_limit_error_references_grep() {
+    async fn byte_cap_truncates_large_file_with_next_offset() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
-        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+        let big_content = std::iter::repeat_n(line.as_str(), 220)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
@@ -1163,27 +1416,43 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
             .unwrap();
+        // 220 lines x 200 chars is ~44 KB: over the 40 KB cap, so the read is
+        // cut at a line boundary and the hint names the next offset.
         match result {
-            ReadFileOutput::FileTooLarge(msg) => {
-                assert!(msg.contains("exceeds maximum allowed tokens"));
+            ReadFileOutput::FileContent(fc) => {
+                let hint = fc.content.rsplit('\n').next().unwrap();
                 assert!(
-                    msg.contains("Grep"),
-                    "Error should reference renamed grep tool: {}",
-                    msg
+                    hint.starts_with("[... truncated at line ") && hint.contains("of 220 (40 KB per-call cap); continue with offset="),
+                    "hint: {hint}"
                 );
+                let last: usize = hint
+                    .split("truncated at line ")
+                    .nth(1)
+                    .unwrap()
+                    .split(' ')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(last < 220 && last > 180, "kept {last} lines");
+                assert!(hint.ends_with(&format!("offset={}]", last + 1)), "hint: {hint}");
+                assert_eq!(fc.limit, Some(last), "stored limit reflects the truncated window");
+                assert!(fc.content.len() <= MAX_READ_BYTES + hint.len() + 1);
+                assert!(!fc.content.contains(&format!("\n{}→", last + 10)), "no lines past the cut");
             }
-            other => panic!("Expected FileTooLarge, got {:?}", other),
+            other => panic!("Expected FileContent, got {:?}", other),
         }
     }
     #[tokio::test]
-    async fn token_limit_error_when_range_specified_gives_better_message() {
+    async fn byte_cap_hint_when_range_specified_names_next_offset() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
-        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+        let big_content = std::iter::repeat_n(line.as_str(), 220)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
@@ -1193,39 +1462,61 @@ mod tests {
             [(ToolKind::Search, "Grep".to_string())].into(),
             Default::default(),
         ));
+        // A 160-line window (~32 KB) fits the cap and comes back whole.
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: Some(1),
-            limit: Some(800),
+            limit: Some(160),
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
             .unwrap();
         match result {
-            ReadFileOutput::FileTooLarge(msg) => {
-                assert!(msg.contains("requested line range"));
-                assert!(msg.contains("offset=1"));
-                assert!(msg.contains("limit=800"));
-                assert!(msg.contains("exceeds the maximum allowed tokens"));
-                assert!(
-                    msg.contains("Grep"),
-                    "Error should still reference the grep tool: {}",
-                    msg
-                );
-                assert!(!msg.contains("Please use offset and limit parameters"));
+            ReadFileOutput::FileContent(fc) => {
+                assert!(!fc.content.contains("truncated"), "160 lines fit: {}", &fc.content[fc.content.len() - 200..]);
+                assert_eq!(fc.limit, Some(160));
             }
-            other => panic!("Expected FileTooLarge, got {:?}", other),
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
+        // A 220-line window (~44 KB) from offset 200 into a 600-line file overflows, is cut, and continues from the right line.
+        let tmp2 = TempDir::new().unwrap();
+        let bigger_content = std::iter::repeat_n(line.as_str(), 600)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(tmp2.path().join("big.txt"), &bigger_content).unwrap();
+        let resources = test_resources(tmp2.path());
+        let input = ReadFileInput {
+            path: "big.txt".to_string(),
+            offset: Some(200),
+            limit: Some(220),
+            pages: None,
+            format: None,
+            files: None,
+        };
+        let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                let hint = fc.content.rsplit('\n').next().unwrap();
+                let last: usize = hint.split("truncated at line ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+                assert!((200 + 180..200 + 220).contains(&last), "cut at {last}");
+                assert!(hint.contains(&format!("continue with offset={}", last + 1)), "hint: {hint}");
+                assert!(fc.content.starts_with("200→"), "window starts at offset 200");
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
         }
     }
-    /// Regression: FileTooLarge must name *this* tool's schema keys, not
+    /// Regression: the truncation hint must name *this* tool's schema keys, not
     /// whatever a sibling Read tool last wrote into the kind-wide param map.
     #[tokio::test]
-    async fn token_limit_error_uses_invoking_tool_param_names_not_kind_wide() {
+    async fn byte_cap_hint_uses_invoking_tool_param_names_not_kind_wide() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
-        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+        let big_content = std::iter::repeat_n(line.as_str(), 220)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
@@ -1246,9 +1537,10 @@ mod tests {
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: Some(1),
-            limit: Some(800),
+            limit: Some(220),
             pages: None,
             format: None,
+            files: None,
         };
         let mut ctx = test_ctx(resources.into_shared());
         ctx.extensions
@@ -1263,17 +1555,179 @@ mod tests {
             .await
             .unwrap();
         match result {
-            ReadFileOutput::FileTooLarge(msg) => {
+            ReadFileOutput::FileContent(fc) => {
+                let hint = fc.content.rsplit('\n').next().unwrap();
                 assert!(
-                    msg.contains("start_line=1") && msg.contains("max_lines=800"),
-                    "expected invoking-tool names, got: {msg}"
+                    hint.contains("continue with start_line="),
+                    "expected invoking-tool names, got: {hint}"
                 );
                 assert!(
-                    !msg.contains("poisoned_offset") && !msg.contains("poisoned_limit"),
-                    "must not use kind-wide sibling renames: {msg}"
+                    !hint.contains("poisoned_offset") && !hint.contains("poisoned_limit"),
+                    "must not use kind-wide sibling renames: {hint}"
                 );
             }
-            other => panic!("Expected FileTooLarge, got {:?}", other),
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn files_reads_several_paths_in_one_call_with_headers() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}\nfn c() {}\n").unwrap();
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: String::new(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: Some(vec![
+                ReadFileEntry { path: "a.rs".into(), offset: None, limit: None },
+                ReadFileEntry { path: "b.rs".into(), offset: Some(2), limit: None },
+                ReadFileEntry { path: "a.rs".into(), offset: None, limit: None },
+                ReadFileEntry { path: "missing.rs".into(), offset: None, limit: None },
+            ]),
+        };
+        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.starts_with("==> a.rs <==\n1→fn a() {}"), "{}", fc.content);
+                assert!(fc.content.contains("\n\n==> b.rs <==\n2→fn c() {}"), "{}", fc.content);
+                assert!(fc.content.contains("==> missing.rs <==\nError: ") && fc.content.contains("does not exist"), "{}", fc.content);
+                assert_eq!(fc.content.matches("==> a.rs <==").count(), 1, "repeated path reads once");
+                assert_eq!(fc.absolute_path, dunce::canonicalize(tmp.path().join("a.rs")).unwrap());
+                assert_eq!(fc.total_lines, 2 + 3);
+                assert!(fc.raw_output.contains("fn a() {}") && fc.raw_output.contains("fn c() {}"));
+                assert!(fc.content_concise.as_deref().unwrap().starts_with("==> a.rs <==\n1→fn a() {}"));
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn files_plus_target_file_reads_target_first_and_errors_when_both_absent() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "alpha\n").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "beta\n").unwrap();
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: "a.rs".into(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: Some(vec![ReadFileEntry { path: "b.rs".into(), offset: None, limit: None }]),
+        };
+        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.starts_with("==> a.rs <==\n1→alpha"), "{}", fc.content);
+                assert!(fc.content.contains("==> b.rs <==\n1→beta"), "{}", fc.content);
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
+        let resources = test_resources(tmp.path());
+        let input: ReadFileInput = serde_json::from_value(serde_json::json!({})).unwrap();
+        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("target_file") && msg.contains("files"), "{msg}"),
+            other => panic!("Expected FileReadError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_file_schema_requires_neither_target_file_nor_files() {
+        let schema = serde_json::to_value(schemars::schema_for!(ReadFileInput)).unwrap();
+        let required = schema.get("required").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        assert!(required.is_empty(), "no single required key: {required:?}");
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("target_file") && props.contains_key("files"));
+        assert_eq!(props["files"]["type"], serde_json::json!(["array", "null"]));
+    }
+
+    /// Three files under one budget: the first fits, the second is cut with a
+    /// next-offset hint, the third is listed as unread.
+    #[tokio::test]
+    async fn files_share_one_byte_budget_and_list_unread_files() {
+        let tmp = TempDir::new().unwrap();
+        let big: String = (0..300).map(|_| format!("{}\n", "y".repeat(99))).collect(); // ~30 KB
+        std::fs::write(tmp.path().join("a.txt"), &big).unwrap();
+        std::fs::write(tmp.path().join("b.txt"), &big).unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "gamma\n").unwrap();
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: String::new(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: Some(vec![
+                ReadFileEntry { path: "a.txt".into(), offset: None, limit: None },
+                ReadFileEntry { path: "b.txt".into(), offset: None, limit: None },
+                ReadFileEntry { path: "c.txt".into(), offset: None, limit: None },
+            ]),
+        };
+        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                let a_end = fc.content.find("==> b.txt <==").unwrap();
+                assert!(!fc.content[..a_end].contains("truncated"), "first file fits whole");
+                assert!(fc.content[a_end..].contains("[... truncated at line "), "second file is cut: {}", &fc.content[a_end..a_end + 200]);
+                assert!(fc.content.ends_with("[40 KB cap reached: 1 of 3 files not read: c.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
+                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
+    }
+    /// When earlier files leave less budget than the next file's first line,
+    /// that file is deferred to another call (listed as unread), not reported
+    /// as an oversized line; smaller files after it still fit.
+    #[tokio::test]
+    async fn file_whose_first_line_outgrows_the_leftover_budget_is_listed_unread() {
+        let tmp = TempDir::new().unwrap();
+        let almost_full: String = (0..390).map(|_| format!("{}\n", "y".repeat(99))).collect(); // ~39 KB
+        std::fs::write(tmp.path().join("a.txt"), &almost_full).unwrap();
+        std::fs::write(tmp.path().join("b.txt"), format!("{}\n", "z".repeat(5_000))).unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "gamma\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(TemplateRenderer::new(
+            [(ToolKind::Search, "grep".to_string()), (ToolKind::Execute, "run_terminal_command".to_string())].into(),
+            Default::default(),
+        ));
+        let input = ReadFileInput {
+            path: String::new(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: Some(vec![
+                ReadFileEntry { path: "a.txt".into(), offset: None, limit: None },
+                ReadFileEntry { path: "b.txt".into(), offset: None, limit: None },
+                ReadFileEntry { path: "c.txt".into(), offset: None, limit: None },
+            ]),
+        };
+        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.starts_with("==> a.txt <==\n1→yyy"), "{}", &fc.content[..60]);
+                assert!(!fc.content.contains("truncated") && !fc.content.contains("alone is"), "a fits whole and b is not blamed as an oversized line: {}", &fc.content[fc.content.len() - 300..]);
+                assert!(!fc.content.contains("==> b.txt <=="), "b is deferred, not read into a sliver");
+                assert!(fc.content.contains("\n\n==> c.txt <==\n1→gamma\n"), "c still fits the leftover budget: {}", &fc.content[fc.content.len() - 300..]);
+                assert!(fc.content.ends_with("[40 KB cap reached: 1 of 3 files not read: b.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
+                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
         }
     }
     #[test]
@@ -1445,6 +1899,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1481,6 +1936,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1516,6 +1972,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let mut ctx = test_ctx(resources.into_shared());
         ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion(
@@ -1551,6 +2008,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1579,6 +2037,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1609,6 +2068,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1898,6 +2358,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: Some(1),
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1942,6 +2403,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -1970,6 +2432,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: Some(1),
             pages: None,
             format: None,
+            files: None,
         };
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -2086,6 +2549,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
             .await
@@ -2213,6 +2677,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let resources = test_resources(tmp.path());
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
@@ -2251,6 +2716,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let mut ctx = fuigo_tool_runtime::ToolCallContext::default();
         ctx.extensions
@@ -2276,6 +2742,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: Some("text".to_string()),
+            files: None,
         };
         let resources = test_resources(tmp.path());
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
@@ -2302,6 +2769,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let resources = test_resources(tmp.path());
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
@@ -2331,6 +2799,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let pdf_input = || ReadFileInput {
             path: "doc.pdf".to_string(),
@@ -2338,6 +2807,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: Some("text".to_string()),
+            files: None,
         };
         for _ in 0..10 {
             let (text, pdf) = tokio::join!(
@@ -2375,6 +2845,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let (deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
         assert!(
@@ -2402,16 +2873,18 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         }
     }
     /// Regression for the "death spiral" incident: a single-line
-    /// ~49.5KB JSON payload must be readable in full with default config.
-    /// The old 2000-char per-line clip made such files unreadable by
-    /// construction (bash output and MCP results are byte-capped too), so the
-    /// model could never load a payload it needed to re-emit as tool input.
+    /// ~35KB JSON payload (under the per-call byte cap) must be readable in
+    /// full with default config. The old 2000-char per-line clip made such
+    /// files unreadable by construction (bash output and MCP results are
+    /// byte-capped too), so the model could never load a payload it needed to
+    /// re-emit as tool input. A single line above the cap routes to the
+    /// shell-tool hint instead (see `oversized_single_line_gets_shell_hint`).
     #[tokio::test]
     async fn single_line_payload_reads_in_full_by_default() {
         let tmp = TempDir::new().unwrap();
         let payload = format!(
             "{{\"uid\":\"cdlmfnq6x2o74e\",\"panels\":\"{}\"}}",
-            "x".repeat(49_500)
+            "x".repeat(35_000)
         );
         std::fs::write(tmp.path().join("payload.json"), &payload).unwrap();
         let resources = test_resources(tmp.path());
@@ -2421,6 +2894,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let (_deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
         match terminal {
@@ -2449,19 +2923,20 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
         let (_deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
         terminal
     }
-    /// A single-line file that busts the whole-read token cap gets the
+    /// A single-line file that busts the per-call byte cap gets the
     /// shell-tool hint — line-based offset/limit cannot narrow one line.
-    /// ~120KB single line ≈ 30K estimated tokens > MAX_NUM_TOKENS (25K).
+    /// A ~50KB single line > MAX_READ_BYTES (40 KB).
     #[tokio::test]
     async fn oversized_single_line_gets_shell_hint() {
         for content in [
-            "z".repeat(120_000),
-            format!("{}\n", "z".repeat(120_000)),
-            format!("{}\r\n", "z".repeat(120_000)),
+            "z".repeat(50_000),
+            format!("{}\n", "z".repeat(50_000)),
+            format!("{}\r\n", "z".repeat(50_000)),
         ] {
             match read_huge_file(&content, true).await {
                 ReadFileOutput::FileTooLarge(msg) => {
@@ -2479,7 +2954,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     /// to a tool it cannot call).
     #[tokio::test]
     async fn oversized_single_line_hint_suppressed_without_execute_tool() {
-        match read_huge_file(&"z".repeat(120_000), false).await {
+        match read_huge_file(&"z".repeat(50_000), false).await {
             ReadFileOutput::FileTooLarge(msg) => {
                 assert!(
                     !msg.contains("single very long line"),
@@ -2495,7 +2970,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     #[tokio::test]
     async fn oversized_narrowed_window_single_line_gets_shell_hint() {
         let tmp = TempDir::new().unwrap();
-        let content = format!("# header\n{}\nfooter\n", "z".repeat(120_000));
+        let content = format!("# header\n{}\nfooter\n", "z".repeat(50_000));
         std::fs::write(tmp.path().join("huge.json"), content).unwrap();
         let mut resources = test_resources(tmp.path());
         let mut kinds = std::collections::HashMap::from([(ToolKind::Search, "grep".to_string())]);
@@ -2507,6 +2982,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             limit: Some(1),
             pages: None,
             format: None,
+            files: None,
         };
         let (_deltas, terminal) = execute_collect(test_ctx(resources.into_shared()), input).await;
         match terminal {
@@ -2519,18 +2995,19 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             other => panic!("expected FileTooLarge, got {other:?}"),
         }
     }
-    /// Multi-line oversized files keep the standard offset/limit guidance.
+    /// Multi-line oversized files are truncated with offset guidance, never rejected.
     #[tokio::test]
-    async fn oversized_multi_line_gets_standard_guidance() {
-        let content = format!("{}\n", "z".repeat(3_000)).repeat(50);
+    async fn oversized_multi_line_is_truncated_with_offset_guidance() {
+        let content = format!("{}\n", "z".repeat(3_000)).repeat(100);
         match read_huge_file(&content, true).await {
-            ReadFileOutput::FileTooLarge(msg) => {
+            ReadFileOutput::FileContent(fc) => {
+                let hint = fc.content.rsplit('\n').next().unwrap();
                 assert!(
-                    !msg.contains("single very long line") && msg.contains("offset"),
-                    "multi-line overflow must keep offset/limit guidance, got: {msg}"
+                    !hint.contains("single very long line") && hint.contains("continue with offset="),
+                    "multi-line overflow must give offset guidance, got: {hint}"
                 );
             }
-            other => panic!("expected FileTooLarge, got {other:?}"),
+            other => panic!("expected FileContent, got {other:?}"),
         }
     }
     #[test]

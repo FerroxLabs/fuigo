@@ -260,6 +260,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     >,
     pub session_meta: Option<&'a acp::Meta>,
     pub model_agent_type: Option<&'a str>,
+    /// [`crate::agent::config::ModelInfo::agent_type_inferred`] for `model_agent_type`; `false` when it came from persisted session state.
+    pub model_agent_type_inferred: bool,
     pub session_model_id: acp::ModelId,
     /// A `session/new` reasoning-effort hint applied to the spawn sampling; `None` for loads.
     pub initial_reasoning_effort: Option<ReasoningEffort>,
@@ -436,6 +438,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         persisted_announcement_state: None,
         session_meta,
         model_agent_type,
+        model_agent_type_inferred: false,
         session_model_id,
         initial_reasoning_effort: None,
         session_yolo_mode,
@@ -1036,6 +1039,106 @@ pub(crate) fn harnesses_are_compatible(active: &str, required: &str) -> bool {
         (false, false) => true,
         (true, true) => active == required,
         _ => false,
+    }
+}
+/// Stock session profiles a client derives from its UI flags (plan mode, `--no-subagents`, ask-user).
+/// They choose tools, not a harness, so an inferred model harness may replace them; any other client profile is an explicit agent choice.
+pub(crate) fn is_stock_session_profile(name: &str) -> bool {
+    use fuigo_agent::config::BuiltinAgentName;
+    use std::str::FromStr;
+    matches!(
+        BuiltinAgentName::from_str(name),
+        Ok(BuiltinAgentName::FuigoBuild
+            | BuiltinAgentName::FuigoBuildPlan
+            | BuiltinAgentName::FuigoBuildPlanNoSubagents
+            | BuiltinAgentName::FuigoBuildAskUser)
+    )
+}
+/// Keep a stock session profile's subagent choice when a model harness replaces that profile.
+/// The pager expresses `--no-subagents` only by choosing `fuigo-build-plan-no-subagents`, so a harness that ships `spawn_subagent` drops it for that session.
+pub(crate) fn carry_stock_profile_subagent_choice(
+    definition: &mut fuigo_agent::AgentDefinition,
+    session_profile: Option<&str>,
+) {
+    use fuigo_agent::config::BuiltinAgentName;
+    use std::str::FromStr;
+    let Some(profile) = session_profile
+        .filter(|name| is_stock_session_profile(name))
+        .and_then(|name| BuiltinAgentName::from_str(name).ok())
+    else {
+        return;
+    };
+    let task_tool_id = format!(
+        "{}:task",
+        fuigo_tools::types::tool::ToolNamespace::FuigoBuild
+    );
+    let profile_spawns = profile
+        .definition()
+        .tool_config
+        .tools
+        .iter()
+        .any(|tool| tool.id == task_tool_id);
+    if !profile_spawns {
+        definition
+            .tool_config
+            .tools
+            .retain(|tool| tool.id != task_tool_id);
+    }
+}
+/// Whether the user picked an agent outside the session request: `FUIGO_AGENT`, `[agent] name` / `definition`, or `--agent-profile`.
+/// Each outranks an inferred model harness.
+pub(crate) fn explicit_agent_selection(
+    agent_config: &crate::agent::config::AgentSelectionConfig,
+    agent_profile_path: Option<&std::path::Path>,
+) -> bool {
+    std::env::var("FUIGO_AGENT")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+        || agent_config.name.is_some()
+        || agent_config.definition.is_some()
+        || agent_profile_path.is_some()
+}
+/// What a model switch does with the session harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HarnessSwitch {
+    /// Keep the active harness.
+    Keep,
+    /// Rebuild into the required harness; only before the first turn.
+    Rebuild,
+    /// Refuse the switch: the harness cannot change after the first turn.
+    Reject,
+}
+/// Decide how a model switch treats the session harness.
+///
+/// A configured `agent_type` behaves as it always has: a mismatch rebuilds before the first turn and is rejected after it.
+/// An inferred harness (an OpenAI model defaulting to `codex`) is a default, not a requirement:
+/// - Switching to such a model rebuilds only a stock harness, only before the first turn, and only without an explicit agent choice; otherwise the active harness stays.
+/// - Switching away from a harness the previous model inferred never fails; it rebuilds before the first turn and keeps the harness after.
+pub(crate) fn harness_switch_decision(
+    active: Option<&str>,
+    required: &str,
+    target_inferred: bool,
+    active_inferred: bool,
+    before_first_turn: bool,
+    explicit_agent_selection: bool,
+) -> HarnessSwitch {
+    let Some(active) = active else {
+        return HarnessSwitch::Keep;
+    };
+    if harnesses_are_compatible(active, required) {
+        return HarnessSwitch::Keep;
+    }
+    if target_inferred {
+        return if before_first_turn && is_stock_session_profile(active) && !explicit_agent_selection {
+            HarnessSwitch::Rebuild
+        } else {
+            HarnessSwitch::Keep
+        };
+    }
+    match (before_first_turn, active_inferred) {
+        (true, _) => HarnessSwitch::Rebuild,
+        (false, true) => HarnessSwitch::Keep,
+        (false, false) => HarnessSwitch::Reject,
     }
 }
 /// Read a string field from `session_meta` first, falling back to `init_meta`.

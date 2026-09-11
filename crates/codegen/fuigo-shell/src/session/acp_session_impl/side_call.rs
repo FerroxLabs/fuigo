@@ -160,7 +160,7 @@ impl SessionActor {
     }
 
     /// Build the cache-aligned request for a recap-style side-call via [`Self::parent_cached_request`].
-    /// Uses the main turn's tool and hosted-tool specs and matching reasoning effort so the prompt-cache prefix stays warm.
+    /// Replays the tool list the main turn last sent (see [`Self::side_call_tool_specs`]), live hosted tools and matching reasoning effort so the prompt-cache prefix stays warm.
     ///
     /// Leaves BOTH temperature and max_output_tokens unset.
     /// The cli-chat-proxy layer may inject a `thinking` budget for thinking-enabled models (which also forces temperature == 1).
@@ -173,8 +173,7 @@ impl SessionActor {
         x_fuigo_conv_id: String,
         x_fuigo_req_id: String,
     ) -> ConversationRequest {
-        let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
+        let tools = self.side_call_tool_specs().await;
         // Mirror the main turn's hosted tools (overrides folded in) so a side-call can't search past the active cutoff.
         let hosted_tools = self.hosted_tools_for_turn();
         self.parent_cached_request(AuxCall {

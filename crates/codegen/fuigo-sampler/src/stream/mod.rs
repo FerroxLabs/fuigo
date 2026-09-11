@@ -8,6 +8,7 @@ pub mod chat_completions;
 pub mod collect;
 pub mod messages;
 pub mod responses;
+pub mod responses_ptc;
 
 pub use chat_completions::stream_chat_completions;
 pub use collect::collect_response;

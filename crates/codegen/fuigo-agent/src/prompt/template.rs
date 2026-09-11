@@ -445,6 +445,169 @@ mod tests {
         assert!(!prompt.contains("${%"), "No unresolved template blocks");
     }
 
+    /// The documented `apply_patch` call must use the tool's real input schema (`{"patch": string}`) and carry a patch the parser accepts.
+    #[test]
+    fn test_apply_patch_template_example_matches_tool_schema() {
+        use fuigo_tools::implementations::codex::apply_patch::{ApplyPatchInput, parse_patch};
+        let prompt = render_apply_patch(&default_renderer(), &default_placeholders());
+        let line = prompt
+            .lines()
+            .find(|l| l.contains("Use the `apply_patch` tool to edit files"))
+            .expect("apply_patch usage line");
+        let start = line.find('{').expect("example call object");
+        let end = line.rfind('}').expect("example call object end");
+        let example = &line[start..=end];
+        let value: serde_json::Value =
+            serde_json::from_str(example).expect("example call must be valid JSON");
+        let keys: Vec<&String> = value
+            .as_object()
+            .expect("example call must be an object")
+            .keys()
+            .collect();
+        assert_eq!(keys, ["patch"], "apply_patch takes exactly one argument, `patch`");
+        let input: ApplyPatchInput =
+            serde_json::from_value(value).expect("example must deserialize as ApplyPatchInput");
+        assert!(input.patch.starts_with("*** Begin Patch\n*** Update File: "));
+        parse_patch(&input.patch).expect("example patch must parse");
+    }
+
+    /// The base prompt asks for parallel independent tool calls and whole-file reads, and keeps the dedicated-tool rule.
+    #[test]
+    fn test_base_prompt_guides_parallel_calls_and_whole_file_reads() {
+        let prompt = render_base(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("Issue independent tool calls in parallel, in a single response"));
+        assert!(prompt.contains("read a whole relevant file"));
+        assert!(
+            prompt.contains("`read_file` for reading files instead of cat/head/tail"),
+            "the dedicated file-tool rule must stay"
+        );
+        assert!(prompt.contains("Read whole files rather than slices unless a file is very large"));
+        assert!(prompt.contains("when `read_file` accepts several paths, read related files together in one call"));
+        assert!(prompt.contains("Do not re-read a file that has not changed since you read it"));
+        // default_renderer() has no task tool, so the subagent line needs a renderer that ships one
+        let with_task = render_base(&codex_renderer(), &default_placeholders());
+        assert!(
+            with_task.contains("explore directly rather than spawning a `spawn_subagent` subagent"),
+            "small tasks must be explored directly"
+        );
+    }
+
+    /// Without a task tool the base prompt must not mention subagents at all.
+    #[test]
+    fn test_base_prompt_subagent_guidance_needs_task_tool() {
+        let tools: HashMap<ToolKind, String> = [(ToolKind::Read, "read_file".to_string())].into();
+        let r = TemplateRenderer::new(tools, HashMap::new());
+        let prompt = render_base(&r, &default_placeholders());
+        assert!(!prompt.contains("subagent"), "no subagent guidance without a task tool");
+        assert!(prompt.contains("Read whole files rather than slices unless a file is very large"));
+    }
+
+    /// Renderer shaped like the Codex harness: its own file tools plus the shared shell/plan/task tools.
+    fn codex_renderer() -> TemplateRenderer {
+        let tools: HashMap<ToolKind, String> = [
+            (ToolKind::Read, "read_file"),
+            (ToolKind::Edit, "apply_patch"),
+            (ToolKind::Execute, "run_terminal_command"),
+            (ToolKind::Search, "grep_files"),
+            (ToolKind::List, "list_dir"),
+            (ToolKind::Plan, "todo_write"),
+            (ToolKind::Task, "spawn_subagent"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.to_string()))
+        .collect();
+        TemplateRenderer::new(tools, HashMap::new())
+    }
+
+    /// Raw byte ceiling for the Codex template: it is prefix for every OpenAI request, so it must not grow.
+    const CODEX_TEMPLATE_RAW_CEILING_BYTES: usize = 21_473;
+
+    /// The Codex prompt batches exploration, names the harness's real tools, explores directly for small tasks, and no longer carries Codex-CLI text Fuigo cannot honour.
+    #[test]
+    fn test_apply_patch_prompt_guides_batching_and_drops_stale_codex_text() {
+        let raw = apply_patch_template();
+        assert!(
+            raw.len() <= CODEX_TEMPLATE_RAW_CEILING_BYTES,
+            "apply_patch_prompt.md is {} bytes, over the {} byte ceiling",
+            raw.len(),
+            CODEX_TEMPLATE_RAW_CEILING_BYTES
+        );
+        let prompt = render_apply_patch(&codex_renderer(), &default_placeholders());
+        assert!(!prompt.contains("${{") && !prompt.contains("${%"), "no unresolved template tokens");
+        // Batching guidance names the tools the harness ships
+        assert!(prompt.contains("## Exploration and tool use"));
+        assert!(prompt.contains("Parallelize independent tool calls in one response whenever you can, especially file reads and searches"));
+        assert!(prompt.contains("when `read_file` accepts several paths, read related files in one call"));
+        assert!(prompt.contains("Do not re-read a file you already have unless you changed it or it was trimmed from context"));
+        assert!(prompt.contains("one search with regex alternation and context beats many single-pattern searches (`grep_files` for content, `list_dir` to orient in a directory once)"));
+        assert!(prompt.contains("Prefer the file tools above over `cat`/`sed`/`rg` in `run_terminal_command`"));
+        assert!(prompt.contains("Wait for a command's result rather than polling for it"));
+        assert!(prompt.contains("prefer using `rg` or `rg --files`"), "shell rg advice stays");
+        // Subagents only for broad work, and wait for them
+        assert!(prompt.contains("## Subagents"));
+        assert!(prompt.contains("For tasks scoped to a handful of files, explore directly — do not spawn a `spawn_subagent` subagent"));
+        assert!(prompt.contains("wait for its result rather than duplicating the investigation yourself"));
+        // Plan tool: milestones, not every step
+        assert!(prompt.contains("It is for multi-step work the user watches"));
+        assert!(prompt.contains("Do not update the plan for every small step"));
+        assert!(prompt.contains("If no plan tool is available, skip written planning and start the work"));
+        // Preamble optional; progress updates only for long work
+        assert!(prompt.contains("A brief one-line preamble is welcome when it helps the user follow along"));
+        assert!(prompt.contains("Do not add commentary to routine reads and searches"));
+        assert!(!prompt.contains("When making tool calls, include a brief preamble message"));
+        assert!(prompt.contains("Only for especially longer tasks"));
+        // Stale Codex-CLI text is gone
+        assert!(prompt.contains("When running non-interactively, proactively run the relevant tests and lints yourself"));
+        for stale in [
+            "**never**",
+            "on-failure",
+            "**untrusted**",
+            "on-request",
+            "approval mode",
+            "included with the developer message",
+            "Sandbox and approvals",
+        ] {
+            assert!(!prompt.contains(stale), "stale Codex-CLI text still present: {stale}");
+        }
+        // Kept from the earlier fix
+        assert!(prompt.contains("Do not waste tokens by re-reading files after calling `apply_patch` on them"));
+        assert!(prompt.contains("Emit function calls to read and search the workspace, run terminal commands, and apply patches"));
+    }
+
+    /// Codex prompt without task/search/list tools drops the guarded guidance instead of leaking tokens.
+    #[test]
+    fn test_apply_patch_prompt_guidance_degrades_without_optional_tools() {
+        let tools: HashMap<ToolKind, String> = [
+            (ToolKind::Read, "read_file".to_string()),
+            (ToolKind::Execute, "run_terminal_command".to_string()),
+        ]
+        .into();
+        let r = TemplateRenderer::new(tools, HashMap::new());
+        let prompt = render_apply_patch(&r, &default_placeholders());
+        assert!(!prompt.contains("${{") && !prompt.contains("${%"));
+        assert!(prompt.contains("## Exploration and tool use"));
+        assert!(!prompt.contains("## Subagents"));
+        assert!(!prompt.contains("subagent"));
+        assert!(!prompt.contains("grep_files") && !prompt.contains("list_dir"));
+        assert!(prompt.contains("one search with regex alternation and context beats many single-pattern searches."));
+    }
+
+    /// The subagent prompt carries a context-gathering budget and whole-file/multi-file read guidance.
+    #[test]
+    fn test_subagent_prompt_guides_context_budget_and_whole_file_reads() {
+        let prompt = render_subagent(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("Parallelize independent tool calls in a single response, especially file reads and searches"));
+        assert!(prompt.contains("start broad with one wide search (`grep` with regex alternation and context), then read the relevant files in one batch, and stop exploring once you can answer"));
+        assert!(prompt.contains("Read whole files rather than offset/limit slices; when `read_file` accepts several paths, read related files in one call"));
+        assert!(prompt.contains("Never re-read a file you already have, and never issue single-pattern searches one at a time"));
+        // Without search/read tools the guarded clauses drop out cleanly
+        let r = TemplateRenderer::new(HashMap::new(), HashMap::new());
+        let bare = render_subagent(&r, &default_placeholders());
+        assert!(!bare.contains("${{") && !bare.contains("${%"));
+        assert!(bare.contains("start broad with one wide search, then read the relevant files in one batch"));
+        assert!(bare.contains("Read whole files rather than offset/limit slices. Never re-read"));
+    }
+
     #[test]
     fn test_apply_patch_template_plan_absent_omits_planning() {
         // Renderer without Plan tool

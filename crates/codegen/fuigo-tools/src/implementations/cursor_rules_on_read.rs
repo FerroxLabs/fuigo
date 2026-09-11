@@ -693,6 +693,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let first = fuigo_tool_runtime::Tool::run(&FuigoReadFileTool, test_ctx(shared), input)

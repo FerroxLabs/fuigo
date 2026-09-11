@@ -1,7 +1,7 @@
 [
   {
     "name": "run_terminal_command",
-    "original": "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional timeout in milliseconds (up to 36000000ms). If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later. Background tasks are not bounded by the default: with timeout omitted or 0 they run until they exit or are killed; a positive timeout still applies.\n  - Timeout enforcement: when the timeout fires, the wrapper kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed. `timeout: 0` in `background: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via kill_command_or_subagent.\n  - If the output exceeds 40000 characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.\n  - You can use the background parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it. You do not need to use '&' at the end of the command when using this parameter.",
+    "original": "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional timeout in milliseconds (up to 36000000ms). A foreground command blocks up to timeout (default 120000ms, at most 300000ms of blocking); on expiry it is not killed: it keeps running in the background and you get a task id. So a test run or build that finishes within the timeout returns its output inline; use background: true only for servers, watchers, or work you will not wait for. Background tasks are not bounded by the default: with timeout omitted or 0 they run until they exit or are killed; a positive timeout still applies.\n  - Timeout enforcement: when the timeout fires, the wrapper kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed. `timeout: 0` in `background: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via kill_command_or_subagent.\n  - If the output exceeds 40000 characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.\n  - You can use the background parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it. You do not need to use '&' at the end of the command when using this parameter.",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "required": [
@@ -14,7 +14,7 @@
           "type": "string"
         },
         "timeout": {
-          "description": "Optional timeout in milliseconds (max 36000000). Default: 120000; foreground commands exceeding it are automatically backgrounded.",
+          "description": "Optional timeout in milliseconds (max 36000000). Default: 120000. A foreground command blocks up to this long (omitted: 120000 ms; at most 300000 ms of blocking); on expiry it keeps running in the background and returns a task id.",
           "type": [
             "integer",
             "null"
@@ -36,103 +36,178 @@
       },
       "type": "object"
     },
-    "compact": "Run bash; return output. Optional timeout_ms is at most 36000000. Foreground commands exceeding the default auto-background (not killed) and return a task ID. Background commands without a positive timeout run until exit or explicit kill; timeout 0 disables their wrapper timeout. On timeout, terminate the process group with SIGTERM then SIGKILL after ~1s; detached setsid/nohup descendants may survive. Output over 40000 characters retains beginning/end plus a full-log path. background=true returns immediately; completion notifies you—do not poll or sleep-wait, and do not append '&'."
+    "compact": "Run bash; return output. Optional timeout_ms is at most 36000000. A foreground command blocks up to its timeout (default 120000, at most 300000 of blocking); on expiry it is not killed but keeps running in the background and returns a task ID, so runs that finish in time return inline; use background=true only for servers, watchers or work you will not wait for. Background commands without a positive timeout run until exit or explicit kill; timeout 0 disables their wrapper timeout. On timeout, terminate the process group with SIGTERM then SIGKILL after ~1s; detached setsid/nohup descendants may survive. Output over 40000 characters retains beginning/end plus a full-log path. background=true returns immediately; completion notifies you—do not poll or sleep-wait, and do not append '&'."
   },
   {
     "name": "read_file",
-    "original": "Read a file.\n\nUsage:\n- The target_file parameter can be a relative path in the workspace or an absolute path\n- By default, it reads up to 1000 lines starting from the beginning of the file\n- Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line\n- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc).\n- When reading an image file the contents are presented visually as this tool uses multimodal LLMs.",
+    "original": "Reads whole files by default, with 1-indexed line numbers (L{n}: content; lines longer than 500 characters are cut). Pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files. A call returns at most about 40 KB across its files; past that the read is truncated at a line boundary and the result names the next offset. Indentation mode expands around an anchor line.",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "required": [
-        "target_file"
-      ],
-      "type": "object",
       "properties": {
-        "target_file": {
-          "description": "The path of the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is.",
-          "type": "string"
+        "file_path": {
+          "description": "Absolute path to the file. Omit it when passing `files`.",
+          "type": "string",
+          "default": ""
+        },
+        "files": {
+          "description": "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "description": "Input for the codex `read_file` tool.\n\nField descriptions match codex `create_read_file_tool()` parameter descriptions.\nOne file of a multi-file codex `read_file` call.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "description": "Absolute path to the file",
+                "type": "string"
+              },
+              "offset": {
+                "description": "The line number to start reading from. Must be 1 or greater. Only for very large files.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0,
+                "default": null
+              },
+              "limit": {
+                "description": "The maximum number of lines to return. Only for very large files.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          "default": null
         },
         "offset": {
-          "description": "The line number to start reading from. Only provide if the file is too large to read at once.",
+          "description": "The line number to start reading from. Must be 1 or greater.",
           "type": "integer",
+          "format": "uint",
+          "minimum": 1,
           "default": 1
         },
         "limit": {
-          "description": "The number of lines to read. Only provide if the file is too large to read at once.",
-          "type": "integer"
+          "description": "The maximum number of lines to return.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 20000
         },
-        "pages": {
-          "description": "Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files.",
-          "type": [
-            "string",
-            "null"
-          ]
+        "mode": {
+          "description": "Optional mode selector: \"slice\" for simple ranges (default) or \"indentation\"\nto expand around an anchor line.",
+          "type": "string",
+          "enum": [
+            "slice",
+            "indentation"
+          ],
+          "default": "slice"
         },
-        "format": {
-          "description": "Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files.",
+        "indentation": {
+          "description": "Indentation-mode configuration. Only used when mode is \"indentation\".",
           "type": [
-            "string",
+            "object",
             "null"
-          ]
+          ],
+          "properties": {
+            "anchor_line": {
+              "description": "Anchor line to center the indentation lookup on (defaults to offset).",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0,
+              "default": null
+            },
+            "max_levels": {
+              "description": "How many parent indentation levels (smaller indents) to include.",
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0,
+              "default": 0
+            },
+            "include_siblings": {
+              "description": "When true, include additional blocks that share the anchor indentation.",
+              "type": "boolean",
+              "default": false
+            },
+            "include_header": {
+              "description": "Include doc comments or attributes directly above the selected block.",
+              "type": "boolean",
+              "default": true
+            },
+            "max_lines": {
+              "description": "Hard cap on the number of lines returned when using indentation mode.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0,
+              "default": null
+            }
+          },
+          "default": null
         }
-      }
+      },
+      "type": "object",
+      "required": []
     },
-    "compact": "Read a workspace-relative or absolute path; default first 1000 lines. Line anchors are 1-based LINE_NUMBER→LINE_CONTENT on the first returned line and every tenth file line; count intervening lines from the nearest anchor. Supports text, PDF, PowerPoint, notebooks and images; images are presented visually."
+    "compact": "Read whole files by default with 1-indexed L{n}: lines (lines over 500 characters are cut); pass several paths in one call as files=[{path, offset?, limit?}] to read them together; use offset/limit only for very large files. A call returns at most about 40 KB across its files, then truncates at a line boundary and names the next offset. Indentation mode expands around an anchor line."
   },
   {
-    "name": "search_replace",
-    "original": "Replace an exact string in a file.\n\n- `read_file` prefixes each line with \"LINE_NUMBER→\". That prefix is not part of the file: match only what comes after the →, with its exact indentation.\n- `old_string` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `replace_all` to change every occurrence (handy for renaming an identifier).\n- To create a new file, set `old_string` to an empty string.",
+    "name": "list_dir",
+    "original": "Lists entries in a local directory with 1-indexed entry numbers and simple type labels. Returns up to 200 entries two levels deep by default; raise limit/offset or depth only when the listing says more entries exist.",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "required": [
-        "file_path",
-        "old_string",
-        "new_string"
+        "dir_path"
       ],
       "properties": {
-        "file_path": {
-          "description": "The path to the file to modify. You can use either a relative path in the workspace or an absolute path.",
+        "dir_path": {
+          "description": "Absolute path to the directory to list.",
           "type": "string"
         },
-        "old_string": {
-          "description": "The text to replace",
-          "type": "string"
+        "offset": {
+          "description": "The entry number to start listing from. Must be 1 or greater.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "default": 1
         },
-        "new_string": {
-          "description": "The text to replace it with (must be different from old_string)",
-          "type": "string"
+        "limit": {
+          "description": "The maximum number of entries to return.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 200
         },
-        "replace_all": {
-          "description": "Replace all occurrences of old_string (default false)",
-          "type": "boolean",
-          "default": false
+        "depth": {
+          "description": "The maximum directory depth to traverse. Must be 1 or greater.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "default": 2
         }
       },
       "type": "object"
     },
-    "compact": "Replace an exact file string. Exclude read_file's LINE_NUMBER→ anchors; preserve indentation. old_string must uniquely match, unless replace_all=true; add surrounding context to disambiguate. Empty old_string creates a new file."
+    "compact": "List a local directory with 1-indexed entry numbers and simple type labels: up to 200 entries two levels deep by default; raise limit/offset or depth only when the listing says more entries exist."
   },
   {
-    "name": "list_dir",
-    "original": "Lists files and directories in a given path.\nThe 'target_directory' parameter can be relative to the workspace root or absolute.\n\nOther details:\n    - The result does not display dot-files and dot-directories.\n    - Respects .gitignore patterns (files/directories ignored by git are not shown).\n    - Large directories are summarized with file counts and extension breakdowns instead of listing all files.",
-    "parameters": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "required": [
-        "target_directory"
-      ],
-      "type": "object",
-      "properties": {
-        "target_directory": {
-          "description": "Path to directory to list contents of, relative to the workspace root or absolute.",
-          "type": "string"
-        }
-      }
-    },
-    "compact": "List a workspace-relative or absolute directory. Hides dotfiles/directories and honors .gitignore. Large directories return counts and extension summaries instead of every entry."
-  },
-  {
-    "name": "grep",
-    "original": "Search file contents with regular expressions (ripgrep).\n\n- Full regex syntax, so escape literal special characters: `functionCall\\(`, or `interface\\{\\}` to find interface{} in Go.\n- Pass pattern as a raw regex string — no surrounding quotes.\n- Respects .gitignore unless you pass a broad glob like '--glob *'.\n- Only filter by 'type' or 'glob' when you are sure of the file type; import paths may not match source file types (.js vs .ts).\n- Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report \"at least\" counts.",
+    "name": "grep_files",
+    "original": "Search file contents with regular expressions (ripgrep).\n\n- Full regex syntax, so escape literal special characters: `functionCall\\(`, or `interface\\{\\}` to find interface{} in Go.\n- Pass pattern as a raw regex string — no surrounding quotes. Combine related searches into one call with alternation (`foo|bar|baz`; a JSON array of patterns is also accepted and OR-ed) instead of one call per term.\n- Results are the matching lines with file and line number; add -C (or -A/-B) for surrounding context lines in the same call.\n- Respects .gitignore unless you pass a broad glob like '--glob *'.\n- Only filter by 'type' or 'glob' when you are sure of the file type; import paths may not match source file types (.js vs .ts).\n- Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report \"at least\" counts.",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "required": [
@@ -141,7 +216,7 @@
       "type": "object",
       "properties": {
         "pattern": {
-          "description": "The regular expression pattern to search for in file contents (rg --regexp)",
+          "description": "The regular expression pattern to search for in file contents (rg --regexp). Search several things in one call with alternation: `foo|bar|baz` (a JSON array of patterns is also accepted and OR-ed).",
           "type": "string"
         },
         "path": {
@@ -193,16 +268,16 @@
         }
       }
     },
-    "compact": "Search contents with ripgrep regex. Supply raw regex without surrounding quotes; escape literal regex metacharacters. Honors .gitignore unless overridden by a broad glob such as '--glob *'. Filter type/glob only when certain (imports and source extensions may differ). ':' denotes matches, '-' context, grouped by file. Capped results report 'at least' counts."
+    "compact": "Search contents with ripgrep regex. Supply raw regex without surrounding quotes; escape literal regex metacharacters; combine related searches in one call with alternation (foo|bar|baz, or a JSON array of patterns) instead of one call per term. Results are matching lines with file and line number; add -C (or -A/-B) for context lines in the same call. Honors .gitignore unless overridden by a broad glob such as '--glob *'. Filter type/glob only when certain (imports and source extensions may differ). ':' denotes matches, '-' context, grouped by file. Capped results report 'at least' counts."
   },
   {
     "name": "get_command_or_subagent_output",
-    "original": "Get output and status from a background task, monitor, or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n- Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at 600000 (~10 min)\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
+    "original": "Get output and status from a background task or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents; for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n- Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at 600000 (~10 min) (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "task_ids": {
-          "description": "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot.",
+          "description": "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With timeout_ms omitted or positive, multiple ids wait until all complete. Pass timeout_ms=0 for a non-blocking snapshot.",
           "type": "array",
           "items": {
             "type": "string"
@@ -210,7 +285,7 @@
           "default": []
         },
         "timeout_ms": {
-          "description": "Max wait time in milliseconds, up to 600000 (~10 min). A positive value waits for completion; omit or pass 0 for a non-blocking status poll.",
+          "description": "Max wait time in milliseconds, up to 600000 (~10 min). Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot.",
           "type": [
             "integer",
             "null"
@@ -224,7 +299,204 @@
       "type": "object",
       "required": []
     },
-    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted/zero timeout_ms is nonblocking; positive timeout waits for all IDs, capped at 600000ms. Read output_file for large output."
+    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted timeout_ms waits up to 120000 ms for completion; a positive value waits up to that long, capped at 600000 (values below 5000 are raised to 5000: short polls waste a model call each); 0 is a nonblocking snapshot. Read output_file for large output."
+  },
+  {
+    "name": "read_file",
+    "original": "Read a file, or several files in one call.\n\nUsage:\n- Reads whole files by default; pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files.\n- The target_file parameter (or each files[].path) can be a relative path in the workspace or an absolute path\n- A call returns up to 20000 lines and about 40 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from\n- Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line\n- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc); read PDFs and images one per call\n- When reading an image file the contents are presented visually as this tool uses multimodal LLMs.",
+    "parameters": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "target_file": {
+          "description": "The path of the file to read. You can use either a relative path in the workspace or an absolute path. If an absolute path is provided, it will be preserved as is. Omit it when passing `files`.",
+          "type": "string",
+          "default": ""
+        },
+        "files": {
+          "description": "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "description": "One file of a multi-file `read_file` call.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "description": "The path of the file to read: a relative path in the workspace or an absolute path.",
+                "type": "string"
+              },
+              "offset": {
+                "description": "The line number to start reading from. Only provide if the file is too large to read at once.",
+                "type": "integer"
+              },
+              "limit": {
+                "description": "The number of lines to read. Only provide if the file is too large to read at once.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        "offset": {
+          "description": "The line number to start reading from. Only provide if the file is too large to read at once.",
+          "type": "integer",
+          "default": 1
+        },
+        "limit": {
+          "description": "The number of lines to read. Only provide if the file is too large to read at once.",
+          "type": "integer"
+        },
+        "pages": {
+          "description": "Page range for PDF files (e.g. '1-5', '3', '10-'). Required for PDFs with more than 10 pages. Max 20 pages per call. Ignored for non-PDF files.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "description": "Output format for PDF files. 'image' (default) renders pages as images. 'text' extracts text content. Ignored for non-PDF files.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object",
+      "required": []
+    },
+    "compact": "Read whole files by default; pass several paths in one call as files=[{path, offset?, limit?}] to read them together; use offset/limit only for very large files. Paths are workspace-relative or absolute. A call returns up to 20000 lines and about 40 KB across its files, then truncates at a line boundary and names the next offset. Line anchors are 1-based LINE_NUMBER→LINE_CONTENT on the first returned line and every tenth file line; count intervening lines from the nearest anchor. Supports text, PDF, PowerPoint, notebooks and images (read PDFs/images one per call); images are presented visually."
+  },
+  {
+    "name": "grep",
+    "original": "Search file contents with regular expressions (ripgrep).\n\n- Full regex syntax, so escape literal special characters: `functionCall\\(`, or `interface\\{\\}` to find interface{} in Go.\n- Pass pattern as a raw regex string — no surrounding quotes. Combine related searches into one call with alternation (`foo|bar|baz`; a JSON array of patterns is also accepted and OR-ed) instead of one call per term.\n- Results are the matching lines with file and line number; add -C (or -A/-B) for surrounding context lines in the same call.\n- Respects .gitignore unless you pass a broad glob like '--glob *'.\n- Only filter by 'type' or 'glob' when you are sure of the file type; import paths may not match source file types (.js vs .ts).\n- Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report \"at least\" counts.",
+    "parameters": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "required": [
+        "pattern"
+      ],
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "description": "The regular expression pattern to search for in file contents (rg --regexp). Search several things in one call with alternation: `foo|bar|baz` (a JSON array of patterns is also accepted and OR-ed).",
+          "type": "string"
+        },
+        "path": {
+          "description": "File or directory to search in (rg pattern -- PATH). Defaults to workspace path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "glob": {
+          "description": "Glob pattern (rg --glob GLOB -- PATH) to filter files (e.g. \"*.js\", \"*.{ts,tsx}\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "-B": {
+          "description": "Number of lines to show before each match (rg -B).",
+          "type": "integer"
+        },
+        "-A": {
+          "description": "Number of lines to show after each match (rg -A).",
+          "type": "integer"
+        },
+        "-C": {
+          "description": "Number of lines to show before and after each match (rg -C).",
+          "type": "integer"
+        },
+        "-i": {
+          "description": "Case insensitive search (rg -i).",
+          "type": "boolean",
+          "default": false
+        },
+        "type": {
+          "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_limit": {
+          "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Defaults to 200 lines or 500 entries.",
+          "type": "integer"
+        },
+        "multiline": {
+          "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall).",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "compact": "Search contents with ripgrep regex. Supply raw regex without surrounding quotes; escape literal regex metacharacters; combine related searches in one call with alternation (foo|bar|baz, or a JSON array of patterns) instead of one call per term. Results are matching lines with file and line number; add -C (or -A/-B) for context lines in the same call. Honors .gitignore unless overridden by a broad glob such as '--glob *'. Filter type/glob only when certain (imports and source extensions may differ). ':' denotes matches, '-' context, grouped by file. Capped results report 'at least' counts."
+  },
+  {
+    "name": "get_command_or_subagent_output",
+    "original": "Get output and status from a background task, monitor, or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n- Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at 600000 (~10 min) (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
+    "parameters": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "task_ids": {
+          "description": "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With timeout_ms omitted or positive, multiple ids wait until all complete. Pass timeout_ms=0 for a non-blocking snapshot.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "timeout_ms": {
+          "description": "Max wait time in milliseconds, up to 600000 (~10 min). Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null,
+          "maximum": 600000
+        }
+      },
+      "type": "object",
+      "required": []
+    },
+    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted timeout_ms waits up to 120000 ms for completion; a positive value waits up to that long, capped at 600000 (values below 5000 are raised to 5000: short polls waste a model call each); 0 is a nonblocking snapshot. Read output_file for large output."
+  },
+  {
+    "name": "search_replace",
+    "original": "Replace an exact string in a file.\n\n- `read_file` prefixes each line with \"LINE_NUMBER→\". That prefix is not part of the file: match only what comes after the →, with its exact indentation.\n- `old_string` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `replace_all` to change every occurrence (handy for renaming an identifier).\n- To create a new file, set `old_string` to an empty string.",
+    "parameters": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "required": [
+        "file_path",
+        "old_string",
+        "new_string"
+      ],
+      "properties": {
+        "file_path": {
+          "description": "The path to the file to modify. You can use either a relative path in the workspace or an absolute path.",
+          "type": "string"
+        },
+        "old_string": {
+          "description": "The text to replace",
+          "type": "string"
+        },
+        "new_string": {
+          "description": "The text to replace it with (must be different from old_string)",
+          "type": "string"
+        },
+        "replace_all": {
+          "description": "Replace all occurrences of old_string (default false)",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "type": "object"
+    },
+    "compact": "Replace an exact file string. Exclude read_file's LINE_NUMBER→ anchors; preserve indentation. old_string must uniquely match, unless replace_all=true; add surrounding context to disambiguate. Empty old_string creates a new file."
   },
   {
     "name": "scheduler_create",

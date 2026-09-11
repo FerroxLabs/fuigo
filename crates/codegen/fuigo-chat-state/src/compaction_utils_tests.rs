@@ -1968,6 +1968,7 @@ async fn build_compacted_history_multi_turn_with_parallel_tool_calls() {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         // [4] Tool result for call_1
         ConversationItem::tool_result("call_1", "fn main() {\n    println!(\"hello world\");\n}"),
@@ -2002,6 +2003,7 @@ async fn build_compacted_history_multi_turn_with_parallel_tool_calls() {
             model_id: Some("grok-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         // [9] Tool result for call_3
         ConversationItem::tool_result("call_3", "File edited successfully."),
@@ -2355,6 +2357,7 @@ fn conversation_item_preserves_reasoning_siblings() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
     ]);
     assert_eq!(result.len(), 3);
@@ -2379,6 +2382,7 @@ fn strip_reasoning_blocks_drops_reasoning_siblings() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
     ]);
     assert_eq!(result.len(), 1, "reasoning sibling must be dropped");
@@ -2429,6 +2433,7 @@ fn prepare_for_summarization_drops_reasoning_sibling_on_mutated_assistant() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         ConversationItem::tool_result("tc1", "match found"),
     ]);
@@ -2472,6 +2477,7 @@ fn prepare_for_summarization_drops_standalone_reasoning_sibling() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
     ]);
     assert_eq!(result.len(), 1);
@@ -2508,6 +2514,7 @@ fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         ConversationItem::tool_result("tc1", "match"),
         ConversationItem::user("second turn"),
@@ -2518,6 +2525,7 @@ fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         ConversationItem::tool_result("tc2", "stray"),
         ConversationItem::user("third turn"),
@@ -2527,6 +2535,7 @@ fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
     ]);
     assert_eq!(result.len(), 6);
@@ -2596,6 +2605,7 @@ fn prepare_for_summarization_is_idempotent() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         ConversationItem::tool_result("tc1", "files"),
     ];

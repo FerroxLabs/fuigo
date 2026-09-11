@@ -7,6 +7,7 @@ fn make_test_tool() -> ToolSpec {
         name: "test_tool".to_string(),
         description: Some("A test tool".to_string()),
         parameters: serde_json::json!({}),
+        freeform: None,
     }
 }
 
@@ -219,6 +220,7 @@ fn test_assistant_with_content_and_tool_calls() {
         model_id: Some("grok-3".to_string()),
         model_fingerprint: None,
         reasoning_effort: None,
+        output_order: None,
     };
 
     let item = ConversationItem::Assistant(assistant.clone());
@@ -242,6 +244,7 @@ fn test_conversation_request_with_tools_to_chat_completion() {
                 },
                 "required": ["path"]
             }),
+            freeform: None,
         },
         ToolSpec {
             name: "bash".to_string(),
@@ -253,6 +256,7 @@ fn test_conversation_request_with_tools_to_chat_completion() {
                 },
                 "required": ["command"]
             }),
+            freeform: None,
         },
     ];
 

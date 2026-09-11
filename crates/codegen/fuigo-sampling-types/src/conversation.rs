@@ -6,12 +6,14 @@
 mod chat_completions;
 mod messages;
 mod responses;
+pub mod responses_ptc;
 
 pub use chat_completions::{conversation_item_to_chat_message, conversation_to_chat_messages};
 pub use messages::build_messages_request;
 pub use responses::{
-    extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items,
+    custom_tool_call, extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items,
 };
+pub use responses_ptc::{ProgramItem, ProgramOutputItem, patch_request_body};
 
 use std::sync::Arc;
 
@@ -277,6 +279,36 @@ pub struct AssistantItem {
     /// `None` for synthetic items and backends that don't echo it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::ReasoningEffort>,
+    /// Emission order of the Responses-API output items this turn produced.
+    ///
+    /// The Responses backend records one slot per output item so replay can restore the exact interleaving of the
+    /// preceding `Reasoning` / `BackendToolCall` siblings with this item's message text and tool calls
+    /// (`reasoning, message, function_call, reasoning, function_call` must go back on the wire in that order:
+    /// every reasoning item has to directly precede the item it produced).
+    /// `None` on other backends, synthetic items and sessions written before the field existed; those replay in the
+    /// legacy layout (siblings first, then the message, then the calls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_order: Option<Vec<OutputSlot>>,
+}
+
+/// One Responses-API output item of an assistant turn, in emission order (see [`AssistantItem::output_order`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputSlot {
+    /// A `reasoning` sibling, by item id.
+    Reasoning { id: String },
+    /// An assistant `message`; the text is kept per slot so multiple messages replay separately.
+    Message { text: Arc<str> },
+    /// A `function_call` (JSON-argument client tool), by `call_id`.
+    FunctionCall { call_id: String },
+    /// A `custom_tool_call` (freeform client tool), by `call_id`; `id` is the wire item id the replay must carry.
+    CustomToolCall {
+        call_id: String,
+        #[serde(default)]
+        id: String,
+    },
+    /// A backend-executed tool call sibling (`web_search_call`, hosted `custom_tool_call`, `code_interpreter_call`), by item id.
+    BackendToolCall { id: String },
 }
 
 /// Tool result message
@@ -309,6 +341,8 @@ impl BackendToolCallItem {
             BackendToolKind::WebSearch(ws) => ws.id.as_str(),
             BackendToolKind::XSearch(ct) => ct.id.as_str(),
             BackendToolKind::CodeInterpreter(ci) => ci.id.as_str(),
+            BackendToolKind::Program(p) => p.id.as_str(),
+            BackendToolKind::ProgramOutput(o) => o.id.as_str(),
         }
     }
 
@@ -345,6 +379,9 @@ impl BackendToolCallItem {
                     .unwrap_or_default();
                 format!("[backend code_interpreter] {code_preview}")
             }
+            BackendToolKind::Program(_) | BackendToolKind::ProgramOutput(_) => {
+                responses_ptc::text_summary(&self.kind).unwrap_or_default()
+            }
         }
     }
 }
@@ -361,6 +398,10 @@ pub enum BackendToolKind {
     XSearch(rs::CustomToolCall),
     /// Server-side code interpreter execution.
     CodeInterpreter(rs::CodeInterpreterToolCall),
+    /// A programmatic-tool-calling `program` item (the JavaScript the model wrote for the hosted V8 runtime).
+    Program(ProgramItem),
+    /// The terminal `program_output` of a programmatic-tool-calling run.
+    ProgramOutput(ProgramOutputItem),
 }
 
 // ============================================================================
@@ -484,12 +525,90 @@ pub struct ToolSpec {
     pub description: Option<String>,
     /// JSON Schema for the parameters
     pub parameters: serde_json::Value,
+    /// Set when the tool takes grammar-constrained freeform text instead of JSON arguments.
+    /// The Responses backend then advertises it as a `custom` tool (and replays its calls as `custom_tool_call`);
+    /// the Messages and chat-completions backends ignore it and keep the JSON function form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeform: Option<FreeformFormat>,
+}
+
+/// Input format of a freeform (Responses `custom`) tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeformFormat {
+    pub syntax: FreeformSyntax,
+    /// The grammar text in `syntax`.
+    pub definition: String,
+}
+
+/// Grammar syntax of a [`FreeformFormat`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FreeformSyntax {
+    Lark,
+    Regex,
+}
+
+impl ToolSpec {
+    /// Whether this tool takes freeform text (a Responses `custom` tool).
+    pub fn is_freeform(&self) -> bool {
+        self.freeform.is_some()
+    }
+
+    /// The JSON key freeform text is delivered under when a client executes this tool: the schema's single required
+    /// string property (`patch` for apply_patch), so hooks and the tool see the same shape as the JSON function form.
+    /// `raw` when the schema does not pin one down.
+    pub fn freeform_input_key(&self) -> String {
+        let required = self.parameters.get("required").and_then(|r| r.as_array());
+        if let Some([key]) = required.map(Vec::as_slice)
+            && let Some(key) = key.as_str()
+            && self
+                .parameters
+                .pointer(&format!("/properties/{key}/type"))
+                .and_then(|t| t.as_str())
+                == Some("string")
+        {
+            return key.to_owned();
+        }
+        "raw".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tool_spec_freeform_tests {
+    use super::*;
+
+    #[test]
+    fn freeform_input_key_is_the_single_required_string_property() {
+        let mut spec = ToolSpec {
+            name: "apply_patch".into(),
+            description: None,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"patch": {"type": "string"}},
+                "required": ["patch"],
+            }),
+            freeform: None,
+        };
+        assert_eq!(spec.freeform_input_key(), "patch");
+        spec.parameters = serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]});
+        assert_eq!(spec.freeform_input_key(), "raw");
+        spec.parameters = serde_json::json!({"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]});
+        assert_eq!(spec.freeform_input_key(), "raw");
+        spec.parameters = serde_json::json!({});
+        assert_eq!(spec.freeform_input_key(), "raw");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedTool {
-    WebSearch { options: Option<WebSearchOptions> },
-    XSearch { options: Option<XSearchOptions> },
+    WebSearch {
+        options: Option<WebSearchOptions>,
+    },
+    XSearch {
+        options: Option<XSearchOptions>,
+    },
+    /// OpenAI Responses programmatic tool calling: the hosted runtime that lets the model call client tools from a program.
+    ProgrammaticToolCalling,
 }
 
 impl HostedTool {
@@ -497,6 +616,7 @@ impl HostedTool {
         match self {
             HostedTool::WebSearch { .. } => "web_search",
             HostedTool::XSearch { .. } => "x_search",
+            HostedTool::ProgrammaticToolCalling => responses_ptc::PTC_TOOL_TYPE,
         }
     }
 }
@@ -529,6 +649,7 @@ pub fn apply_tool_overrides(
                 }
                 applied.web_search = drop_empty(options.clone(), WebSearchOptions::is_empty);
             }
+            HostedTool::ProgrammaticToolCalling => {}
         }
     }
     applied
@@ -540,6 +661,7 @@ impl From<ToolDefinition> for ToolSpec {
             name: td.function.name,
             description: td.function.description,
             parameters: td.function.parameters,
+            freeform: None,
         }
     }
 }
@@ -702,6 +824,12 @@ pub struct ConversationRequest {
     pub prompt_cache_key: Option<String>,
     /// What the sampler does when the response stops with `Length`.
     pub length_policy: LengthPolicy,
+    /// `text.verbosity` on the Responses backend; `None` leaves the server default.
+    /// The shell sets `Low` for OpenAI-family models (part of the cached prefix, so it stays constant per session).
+    pub text_verbosity: Option<crate::TextVerbosity>,
+    /// Omit `reasoning.summary` on the Responses backend.
+    /// Set for non-interactive sessions (`fuigo -p`, SDK): nothing displays the summary, so it is pure output spend.
+    pub suppress_reasoning_summary: bool,
 }
 
 impl ConversationRequest {
@@ -1336,6 +1464,7 @@ impl ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     }
 
@@ -1350,6 +1479,7 @@ impl ConversationItem {
             model_id: Some(model_id.into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     }
 
@@ -1361,6 +1491,7 @@ impl ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     }
 
@@ -2038,6 +2169,14 @@ pub fn transform_conversation_cwd(
                 if a.content.contains(source_cwd) {
                     a.content = Arc::<str>::from(a.content.replace(source_cwd, target_cwd));
                 }
+                // Per-slot message texts replay on the Responses backend, so they follow the same rewrite
+                for slot in a.output_order.iter_mut().flatten() {
+                    if let OutputSlot::Message { text } = slot
+                        && text.contains(source_cwd)
+                    {
+                        *text = Arc::<str>::from(text.replace(source_cwd, target_cwd));
+                    }
+                }
                 // Tool call arguments contain file paths that must also be rewritten.
                 // The arguments field is a JSON-encoded string
                 // source_cwd appears as a literal substring (serde_json does not escape `/`), so str::replace is safe
@@ -2426,6 +2565,10 @@ mod chat_completions_tests;
 #[cfg(test)]
 #[path = "conversation/responses_tests.rs"]
 mod responses_tests;
+
+#[cfg(test)]
+#[path = "conversation/responses_ptc_tests.rs"]
+mod responses_ptc_tests;
 
 #[cfg(test)]
 #[path = "conversation/messages_tests.rs"]
@@ -3118,6 +3261,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })];
 
         transform_conversation_cwd(&mut items, worktree, root);
@@ -3195,6 +3339,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                output_order: None,
             }),
         ];
 
@@ -3245,6 +3390,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                output_order: None,
             }),
         ];
 
@@ -4571,7 +4717,7 @@ mod tests {
             usage: None,
         };
 
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response, |_| false);
 
         // Five reasoning siblings: 2 real `rs_*` and 3 encrypted `tco_*`
         let reasoning_ids: Vec<&str> = items

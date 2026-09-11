@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-const MAX_LINES_READ_DEFAULT: usize = 1_000;
+const MAX_LINES_READ_DEFAULT: usize = 20_000;
 
 /// Client-configurable truncation settings.
 /// All fields are optional — `None` means "use the tool's built-in default".
@@ -8,8 +8,9 @@ const MAX_LINES_READ_DEFAULT: usize = 1_000;
 /// There is deliberately no per-line cap: clipping long lines silently
 /// corrupts single-line files (minified JSON, data dumps) with no way for
 /// the model to recover the clipped bytes. Non-skill reads are bounded by
-/// the whole-read `MAX_NUM_TOKENS` cap instead (skill files are exempt from
-/// all read limits by design). Other agent CLIs likewise apply no
+/// the per-call `MAX_READ_BYTES` cap instead, which truncates at a line
+/// boundary and names the next offset (skill files are exempt from all read
+/// limits by design). Other agent CLIs likewise apply no
 /// per-line cap. The wire field (`TruncationConfig.max_chars_per_line` in
 /// fuigo-tools.proto) is deprecated and ignored.
 #[derive(Debug, Clone, Default)]
@@ -18,7 +19,7 @@ pub struct TruncationConfig {
     pub default_max_output_bytes: Option<usize>,
     /// Per-tool overrides keyed by canonical tool name.
     pub per_tool_max_output_bytes: HashMap<String, usize>,
-    /// Max lines to read (read_file). Default: 1000.
+    /// Max lines to read (read_file). Default: 20000 (the 40 KB per-call byte cap is the practical bound).
     pub max_lines_read: Option<usize>,
     /// Inline cap for MCP tool results only (bytes). Consulted by the MCP
     /// truncation path (`mcp_max_output_bytes_for`) between the per-tool map
@@ -65,7 +66,7 @@ impl TruncationConfig {
     /// Replace template placeholders in a tool description with current config values.
     ///
     /// Recognized placeholders:
-    /// - `{max_lines_read}` — from `max_lines_read` (default 1000)
+    /// - `{max_lines_read}` — from `max_lines_read` (default 20000)
     /// - `{max_wait_ms}` — the blocking-wait ceiling, as `600000 (~10 min)`
     /// - `{max_output_bytes}` — resolved via `max_output_bytes_for(tool_name, builtin_default)`
     /// - `{max_chars_per_line}` — fixed display value for opencode-compat

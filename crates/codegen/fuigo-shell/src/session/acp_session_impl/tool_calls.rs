@@ -481,6 +481,50 @@ impl SessionActor {
         );
         Ok(allowed)
     }
+    /// Memory tool calls made after the per-step recall limit: each gets a failed `ToolCall` update and an error
+    /// tool result (so the provider batch stays paired) and never executes. Every other call is returned to run.
+    pub(super) async fn reject_memory_calls_after_limit(
+        &self,
+        tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+    ) -> Result<Vec<crate::sampling::types::ToolCallResponse>, acp::Error> {
+        const REASON: &str = "Memory recall limit reached for this step: the call was not executed. \
+                              Continue with the evidence already collected and treat missing facts as UNKNOWN.";
+        let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
+        let (rejected, allowed): (Vec<_>, Vec<_>) = tool_calls.into_iter().partition(|call| {
+            matches!(
+                kind_of(&call.function.name),
+                Some(fuigo_tools::types::tool::ToolKind::MemorySearch | fuigo_tools::types::tool::ToolKind::MemoryGet)
+            )
+        });
+        for call in &rejected {
+            let tool_call_id = acp::ToolCallId::new(std::sync::Arc::from(call.id.clone()));
+            let early_raw_input =
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
+            let meta = self.stamp_tool_meta(None, &call.function.name, None);
+            self.send_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(tool_call_id.clone(), call.function.name.clone())
+                        .kind(acp::ToolKind::Other)
+                        .status(acp::ToolCallStatus::Pending)
+                        .raw_input(early_raw_input)
+                        .meta(meta),
+                ),
+                None,
+            )
+            .await;
+            self.handle_tool_not_executed(&call.id, &tool_call_id, REASON.to_string())
+                .await?;
+        }
+        if !rejected.is_empty() {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                rejected = rejected.len(),
+                allowed = allowed.len(),
+                "memory tool calls past the recall limit were answered with an error result"
+            );
+        }
+        Ok(allowed)
+    }
     /// Runs prepare, then dispatch, then post-flight.
     /// Caller owns the outer tail flush.
     async fn execute_tool_calls_batch(
@@ -604,6 +648,7 @@ impl SessionActor {
                 })
                 .collect()
         };
+        let (dedupe_plans, dedupe_batch_mutates) = self.plan_read_dedupe_batch(&approved).await;
         let lock_cwd = dispatch_cwd.clone();
         let lock_paths = tokio::task::spawn_blocking(move || {
             lock_args
@@ -711,8 +756,14 @@ impl SessionActor {
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
+                let dedupe_plan = Arc::clone(&dedupe_plans[idx]);
                 let prepared = {
                     let mut dispatch_prepared = prepared.clone();
+                    if let Some(plan) = dedupe_plan.as_ref()
+                        && !plan.serves_everything()
+                    {
+                        plan.rewrite_args(&mut dispatch_prepared.parsed_args);
+                    }
                     if interruptible
                         && let InterruptedWaitFilter::Rewritten { kept, requested } =
                             apply_interrupted_wait_filter(
@@ -766,6 +817,7 @@ impl SessionActor {
                         let workspace_ops = workspace_ops.clone();
                         let session_id = session_id.clone();
                         let lock = lock.clone();
+                        let dedupe_plan = Arc::clone(&dedupe_plan);
                         let workflow_smoke_check_cwd = workflow_smoke_check_cwd.clone();
                         let workflow_smoke_check_display_cwd =
                             workflow_smoke_check_display_cwd.clone();
@@ -784,7 +836,18 @@ impl SessionActor {
                                 } else {
                                     None
                                 };
-                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                                match dedupe_plan.as_ref() {
+                                    Some(plan) if plan.serves_everything() => {
+                                        Ok(plan.synthesized_result())
+                                    }
+                                    Some(plan) => dispatch_tool(&workspace_ops, &prepared, &session_id)
+                                        .await
+                                        .map(|mut result| {
+                                            plan.append_notes(&mut result);
+                                            result
+                                        }),
+                                    None => dispatch_tool(&workspace_ops, &prepared, &session_id).await,
+                                }
                             };
                             let mut result = result;
                             let snapshot =
@@ -959,6 +1022,10 @@ impl SessionActor {
             };
             let tool_loop = match result {
                 Ok(tool_result) => {
+                    if !dedupe_batch_mutates {
+                        self.record_read_dedupe(&prepared, &tool_result, dedupe_plans[idx].as_ref().as_ref())
+                            .await;
+                    }
                     let effective_tool_name = tool_result
                         .effective_tool_name
                         .clone()
@@ -1163,6 +1230,7 @@ impl SessionActor {
                 _ => {}
             }
         }
+        self.finish_read_dedupe_batch(dedupe_batch_mutates);
         Ok(())
     }
     async fn apply_pre_tool_use_gate(
@@ -1320,7 +1388,8 @@ impl SessionActor {
                         .as_ref()
                         .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
                         .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true)
+                        // Matches `TaskToolInput`'s serde default: a spawn is synchronous unless the model opts into the background.
+                        .unwrap_or(false)
                 });
             let mut meta = self.stamp_tool_meta(None, &call.function.name, None);
             if let Some(bg) = subagent_background {
@@ -1371,7 +1440,19 @@ impl SessionActor {
         let args_str = crate::session::helpers::tool_input_parsing::normalize_empty_arguments(
             &call.function.arguments,
         );
-        let parse_result = serde_json::from_str::<serde_json::Value>(args_str);
+        // A freeform (Responses `custom`) tool's input is raw text by contract; parsing it as JSON would only mistake
+        // braces inside a patch for concatenated objects. It is delivered under the schema's input key (`patch`), so
+        // hooks and the tool see the same shape as the JSON function form
+        let freeform_key = self.last_sent_tool_specs.borrow().as_ref().and_then(|specs| {
+            specs
+                .iter()
+                .find(|t| t.name == call.function.name && t.is_freeform())
+                .map(fuigo_sampling_types::ToolSpec::freeform_input_key)
+        });
+        let parse_result = match &freeform_key {
+            Some(key) => Ok(json!({ key.as_str(): call.function.arguments.clone() })),
+            None => serde_json::from_str::<serde_json::Value>(args_str),
+        };
         let mut concatenated_json_count: usize = 0;
         let mut raw_input = match &parse_result {
             Ok(value) => value.clone(),

@@ -174,6 +174,8 @@ use sampler_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
+#[path = "acp_session_impl/read_dedupe_hook.rs"]
+mod read_dedupe_hook;
 #[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
 use mcp_snapshot::*;
@@ -728,6 +730,8 @@ pub(crate) struct SessionActor {
     /// Prompt-scoped on the actor: auto-recovery, stop-hook continuations, and the goal loop re-enter the turn loop within one prompt.
     /// A loop-local counter would reset the cap (exhaustion itself triggers auto-recovery).
     pub(crate) transient_retries_prompt_total: std::cell::Cell<u32>,
+    /// Repeat reads of unchanged files whose earlier result is still in context return a short note.
+    pub(crate) read_dedupe: std::cell::RefCell<crate::session::read_dedupe::ReadDedupeCache>,
     /// Start of the current transient-recovery episode (first failed attempt; cleared on a successful sample).
     /// Prompt-scoped with the counter above.
     pub(crate) transient_episode_start: std::cell::Cell<Option<tokio::time::Instant>>,
@@ -787,6 +791,8 @@ pub(crate) struct SessionActor {
     /// Resolved at spawn as `is_telemetry_enabled() && !is_zdr()`; ZDR teams always have this false.
     pub(crate) telemetry_enabled: bool,
     pub(crate) supports_backend_search: std::cell::Cell<bool>,
+    /// Resolved per-model opt-in for programmatic tool calling; fed from `SamplerConfig` at spawn and model switch.
+    pub(crate) programmatic_tool_calling: std::cell::Cell<bool>,
     /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
     pub(crate) tool_overrides: std::cell::RefCell<Option<fuigo_sampling_types::ToolOverrides>>,
     /// Configured cutoff a subagent inherits, read off the `SessionHandle` without an actor round-trip.
@@ -1096,6 +1102,10 @@ pub(crate) struct SessionActor {
     pub(crate) turn_summary_enabled: bool,
     /// Early-session title-refresh gate, resolved once at spawn (defaults to `turn_summary_enabled`; see `Config::resolve_title_refresh`).
     pub(crate) title_refresh_enabled: bool,
+    /// Function tool specs the last main-turn request actually sent, after fork mirroring, child projection, per-step restrictions and presentation.
+    /// Cache-aligned side calls replay this list so their tool prefix is byte-identical; see `side_call_tool_specs`.
+    /// `None` until this actor sends its first main-turn request, and again after a model or agent switch.
+    pub(crate) last_sent_tool_specs: std::cell::RefCell<Option<Vec<fuigo_sampling_types::ToolSpec>>>,
     /// The in-flight title-refresh side-call, if any.
     /// Only one runs at a time (a newer completion skips rather than aborts); aborted on rename, rewind, and shutdown.
     /// See `maybe_refresh_title`.

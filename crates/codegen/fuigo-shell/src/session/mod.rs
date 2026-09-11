@@ -465,7 +465,10 @@ pub(crate) mod memory_observation;
 pub(crate) mod normalize_cache;
 pub mod persistence;
 pub mod execution_state;
+pub(crate) mod read_dedupe;
 pub(crate) mod tool_presentation;
+#[cfg(test)]
+mod compact_tool_catalog_tests;
 pub use fuigo_shared::placeholder_images;
 pub mod plan_mode;
 pub mod prompt_history;

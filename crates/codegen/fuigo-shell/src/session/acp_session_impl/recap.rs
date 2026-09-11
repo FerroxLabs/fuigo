@@ -170,7 +170,7 @@ impl SessionActor {
              {question}"
         ));
         // Same tools as the main turn: they serialize into the cached prefix, and a side question must not search past the active cutoff.
-        let tool_specs = self.turn_base_tool_specs(&self.prepare_tool_definitions().await);
+        let tool_specs = self.side_call_tool_specs().await;
         (instruction, tool_specs, self.hosted_tools_for_turn())
     }
 
