@@ -1485,7 +1485,7 @@ mod tests {
             ReadFileOutput::FileContent(fc) => {
                 let hint = fc.content.rsplit('\n').next().unwrap();
                 let last: usize = hint.split("truncated at line ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
-                assert!(last >= 200 + 900 && last < 200 + 1100, "cut at {last}");
+                assert!((200 + 900..200 + 1100).contains(&last), "cut at {last}");
                 assert!(hint.contains(&format!("continue with offset={}", last + 1)), "hint: {hint}");
                 assert!(fc.content.starts_with("200→"), "window starts at offset 200");
             }
