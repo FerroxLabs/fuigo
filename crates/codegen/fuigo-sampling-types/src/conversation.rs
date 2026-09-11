@@ -542,6 +542,50 @@ impl ToolSpec {
     pub fn is_freeform(&self) -> bool {
         self.freeform.is_some()
     }
+
+    /// The JSON key freeform text is delivered under when a client executes this tool: the schema's single required
+    /// string property (`patch` for apply_patch), so hooks and the tool see the same shape as the JSON function form.
+    /// `raw` when the schema does not pin one down.
+    pub fn freeform_input_key(&self) -> String {
+        let required = self.parameters.get("required").and_then(|r| r.as_array());
+        if let Some([key]) = required.map(Vec::as_slice)
+            && let Some(key) = key.as_str()
+            && self
+                .parameters
+                .pointer(&format!("/properties/{key}/type"))
+                .and_then(|t| t.as_str())
+                == Some("string")
+        {
+            return key.to_owned();
+        }
+        "raw".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tool_spec_freeform_tests {
+    use super::*;
+
+    #[test]
+    fn freeform_input_key_is_the_single_required_string_property() {
+        let mut spec = ToolSpec {
+            name: "apply_patch".into(),
+            description: None,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"patch": {"type": "string"}},
+                "required": ["patch"],
+            }),
+            freeform: None,
+        };
+        assert_eq!(spec.freeform_input_key(), "patch");
+        spec.parameters = serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]});
+        assert_eq!(spec.freeform_input_key(), "raw");
+        spec.parameters = serde_json::json!({"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]});
+        assert_eq!(spec.freeform_input_key(), "raw");
+        spec.parameters = serde_json::json!({});
+        assert_eq!(spec.freeform_input_key(), "raw");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

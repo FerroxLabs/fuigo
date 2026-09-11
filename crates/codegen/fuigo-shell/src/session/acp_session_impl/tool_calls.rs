@@ -1372,16 +1372,17 @@ impl SessionActor {
             &call.function.arguments,
         );
         // A freeform (Responses `custom`) tool's input is raw text by contract; parsing it as JSON would only mistake
-        // braces inside a patch for concatenated objects. It rides the `raw` envelope the tool's input accepts
-        let freeform_tool = self
-            .last_sent_tool_specs
-            .borrow()
-            .as_ref()
-            .is_some_and(|specs| specs.iter().any(|t| t.name == call.function.name && t.is_freeform()));
-        let parse_result = if freeform_tool {
-            Ok(json!({ "raw": call.function.arguments.clone() }))
-        } else {
-            serde_json::from_str::<serde_json::Value>(args_str)
+        // braces inside a patch for concatenated objects. It is delivered under the schema's input key (`patch`), so
+        // hooks and the tool see the same shape as the JSON function form
+        let freeform_key = self.last_sent_tool_specs.borrow().as_ref().and_then(|specs| {
+            specs
+                .iter()
+                .find(|t| t.name == call.function.name && t.is_freeform())
+                .map(fuigo_sampling_types::ToolSpec::freeform_input_key)
+        });
+        let parse_result = match &freeform_key {
+            Some(key) => Ok(json!({ key.as_str(): call.function.arguments.clone() })),
+            None => serde_json::from_str::<serde_json::Value>(args_str),
         };
         let mut concatenated_json_count: usize = 0;
         let mut raw_input = match &parse_result {

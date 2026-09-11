@@ -3611,9 +3611,15 @@ pub(crate) fn resolve_model_list(
             .collect();
         resolved = prefetched;
     }
+    // Config entries that neither extend a catalog/prefetched base nor set `context_window` carry the 200K fallback;
+    // they are the entries a same-slug catalog sibling should donate its real window to (and must never donate)
+    let mut window_unset: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
+        if !had_base && model_override.context_window.is_none() {
+            window_unset.insert(key.clone());
+        }
         if !had_base {
             tracing::debug!(model_key = %key, "config model adding new entry (not in defaults/prefetched)");
             if model_override.context_window.is_none() {
@@ -3684,18 +3690,20 @@ pub(crate) fn resolve_model_list(
         let default_cw = DEFAULT_CONTEXT_WINDOW;
         let donors: std::collections::HashMap<String, (std::num::NonZeroU64, ApiBackend)> =
             resolved
-                .values()
-                .filter(|e| e.info.context_window.get() != default_cw)
-                .map(|e| {
+                .iter()
+                .filter(|(key, e)| {
+                    e.info.context_window.get() != default_cw && !window_unset.contains(*key)
+                })
+                .map(|(_, e)| {
                     (
                         e.info.model.clone(),
                         (e.info.context_window, e.info.api_backend.clone()),
                     )
                 })
                 .collect();
-        for entry in resolved.values_mut() {
+        for (key, entry) in resolved.iter_mut() {
             if let Some((donor_cw, donor_backend)) = donors.get(&entry.info.model) {
-                if entry.info.context_window.get() == default_cw {
+                if entry.info.context_window.get() == default_cw || window_unset.contains(key) {
                     tracing::debug!(
                         model = %entry.info.model,
                         from = default_cw,
