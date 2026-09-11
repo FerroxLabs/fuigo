@@ -1320,7 +1320,8 @@ impl SessionActor {
                         .as_ref()
                         .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
                         .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true)
+                        // Matches `TaskToolInput`'s serde default: a spawn is synchronous unless the model opts into the background.
+                        .unwrap_or(false)
                 });
             let mut meta = self.stamp_tool_meta(None, &call.function.name, None);
             if let Some(bg) = subagent_background {

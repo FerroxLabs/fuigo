@@ -30,14 +30,18 @@ pub struct TaskToolInput {
 
     /// Whether to run the subagent in the background.
     ///
-    /// Returns immediately with a subagent_id. Use the task output tool to
-    /// retrieve results. This is set to true by default.
+    /// Defaults to `false`: the call blocks until the child finishes and
+    /// returns its final report as the tool result. `true` returns a
+    /// subagent_id immediately; the report is collected later with the task
+    /// output tool.
     #[schemars(
-        description = "Returns immediately with a subagent_id. Use the task output tool to \
-            retrieve results. This is set to true by default."
+        description = "Default false: the call blocks until the subagent finishes and returns \
+            its final report as the tool result. Set true only for independent work you can \
+            continue alongside; then the call returns a subagent_id immediately and you collect \
+            the report later with the task output tool using one long timeout_ms, not short polls."
     )]
     #[serde(
-        default = "default_true",
+        default,
         deserialize_with = "crate::serde_lenient::deserialize_lenient_bool"
     )]
     pub run_in_background: bool,
@@ -140,9 +144,6 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
     })
 }
 
-fn default_true() -> bool {
-    true
-}
 
 /// Capability mode controlling which tool classes a child agent can use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -260,7 +261,7 @@ impl SubagentCompletedOutput {
 /// Harness-owned reminders go through `format_with_reminders` with
 /// `system_reminder_tag`.
 pub const BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK: &str =
-    "Do not only poll the child. Continue unfinished parent work now.";
+    "Continue unfinished parent work now; when you need the child's result, wait for it with one long timeout_ms rather than short polls.";
 
 /// How many asks *before* the latest one may still count as leftover parent
 /// exec. Older implement/fix history after the user switched to review-only
@@ -403,7 +404,7 @@ fn background_result_line(subagent_id: &str, naming: &BackgroundNoticeNaming) ->
         timeout_ms_param,
     } = *naming;
     format!(
-        "When you need its result, use {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] and a positive {timeout_ms_param}."
+        "When you need its result, use {task_output_tool} with {task_ids_param}=[\"{subagent_id}\"] and one long {timeout_ms_param} (e.g. 120000), not repeated short polls."
     )
 }
 
@@ -1118,7 +1119,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          {agent_lines}\n\n\
          ## Usage notes\n\
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
-         - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
+         - {run_in_background_param}: defaults to false. The call blocks until the subagent finishes and returns its final report as the tool result; several {task_tool} calls in one response still run in parallel. Set {run_in_background_param}=true only for independent work you can continue alongside: the call then returns a subagent_id immediately and you collect the report later with {background_retrieval_tool} using one long timeout_ms, not repeated short polls.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\
          - When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
@@ -1511,7 +1512,10 @@ mod tests {
         assert!(desc.contains("- **code-reviewer**: Reviews code."));
         assert!(desc.contains("## Usage notes"));
         assert!(desc.contains(
-            "run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. This is set to true by default."
+            "run_in_background: defaults to false. The call blocks until the subagent finishes and returns its final report as the tool result"
+        ));
+        assert!(desc.contains(
+            "Set run_in_background=true only for independent work you can continue alongside: the call then returns a subagent_id immediately and you collect the report later with get_task_output using one long timeout_ms"
         ));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains(
@@ -1708,7 +1712,10 @@ mod tests {
         assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
         assert!(desc.contains("${{ tools.by_kind.read }}"));
         assert!(desc.contains(
-            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. This is set to true by default."
+            "${{ params.task.run_in_background }}: defaults to false. The call blocks until the subagent finishes"
+        ));
+        assert!(desc.contains(
+            "collect the report later with ${{ tools.by_kind.background_task_action }} using one long timeout_ms"
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
     }
@@ -1970,7 +1977,7 @@ mod tests {
         let spawn = format_subagent_started_background("sa-9", "explore", "scan", &naming, false);
         assert!(
             spawn.contains("use FetchJobResult with job_ids=[\"sa-9\"]")
-                && spawn.contains("a positive max_wait"),
+                && spawn.contains("one long max_wait"),
             "renamed tool/params must appear: {spawn}"
         );
         assert!(
@@ -1984,7 +1991,7 @@ mod tests {
             auto.contains("moved to the background")
                 && auto.contains("you will be notified when it completes")
                 && auto.contains("use FetchJobResult with job_ids=[\"sa-9\"]")
-                && auto.contains("a positive max_wait"),
+                && auto.contains("one long max_wait"),
             "auto-bg notice must share the renamed retrieval line: {auto}"
         );
         assert!(
