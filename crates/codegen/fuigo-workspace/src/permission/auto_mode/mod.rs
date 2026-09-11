@@ -12,14 +12,15 @@ use super::bash_command_splitting::{
     PlainCommand, is_wrapper_command, strip_wrapper_command, try_parse_shell,
     try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
-use super::exec_risk::{git_words_are_read_only_query, git_words_have_unsafe_query_option};
 use super::shell_access::{
     command_words_write_paths, command_write_paths_in_tree, is_safe_write_sink,
 };
 use super::types::AccessKind;
 
+mod routine_git;
 mod security_findings;
 
+use routine_git::git_words_are_routine;
 pub use security_findings::{BashSecurityAssessment, ClassifierSecurityFinding};
 
 use crate::permission::wire_enum;
@@ -474,20 +475,10 @@ impl HeuristicPermissionClassifier {
 /// The package managers `uv`/`npm`/`pnpm`/`yarn`/`rustup` are ABSENT: a blanket prefix is denylist-shaped whack-a-mole.
 /// They go through the fail-closed SAFE-subcommand allowlist in [`package_manager_subcommand_is_routine`] instead.
 /// `cp`/`mv`/`mkdir`/`touch` are also ABSENT: they write/create arbitrary destinations the write model already Blocks.
-/// `cd`/`pushd`/`popd` only move the spawned shell's cwd; git entries are the local workflow plus read-only queries.
+/// `cd`/`pushd`/`popd` only move the spawned shell's cwd.
+/// `git` is ABSENT: [`routine_git`] decides every git shape, so a discarding `checkout`/`switch`/`stash` reaches the model.
 const ROUTINE_PREFIXES: &[&str] = &[
     "cargo ",
-    // Read-only git queries are NOT listed here
-    // `bash_command_is_routine` routes them through the shared `exec_risk::git_words_are_read_only_query` helper
-    // Only the local write-workflow verbs stay prefix-matched
-    "git add",
-    "git commit",
-    "git checkout",
-    "git switch",
-    "git stash",
-    "git pull",
-    "git fetch",
-    "git worktree list",
     "pytest",
     "python ",
     "python3 ",
@@ -571,6 +562,21 @@ pub(crate) const KUBECTL_UNSAFE_FLAGS: &[&str] = &[
     "--certificate-authority",
 ];
 
+/// ripgrep flags that spawn a caller-controlled program: `--pre <cmd>` runs a preprocessor per searched file and `--hostname-bin <cmd>` runs a program to resolve the hyperlink hostname.
+/// `--pre-glob` only filters what a preprocessor sees and is deliberately absent. Shared with `manager.rs`.
+pub(crate) const RG_UNSAFE_FLAGS: &[&str] = &["--pre", "--hostname-bin"];
+
+/// True when `words` is `rg` with a [`RG_UNSAFE_FLAGS`] entry, spelled `--flag value` or `--flag=value`.
+pub(crate) fn rg_has_unsafe_flag(words: &[String]) -> bool {
+    if crate::permission::policy::normalized_command_head(words).as_deref() != Some("rg") {
+        return false;
+    }
+    words.iter().skip(1).any(|w| {
+        let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+        RG_UNSAFE_FLAGS.contains(&name)
+    })
+}
+
 /// Env var KEYs safe to set for a routine command: cosmetic / logging only, with no effect on which binary runs or how it resolves code.
 /// Anything else (LD_PRELOAD, DYLD_*, PATH, NODE_OPTIONS, PYTHONPATH, GIT_SSH_COMMAND, FOO, ...) is treated as exec-affecting and blocks.
 /// Case-sensitive exact match.
@@ -647,15 +653,9 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     if head == "find" {
         return find_is_read_only(inner);
     }
-    // Git: read-only queries decide via the shared helper (one verb table plus one unsafe-option table, long-option abbreviations failing closed)
-    // The local write-workflow verbs (`git add`/`commit`/…) fall through to ROUTINE_PREFIXES, still subject to the same unsafe-option table
+    // Git: a fail-closed allowlist (read-only queries plus the recoverable local workflow); discards and unrecognized shapes go to the model
     if head == "git" {
-        if git_words_are_read_only_query(inner) {
-            return true;
-        }
-        if git_words_have_unsafe_query_option(inner) {
-            return false;
-        }
+        return git_words_are_routine(inner);
     }
     // `tree -o <file>` writes an arbitrary path outside the write model; short flags group (`-ao`), so reject any short-flag word containing `o`
     if head == "tree"
@@ -666,12 +666,8 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     {
         return false;
     }
-    // `rg --pre <cmd>` runs <cmd> per searched file; `--pre-glob` only filters.
-    if head == "rg"
-        && inner
-            .iter()
-            .any(|w| w == "--pre" || w.starts_with("--pre="))
-    {
+    // `rg --pre` / `--hostname-bin` run a caller-controlled program; `--pre-glob` only filters.
+    if rg_has_unsafe_flag(inner) {
         return false;
     }
     // kubectl with caller-controlled kubeconfig/endpoint/identity can run an exec credential plugin; mirrors manager.rs::kubectl_has_unsafe_flag
@@ -1834,6 +1830,67 @@ mod tests {
         assert_eq!(v("topgrade"), ClassifierVerdict::Block);
     }
 
+    #[test]
+    fn heuristic_routes_git_segments_through_allowlist() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(v("timeout 30 git checkout main"), ClassifierVerdict::Allow);
+        assert_eq!(
+            v("git status && git checkout -- src/lib.rs"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("git checkout main && cargo test"),
+            ClassifierVerdict::Allow
+        );
+    }
+
+    /// Discarding git shapes must reach the model instead of auto-running; branch switches and the local workflow stay routine.
+    #[test]
+    fn heuristic_bash_git_discards_are_not_routine() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        for cmd in [
+            "git checkout -- app.py",
+            "git checkout -- .",
+            "git checkout HEAD -- src/schema.rs Cargo.toml",
+            "git checkout -f main",
+            "git checkout main src/lib.rs",
+            "git checkout Cargo.toml",
+            "git switch --discard-changes main",
+            "git switch -f main",
+            "git stash drop",
+            "git stash clear",
+        ] {
+            assert_eq!(v(cmd), ClassifierVerdict::Block, "{cmd}");
+        }
+        for cmd in [
+            "git checkout main",
+            "git checkout -b feature/x",
+            "git switch -c feature/y",
+            "git stash",
+            "git stash pop",
+            "git add -A",
+            "git commit -m x",
+        ] {
+            assert_eq!(v(cmd), ClassifierVerdict::Allow, "{cmd}");
+        }
+    }
+
     /// A routine prefix must not smuggle a follow-on command: every chained segment has to be routine, and command substitution is rejected outright.
     #[test]
     fn heuristic_bash_compound_requires_all_routine() {
@@ -1925,7 +1982,7 @@ mod tests {
         assert_eq!(v("find . -type f"), ClassifierVerdict::Allow);
     }
 
-    /// `rg --pre <cmd>` executes <cmd> per searched file, so it must not auto-allow, mirroring `manager.rs::rg_has_pre_flag`.
+    /// `rg --pre <cmd>` executes <cmd> per searched file and `rg --hostname-bin <cmd>` executes <cmd> for hyperlinks, so neither may auto-allow.
     /// `--pre-glob` only filters and stays routine.
     #[test]
     fn heuristic_guards_rg_pre() {
@@ -1940,6 +1997,14 @@ mod tests {
         };
         assert_eq!(v("rg --pre ./pre.sh TODO ."), ClassifierVerdict::Block);
         assert_eq!(v("rg --pre=./pre.sh TODO ."), ClassifierVerdict::Block);
+        assert_eq!(
+            v("rg --hostname-bin=./payload needle"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("rg --hostname-bin ./payload needle"),
+            ClassifierVerdict::Block
+        );
         assert_eq!(v("rg --pre-glob '*.pdf' TODO ."), ClassifierVerdict::Allow);
         assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
     }

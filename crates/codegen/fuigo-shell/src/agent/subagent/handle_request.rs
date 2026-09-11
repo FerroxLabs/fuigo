@@ -1193,6 +1193,7 @@ pub(crate) async fn run_shell_child(
                 &ctx.parent_skills_config,
                 ctx.plugin_registry.as_deref(),
                 ctx.parent_compat,
+                crate::agent::folder_trust::project_scope_allowed(&ctx.parent_cwd),
             )
             .await,
         );
@@ -1376,7 +1377,7 @@ pub(crate) async fn run_shell_child(
         ctx.backend_tools_enabled,
         ctx.respect_gitignore,
         ctx.path_not_found_hints,
-        Default::default(),
+        std::mem::take(&mut ctx.tool_params_json),
         ctx.plugin_registry.clone(),
         None,
         ctx.models_manager.clone(),

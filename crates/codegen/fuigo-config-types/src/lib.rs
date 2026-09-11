@@ -781,6 +781,10 @@ pub struct RemoteSettings {
     /// It is the fallback when no local `[toolset.bash] allow_background_operator` is set; absent uses the client default (allow).
     #[serde(default)]
     pub allow_background_operator: Option<bool>,
+    /// Kill switch for parking a turn on a credential-less 401 whose recovery failed transiently (an expired token during a network outage).
+    /// `Some(false)` restores the terminal failure; absent keeps the park on. `FUIGO_UNCHARGED_401_PARK=0` also forces it off locally.
+    #[serde(default)]
+    pub uncharged_401_park: Option<bool>,
     /// Remote settings fallback for `[toolset.ask_user_question] timeout_enabled`.
     /// When `Some(false)`, questionnaires wait forever unless a higher tier (requirements, env, user, or managed config) sets otherwise.
     #[serde(default)]

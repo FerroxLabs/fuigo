@@ -128,6 +128,9 @@ pub struct AgentBuilder {
     /// Pre-discovered skills inherited from a parent session.
     /// When set, `build()` uses these directly instead of running `list_skills_with_plugins()`.
     preloaded_skills: Option<Vec<fuigo_tools::implementations::skills::types::SkillInfo>>,
+    /// Folder-trust verdict for `working_directory`: gates project AGENTS.md/rules and project skills.
+    /// Defaults to untrusted, so every host that builds an agent must pass its verdict explicitly.
+    project_trusted: bool,
 }
 /// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`) are present in the tool config.
 ///
@@ -256,7 +259,13 @@ impl AgentBuilder {
             system_reminder_tag: fuigo_tools::reminders::DEFAULT_REMINDER_TAG,
             persisted_announced_skill_names: None,
             preloaded_skills: None,
+            project_trusted: false,
         }
+    }
+    /// Set the folder-trust verdict for `working_directory`; untrusted omits project instructions and project skills.
+    pub fn with_project_trusted(mut self, project_trusted: bool) -> Self {
+        self.project_trusted = project_trusted;
+        self
     }
     /// These names are restored into the `SkillManager` inside `build()`, after `ToolBridge::finalize_builder()` but before `seed_skill_discovery()`.
     /// `seed()` then sees non-empty `announced_names` and skips setting `pending = BaselineChange`.
@@ -656,6 +665,7 @@ impl AgentBuilder {
                 &self.skills_config,
                 self.plugin_registry.as_deref(),
                 self.compat,
+                self.project_trusted,
             )
             .await
         } else {
@@ -1108,8 +1118,12 @@ impl AgentBuilder {
             tool_bridge.restore_announced_skill_names(names).await;
         }
         let mut agents_md_files = if definition.agents_md {
-            crate::prompt::agents_md::read_agents_config_with_paths(&working_dir_str, self.compat)
-                .await
+            crate::prompt::agents_md::read_agents_config_with_paths(
+                &working_dir_str,
+                self.compat,
+                self.project_trusted,
+            )
+            .await
         } else {
             vec![]
         };
@@ -1165,11 +1179,9 @@ impl AgentBuilder {
                     .collect()
             };
             let skill_budget_percent: Option<f64> = None;
-            let skill_discovery_cwd = if definition.discover_skills {
-                Some(self.working_directory.clone())
-            } else {
-                None
-            };
+            // An untrusted project gets no runtime skill discovery under its tree either
+            let skill_discovery_cwd = (definition.discover_skills && self.project_trusted)
+                .then(|| self.working_directory.clone());
             tool_bridge
                 .seed_skill_discovery(
                     skill_discovery_cwd,
@@ -1715,6 +1727,7 @@ mod tests {
             ToolNotificationHandle::noop(),
         )
         .from_definition(definition)
+        .with_project_trusted(true)
         .build()
         .await
         .expect("agent should build with local skill fixtures");

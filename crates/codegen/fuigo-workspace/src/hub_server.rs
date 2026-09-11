@@ -681,14 +681,18 @@ impl WorkspaceRpcHandler {
             }
             <DiscoverSkillsReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let skills =
-                    crate::discovery::discover_skills(&cwd, self.workspace.shared.skills_config())
-                        .await;
+                // Hub clients sit outside the local folder-trust model (same contract as `load_permissions`)
+                let skills = crate::discovery::discover_skills(
+                    &cwd,
+                    self.workspace.shared.skills_config(),
+                    true,
+                )
+                .await;
                 Ok(Value::Array(skills))
             }
             <DiscoverAgentsMdReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let files = crate::discovery::discover_agents_md(&cwd).await;
+                let files = crate::discovery::discover_agents_md(&cwd, true).await;
                 Ok(Value::Array(files))
             }
             <DiscoverPluginsReq as WorkspaceRpc>::METHOD => {

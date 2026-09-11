@@ -1,8 +1,8 @@
 //! Folder-trust DECISION side ("do you trust this folder?").
 //!
 //! This is the client/workspace half of the folder-trust gate: it scans a
-//! workspace for repo-local code-exec configs, resolves the pure trust
-//! [`decide`] precedence, prompts (MVP stderr), and reads/writes the durable
+//! workspace for trust-sensitive configs (code-exec configs and project
+//! instructions/skills), resolves the pure trust [`decide`] precedence, prompts (MVP stderr), and reads/writes the durable
 //! [`crate::trust::TrustStore`] (`~/.fuigo/trusted_folders.toml`). The
 //! consume/gating half (the `DECISIONS` cache, `resolve_and_record`,
 //! `project_scope_allowed`, the loader filters) lives in `fuigo-shell`.
@@ -14,7 +14,7 @@
 //! 3. Key unrecordable (the user's own `$HOME`, the filesystem root, or a non-absolute path) → trusted.
 //!    The store refuses to persist such an over-broad root, so gating would re-prompt forever on a key that can never persist.
 //!    See [`crate::trust::is_unsafe_trust_root`].
-//! 4. No repo-local code-exec configs present → trusted (nothing to gate).
+//! 4. No trust-sensitive configs present → trusted (nothing to gate).
 //! 5. Interactive TTY   → prompt the user (y/N).
 //! 6. Otherwise (headless) → untrusted.
 //!
@@ -295,7 +295,9 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     // On a non-git dir each discover walks to the filesystem root, and Windows taxes every such syscall 10-100x
     // The `.claude` settings-compat check keeps its own cheap `.git`-existence walk on purpose; see that check
     // Checks run cheap to expensive and short-circuit on the first hit when `first_only`
-    let chain = fuigo_agent::repo::RepoDirChain::resolve(cwd);
+    // Project instruction and skill roots come from the same `StartupProjectSources` the loaders read, so detection cannot drift from loading
+    let project_sources = fuigo_agent::repo::StartupProjectSources::resolve(cwd);
+    let chain = &project_sources.chain;
     let mut kinds: Vec<&'static str> = Vec::new();
     // Record a distinct kind; when `first_only`, return as soon as one is found
     macro_rules! hit {
@@ -398,6 +400,16 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     if directory_present_or_uncertain(&hook_root.join(".fuigo").join("workflows")) {
         hit!("workflows");
     }
+    // Project instructions (AGENTS.md / CLAUDE.md / rules dirs) reach the model as agent instructions, so an instructions-only clone must gate too
+    if fuigo_agent::prompt::agents_md::has_project_instruction_markers_in(
+        project_sources.instruction_dirs(),
+    ) {
+        hit!("instructions");
+    }
+    // Project skill/command roots, even empty ones, likewise feed the model
+    if fuigo_agent::prompt::skills::has_project_skill_dirs_in(project_sources.skill_dirs()) {
+        hit!("skills");
+    }
     // `~/.claude.json` `projects.<cwd>.mcpServers`.
     if claude_project_mcp_present(cwd) {
         hit!("mcp");
@@ -440,13 +452,13 @@ pub fn prompt_for_trust(key: &Path) -> bool {
     let _ = writeln!(err);
     let _ = writeln!(
         err,
-        "This folder contains repo-local config (.mcp.json / .fuigo/lsp.json / hooks) \
-         that can run commands on your machine."
+        "This folder contains repo-local config (MCP/LSP servers, hooks, permission rules) \
+         or project instructions/skills that Fuigo would otherwise apply automatically."
     );
     let _ = writeln!(err, "  Folder: {}", key.display());
     let _ = write!(
         err,
-        "Trust the authors of this folder and allow these servers to start? [y/N] "
+        "Trust the authors of this folder and apply them? [y/N] "
     );
     let _ = err.flush();
 
@@ -579,6 +591,58 @@ mod tests {
         let tmp = repo_tmp();
         std::fs::write(tmp.path().join(".envrc"), "export FOO=bar\n").unwrap();
         assert!(repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_agents_md_from_subdir() {
+        let tmp = repo_tmp();
+        std::fs::write(tmp.path().join("AGENTS.md"), "# project\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["instructions"]);
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_rules_from_subdir() {
+        let tmp = repo_tmp();
+        let rules = tmp.path().join(".fuigo").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("style.md"), "# style\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["instructions"]);
+    }
+
+    #[test]
+    fn repo_configs_present_detects_empty_skill_roots_only_in_project_chain() {
+        for config in [".fuigo", ".agents", ".claude", ".cursor"] {
+            for leaf in ["skills", "commands"] {
+                let tmp = repo_tmp();
+                let repo = tmp.path().join("repo");
+                std::fs::create_dir_all(&repo).unwrap();
+                git2::Repository::init(&repo).unwrap();
+                let outside = tmp.path().join(config).join(leaf);
+                std::fs::create_dir_all(outside).unwrap();
+                let subdir = repo.join("nested");
+                std::fs::create_dir_all(&subdir).unwrap();
+                let cwd = subdir.join("inner");
+                std::fs::create_dir_all(cwd.join("child").join(config).join(leaf)).unwrap();
+                assert!(repo_config_kinds(&cwd).is_empty());
+
+                for dir in [&repo, &subdir, &cwd] {
+                    let config_dir = dir.join(config);
+                    std::fs::create_dir_all(&config_dir).unwrap();
+                    assert!(repo_config_kinds(&cwd).is_empty());
+                    let marker = config_dir.join(leaf);
+                    std::fs::write(&marker, "not a directory").unwrap();
+                    assert!(repo_config_kinds(&cwd).is_empty());
+                    std::fs::remove_file(&marker).unwrap();
+                    std::fs::create_dir(&marker).unwrap();
+                    assert_eq!(repo_config_kinds(&cwd), vec!["skills"]);
+                    std::fs::remove_dir(&marker).unwrap();
+                }
+            }
+        }
     }
 
     #[test]

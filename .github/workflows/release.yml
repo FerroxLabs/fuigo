@@ -199,8 +199,19 @@ jobs:
           cache-targets: true
           cache-on-failure: true
 
+      # FUIGO_VERSION marks the binary as a release build. Without it
+      # `fuigo_version::IS_DEV_BUILD` is true and the folder-trust gate
+      # (`folder_trust_inert()`) treats every clone as trusted, so repo-local
+      # MCP/LSP/hooks/permission policy, project instructions and project
+      # skills load ungated. 1.0.11 and 1.0.12 shipped unstamped. The value is
+      # the same one the smoke test below expects in `--version`.
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p fuigo-pager-bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          FUIGO_VERSION=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          export FUIGO_VERSION
+          cargo build --release --target ${{ matrix.target }} -p fuigo-pager-bin
 
       # A binary that cannot start is worth catching here rather than after
       # publish. Only meaningful where the runner can execute what it built,

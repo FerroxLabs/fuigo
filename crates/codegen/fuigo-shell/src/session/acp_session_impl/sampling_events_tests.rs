@@ -1361,6 +1361,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                         enabled: true,
                     },
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await
             else {

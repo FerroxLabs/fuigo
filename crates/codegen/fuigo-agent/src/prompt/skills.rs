@@ -13,8 +13,8 @@ pub use fuigo_tools::implementations::skills::types::{SkillInfo, SkillScope};
 pub use fuigo_tools::types::compat::CompatConfig;
 
 use fuigo_tools::implementations::skills::discovery::{
-    find_command_paths, find_skill_md_paths, find_skill_paths, is_valid_skill_name,
-    normalize_skill_name, parse_skill_files, scan_md_files, walk_for_skill_md,
+    COMMAND_SUBDIR, SKILL_SUBDIRS, find_command_paths, find_skill_md_paths, find_skill_paths,
+    is_valid_skill_name, normalize_skill_name, parse_skill_files, scan_md_files, walk_for_skill_md,
 };
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -64,12 +64,30 @@ pub struct SkillsConfig {
 ///
 /// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned.
 /// Pass `CompatConfig::default()` to preserve the historical all-vendors behavior.
+/// `project_trusted` is the folder-trust verdict for `working_directory`; when false, the project chain and the workspace-user overlay are omitted.
 pub async fn list_skills(
     working_directory: Option<&str>,
     config: &SkillsConfig,
     compat: CompatConfig,
+    project_trusted: bool,
 ) -> Vec<SkillInfo> {
-    list_skills_with_plugins(working_directory, config, None, compat).await
+    list_skills_with_plugins(working_directory, config, None, compat, project_trusted).await
+}
+
+/// Whether any project skill or command root exists on the supplied roots.
+/// Empty discovery roots still require trust. All vendors count regardless of runtime compat settings.
+pub fn has_project_skill_dirs_in<'a>(chain_dirs: impl IntoIterator<Item = &'a Path>) -> bool {
+    let config_dirs = CompatConfig::default().skill_config_dirs();
+    chain_dirs.into_iter().any(|dir| {
+        config_dirs.iter().any(|config_dir| {
+            let config_dir = dir.join(config_dir);
+            SKILL_SUBDIRS
+                .iter()
+                .copied()
+                .chain(std::iter::once(COMMAND_SUBDIR))
+                .any(|subdir| config_dir.join(subdir).is_dir())
+        })
+    })
 }
 
 /// List all discovered skills including plugin-provided skills.
@@ -77,21 +95,28 @@ pub async fn list_skills(
 /// When `plugins` is `Some`, skills from enabled plugins are appended with `plugin_name: Some(...)`.
 /// Their `scope` is the plugin's origin (e.g. `Repo` for `.fuigo/plugins/`).
 /// Native skills always win bare-name resolution, but qualified plugin entries (`my-plugin:hello`) are preserved even on collision.
+/// Untrusted projects skip project roots and the workspace-user overlay; user, config-path, injected, and plugin sources are unaffected.
 pub async fn list_skills_with_plugins(
     working_directory: Option<&str>,
     config: &SkillsConfig,
     plugins: Option<&crate::plugins::PluginRegistry>,
     compat: CompatConfig,
+    project_trusted: bool,
 ) -> Vec<SkillInfo> {
     let _skill_discovery_timer = crate::timing::timer("skill_discovery");
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
+    let (discovery_cwd, discovery_user_dir) = if project_trusted {
+        (working_directory, workspace_user_dir.as_deref())
+    } else {
+        (None, None)
+    };
 
     let mut skills = if config.auto_discover == Some(false) {
         Vec::new()
     } else {
         list_skills_with_options(
-            working_directory,
-            workspace_user_dir.as_deref(),
+            discovery_cwd,
+            discovery_user_dir,
             &fuigo_tools::util::fuigo_home::fuigo_home(),
             compat,
         )
@@ -149,12 +174,28 @@ pub fn collect_skill_config_dirs(
     config_paths: &[String],
     compat: CompatConfig,
 ) -> Vec<PathBuf> {
-    let fuigo_home = global_dir.to_path_buf();
-    let git_root = cwd.and_then(|c| {
-        git2::Repository::discover(c)
-            .ok()
-            .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
+    let project_sources = cwd.map(|cwd| {
+        crate::repo::StartupProjectSources::with_workspace_user(
+            cwd,
+            workspace_user_dir.map(Path::to_path_buf),
+        )
     });
+    collect_skill_config_dirs_from_sources(
+        project_sources.as_ref(),
+        global_dir,
+        config_paths,
+        compat,
+    )
+}
+
+/// [`collect_skill_config_dirs`] over an already-resolved project chain, so discovery and the folder-trust detector walk the same roots.
+fn collect_skill_config_dirs_from_sources(
+    project_sources: Option<&crate::repo::StartupProjectSources>,
+    global_dir: &Path,
+    config_paths: &[String],
+    compat: CompatConfig,
+) -> Vec<PathBuf> {
+    let fuigo_home = global_dir.to_path_buf();
 
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
@@ -174,30 +215,12 @@ pub fn collect_skill_config_dirs(
     // When all cells are on, this list equals the historical `[".fuigo", ".agents", ".claude", ".cursor"]`
     let config_dir_names = compat.skill_config_dirs();
 
-    // Priority 1 & 2: Walk from cwd up to the git root.
-    if let Some(cwd) = cwd {
-        if let Some(ref root) = git_root {
-            let mut current = Some(cwd.to_path_buf());
-            while let Some(dir) = current {
-                for name in &config_dir_names {
-                    try_add(dir.join(name));
-                }
-                if dir == *root {
-                    break;
-                }
-                current = dir.parent().map(|p| p.to_path_buf());
-            }
-        } else {
+    // Priority 1, 2 & 2.5: the cwd-to-git-root chain (cwd first), then the optional workspace user dir
+    if let Some(project_sources) = project_sources {
+        for dir in project_sources.skill_dirs() {
             for name in &config_dir_names {
-                try_add(cwd.join(name));
+                try_add(dir.join(name));
             }
-        }
-    }
-
-    // Priority 2.5: Optional workspace user dir.
-    if let Some(user_dir) = workspace_user_dir {
-        for name in &config_dir_names {
-            try_add(user_dir.join(name));
         }
     }
 
@@ -285,21 +308,24 @@ async fn list_skills_with_options(
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let cwd = working_directory.map(PathBuf::from);
-
-    let git_root = cwd.as_ref().and_then(|c| {
-        git2::Repository::discover(c)
-            .ok()
-            .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
+    let project_sources = cwd.as_ref().map(|cwd| {
+        crate::repo::StartupProjectSources::with_workspace_user(
+            cwd,
+            workspace_user_dir.map(Path::to_path_buf),
+        )
     });
+    let git_root = project_sources
+        .as_ref()
+        .and_then(|sources| sources.chain.git_root.as_deref());
 
     let config_dirs =
-        collect_skill_config_dirs(cwd.as_deref(), workspace_user_dir, global_dir, &[], compat);
+        collect_skill_config_dirs_from_sources(project_sources.as_ref(), global_dir, &[], compat);
 
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
 
     for config_dir in &config_dirs {
-        let scope = scope_for_config_dir(config_dir, cwd.as_deref(), git_root.as_deref());
+        let scope = scope_for_config_dir(config_dir, cwd.as_deref(), git_root);
 
         // Skills before commands: skills win name collisions.
         collect_discovered_paths(
@@ -724,6 +750,7 @@ mod tests {
             Some(project.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         let names: HashSet<_> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -750,6 +777,7 @@ mod tests {
             &config,
             None,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
 
@@ -786,6 +814,7 @@ mod tests {
             &config,
             None,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
 
@@ -818,6 +847,7 @@ mod tests {
             &config,
             None,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
 
@@ -1675,6 +1705,55 @@ mod tests {
         assert_eq!(ones.len(), 1, "skill must appear exactly once: {merged:?}");
     }
 
+    #[tokio::test]
+    async fn untrusted_project_skills_are_omitted() {
+        for config_dir in [".fuigo", ".agents", ".claude", ".cursor"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo = tmp.path().join("repo");
+            let config_root = repo.join(config_dir);
+            write_skill_md(
+                &config_root.join("skills").join("trust-gate-proj"),
+                "trust-gate-proj",
+            );
+            let commands = config_root.join("commands");
+            std::fs::create_dir_all(&commands).unwrap();
+            std::fs::write(commands.join("trust-gate-command.md"), "# deploy\n").unwrap();
+            init_git_repo(&repo);
+            std::fs::write(repo.join(".gitignore"), format!("{config_dir}/\n")).unwrap();
+            let subdir = repo.join("crates").join("inner");
+            std::fs::create_dir_all(&subdir).unwrap();
+            let chain = crate::repo::RepoDirChain::resolve(&subdir);
+            assert!(has_project_skill_dirs_in(
+                chain.dirs.iter().map(PathBuf::as_path)
+            ));
+
+            let trusted = list_skills(
+                Some(subdir.to_str().unwrap()),
+                &SkillsConfig::default(),
+                CompatConfig::default(),
+                /*project_trusted*/ true,
+            )
+            .await;
+            let untrusted = list_skills(
+                Some(subdir.to_str().unwrap()),
+                &SkillsConfig::default(),
+                CompatConfig::default(),
+                /*project_trusted*/ false,
+            )
+            .await;
+            for name in ["trust-gate-proj", "trust-gate-command"] {
+                assert!(
+                    trusted.iter().any(|skill| skill.name == name),
+                    "trusted folder must load {config_dir} skill {name}"
+                );
+                assert!(
+                    !untrusted.iter().any(|skill| skill.name == name),
+                    "untrusted folder must omit {config_dir} skill {name}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn filter_skills_empty_ignore_returns_all() {
         let skills = vec![
@@ -1760,6 +1839,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -1794,6 +1874,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -1835,6 +1916,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         let count = skills.iter().filter(|s| s.name == "dup-skill").count();
@@ -1870,6 +1952,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
 
@@ -1956,6 +2039,7 @@ mod tests {
             Some(cwd.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         let same_skills: Vec<&SkillInfo> = skills.iter().filter(|s| s.name == "same").collect();
@@ -2004,6 +2088,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
 
@@ -2049,6 +2134,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &config,
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         assert!(
@@ -2620,6 +2706,7 @@ mod tests {
             Some(repo_root.to_str().unwrap()),
             &SkillsConfig::default(),
             CompatConfig::default(),
+            /*project_trusted*/ true,
         )
         .await;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();

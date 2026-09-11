@@ -1,6 +1,6 @@
 {
     "name": "fuigo",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "description": "Bring Fuigo into your terminal",
     "license": "Apache-2.0",
     "bin": {
@@ -40,11 +40,11 @@
         "@iarna/toml": "^3.0.0"
     },
     "optionalDependencies": {
-        "@fuigo/darwin-arm64": "1.0.12",
-        "@fuigo/darwin-x64": "1.0.12",
-        "@fuigo/linux-arm64": "1.0.12",
-        "@fuigo/linux-x64": "1.0.12",
-        "@fuigo/win32-arm64": "1.0.12",
-        "@fuigo/win32-x64": "1.0.12"
+        "@fuigo/darwin-arm64": "1.0.13",
+        "@fuigo/darwin-x64": "1.0.13",
+        "@fuigo/linux-arm64": "1.0.13",
+        "@fuigo/linux-x64": "1.0.13",
+        "@fuigo/win32-arm64": "1.0.13",
+        "@fuigo/win32-x64": "1.0.13"
     }
 }
