@@ -452,6 +452,15 @@ pub(crate) fn parse_ask_user_question_from_meta(
         }
     }
 }
+/// Whether a session advertises `ask_user_question`.
+/// An explicit `_meta.askUserQuestion` wins. Otherwise a non-interactive session (`fuigo -p`, SDK) gets no tool, because nobody is there to answer it, and an interactive one follows the `ask_user_question` feature.
+pub(crate) fn resolve_ask_user_question_enabled(
+    meta: Option<bool>,
+    non_interactive: bool,
+    feature_enabled: impl FnOnce() -> bool,
+) -> bool {
+    meta.unwrap_or_else(|| !non_interactive && feature_enabled())
+}
 pub(crate) fn lookup_session_model(
     session_model: Option<agent_client_protocol::ModelId>,
     default_model_id: &agent_client_protocol::ModelId,
@@ -611,6 +620,17 @@ mod tests {
     fn parse_ask_user_question_returns_none_when_absent() {
         let meta = serde_json::json!({ "agentProfile": "fuigo-build-plan" });
         assert_eq!(parse_ask_user_question_from_meta(meta.as_object()), None);
+    }
+    #[test]
+    fn non_interactive_sessions_default_ask_user_question_off() {
+        assert!(!resolve_ask_user_question_enabled(None, true, || true));
+        assert!(resolve_ask_user_question_enabled(None, false, || true));
+        assert!(!resolve_ask_user_question_enabled(None, false, || false));
+        assert!(
+            resolve_ask_user_question_enabled(Some(true), true, || false),
+            "an explicit opt-in still wins for non-interactive clients that answer programmatically"
+        );
+        assert!(!resolve_ask_user_question_enabled(Some(false), false, || true));
     }
     #[test]
     fn parse_ask_user_question_returns_none_for_empty_meta() {

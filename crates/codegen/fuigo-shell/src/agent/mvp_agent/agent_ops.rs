@@ -4528,15 +4528,15 @@ impl MvpAgent {
             .borrow()
             .workflow_max_concurrent_agents;
         let media_gen_batch_limits = self.cfg.borrow().media_gen_batch_limits;
-        let ask_user_question_enabled = crate::upload::turn::parse_ask_user_question_from_meta(
-                session_meta,
-            )
-            .unwrap_or_else(|| {
-                self
-                    .cfg
+        let ask_user_question_enabled = crate::upload::turn::resolve_ask_user_question_enabled(
+            crate::upload::turn::parse_ask_user_question_from_meta(session_meta),
+            startup_hints.non_interactive,
+            || {
+                self.cfg
                     .borrow()
                     .is_feature_enabled(crate::agent::config::Feature::AskUserQuestion)
-            });
+            },
+        );
         let client_hooks = crate::extensions::hooks::parse_client_hooks(session_meta);
         let disable_web_search = self.cfg.borrow().disable_web_search;
         let todo_gate = self.cfg.borrow().todo_gate;
