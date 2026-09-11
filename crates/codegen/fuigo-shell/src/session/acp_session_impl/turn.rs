@@ -2608,13 +2608,11 @@ impl SessionActor {
             } else { false };
             let finalize_response = finalize_recall || finalize_execution;
             let recall_exhausted = memory_recall_rounds >= 2;
+            // The advertised tool list never changes within a session: every edit to `tools` invalidates the whole
+            // server-side prompt cache (OpenAI: keep `tools` constant, steer with `tool_choice`). Restrictions are
+            // therefore expressed as reminders plus `tool_choice` (finalize) or execution-time rejection (recall limit),
+            // never by removing definitions.
             if recall_exhausted && !finalize_response {
-                effective_tools.retain(|tool| {
-                    !matches!(
-                        self.agent.borrow().tool_bridge().tool_kind(&tool.name),
-                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
-                    )
-                });
                 self.push_system_reminder(
                     "The memory recall limit for this step is reached. Continue the requested \
                      work using the evidence already collected. Treat missing facts as UNKNOWN; \
@@ -2622,7 +2620,6 @@ impl SessionActor {
                 );
             }
             if finalize_recall {
-                effective_tools.clear();
                 self.push_system_reminder(
                     "Memory recall is complete for this turn. Produce the final answer now using \
                      the evidence already returned, including results before the latest empty search. \
@@ -2634,7 +2631,6 @@ impl SessionActor {
                 );
             }
             if finalize_execution {
-                effective_tools.clear();
                 self.push_system_reminder("Execution capacity is reserved for this final response. Do not take any actions or call tools. Report only evidence-backed changes and checks already performed, unresolved work and unknown effects. Do not claim completion if required work remains.");
             }
             if structured_output_tool && let Some(schema) = json_schema.clone() {
@@ -2654,7 +2650,7 @@ impl SessionActor {
             let adaptive = self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() == "adaptive";
             let deferred_native = if adaptive { self.adaptive_deferred_native(&effective_tools) } else { Default::default() };
             if adaptive {
-                let enabled = !finalize_response && effective_tools.iter().any(|tool| tool.name == "search_tool");
+                let enabled = effective_tools.iter().any(|tool| tool.name == "search_tool");
                 effective_tools = self.tool_metadata_snapshot.lock().unwrap().native_presentation.project(
                     req_id, effective_tools, &deferred_native.keys().cloned().collect(), enabled,
                 );
@@ -2729,13 +2725,15 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = if finalize_response {
-                vec![]
-            } else {
-                self.hosted_tools_for_turn()
-            };
+            // Hosted tools are part of `tools` too, so they stay; `tool_choice` is what closes the final-answer slot.
+            request.hosted_tools = self.hosted_tools_for_turn();
             if finalize_response {
-                request.tool_choice = None;
+                // The final slot either produces the structured answer through its tool or calls nothing at all
+                request.tool_choice = Some(if structured_output_tool && json_schema.is_some() {
+                    fuigo_sampling_types::ConversationToolChoice::Function(STRUCTURED_OUTPUT_TOOL.to_string())
+                } else {
+                    fuigo_sampling_types::ConversationToolChoice::None
+                });
             }
             request.max_output_tokens = self
                 .tool_context
@@ -3171,18 +3169,6 @@ impl SessionActor {
                 return Err(acp::Error::internal_error()
                     .data("Tool call rejected during finalization"));
             }
-            if recall_exhausted
-                && !finalize_response
-                && tool_calls.iter().any(|call| {
-                    matches!(
-                        self.agent.borrow().tool_bridge().tool_kind(&call.name),
-                        Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
-                    )
-                })
-            {
-                return Err(acp::Error::internal_error()
-                    .data("Repeated memory tool rejected after recall limit"));
-            }
             let over_cap = self.media_gen_over_cap(&tool_calls);
             if fuigo_tools::media_gen_limits::should_resample_egregious(
                 &over_cap,
@@ -3567,6 +3553,13 @@ impl SessionActor {
                     },
                 )
                 .await;
+            // Memory tools stay advertised after the recall limit (a constant tool list); a call past the limit is
+            // answered with an error result instead of running, so the model sees the limit without a failed turn.
+            let tool_call_responses = if recall_exhausted && !finalize_response {
+                self.reject_memory_calls_after_limit(tool_call_responses).await?
+            } else {
+                tool_call_responses
+            };
             let execution_tool_ids = tool_call_responses.iter().map(|call| call.id.clone()).collect::<Vec<_>>();
             if let Some(execution) = &execution {
                 execution.tools(execution_tool_ids.clone()).await.map_err(|_| acp::Error::internal_error().data("Tool execution admission not durable or finalizing"))?;
