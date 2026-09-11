@@ -927,6 +927,9 @@ pub(crate) async fn spawn_session_actor(
             },
         ))
     });
+    // Any configured server (resolved local/client/managed list, or in-process SDK servers) keeps
+    // the MCP meta-tools advertised; with none, `search_tool`/`use_tool` are dropped at build.
+    let mcp_configured = !mcp_servers.is_empty() || !acp_mcp_servers.is_empty();
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
         if let Some(ref pool) = parent_mcp_pool {
@@ -1011,6 +1014,7 @@ pub(crate) async fn spawn_session_actor(
         mcp_state: mcp_state.clone(),
         managed_gateway_tool_client: managed_gateway_tool_client.clone(),
         is_non_interactive: startup_hints.non_interactive,
+        mcp_configured,
         system_prompt_label,
         owner_session_id: Some(session_info.id.0.to_string()),
         parent_scheduler_handle: if startup_hints.is_subagent {
