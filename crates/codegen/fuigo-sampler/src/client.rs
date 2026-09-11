@@ -89,6 +89,9 @@ impl FuigoRequestHeaders<'_> {
 /// The API echoes the request's `tools` array in `ResponseCreated` and `ResponseCompleted` events.
 /// If we sent `{"type": "x_search"}`, `rs::Tool` deserialization fails, so we strip unrecognized tools from the raw JSON and retry.
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+    // Programmatic-tool-calling items (`program`, `program_output`) have no typed variant; rewrite them into carriers first
+    let transcoded = crate::stream::responses_ptc::transcode_sse(data);
+    let data = transcoded.as_deref().unwrap_or(data);
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
         Err(first_err) => {
@@ -1256,6 +1259,8 @@ impl SamplingClient {
         // async-openai's ReasoningTextContent struct omits the `type` discriminator that the Responses API requires on input
         // Patch it in after serializing
         fuigo_sampling_types::patch_reasoning_text_types(&mut request_body);
+        // Programmatic tool calling: carriers -> wire items, `caller` on program calls, `allowed_callers` on tools (no-op when off)
+        fuigo_sampling_types::patch_request_body(&mut request_body);
         let SentRequest {
             builder,
             sent_bearer,
@@ -1380,6 +1385,8 @@ impl SamplingClient {
         splice_extra_tool_entries(&mut request_body, extra_tool_entries);
         append_response_includes(&mut request_body, &self.defaults.extra_response_includes);
         fuigo_sampling_types::patch_reasoning_text_types(&mut request_body);
+        // Programmatic tool calling: carriers -> wire items, `caller` on program calls, `allowed_callers` on tools (no-op when off)
+        fuigo_sampling_types::patch_request_body(&mut request_body);
         // Fresh per attempt so signals never leak across retries; `None` (check disabled) sends no header and does no peek work per event
         let doom_loop = self
             .defaults
@@ -2264,6 +2271,7 @@ mod tests {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            programmatic_tool_calling: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,

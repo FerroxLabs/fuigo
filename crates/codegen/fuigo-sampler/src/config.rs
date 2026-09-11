@@ -94,6 +94,10 @@ pub struct SamplerConfig {
     #[serde(default)]
     pub supports_backend_search: bool,
 
+    /// Resolved per-model opt-in for OpenAI Responses programmatic tool calling (already gated on backend and model family).
+    #[serde(default)]
+    pub programmatic_tool_calling: bool,
+
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -146,6 +150,7 @@ impl Default for SamplerConfig {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            programmatic_tool_calling: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,

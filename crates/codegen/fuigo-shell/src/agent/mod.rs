@@ -13,6 +13,7 @@ pub mod init;
 pub mod key_discovery;
 pub mod model_providers;
 pub mod models;
+pub mod programmatic_tools;
 pub mod mvp_agent;
 pub(crate) mod otel_gate;
 pub(crate) mod proxy;

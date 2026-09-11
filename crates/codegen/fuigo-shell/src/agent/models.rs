@@ -608,6 +608,17 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
+    /// Resolved programmatic-tool-calling opt-in for a catalog model (entry flag or env override, gated on backend and family).
+    pub(crate) fn model_programmatic_tool_calling(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| crate::agent::programmatic_tools::enabled_for(e.info()))
+            .unwrap_or(false)
+    }
+
     pub(crate) fn model_compactions_remaining(
         &self,
         model_id: &str,
