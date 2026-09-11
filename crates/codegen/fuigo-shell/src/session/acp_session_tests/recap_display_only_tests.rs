@@ -1765,3 +1765,48 @@ async fn parent_cached_request_pins_fail_length_policy() {
         fuigo_sampling_types::LengthPolicy::Fail
     );
 }
+
+/// Non-interactive attachments (`fuigo -p`, SDK) never start the dashboard-only side calls, even with both features on.
+/// An interactive attachment on the same actor still starts both.
+#[tokio::test(flavor = "current_thread")]
+async fn non_interactive_attachment_skips_turn_summary_and_title_refresh() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.turn_summary_enabled = true;
+            actor.title_refresh_enabled = true;
+            let actor = std::sync::Arc::new(actor);
+
+            actor.attach_non_interactive.set(true);
+            actor.restart_turn_summary("pid-headless".into());
+            actor.maybe_refresh_title();
+            assert!(
+                actor.turn_summary_task.borrow().is_none(),
+                "non-interactive attachment must not start a turn summary"
+            );
+            assert!(
+                actor.title_refresh_task.borrow().is_none(),
+                "non-interactive attachment must not start a title refresh"
+            );
+
+            // An interactive client re-attached to the same session
+            actor.attach_non_interactive.set(false);
+            actor.restart_turn_summary("pid-interactive".into());
+            actor.maybe_refresh_title();
+            assert!(
+                actor.turn_summary_task.borrow().is_some(),
+                "interactive attachment keeps the turn summary"
+            );
+            assert!(
+                actor.title_refresh_task.borrow().is_some(),
+                "interactive attachment keeps the title refresh"
+            );
+            actor.abort_turn_summary();
+            actor.abort_title_refresh();
+        })
+        .await;
+}

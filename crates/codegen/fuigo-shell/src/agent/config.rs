@@ -1648,6 +1648,19 @@ pub enum TitlePolicy {
     Host,
 }
 
+impl TitlePolicy {
+    /// The first-prompt title policy for one session attachment.
+    /// Non-interactive sessions (`fuigo -p`, SDK) never pay for a model title: `Model` becomes the zero-dispatch `Local` label,
+    /// so session lists and the `/resume` picker still name the run instead of showing "(no prompt)".
+    /// `Host` and `Local` already send no request and pass through.
+    pub(crate) fn for_attachment(self, non_interactive: bool) -> Self {
+        match self {
+            Self::Model if non_interactive => Self::Local,
+            policy => policy,
+        }
+    }
+}
+
 #[cfg(test)]
 mod title_policy_tests {
     use super::*;
@@ -1663,6 +1676,16 @@ mod title_policy_tests {
             assert_eq!(serde_json::to_value(session).unwrap()["title_policy"], wire);
         }
         assert!(serde_json::from_value::<SessionConfig>(serde_json::json!({"title_policy": "unknown"})).is_err());
+    }
+
+    #[test]
+    fn non_interactive_attachment_never_dispatches_a_model_title() {
+        assert_eq!(TitlePolicy::Model.for_attachment(true), TitlePolicy::Local);
+        assert_eq!(TitlePolicy::Model.for_attachment(false), TitlePolicy::Model);
+        for policy in [TitlePolicy::Local, TitlePolicy::Host] {
+            assert_eq!(policy.for_attachment(true), policy);
+            assert_eq!(policy.for_attachment(false), policy);
+        }
     }
 
     #[test]

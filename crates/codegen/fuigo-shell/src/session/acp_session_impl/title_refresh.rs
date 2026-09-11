@@ -15,10 +15,13 @@ const TITLE_REFRESH_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::fr
 
 impl SessionActor {
     /// Spawn a title refresh after a successful turn, unless the title is frozen or one is already running.
-    /// No-op for subagents and when post-turn side-calls are disabled (title refresh shares the `turn_summary_enabled` gate).
+    /// No-op for subagents, for non-interactive attachments (`fuigo -p`, SDK), and when post-turn side-calls are disabled (title refresh shares the `turn_summary_enabled` gate).
     /// At most one refresh runs at a time and it is left to finish; the checkpoint decision and freeze happen in [`Self::refresh_title`].
     pub(crate) fn maybe_refresh_title(self: &Arc<Self>) {
-        if !self.title_refresh_enabled || self.startup_hints.is_subagent {
+        if !self.title_refresh_enabled
+            || self.startup_hints.is_subagent
+            || self.attach_non_interactive.get()
+        {
             return;
         }
         if self.next_title_refresh_idx.get() >= session_summary::TITLE_REFRESH_TURNS.len() {
