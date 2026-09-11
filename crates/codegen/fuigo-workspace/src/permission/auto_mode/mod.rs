@@ -562,6 +562,21 @@ pub(crate) const KUBECTL_UNSAFE_FLAGS: &[&str] = &[
     "--certificate-authority",
 ];
 
+/// ripgrep flags that spawn a caller-controlled program: `--pre <cmd>` runs a preprocessor per searched file and `--hostname-bin <cmd>` runs a program to resolve the hyperlink hostname.
+/// `--pre-glob` only filters what a preprocessor sees and is deliberately absent. Shared with `manager.rs`.
+pub(crate) const RG_UNSAFE_FLAGS: &[&str] = &["--pre", "--hostname-bin"];
+
+/// True when `words` is `rg` with a [`RG_UNSAFE_FLAGS`] entry, spelled `--flag value` or `--flag=value`.
+pub(crate) fn rg_has_unsafe_flag(words: &[String]) -> bool {
+    if crate::permission::policy::normalized_command_head(words).as_deref() != Some("rg") {
+        return false;
+    }
+    words.iter().skip(1).any(|w| {
+        let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+        RG_UNSAFE_FLAGS.contains(&name)
+    })
+}
+
 /// Env var KEYs safe to set for a routine command: cosmetic / logging only, with no effect on which binary runs or how it resolves code.
 /// Anything else (LD_PRELOAD, DYLD_*, PATH, NODE_OPTIONS, PYTHONPATH, GIT_SSH_COMMAND, FOO, ...) is treated as exec-affecting and blocks.
 /// Case-sensitive exact match.
@@ -651,12 +666,8 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     {
         return false;
     }
-    // `rg --pre <cmd>` runs <cmd> per searched file; `--pre-glob` only filters.
-    if head == "rg"
-        && inner
-            .iter()
-            .any(|w| w == "--pre" || w.starts_with("--pre="))
-    {
+    // `rg --pre` / `--hostname-bin` run a caller-controlled program; `--pre-glob` only filters.
+    if rg_has_unsafe_flag(inner) {
         return false;
     }
     // kubectl with caller-controlled kubeconfig/endpoint/identity can run an exec credential plugin; mirrors manager.rs::kubectl_has_unsafe_flag
@@ -1971,7 +1982,7 @@ mod tests {
         assert_eq!(v("find . -type f"), ClassifierVerdict::Allow);
     }
 
-    /// `rg --pre <cmd>` executes <cmd> per searched file, so it must not auto-allow, mirroring `manager.rs::rg_has_pre_flag`.
+    /// `rg --pre <cmd>` executes <cmd> per searched file and `rg --hostname-bin <cmd>` executes <cmd> for hyperlinks, so neither may auto-allow.
     /// `--pre-glob` only filters and stays routine.
     #[test]
     fn heuristic_guards_rg_pre() {
