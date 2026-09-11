@@ -117,6 +117,9 @@ impl ChatStateActor {
             // Execute completed tool calls on a Length-truncated turn instead
             // of failing it; text-only salvage stays behind `CompletePartial`.
             length_policy: fuigo_sampling_types::LengthPolicy::CompleteToolCalls,
+            // Decided by the shell per request (model family, session interactivity)
+            text_verbosity: None,
+            suppress_reasoning_summary: false,
         }
     }
 }
