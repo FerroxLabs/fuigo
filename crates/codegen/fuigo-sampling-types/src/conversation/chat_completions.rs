@@ -47,6 +47,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                     model_id,
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    output_order: None,
                 })
             }
             Role::Tool => {
@@ -235,6 +236,7 @@ impl From<ChatResponseMessage> for ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     }
 }

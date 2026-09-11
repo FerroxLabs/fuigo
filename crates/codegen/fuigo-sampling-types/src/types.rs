@@ -758,6 +758,25 @@ pub enum ReasoningEffort {
     Max,
 }
 
+/// `text.verbosity` for the Responses API (GPT-5 family).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+impl TextVerbosity {
+    pub fn to_responses_api(self) -> crate::rs::Verbosity {
+        match self {
+            Self::Low => crate::rs::Verbosity::Low,
+            Self::Medium => crate::rs::Verbosity::Medium,
+            Self::High => crate::rs::Verbosity::High,
+        }
+    }
+}
+
 impl ReasoningEffort {
     pub fn to_responses_api(self) -> crate::rs::ReasoningEffort {
         match self {

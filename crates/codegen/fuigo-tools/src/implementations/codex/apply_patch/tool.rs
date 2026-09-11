@@ -98,11 +98,59 @@ It is important to remember:
 // ─── Input ───────────────────────────────────────────────────────────
 
 /// Input for the `apply_patch` tool.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+///
+/// Deserializes from the JSON function form `{"patch": "..."}` and from the freeform form: a bare string, or the
+/// `{"raw": "..."}` / `{"input": "..."}` envelope the shell wraps non-JSON tool arguments in when the Responses
+/// backend advertises this tool as a `custom` (grammar-constrained) tool.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct ApplyPatchInput {
     /// The patch text in codex patch format.
     pub patch: String,
 }
+
+impl<'de> serde::Deserialize<'de> for ApplyPatchInput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Text(String),
+            Object {
+                #[serde(alias = "raw", alias = "input")]
+                patch: String,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Text(patch) | Wire::Object { patch } => Self { patch },
+        })
+    }
+}
+
+// ─── Freeform (Responses `custom` tool) form ─────────────────────────
+
+/// Description of the freeform form, Codex's wording (`codex-rs/core/src/tools/handlers/apply_patch_spec.rs`, rust-v0.154.0).
+pub const APPLY_PATCH_FREEFORM_DESCRIPTION: &str = "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.";
+
+/// Codex's Lark grammar for the freeform form, verbatim (`codex-rs/core/assets/tools/apply_patch.lark`, rust-v0.154.0).
+pub const APPLY_PATCH_LARK_GRAMMAR: &str = r#"start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF
+"#;
 
 // ─── Tool ────────────────────────────────────────────────────────────
 
@@ -509,6 +557,37 @@ mod tests {
         ApplyPatchInput {
             patch: patch.to_string(),
         }
+    }
+
+    /// The input accepts the JSON function form and every freeform envelope: a bare string (a Responses
+    /// `custom_tool_call` input), and the `raw` / `input` wrappers the shell uses for non-JSON arguments.
+    #[test]
+    fn input_accepts_json_form_and_raw_freeform_text() {
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
+        for value in [
+            serde_json::json!({ "patch": patch }),
+            serde_json::json!({ "raw": patch }),
+            serde_json::json!({ "input": patch }),
+            serde_json::Value::String(patch.to_string()),
+        ] {
+            let input: ApplyPatchInput =
+                serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert_eq!(input.patch, patch, "{value}");
+        }
+        assert!(serde_json::from_value::<ApplyPatchInput>(serde_json::json!({ "other": 1 })).is_err());
+        // The schema advertised to JSON backends is unchanged: an object with a required `patch` string
+        let schema = serde_json::to_value(schemars::schema_for!(ApplyPatchInput)).unwrap();
+        assert_eq!(schema["required"], serde_json::json!(["patch"]));
+    }
+
+    /// The grammar is Codex's, byte for byte on the lines that matter, and the description says freeform.
+    #[test]
+    fn freeform_grammar_matches_codex() {
+        assert!(APPLY_PATCH_LARK_GRAMMAR.starts_with("start: begin_patch hunk+ end_patch\n"));
+        assert!(APPLY_PATCH_LARK_GRAMMAR.contains("add_line: \"+\" /(.*)/ LF -> line\n"));
+        assert!(APPLY_PATCH_LARK_GRAMMAR.contains("change_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\n"));
+        assert!(APPLY_PATCH_LARK_GRAMMAR.ends_with("%import common.LF\n"));
+        assert!(APPLY_PATCH_FREEFORM_DESCRIPTION.contains("FREEFORM"));
     }
 
     fn wrap_patch(body: &str) -> String {

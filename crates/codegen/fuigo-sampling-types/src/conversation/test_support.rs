@@ -76,6 +76,7 @@ pub(super) fn btw_mid_turn_conversation() -> Vec<ConversationItem> {
             model_id: Some("messages-compatible-model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         // Completed tool pair
         ConversationItem::Assistant(AssistantItem {
@@ -88,6 +89,7 @@ pub(super) fn btw_mid_turn_conversation() -> Vec<ConversationItem> {
             model_id: Some("messages-compatible-model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         ConversationItem::tool_result("call_1", "fn main() {}"),
         ConversationItem::Assistant(AssistantItem {
@@ -96,6 +98,7 @@ pub(super) fn btw_mid_turn_conversation() -> Vec<ConversationItem> {
             model_id: Some("messages-compatible-model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         // Mid-turn: orphaned tool_use (no result yet)
         ConversationItem::Assistant(AssistantItem {
@@ -108,6 +111,7 @@ pub(super) fn btw_mid_turn_conversation() -> Vec<ConversationItem> {
             model_id: Some("messages-compatible-model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
     ]
 }
@@ -126,6 +130,7 @@ pub(super) fn assistant_with_calls(calls: &[(&str, &str)]) -> ConversationItem {
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
+        output_order: None,
     })
 }
 

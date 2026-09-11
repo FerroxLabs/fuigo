@@ -276,6 +276,7 @@ pub fn stream_chat_completions<'a>(
                 model_fingerprint,
                 // Chat Completions does not echo the applied reasoning effort.
                 reasoning_effort: None,
+                output_order: None,
             }));
         } else {
             items.push(ConversationItem::assistant(""));
