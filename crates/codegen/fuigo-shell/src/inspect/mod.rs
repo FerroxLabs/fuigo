@@ -59,7 +59,7 @@ pub(crate) struct InspectReport {
     pub channel: String,
     pub cwd: String,
     pub project_root: Option<String>,
-    /// Folder-trust verdict for `cwd`: when false, repo-local project hooks, plugins, and MCP/LSP entries are gated out of the listings below.
+    /// Folder-trust verdict for `cwd`: when false, repo-local project hooks, plugins, MCP/LSP, instructions, and skills are gated out of the listings below.
     pub project_trusted: bool,
     pub project_instructions: Vec<InstructionFile>,
     pub permissions: PermissionsReport,
@@ -335,7 +335,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
         .and_then(|r| r.workdir().map(|p| p.to_path_buf()));
 
     // Route through the live folder-trust gate rather than a raw store read; no session resolve has run for a one-shot `inspect`
-    // The single verdict drives the top-level flag and gates the hooks, plugins, and MCP/LSP listings so they reflect runtime gating
+    // The single verdict drives the top-level flag and gates the hooks, plugins, MCP/LSP, instruction, and skill listings so they reflect runtime gating
     // `remote = None`: env/user/managed opt-out is honored, but a remote kill-switch is not consulted on this report-only path
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
@@ -370,9 +370,9 @@ async fn build_report(cwd: &Path) -> InspectReport {
 
     // Discover with all vendors ON so inspect shows the full set on disk.
     let (mut instructions, permissions, mut skills) = tokio::join!(
-        list_instructions(cwd),
+        list_instructions(cwd, project_trusted),
         list_permissions(cwd, project_trusted),
-        list_skills(cwd, &plugin_registry, &skills_config),
+        list_skills(cwd, &plugin_registry, &skills_config, project_trusted),
     );
 
     // Attach local compatibility status to each discovered vendor entry.
@@ -514,11 +514,12 @@ fn instruction_file_type(
 }
 
 /// Wraps the production instruction discovery (`agents_md::read_agents_config_with_paths`).
-async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
-    // Discover with all vendors ON so inspect shows the full set.
+async fn list_instructions(cwd: &Path, project_trusted: bool) -> Vec<InstructionFile> {
+    // Discover with all vendors ON so inspect shows the full set; folder trust gates project scope exactly as at runtime.
     let configs = fuigo_agent::prompt::agents_md::read_agents_config_with_paths(
         &cwd.display().to_string(),
         fuigo_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
     .await;
 
@@ -805,13 +806,15 @@ async fn list_skills(
     cwd: &Path,
     plugin_registry: &fuigo_agent::plugins::PluginRegistry,
     skills_config: &fuigo_agent::prompt::skills::SkillsConfig,
+    project_trusted: bool,
 ) -> Vec<SkillEntry> {
-    // Discover with all vendors ON so inspect shows the full set.
+    // Discover with all vendors ON so inspect shows the full set; folder trust gates project scope exactly as at runtime.
     let skills = fuigo_agent::prompt::skills::list_skills_with_plugins(
         Some(&cwd.display().to_string()),
         skills_config,
         Some(plugin_registry),
         fuigo_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
     .await;
 
@@ -2373,7 +2376,13 @@ mod tests {
         };
         let registry = fuigo_agent::plugins::PluginRegistry::from_discovered(vec![], &[], &[]);
 
-        let entries = list_skills(cwd.path(), &registry, &config).await;
+        let entries = list_skills(
+            cwd.path(),
+            &registry,
+            &config,
+            /*project_trusted*/ true,
+        )
+        .await;
 
         let extra_entry = entries
             .iter()

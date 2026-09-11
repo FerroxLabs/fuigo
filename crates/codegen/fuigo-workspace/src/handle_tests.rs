@@ -7490,7 +7490,7 @@ async fn bundled_allowlist_filters_discovery() {
         &dir,
         Some("allowlist-e2e-kept"),
     ));
-    let skills = crate::discovery::discover_skills(cwd.path(), &config).await;
+    let skills = crate::discovery::discover_skills(cwd.path(), &config, true).await;
     let names: Vec<&str> = skills
         .iter()
         .filter_map(|s| s["name"].as_str())

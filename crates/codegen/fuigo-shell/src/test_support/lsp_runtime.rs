@@ -104,6 +104,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         backend_tools_enabled: true,
         respect_gitignore: false,
         path_not_found_hints: false,
+        tool_params_json: Default::default(),
         plugin_registry: None,
         models_manager: Default::default(),
         file_tool_overrides: None,

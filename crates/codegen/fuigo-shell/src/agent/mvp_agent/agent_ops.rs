@@ -4581,17 +4581,9 @@ impl MvpAgent {
         let auth_manager = Some(self.auth_manager.clone());
         let bash_params_json = {
             let cfg = self.cfg.borrow();
-            let remote_auto_bg = cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|r| r.auto_background_on_timeout);
-            let remote_allow_background_operator = cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|r| r.allow_background_operator);
             cfg.toolset
                 .bash
-                .to_bash_params_json(remote_auto_bg, remote_allow_background_operator)
+                .to_bash_params_json_with_remote(cfg.remote_settings.as_ref())
         };
         let ask_user_question_params_json = {
             let cfg = self.cfg.borrow();

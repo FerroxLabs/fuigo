@@ -524,6 +524,18 @@ echo "No issues found"
 
 ---
 
+## Folder Trust in Headless Runs
+
+Project instructions (`AGENTS.md`, `CLAUDE.md`, `.fuigo/rules/`), project skills and commands (`.fuigo/skills/`, `.fuigo/commands/`, and their `.agents` / `.claude` / `.cursor` equivalents), project hooks, plugins, permission rules, and repo-local MCP/LSP servers load only from a trusted folder. An interactive session asks once. A headless run cannot ask, so in an untrusted folder that ships any of these it starts without them.
+
+For CI jobs and benchmark harnesses running against a checkout you trust, pass `--trust`:
+
+```bash
+fuigo --trust -p "Run the test suite and fix failures"
+```
+
+`--trust` records the current folder's workspace (its git root) in `~/.fuigo/trusted_folders.toml` before the session starts, so later runs in the same checkout are trusted as well. In a disposable container you can instead turn the gate off for the process with `FUIGO_FOLDER_TRUST=0`. Instructions and skills under `~/.fuigo/` always load. See [10-hooks.md](10-hooks.md) for the full trust model.
+
 ## Always-approve for automation
 
 `--always-approve` (alias `--yolo`, same as `--permission-mode bypassPermissions`) runs tool calls without interactive permission prompts. Deny rules, hooks, and admin locks still apply (see [Permissions and safety](22-permissions-and-safety.md#permission-modes)).
