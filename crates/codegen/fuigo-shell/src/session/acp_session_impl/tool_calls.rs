@@ -604,6 +604,7 @@ impl SessionActor {
                 })
                 .collect()
         };
+        let (dedupe_plans, dedupe_batch_mutates) = self.plan_read_dedupe_batch(&approved).await;
         let lock_cwd = dispatch_cwd.clone();
         let lock_paths = tokio::task::spawn_blocking(move || {
             lock_args
@@ -711,8 +712,14 @@ impl SessionActor {
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
+                let dedupe_plan = Arc::clone(&dedupe_plans[idx]);
                 let prepared = {
                     let mut dispatch_prepared = prepared.clone();
+                    if let Some(plan) = dedupe_plan.as_ref()
+                        && !plan.serves_everything()
+                    {
+                        plan.rewrite_args(&mut dispatch_prepared.parsed_args);
+                    }
                     if interruptible
                         && let InterruptedWaitFilter::Rewritten { kept, requested } =
                             apply_interrupted_wait_filter(
@@ -766,6 +773,7 @@ impl SessionActor {
                         let workspace_ops = workspace_ops.clone();
                         let session_id = session_id.clone();
                         let lock = lock.clone();
+                        let dedupe_plan = Arc::clone(&dedupe_plan);
                         let workflow_smoke_check_cwd = workflow_smoke_check_cwd.clone();
                         let workflow_smoke_check_display_cwd =
                             workflow_smoke_check_display_cwd.clone();
@@ -784,7 +792,18 @@ impl SessionActor {
                                 } else {
                                     None
                                 };
-                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                                match dedupe_plan.as_ref() {
+                                    Some(plan) if plan.serves_everything() => {
+                                        Ok(plan.synthesized_result())
+                                    }
+                                    Some(plan) => dispatch_tool(&workspace_ops, &prepared, &session_id)
+                                        .await
+                                        .map(|mut result| {
+                                            plan.append_notes(&mut result);
+                                            result
+                                        }),
+                                    None => dispatch_tool(&workspace_ops, &prepared, &session_id).await,
+                                }
                             };
                             let mut result = result;
                             let snapshot =
@@ -959,6 +978,10 @@ impl SessionActor {
             };
             let tool_loop = match result {
                 Ok(tool_result) => {
+                    if !dedupe_batch_mutates {
+                        self.record_read_dedupe(&prepared, &tool_result, dedupe_plans[idx].as_ref().as_ref())
+                            .await;
+                    }
                     let effective_tool_name = tool_result
                         .effective_tool_name
                         .clone()
@@ -1163,6 +1186,7 @@ impl SessionActor {
                 _ => {}
             }
         }
+        self.finish_read_dedupe_batch(dedupe_batch_mutates);
         Ok(())
     }
     async fn apply_pre_tool_use_gate(
@@ -1320,7 +1344,8 @@ impl SessionActor {
                         .as_ref()
                         .and_then(|v| v.get("run_in_background").or_else(|| v.get("background")))
                         .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true)
+                        // Matches `TaskToolInput`'s serde default: a spawn is synchronous unless the model opts into the background.
+                        .unwrap_or(false)
                 });
             let mut meta = self.stamp_tool_meta(None, &call.function.name, None);
             if let Some(bg) = subagent_background {

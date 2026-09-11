@@ -28,8 +28,8 @@ impl crate::types::tool_metadata::ToolMetadata for GetTerminalCommandOutputTool 
         r#"Get output and status from a background terminal command${%- if tools.by_kind.monitor %} or monitor${%- endif %}.
 
 Usage notes:
-- Pass ${{ params.background_task_action.task_ids }} with one or more ids from ${%- if params is defined and params.execute is defined and params.execute.is_background %} ${{ params.execute.is_background }}=true commands${%- else %} background commands${%- endif %}${%- if tools.by_kind.monitor %} (a monitor's ${{ params.kill_task_action.task_id }} is returned by ${{ tools.by_kind.monitor }})${%- endif %}; for a single task use a one-element array. Multiple ids with a positive ${{ params.background_task_action.timeout_ms }} wait until all complete
-- Omit ${{ params.background_task_action.timeout_ms }} or pass 0 for a non-blocking status snapshot; set a positive ${{ params.background_task_action.timeout_ms }} to wait up to that many milliseconds, capped at {max_wait_ms}
+- Pass ${{ params.background_task_action.task_ids }} with one or more ids from ${%- if params is defined and params.execute is defined and params.execute.is_background %} ${{ params.execute.is_background }}=true commands${%- else %} background commands${%- endif %}${%- if tools.by_kind.monitor %} (a monitor's ${{ params.kill_task_action.task_id }} is returned by ${{ tools.by_kind.monitor }})${%- endif %}; for a single task use a one-element array. Multiple ids with ${{ params.background_task_action.timeout_ms }} omitted or positive wait until all complete
+- Omit ${{ params.background_task_action.timeout_ms }} to wait up to 120000 ms for completion; a positive ${{ params.background_task_action.timeout_ms }} waits up to that many milliseconds, capped at {max_wait_ms} (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot
 - Returns current output, status, and exit code if completed${%- if tools.by_kind.read %}
 - If output is large, use ${{ tools.by_kind.read }} on the output_file path${%- endif %}"#
     }

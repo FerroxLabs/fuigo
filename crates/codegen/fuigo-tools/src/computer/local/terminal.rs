@@ -43,9 +43,11 @@ const COMPLETED_TASK_TTL: Duration = Duration::from_secs(300);
 const SIGTERM_GRACE: Duration = Duration::from_secs(1);
 /// Max background task lifetime; 10 hours to support long monitor and bash runs.
 const BACKGROUND_MAX_RUNTIME: Duration = Duration::from_secs(36_000);
-/// Max time an auto-backgroundable foreground command blocks the turn before it is
-/// backgrounded (never killed), independent of `timeout`. Env: `FUIGO_FOREGROUND_BLOCK_BUDGET_MS`.
-const FOREGROUND_BLOCK_BUDGET: Duration = Duration::from_secs(15);
+/// Fallback max time an auto-backgroundable foreground command blocks the turn before it is
+/// backgrounded (never killed) when the request carries no budget. The bash tool sets the
+/// request budget to its resolved `timeout` (default 120s, capped at 300s), so this only
+/// applies to callers that leave it unset. Env: `FUIGO_FOREGROUND_BLOCK_BUDGET_MS`.
+const FOREGROUND_BLOCK_BUDGET: Duration = Duration::from_secs(120);
 
 fn foreground_block_budget_from_env() -> Duration {
     std::env::var("FUIGO_FOREGROUND_BLOCK_BUDGET_MS")

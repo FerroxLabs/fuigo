@@ -258,7 +258,7 @@ mod tests {
     use crate::types::tool_metadata::test_ctx;
 
     use crate::computer::local::LocalFs;
-    use crate::implementations::fuigo_build::read_file::{MAX_LINES_READ, ReadFileTool};
+    use crate::implementations::fuigo_build::read_file::ReadFileTool;
     use crate::notification::types::ToolNotificationHandle;
     use crate::types::resources::{Cwd, FileSystem, NotificationHandle, Resources};
     use std::sync::Arc;
@@ -428,6 +428,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -471,6 +472,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -511,6 +513,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -534,6 +537,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -559,6 +563,7 @@ mod tests {
             limit: Some(2),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -595,6 +600,7 @@ mod tests {
             limit: Some(2),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -658,6 +664,7 @@ mod tests {
             limit: Some(2),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -709,6 +716,7 @@ mod tests {
             limit: Some(5),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -744,6 +752,7 @@ mod tests {
             limit: Some(5),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -764,7 +773,18 @@ mod tests {
         }
     }
 
-    /// Regression: no-limit reads must be capped at MAX_LINES_READ.
+    /// The client's `max_lines_read` cap (here 1000; the built-in default is
+    /// `MAX_LINES_READ`) bounds a no-limit read.
+    fn capped_resources(cwd: &std::path::Path, max_lines: usize) -> Resources {
+        let mut resources = test_resources(cwd);
+        resources.insert(TruncationCfg(TruncationConfig {
+            max_lines_read: Some(max_lines),
+            ..Default::default()
+        }));
+        resources
+    }
+
+    /// Regression: no-limit reads must be capped at the configured max lines.
     #[tokio::test]
     async fn large_file_truncated_to_max_lines() {
         let tmp = TempDir::new().unwrap();
@@ -772,13 +792,15 @@ mod tests {
         std::fs::write(tmp.path().join("big.txt"), &content).unwrap();
 
         let tool = HashlineReadTool;
-        let resources = test_resources(tmp.path());
+        let resources = capped_resources(tmp.path(), 1000);
+        const MAX_LINES_READ: usize = 1000;
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: None,
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -814,6 +836,7 @@ mod tests {
             limit: Some(50),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
@@ -829,7 +852,7 @@ mod tests {
         }
     }
 
-    /// Explicit limit exceeding MAX_LINES_READ gets capped.
+    /// Explicit limit exceeding the configured max lines gets capped.
     #[tokio::test]
     async fn explicit_large_limit_capped_to_max_lines() {
         let tmp = TempDir::new().unwrap();
@@ -837,13 +860,15 @@ mod tests {
         std::fs::write(tmp.path().join("big.txt"), &content).unwrap();
 
         let tool = HashlineReadTool;
-        let resources = test_resources(tmp.path());
+        let resources = capped_resources(tmp.path(), 1000);
+        const MAX_LINES_READ: usize = 1000;
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: None,
             limit: Some(2000),
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)

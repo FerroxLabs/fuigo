@@ -174,6 +174,8 @@ use sampler_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
+#[path = "acp_session_impl/read_dedupe_hook.rs"]
+mod read_dedupe_hook;
 #[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
 use mcp_snapshot::*;
@@ -728,6 +730,8 @@ pub(crate) struct SessionActor {
     /// Prompt-scoped on the actor: auto-recovery, stop-hook continuations, and the goal loop re-enter the turn loop within one prompt.
     /// A loop-local counter would reset the cap (exhaustion itself triggers auto-recovery).
     pub(crate) transient_retries_prompt_total: std::cell::Cell<u32>,
+    /// Repeat reads of unchanged files whose earlier result is still in context return a short note.
+    pub(crate) read_dedupe: std::cell::RefCell<crate::session::read_dedupe::ReadDedupeCache>,
     /// Start of the current transient-recovery episode (first failed attempt; cleared on a successful sample).
     /// Prompt-scoped with the counter above.
     pub(crate) transient_episode_start: std::cell::Cell<Option<tokio::time::Instant>>,

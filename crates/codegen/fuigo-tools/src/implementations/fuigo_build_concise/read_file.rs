@@ -167,6 +167,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         };
 
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
