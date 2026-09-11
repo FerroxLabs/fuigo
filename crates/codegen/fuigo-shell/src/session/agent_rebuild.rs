@@ -127,6 +127,11 @@ pub(crate) struct AgentRebuildSpec {
     pub managed_gateway_tool_client:
         Option<fuigo_tools::types::resources::ManagedGatewayToolClient>,
     pub is_non_interactive: bool,
+    /// Whether any MCP server (resolved local/client/managed list or in-process SDK servers) was
+    /// configured at spawn. False drops `search_tool`/`use_tool` from the advertised toolset.
+    /// `UpdateMcpServers` does not rebuild the agent, so a server added later is advertised only
+    /// after the next agent rebuild (definition/model switch).
+    pub mcp_configured: bool,
     pub system_prompt_label: String,
     pub owner_session_id: Option<String>,
     pub parent_scheduler_handle:
@@ -250,6 +255,7 @@ impl AgentRebuildSpec {
         .with_memory_enabled(*memory_enabled)
         .with_memory_paths(memory_global_path.clone(), memory_workspace_path.clone())
         .with_is_non_interactive(*is_non_interactive)
+        .with_mcp_configured(*mcp_configured)
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
         .with_state_path(bridge_state_path.clone())
@@ -468,6 +474,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         )),
         managed_gateway_tool_client: None,
         is_non_interactive: false,
+        mcp_configured: false,
         system_prompt_label: fuigo_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         owner_session_id: Some("test-session".to_string()),
         parent_scheduler_handle: None,

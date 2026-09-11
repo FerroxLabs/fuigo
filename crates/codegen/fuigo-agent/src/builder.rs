@@ -79,6 +79,9 @@ pub struct AgentBuilder {
     memory_global_path: Option<String>,
     memory_workspace_path: Option<String>,
     is_non_interactive: bool,
+    /// Whether any MCP server (local config, client-passed, in-process SDK, managed) is configured
+    /// for this session at build time. When false the MCP meta-tools are not advertised.
+    mcp_configured: bool,
     system_prompt_label: String,
     session_env: Option<Arc<HashMap<String, String>>>,
     state_path: Option<PathBuf>,
@@ -127,12 +130,19 @@ pub struct AgentBuilder {
     preloaded_skills: Option<Vec<fuigo_tools::implementations::skills::types::SkillInfo>>,
 }
 /// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`) are present in the tool config.
-fn ensure_plan_mode_tools(tool_config: &mut fuigo_tools::registry::types::ToolServerConfig) {
+///
+/// `inject_plan_mode` is false for non-interactive sessions: the TUI plan-mode keybind is what needs
+/// `enter_plan_mode`/`exit_plan_mode` injected, and a headless session has no keybind. A curated plan
+/// profile still carries them in its own toolset, so an explicit plan request keeps them.
+fn ensure_plan_mode_tools(
+    tool_config: &mut fuigo_tools::registry::types::ToolServerConfig,
+    inject_plan_mode: bool,
+) {
     use fuigo_tools::implementations::fuigo_build;
     let existing: std::collections::HashSet<&str> =
         tool_config.tools.iter().map(|tc| tc.id.as_str()).collect();
-    let missing_enter = !existing.contains("FuigoBuild:enter_plan_mode");
-    let missing_exit = !existing.contains("FuigoBuild:exit_plan_mode");
+    let missing_enter = inject_plan_mode && !existing.contains("FuigoBuild:enter_plan_mode");
+    let missing_exit = inject_plan_mode && !existing.contains("FuigoBuild:exit_plan_mode");
     let missing_ask = !existing.contains("FuigoBuild:ask_user_question");
     drop(existing);
     if missing_enter {
@@ -215,6 +225,7 @@ impl AgentBuilder {
             memory_global_path: None,
             memory_workspace_path: None,
             is_non_interactive: false,
+            mcp_configured: true,
             system_prompt_label: crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
             session_env: None,
             state_path: None,
@@ -345,6 +356,13 @@ impl AgentBuilder {
     /// Mark this session as non-interactive (headless / SDK / stdio / generic-ACP).
     /// Suppresses prompt sections that assume a human at the TUI prompt (the `! <command>` shell-prefix tip and the `<user_guide>` TUI pointer).
     /// Stamps `non_interactive` into the ask_user_question params so an unanswered questionnaire returns no-operator text instead of "user declined".
+    /// Whether MCP servers are configured for the session. False drops `search_tool`/`use_tool`
+    /// from the advertised toolset (they can only reach MCP servers). Defaults to true so hosts
+    /// that do not compute the signal keep the tools.
+    pub fn with_mcp_configured(mut self, value: bool) -> Self {
+        self.mcp_configured = value;
+        self
+    }
     pub fn with_is_non_interactive(mut self, value: bool) -> Self {
         self.is_non_interactive = value;
         self
@@ -724,7 +742,7 @@ impl AgentBuilder {
                     .tools
                     .push((&fuigo_tools::implementations::opencode::OpenCodeWriteTool).into());
             }
-            ensure_plan_mode_tools(&mut tool_config);
+            ensure_plan_mode_tools(&mut tool_config, !self.is_non_interactive);
         }
         let active_agent_message = fuigo_tools::registry::types::ToolConfig::for_tool::<
             fuigo_tools::implementations::fuigo_build::SendSubagentMessageTool,
@@ -770,6 +788,20 @@ impl AgentBuilder {
                 fuigo_tools::types::tool::ToolNamespace::FuigoBuild,
             );
             tool_config.tools.retain(|tool| tool.id != ask_user_id);
+        }
+        if self.is_non_interactive {
+            // A todo list is rendered only by an interactive client; in a headless
+            // session nobody sees it, so every todo_write call is a wasted model turn.
+            tool_config
+                .tools
+                .retain(|tool| tool.kind != Some(ToolKind::Plan));
+        }
+        if !self.mcp_configured {
+            // search_tool/use_tool only reach MCP servers; with none configured at
+            // session start they are dead schema bytes in every request.
+            tool_config.tools.retain(|tool| {
+                !matches!(tool.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
+            });
         }
         apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
         let task_tool_id = format!(
@@ -2045,6 +2077,65 @@ mod tests {
             .await
             .expect("finalize must insert Params for the injected ask_user_question");
         assert_eq!(applied.0.non_interactive, Some(true));
+    }
+    async fn tool_names(definition: crate::config::AgentDefinition, non_interactive: bool, mcp_configured: bool) -> Vec<String> {
+        use fuigo_tools::computer::local::LocalTerminalBackend;
+        use fuigo_tools::notification::ToolNotificationHandle;
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .with_is_non_interactive(non_interactive)
+        .with_mcp_configured(mcp_configured)
+        .build()
+        .await
+        .expect("agent should build");
+        agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect()
+    }
+    /// Headless sessions drop todo_write (nobody renders the list) and the injected plan-mode
+    /// tools (no keybind); an interactive session keeps all of them.
+    #[tokio::test]
+    async fn non_interactive_build_drops_todo_write_and_injected_plan_mode_tools() {
+        let headless = tool_names(crate::config::AgentDefinition::default_fuigo_build(), true, true).await;
+        for dropped in ["todo_write", "enter_plan_mode", "exit_plan_mode"] {
+            assert!(!headless.contains(&dropped.to_string()), "headless must not advertise {dropped}; got {headless:?}");
+        }
+        assert!(headless.contains(&"read_file".to_string()));
+        let interactive = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, true).await;
+        for kept in ["todo_write", "enter_plan_mode", "exit_plan_mode"] {
+            assert!(interactive.contains(&kept.to_string()), "interactive must keep {kept}; got {interactive:?}");
+        }
+    }
+    /// An explicit plan profile carries the plan-mode tools in its own toolset, so a headless
+    /// session that asked for it keeps them.
+    #[tokio::test]
+    async fn non_interactive_plan_profile_keeps_plan_mode_tools() {
+        let names = tool_names(crate::config::AgentDefinition::fuigo_build_plan(), true, true).await;
+        for kept in ["enter_plan_mode", "exit_plan_mode"] {
+            assert!(names.contains(&kept.to_string()), "plan profile must keep {kept}; got {names:?}");
+        }
+        assert!(!names.contains(&"todo_write".to_string()), "headless still drops todo_write; got {names:?}");
+    }
+    /// With no MCP server configured the meta-tools are not advertised; with one they are.
+    #[tokio::test]
+    async fn mcp_meta_tools_follow_the_configured_signal() {
+        let without = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, false).await;
+        assert!(
+            !without.iter().any(|n| n == "search_tool" || n == "use_tool"),
+            "no MCP configured: search_tool/use_tool must be absent; got {without:?}"
+        );
+        let with = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, true).await;
+        assert!(
+            with.contains(&"search_tool".to_string()) && with.contains(&"use_tool".to_string()),
+            "MCP configured: search_tool/use_tool must be present; got {with:?}"
+        );
     }
     async fn build_with_tools(tools: Vec<String>, disallowed: Vec<String>) -> crate::agent::Agent {
         use fuigo_tools::computer::local::LocalTerminalBackend;
