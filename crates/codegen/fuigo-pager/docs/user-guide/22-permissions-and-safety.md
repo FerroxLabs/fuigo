@@ -555,7 +555,7 @@ Recommended combination for untrusted code:
 
 1. **Prefer narrow patterns.** `Bash(git *)` grants less access than a bare `Bash` allow rule.
 2. **Combine layers.** `dontAsk`, narrow allow rules, a restrictive hook, and the sandbox each restrict independently.
-3. **Review project configuration from unfamiliar sources.** Project permission rules in `.fuigo/config.toml` and `.claude/settings.json` are gated on folder trust: an untrusted checkout's project rules (including `allow` rules and `defaultMode`) are skipped, and their presence triggers the folder-trust question. Trusting the folder applies them, so review them — and any project hooks — before granting trust to an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
+3. **Review project configuration from unfamiliar sources.** Folder trust gates project permission rules in `.fuigo/config.toml` and `.claude/settings.json` (including `allow` rules and `defaultMode`), plus startup loading of project instructions (`AGENTS.md`, rules) and project skills. An untrusted checkout's copies are skipped, and their presence triggers the folder-trust question; a headless run with these sources needs `--trust` or a prior grant. Review them and any project hooks before trusting an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
 4. **Test your policy.** With `defaultMode: "dontAsk"` set (or your `PreToolUse` hook installed), run representative commands and confirm what is blocked.
 5. **Treat the read-only command list as a convenience, not a security boundary.**
 

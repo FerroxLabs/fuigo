@@ -67,6 +67,62 @@ impl RepoDirChain {
     }
 }
 
+/// The project-scope roots startup discovery reads: the cwd-to-git-root chain plus the optional workspace-user dir.
+/// Shared by the loaders (instructions, skills) and the folder-trust detector so what gates can never drift from what loads.
+#[derive(Debug, Clone)]
+pub struct StartupProjectSources {
+    pub chain: RepoDirChain,
+    workspace_user_dir: Option<PathBuf>,
+}
+
+impl StartupProjectSources {
+    pub fn resolve(cwd: &Path) -> Self {
+        Self::with_workspace_user(
+            cwd,
+            crate::prompt::workspace_user::optional_workspace_user_dir(),
+        )
+    }
+
+    pub fn with_workspace_user(cwd: &Path, workspace_user_dir: Option<PathBuf>) -> Self {
+        let chain = RepoDirChain::resolve(cwd);
+        let workspace_user_dir = workspace_user_dir.filter(|user_dir| {
+            let canonical = canonical_or_raw(user_dir);
+            chain
+                .dirs
+                .iter()
+                .all(|dir| canonical_or_raw(dir) != canonical)
+        });
+        Self {
+            chain,
+            workspace_user_dir,
+        }
+    }
+
+    /// Skill roots: the chain cwd-first, then the workspace-user dir.
+    pub fn skill_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.chain
+            .dirs
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(self.workspace_user_dir.as_deref())
+    }
+
+    /// Instruction roots: the chain root-first, with the workspace-user dir second inside a repo.
+    pub fn instruction_dirs(&self) -> Vec<&Path> {
+        let mut dirs: Vec<&Path> = self.chain.dirs.iter().rev().map(PathBuf::as_path).collect();
+        if self.chain.git_root.is_some()
+            && let Some(user_dir) = self.workspace_user_dir.as_deref()
+        {
+            dirs.insert(1.min(dirs.len()), user_dir);
+        }
+        dirs
+    }
+}
+
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Whether `path` canonicalizes to the user's home directory.
 /// It stays local (not reused from `fuigo-workspace`, which depends on THIS crate) to keep the dep edge one-way.
 /// It backs the guard in [`RepoDirChain::resolve`] that drops a $HOME git root.

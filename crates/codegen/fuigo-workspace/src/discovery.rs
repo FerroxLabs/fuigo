@@ -26,13 +26,19 @@ pub use fuigo_agent::prompt::skills::SkillsConfig;
 /// Delegates to [`fuigo_agent::prompt::skills::list_skills`] with the workspace's `root_cwd` and the caller-supplied `SkillsConfig`.
 /// Returns each [`SkillInfo`] serialized to a `serde_json::Value`.
 /// `list_skills` stats and reads each SKILL.md but holds no async locks across `.await` points, so contention is not a concern.
-pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Value> {
+/// `project_trusted` omits project-scope skills when false.
+pub async fn discover_skills(
+    root_cwd: &Path,
+    config: &SkillsConfig,
+    project_trusted: bool,
+) -> Vec<Value> {
     let cwd_str = root_cwd.to_string_lossy();
     // Workspace discovery does no per-vendor compat gating; pass the all-on default
     let skills = fuigo_agent::prompt::skills::list_skills(
         Some(&cwd_str),
         config,
         fuigo_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
     .await;
 
@@ -57,11 +63,13 @@ pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Valu
 // ---------------------------------------------------------------------------
 
 /// Discover project-instruction files (AGENTS.md, Claude.md, rules) from the workspace root up to the git root.
-pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
+/// `project_trusted` is the folder-trust verdict for `root_cwd`; when false, project-scope instructions are omitted.
+pub async fn discover_agents_md(root_cwd: &Path, project_trusted: bool) -> Vec<Value> {
     let cwd_str = root_cwd.to_string_lossy();
     let files = fuigo_agent::prompt::agents_md::read_agents_config_with_paths(
         &cwd_str,
         fuigo_tools::types::compat::CompatConfig::default(),
+        project_trusted,
     )
     .await;
 
@@ -240,7 +248,12 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills = discover_skills(
+            tmp.path(),
+            &SkillsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("my-skill"));
@@ -268,7 +281,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = discover_skills(tmp.path(), &config).await;
+        let skills = discover_skills(tmp.path(), &config, /*project_trusted*/ true).await;
         let found = skills.iter().any(|s| s["name"].as_str() == Some("ignored"));
         assert!(
             !found,
@@ -291,7 +304,12 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills = discover_skills(
+            tmp.path(),
+            &SkillsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("serialized-check"))
@@ -338,7 +356,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = discover_agents_md(tmp.path()).await;
+        let files = discover_agents_md(tmp.path(), /*project_trusted*/ true).await;
         let rule = files
             .iter()
             .find(|f| {
@@ -367,7 +385,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = discover_agents_md(tmp.path()).await;
+        let files = discover_agents_md(tmp.path(), /*project_trusted*/ true).await;
         let agents = files
             .iter()
             .find(|f| {
