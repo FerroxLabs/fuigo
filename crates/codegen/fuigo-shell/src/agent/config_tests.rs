@@ -7943,3 +7943,41 @@ fn is_openai_model_slug_recognizes_openai_slugs_only() {
         assert!(!is_openai_model_slug(no), "{no}");
     }
 }
+/// The hardbench `fuigo -p -m benchmark` config: a custom Responses-API GPT entry with no `agent_type` resolves to the Codex harness.
+/// A headless session on it therefore advertises `apply_patch` and, being non-interactive, no `ask_user_question`.
+#[test]
+#[serial]
+fn benchmark_style_custom_gpt_responses_entry_resolves_to_codex_harness() {
+    let resolved = resolve_agent_type_models(
+        r#"
+            [model.benchmark]
+            model = "gpt-5.6-sol"
+            api_backend = "responses"
+            base_url = "https://api.example.com/v1"
+            context_window = 400000
+            "#,
+    );
+    let info = &resolved.get("benchmark").expect("benchmark model should exist").info;
+    assert_eq!(info.api_backend, ApiBackend::Responses);
+    assert_eq!(info.agent_type, OPENAI_DEFAULT_AGENT_TYPE);
+    assert!(info.agent_type_inferred);
+    let prev_agent = std::env::var("FUIGO_AGENT").ok();
+    unsafe { std::env::remove_var("FUIGO_AGENT") };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let definition = crate::agent::mvp_agent::MvpAgent::resolve_agent_definition_for_model(
+        tmp.path(),
+        None,
+        &AgentSelectionConfig::default(),
+        None,
+        Some(info.agent_type.as_str()),
+        info.agent_type_inferred,
+    );
+    if let Some(v) = prev_agent {
+        unsafe { std::env::set_var("FUIGO_AGENT", v) };
+    }
+    assert_eq!(definition.name, OPENAI_DEFAULT_AGENT_TYPE);
+    assert!(
+        !crate::upload::turn::resolve_ask_user_question_enabled(None, true, || true),
+        "a headless session must not advertise ask_user_question"
+    );
+}
