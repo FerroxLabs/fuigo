@@ -12,6 +12,8 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(sampling_config.model.clone());
+        // The replayed side-call tool list aligned with the old model's cache; the next main turn records a fresh one
+        self.last_sent_tool_specs.replace(None);
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -201,6 +203,8 @@ impl SessionActor {
             }
         }
         let new_agent_name = definition.name.clone();
+        // A rebuilt harness advertises its own tools; side calls preview them until the next main turn records what it sent
+        self.last_sent_tool_specs.replace(None);
         tracing::info!(
             session_id = %self.session_info.id.0,
             new_agent_type = %new_agent_name,

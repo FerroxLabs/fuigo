@@ -2562,32 +2562,7 @@ impl SessionActor {
                 backend_search_active,
                 "backend_search: turn tool resolution"
             );
-            let mut effective_tools: Vec<ToolSpec> =
-                if let Some(ref override_tools) = self.forked_tool_override {
-                    let bridge = self.agent.borrow().tool_bridge().clone();
-                    let mut tools = child_tool_projection::child_safe_tool_specs(
-                        override_tools.clone(),
-                        child_tool_projection::ChildToolProjection::VerbatimMirror,
-                        |name| bridge.tool_kind(name),
-                    );
-                    if self.startup_hints.is_subagent {
-                        crate::agent::subagent::strip_ask_user_question_tool(&mut tools);
-                        crate::agent::subagent::strip_workflow_tool(&mut tools);
-                    }
-                    self.present_tool_specs(tools)
-                } else {
-                    let tools = self.turn_base_tool_specs(&tool_definitions);
-                    if self.startup_hints.is_subagent {
-                        let bridge = self.agent.borrow().tool_bridge().clone();
-                        child_tool_projection::child_safe_tool_specs(
-                            tools,
-                            child_tool_projection::ChildToolProjection::Rebuilt,
-                            |name| bridge.tool_kind(name),
-                        )
-                    } else {
-                        tools
-                    }
-                };
+            let mut effective_tools: Vec<ToolSpec> = self.main_turn_tool_specs(&tool_definitions);
             let recall_only_tools = effective_tools.iter().all(|tool| {
                 matches!(tool.name.as_str(), "search_tool" | "use_tool")
                     || matches!(
@@ -2676,12 +2651,7 @@ impl SessionActor {
             // Presentation is applied AFTER recall-only classification and all
             // finalization/child restrictions. It cannot confer eligibility.
             let adaptive = self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() == "adaptive";
-            let deferred_native: std::collections::BTreeMap<String, String> = if adaptive {
-                effective_tools.iter().filter(|tool| !self.delivery_tools.borrow().contains(&tool.name) && matches!(
-                    self.agent.borrow().tool_bridge().tool_kind(&tool.name),
-                    Some(ToolKind::ImageGen | ToolKind::VideoGen | ToolKind::ImageToVideo | ToolKind::ReferenceToVideo)
-                )).map(|tool| (tool.name.clone(), crate::session::tool_presentation::fingerprint(tool))).collect()
-            } else { Default::default() };
+            let deferred_native = if adaptive { self.adaptive_deferred_native(&effective_tools) } else { Default::default() };
             if adaptive {
                 let enabled = !finalize_response && effective_tools.iter().any(|tool| tool.name == "search_tool");
                 effective_tools = self.tool_metadata_snapshot.lock().unwrap().native_presentation.project(
@@ -2699,6 +2669,8 @@ impl SessionActor {
                 self.tool_metadata_snapshot.lock().unwrap().native_presentation.checkpoint_saved(hints);
             }
             let advertised_native: std::collections::BTreeSet<String> = effective_tools.iter().map(|t| t.name.clone()).collect();
+            // Cache-aligned side calls replay exactly this list (see `side_call_tool_specs`)
+            *self.last_sent_tool_specs.borrow_mut() = Some(effective_tools.clone());
             let build_req_start = std::time::Instant::now();
             let request = self
                 .chat_state_handle

@@ -1096,6 +1096,10 @@ pub(crate) struct SessionActor {
     pub(crate) turn_summary_enabled: bool,
     /// Early-session title-refresh gate, resolved once at spawn (defaults to `turn_summary_enabled`; see `Config::resolve_title_refresh`).
     pub(crate) title_refresh_enabled: bool,
+    /// Function tool specs the last main-turn request actually sent, after fork mirroring, child projection, per-step restrictions and presentation.
+    /// Cache-aligned side calls replay this list so their tool prefix is byte-identical; see `side_call_tool_specs`.
+    /// `None` until this actor sends its first main-turn request, and again after a model or agent switch.
+    pub(crate) last_sent_tool_specs: std::cell::RefCell<Option<Vec<fuigo_sampling_types::ToolSpec>>>,
     /// The in-flight title-refresh side-call, if any.
     /// Only one runs at a time (a newer completion skips rather than aborts); aborted on rename, rewind, and shutdown.
     /// See `maybe_refresh_title`.

@@ -1810,3 +1810,42 @@ async fn non_interactive_attachment_skips_turn_summary_and_title_refresh() {
         })
         .await;
 }
+
+/// Cache-aligned side calls replay the tool list the main turn last sent, verbatim and in order.
+/// Before any main-turn request they fall back to what the next main turn would advertise (the presented base list here).
+#[tokio::test(flavor = "current_thread")]
+async fn side_calls_replay_the_last_sent_main_turn_tools() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            let json = |tools: &Vec<ToolSpec>| serde_json::to_string(tools).expect("tools serialize");
+            let setup = actor.prepare_side_call().await.expect("side-call setup");
+
+            let base = actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
+            assert!(!base.is_empty(), "test env must expose tools");
+            let fallback = actor
+                .side_call_request(&setup, Vec::new(), "conv-fallback".into(), "req-fallback".into())
+                .await;
+            assert_eq!(json(&fallback.tools), json(&base), "no main turn yet: side calls send what the next turn would");
+
+            // Stand-in for a projected list: reordered and with a description the unprojected registry never has
+            let mut sent = base.clone();
+            sent.reverse();
+            sent[0].description = Some("projected description the main turn actually sent".into());
+            *actor.last_sent_tool_specs.borrow_mut() = Some(sent.clone());
+            let replay = actor
+                .side_call_request(&setup, Vec::new(), "conv-replay".into(), "req-replay".into())
+                .await;
+            assert_eq!(json(&replay.tools), json(&sent), "turn summary and recap must replay the sent list");
+            assert_eq!(json(&actor.side_call_tool_specs().await), json(&sent), "/btw and compaction share the replayed list");
+
+            actor.last_sent_tool_specs.replace(None);
+            assert_eq!(json(&actor.side_call_tool_specs().await), json(&base), "a cleared record falls back again");
+        })
+        .await;
+}

@@ -328,6 +328,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 recap_epoch: std::cell::Cell::new(0),
                 turn_summary_task: std::cell::RefCell::new(None),
                 turn_summary_generation: std::cell::Cell::new(0),
+                last_sent_tool_specs: std::cell::RefCell::new(None),
                 title_refresh_task: std::cell::RefCell::new(None),
                 title_refresh_generation: std::cell::Cell::new(0),
                 next_title_refresh_idx: std::cell::Cell::new(0),
