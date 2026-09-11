@@ -378,6 +378,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `model.<id>.stream_tool_calls` | `boolean` | `yes` | `user` | Per-model tool-call streaming request shape. |
 | `model.<id>.supported_in_api` | `boolean` | `yes` | `user` | Whether this catalog entry is offered as a public API model. |
 | `model.<id>.supports_backend_search` | `boolean` | `yes` | `user` | Whether the endpoint supports Fuigo-hosted server-side search tools. |
+| `model.<id>.programmatic_tool_calling` | `boolean` | `yes` | `user` | Opt an OpenAI Responses model (GPT-5.6+) into programmatic tool calling: the model can batch client tool calls inside a hosted program. Default `false`; `FUIGO_PROGRAMMATIC_TOOL_CALLING=1|0` overrides every entry. |
 | `model.<id>.supports_reasoning_effort` | `boolean` | `yes` | `user` | Deprecated; prefer `reasoning_efforts`. |
 | `model.<id>.system_prompt_label` | `string` | `yes` | `user` | Per-model system-prompt identity label. |
 | `model.<id>.temperature` | `number` | `yes` | `user` | Per-model sampling temperature. |

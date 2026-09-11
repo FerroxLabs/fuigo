@@ -53,8 +53,11 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
             }
             rs::OutputItem::CustomToolCall(ct) => {
                 backend_tool_count += 1;
+                // A PTC carrier (see `responses_ptc`) is a program item in disguise; anything else is x_search
+                let kind = super::responses_ptc::carrier_to_backend_kind(&ct)
+                    .unwrap_or(BackendToolKind::XSearch(ct));
                 items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                    kind: BackendToolKind::XSearch(ct),
+                    kind,
                 }));
             }
             rs::OutputItem::CodeInterpreterCall(ci) => {
@@ -268,19 +271,24 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 },
             ))]
         }
-        ConversationItem::BackendToolCall(b) => {
-            vec![match &b.kind {
-                BackendToolKind::WebSearch(ws) => {
-                    rs::InputItem::Item(rs::Item::WebSearchCall(ws.clone()))
-                }
-                BackendToolKind::XSearch(ct) => {
-                    rs::InputItem::Item(rs::Item::CustomToolCall(ct.clone()))
-                }
-                BackendToolKind::CodeInterpreter(ci) => {
-                    rs::InputItem::Item(rs::Item::CodeInterpreterCall(ci.clone()))
-                }
-            }]
-        }
+        ConversationItem::BackendToolCall(b) => match &b.kind {
+            BackendToolKind::WebSearch(ws) => {
+                vec![rs::InputItem::Item(rs::Item::WebSearchCall(ws.clone()))]
+            }
+            BackendToolKind::XSearch(ct) => {
+                vec![rs::InputItem::Item(rs::Item::CustomToolCall(ct.clone()))]
+            }
+            BackendToolKind::CodeInterpreter(ci) => {
+                vec![rs::InputItem::Item(rs::Item::CodeInterpreterCall(
+                    ci.clone(),
+                ))]
+            }
+            // Replayed as typed carriers; `patch_request_body` rewrites them into wire `program` / `program_output` items
+            BackendToolKind::Program(p) => super::responses_ptc::program_input_items(p),
+            BackendToolKind::ProgramOutput(o) => {
+                super::responses_ptc::program_output_input_items(o)
+            }
+        },
     }
 }
 
@@ -360,6 +368,9 @@ pub fn extra_tool_entries(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value>
                     Some(o) => o.to_tool_entry(),
                     None => XSearchOptions::default().to_tool_entry(),
                 });
+            }
+            HostedTool::ProgrammaticToolCalling => {
+                entries.push(super::responses_ptc::tool_entry());
             }
         }
     }

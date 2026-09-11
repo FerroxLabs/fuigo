@@ -2719,7 +2719,7 @@ impl SessionActor {
             request.hosted_tools = if finalize_response {
                 vec![]
             } else {
-                self.hosted_tools_for_turn()
+                self.hosted_tools_for_agent_turn()
             };
             if finalize_response {
                 request.tool_choice = None;

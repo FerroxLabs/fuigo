@@ -3895,6 +3895,8 @@ struct DefaultModelJson {
     #[serde(default)]
     supports_backend_search: bool,
     #[serde(default)]
+    programmatic_tool_calling: bool,
+    #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
     compaction_at_tokens: Option<CompactionAtTokens>,
@@ -3961,6 +3963,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_efforts: m.reasoning_efforts,
                 variants: m.variants,
                 supports_backend_search: m.supports_backend_search,
+                programmatic_tool_calling: m.programmatic_tool_calling,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -4072,6 +4075,10 @@ pub struct ModelEntryConfig {
     pub supported_in_api: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_backend_search: bool,
+    /// Opt this model into OpenAI Responses programmatic tool calling (see `docs/ptc-contract.md`).
+    /// Only takes effect with `api_backend = "responses"` on an OpenAI-family model; `FUIGO_PROGRAMMATIC_TOOL_CALLING` overrides it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub programmatic_tool_calling: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4151,6 +4158,7 @@ pub struct ConfigModelOverride {
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: Option<bool>,
+    pub programmatic_tool_calling: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`; serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4247,6 +4255,9 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
+        }
+        if let Some(v) = self.programmatic_tool_calling {
+            entry.info.programmatic_tool_calling = v;
         }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
@@ -4348,6 +4359,9 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<ModelVariant>,
     pub supports_backend_search: bool,
+    /// Per-model opt-in for OpenAI Responses programmatic tool calling; resolved by `crate::agent::programmatic_tools`.
+    #[serde(default)]
+    pub programmatic_tool_calling: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
@@ -4421,6 +4435,7 @@ impl ModelInfo {
             reasoning_efforts: Vec::new(),
             variants: Vec::new(),
             supports_backend_search: false,
+            programmatic_tool_calling: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4461,6 +4476,7 @@ impl ModelInfo {
             reasoning_efforts: entry.reasoning_efforts.clone(),
             variants: entry.variants.clone(),
             supports_backend_search: entry.supports_backend_search,
+            programmatic_tool_calling: entry.programmatic_tool_calling,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
@@ -5288,6 +5304,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 reasoning_efforts: Vec::new(),
                 variants: Vec::new(),
                 supports_backend_search: false,
+                programmatic_tool_calling: false,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -5448,6 +5465,7 @@ pub(crate) fn sampling_config_for_model(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
+        programmatic_tool_calling: crate::agent::programmatic_tools::enabled_for(info),
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -5529,6 +5547,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             reasoning_efforts: Vec::new(),
             variants: Vec::new(),
             supports_backend_search: false,
+            programmatic_tool_calling: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,

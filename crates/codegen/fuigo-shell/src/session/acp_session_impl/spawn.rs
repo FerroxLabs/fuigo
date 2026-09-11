@@ -1674,6 +1674,7 @@ pub(crate) async fn spawn_session_actor(
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,
         supports_backend_search: std::cell::Cell::new(sampling_config.supports_backend_search),
+        programmatic_tool_calling: std::cell::Cell::new(sampling_config.programmatic_tool_calling),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: resolved_tool_overrides.clone(),
         compactions_remaining: std::cell::Cell::new(sampling_config.compactions_remaining),
