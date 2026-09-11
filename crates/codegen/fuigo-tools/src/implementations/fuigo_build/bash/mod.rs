@@ -4192,8 +4192,14 @@ mod tests {
                 ..BashParams::default()
             };
             let renderer = TemplateRenderer::new(
-                [(ToolKind::Execute, "run_terminal_command".to_string())].into(),
-                Default::default(),
+                HashMap::from([(ToolKind::Execute, "run_terminal_command".to_string())]),
+                HashMap::from([(
+                    ToolKind::Execute,
+                    HashMap::from([
+                        ("timeout".to_string(), "timeout".to_string()),
+                        ("is_background".to_string(), "background".to_string()),
+                    ]),
+                )]),
             );
             let desc = BashTool::rendered_description(None, &renderer, &params);
             for text in [

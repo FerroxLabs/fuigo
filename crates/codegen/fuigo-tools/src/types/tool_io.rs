@@ -172,6 +172,7 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
+            files: None,
         })
         .try_into();
         assert_eq!(rf.unwrap().path, "x");

@@ -1389,13 +1389,13 @@ mod tests {
     }
 
     #[test]
-    fn task_tool_input_defaults_background_true() {
+    fn task_tool_input_defaults_background_false() {
         let input: TaskToolInput =
             serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
         assert!(
-            input.run_in_background,
-            "run_in_background should default to true"
+            !input.run_in_background,
+            "run_in_background should default to false (synchronous spawn)"
         );
 
         let foreground: TaskToolInput = serde_json::from_str(
@@ -1871,7 +1871,7 @@ mod tests {
             "renamed task_ids must appear: {desc}"
         );
         assert!(
-            desc.contains("positive max_wait wait") && desc.contains("Omit max_wait or pass 0"),
+            desc.contains("max_wait omitted or positive wait") && desc.contains("Omit max_wait to wait up to"),
             "renamed timeout_ms must appear: {desc}"
         );
         assert!(
