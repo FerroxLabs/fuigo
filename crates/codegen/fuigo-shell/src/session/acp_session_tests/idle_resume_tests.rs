@@ -231,6 +231,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 },
                 session_start: std::time::Instant::now(),
                 inference_idle_timeout: Duration::from_secs(300),
+                uncharged_401_park_enabled: true,
                 max_retries: 3,
                 rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
                 max_turns: None,

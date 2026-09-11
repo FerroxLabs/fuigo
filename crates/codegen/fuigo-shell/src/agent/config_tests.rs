@@ -6797,6 +6797,84 @@ fn slug_propagation_does_not_overwrite_explicit_context_window() {
         "explicitly-set context_window must not be overwritten by slug propagation"
     );
 }
+/// Resolves a prefetched `custom-model` (default context window, ChatCompletions) against a same-slug `[model.alias]` donor at 500000 / `responses`, plus whatever `extra_toml` adds.
+/// The slug is absent from the built-in catalog so the prefetched layer cannot pre-fill the entry and turn it into its own donor.
+fn resolve_custom_model_with_alias_donor(extra_toml: &str) -> ModelEntry {
+    let raw: toml::Value = toml::from_str(&format!(
+        r#"
+            [model.alias]
+            model = "custom-model"
+            context_window = 500000
+            base_url = "https://test.example.com/v1"
+            api_backend = "responses"
+
+            {extra_toml}
+            "#
+    ))
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+    let mut prefetched = IndexMap::new();
+    let mut entry = test_model_entry(
+        "custom-model",
+        "https://test.example.com/v1",
+        None,
+        None,
+        None,
+    );
+    entry.info.context_window = NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).unwrap();
+    prefetched.insert("custom-model".to_owned(), entry);
+    resolve_model_list(&cfg, Some(prefetched))
+        .shift_remove("custom-model")
+        .expect("custom-model key must exist")
+}
+/// An explicit `chat_completions` equals the enum default, so propagation must tell it apart from
+/// a field that was never set. The context window still inherits from the donor.
+#[test]
+fn slug_propagation_keeps_explicit_chat_completions_api_backend() {
+    let entry = resolve_custom_model_with_alias_donor(
+        r#"
+            [model.custom-model]
+            api_backend = "chat_completions"
+            "#,
+    );
+    assert_eq!(
+        (entry.info.api_backend, entry.info.context_window.get()),
+        (ApiBackend::ChatCompletions, 500_000)
+    );
+}
+/// A backend inherited from `[model_providers.<id>]` counts as explicit for the model.
+#[test]
+fn slug_propagation_keeps_provider_chat_completions_api_backend() {
+    let entry = resolve_custom_model_with_alias_donor(
+        r#"
+            [model_providers.gateway]
+            base_url = "https://test.example.com/v1"
+            api_backend = "chat_completions"
+            api_key = "sk-provider"
+
+            [model.custom-model]
+            model_provider = "gateway"
+            "#,
+    );
+    assert_eq!(
+        (entry.info.api_backend, entry.info.context_window.get()),
+        (ApiBackend::ChatCompletions, 500_000)
+    );
+}
+/// A `[model.<id>]` override that leaves `api_backend` unset still inherits from the donor.
+#[test]
+fn slug_propagation_inherits_api_backend_into_config_entry_without_one() {
+    let entry = resolve_custom_model_with_alias_donor(
+        r#"
+            [model.custom-model]
+            name = "Custom Model"
+            "#,
+    );
+    assert_eq!(
+        (entry.info.api_backend, entry.info.context_window.get()),
+        (ApiBackend::Responses, 500_000)
+    );
+}
 /// When no sibling has a real context_window, slug propagation is a no-op.
 #[test]
 fn slug_propagation_noop_when_no_donor() {
@@ -8022,4 +8100,46 @@ fn custom_gpt_5_6_entry_inherits_catalog_window_and_infers_codex() {
         assert_eq!(entry.info.max_completion_tokens, Some(128_000), "{slug}");
         assert!(entry.info.is_openai_model(), "{slug}");
     }
+}
+
+/// An explicit `api_backend = "chat_completions"` on a custom entry that names a catalog slug is the user's choice:
+/// the same-slug catalog sibling still donates its context window, but must not overwrite the backend.
+/// The reverse keeps working: an entry that leaves `api_backend` unset inherits the sibling's Responses backend.
+#[test]
+#[serial]
+fn explicit_chat_completions_backend_survives_same_slug_catalog_sibling() {
+    let resolved = resolve_agent_type_models(
+        r#"
+            [model.cc]
+            model = "gpt-5.6-sol"
+            api_backend = "chat_completions"
+            base_url = "https://proxy.example.com/v1"
+
+            [model.inferred]
+            model = "gpt-5.6-sol"
+            base_url = "https://proxy.example.com/v1"
+            "#,
+    );
+    let cc = &resolved.get("cc").expect("cc should resolve").info;
+    assert_eq!(
+        cc.api_backend,
+        ApiBackend::ChatCompletions,
+        "an explicit chat_completions backend must not be overwritten by the same-slug sibling"
+    );
+    assert_eq!(
+        cc.context_window.get(),
+        1_050_000,
+        "the sibling still donates its window to an entry without context_window"
+    );
+    assert_eq!(cc.base_url, "https://proxy.example.com/v1");
+    let inferred = &resolved
+        .get("inferred")
+        .expect("inferred should resolve")
+        .info;
+    assert_eq!(
+        inferred.api_backend,
+        ApiBackend::Responses,
+        "an entry with no backend still inherits the sibling's backend"
+    );
+    assert_eq!(inferred.context_window.get(), 1_050_000);
 }

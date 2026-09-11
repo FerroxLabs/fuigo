@@ -135,6 +135,7 @@ async fn idle_timeout_first_failure_requests_resubmit() {
                     0,
                     transient_state(0, true),
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             match result {
@@ -161,6 +162,7 @@ async fn server_error_first_failure_requests_resubmit() {
                     0,
                     transient_state(0, true),
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             match result {
@@ -186,6 +188,7 @@ async fn exhausted_budget_falls_through_to_terminal() {
                     0,
                     transient_state(MAX_TRANSIENT_TURN_RETRIES, true),
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             assert!(
@@ -209,6 +212,7 @@ async fn kill_switch_disables_the_arm() {
                     0,
                     transient_state(0, false),
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             assert!(
@@ -239,6 +243,7 @@ async fn budgeted_workflow_child_stays_terminal() {
                     0,
                     transient_state(0, true),
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             assert!(
@@ -262,6 +267,7 @@ async fn empty_response_stays_terminal_with_full_budget() {
                     0,
                     transient_state(0, true),
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             assert!(
@@ -289,6 +295,7 @@ async fn prompt_total_cap_vetoes_even_with_fresh_step_budget() {
                     0,
                     state,
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             assert!(
@@ -321,6 +328,7 @@ async fn episode_window_vetoes_after_wall_clock_budget() {
                     0,
                     state,
                     false,
+                    crate::session::acp_session::TurnParkState::Fresh,
                 )
                 .await;
             assert!(
@@ -341,7 +349,13 @@ async fn invalid_image_code_is_never_transient_retried() {
             let mut error = error_of_kind(fuigo_sampler::SamplingErrorKind::Api, Some(500));
             error.error_code = Some(fuigo_sampling_types::ApiErrorCode::InvalidImage);
             let result = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    false,
+                    crate::session::acp_session::TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 result.is_err(),
