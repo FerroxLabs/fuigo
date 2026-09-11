@@ -1151,9 +1151,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_reconciles_agents_used_from_journal_no_double_charge() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
 
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
@@ -1191,26 +1189,32 @@ mod tests {
                 },
             )
             .unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("respawned agent") else {
-            panic!("expected respawn event");
-        };
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("resumed output"),
-            subagent_id: id,
-            ..Default::default()
-        });
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Completed { .. }
-        ));
+        // The spawn was journaled as dispatched with no recorded result. The bounded
+        // engine refuses to replay an effect with an unknown outcome, so resume fails
+        // instead of respawning (see pause_marks_user_paused_and_resume_rejects_unknown_effect).
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
+            .await
+            .expect("resume did not report its outcome")
+            .unwrap();
+        match outcome {
+            WorkflowOutcome::Failed { error } => {
+                assert!(error.contains("unknown outcome"), "{error}");
+            }
+            other => panic!("expected unknown-outcome failure, got {other:?}"),
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), subagent_rx.recv())
+                .await
+                .is_err(),
+            "unknown effect must not respawn"
+        );
 
         assert_eq!(
             manager.tracker.lock().get(&run_id).unwrap().agents_used,
             1,
-            "resume reconciles agents_used from the journal (0 journaled) then re-reserves once; \
-             without the reconcile the leaked slot double-charges to 2"
+            "resume reconciles agents_used from the journal (1 dispatched spawn) and the refused \
+             replay reserves nothing more; without the reconcile-then-refuse pairing the leaked \
+             in-memory slot plus a re-reservation would double-charge to 2"
         );
     }
 
