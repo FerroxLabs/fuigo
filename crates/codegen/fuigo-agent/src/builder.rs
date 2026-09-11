@@ -1277,8 +1277,9 @@ Prefer doing the work yourself unless delegation is clearly necessary.\n\
 \n\
 Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \n\
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: default false (blocks and returns the child's report); true only for independent \n\
-work you continue alongside, then collect the report with the task output tool and one long timeout_ms.";
+${{ params.task.run_in_background }}: default false (runs to completion; the report is this call's result). \n\
+true only for work not needed before your next step; then fetch the report once with the task output \n\
+tool, timeout_ms omitted; never poll.";
 /// CLI [`fuigo_tool_types::SubagentToolNaming`]: each kind maps to its `${{ tools.by_kind.* }}` template placeholder.
 /// Rendering a built-in's `tools_template` thus reproduces the placeholders for the CLI's `TemplateRenderer` to resolve at finalize time.
 const SUBAGENT_TOOL_NAMING: fuigo_tool_types::SubagentToolNaming<'static> =
