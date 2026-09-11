@@ -12,14 +12,15 @@ use super::bash_command_splitting::{
     PlainCommand, is_wrapper_command, strip_wrapper_command, try_parse_shell,
     try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
-use super::exec_risk::{git_words_are_read_only_query, git_words_have_unsafe_query_option};
 use super::shell_access::{
     command_words_write_paths, command_write_paths_in_tree, is_safe_write_sink,
 };
 use super::types::AccessKind;
 
+mod routine_git;
 mod security_findings;
 
+use routine_git::git_words_are_routine;
 pub use security_findings::{BashSecurityAssessment, ClassifierSecurityFinding};
 
 use crate::permission::wire_enum;
@@ -474,20 +475,10 @@ impl HeuristicPermissionClassifier {
 /// The package managers `uv`/`npm`/`pnpm`/`yarn`/`rustup` are ABSENT: a blanket prefix is denylist-shaped whack-a-mole.
 /// They go through the fail-closed SAFE-subcommand allowlist in [`package_manager_subcommand_is_routine`] instead.
 /// `cp`/`mv`/`mkdir`/`touch` are also ABSENT: they write/create arbitrary destinations the write model already Blocks.
-/// `cd`/`pushd`/`popd` only move the spawned shell's cwd; git entries are the local workflow plus read-only queries.
+/// `cd`/`pushd`/`popd` only move the spawned shell's cwd.
+/// `git` is ABSENT: [`routine_git`] decides every git shape, so a discarding `checkout`/`switch`/`stash` reaches the model.
 const ROUTINE_PREFIXES: &[&str] = &[
     "cargo ",
-    // Read-only git queries are NOT listed here
-    // `bash_command_is_routine` routes them through the shared `exec_risk::git_words_are_read_only_query` helper
-    // Only the local write-workflow verbs stay prefix-matched
-    "git add",
-    "git commit",
-    "git checkout",
-    "git switch",
-    "git stash",
-    "git pull",
-    "git fetch",
-    "git worktree list",
     "pytest",
     "python ",
     "python3 ",
@@ -647,15 +638,9 @@ fn bash_command_is_routine(words: &[String]) -> bool {
     if head == "find" {
         return find_is_read_only(inner);
     }
-    // Git: read-only queries decide via the shared helper (one verb table plus one unsafe-option table, long-option abbreviations failing closed)
-    // The local write-workflow verbs (`git add`/`commit`/…) fall through to ROUTINE_PREFIXES, still subject to the same unsafe-option table
+    // Git: a fail-closed allowlist (read-only queries plus the recoverable local workflow); discards and unrecognized shapes go to the model
     if head == "git" {
-        if git_words_are_read_only_query(inner) {
-            return true;
-        }
-        if git_words_have_unsafe_query_option(inner) {
-            return false;
-        }
+        return git_words_are_routine(inner);
     }
     // `tree -o <file>` writes an arbitrary path outside the write model; short flags group (`-ao`), so reject any short-flag word containing `o`
     if head == "tree"
