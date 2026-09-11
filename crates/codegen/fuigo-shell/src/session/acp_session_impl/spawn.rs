@@ -1653,6 +1653,7 @@ pub(crate) async fn spawn_session_actor(
                     .and_then(|r| r.turn_transient_retry),
             ),
         transient_retries_prompt_total: std::cell::Cell::new(0),
+        read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::from(&session_pruning_config))),
         transient_episode_start: std::cell::Cell::new(None),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),

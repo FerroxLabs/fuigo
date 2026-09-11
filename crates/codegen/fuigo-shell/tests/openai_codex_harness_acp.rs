@@ -1,6 +1,8 @@
 //! OpenAI models without a configured `agent_type` run on the Codex harness (`apply_patch`, codex file tools) end to end over ACP.
 //! Covers `session/new` with a stock client profile, the zero-turn model switch `fuigo -p -m` uses, a mid-session switch that must not fail,
-//! a custom client profile that still wins, and non-interactive sessions that never advertise `ask_user_question`.
+//! a custom client profile that still wins, and non-interactive sessions that never advertise `ask_user_question`,
+//! `todo_write` or the injected plan-mode tools. With no MCP server configured no session advertises
+//! `search_tool`/`use_tool`; a session that registers in-process SDK MCP servers does.
 #[allow(dead_code)]
 mod acp_harness;
 
@@ -51,8 +53,8 @@ async fn switch_model(conn: &acp::ClientSideConnection, session: &acp::SessionId
     .unwrap_or_else(|e| panic!("switching {} to {model} failed: {e}", session.0));
 }
 
-/// Tool names of the last main-turn inference request this session sent.
-fn last_tool_names(requests: &[LogEntry], session: &acp::SessionId) -> Vec<String> {
+/// The tools array of the last main-turn inference request this session sent.
+fn last_tools(requests: &[LogEntry], session: &acp::SessionId) -> Vec<Value> {
     requests
         .iter()
         .filter(|r| r.path == "/v1/chat/completions")
@@ -60,9 +62,36 @@ fn last_tool_names(requests: &[LogEntry], session: &acp::SessionId) -> Vec<Strin
         .filter_map(|r| r.body.as_ref().and_then(|body| body["tools"].as_array()))
         .rfind(|tools| tools.iter().any(|t| t["function"]["name"] == "run_terminal_command"))
         .unwrap_or_else(|| panic!("no main-turn request with tools for {}", session.0))
+        .clone()
+}
+
+/// Tool names of the last main-turn inference request this session sent.
+fn last_tool_names(requests: &[LogEntry], session: &acp::SessionId) -> Vec<String> {
+    last_tools(requests, session)
         .iter()
         .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
         .collect()
+}
+
+/// Description of `name` in the last main-turn request this session sent.
+fn last_tool_description(requests: &[LogEntry], session: &acp::SessionId, name: &str) -> String {
+    last_tools(requests, session)
+        .iter()
+        .find(|t| t["function"]["name"] == name)
+        .and_then(|t| t["function"]["description"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("{name} missing from the last request of {}", session.0))
+}
+
+fn assert_has(tools: &[String], names: &[&str], label: &str) {
+    for name in names {
+        assert!(tools.iter().any(|t| t == name), "{label}: must advertise {name}; got {tools:?}");
+    }
+}
+
+fn assert_lacks(tools: &[String], names: &[&str], label: &str) {
+    for name in names {
+        assert!(!tools.iter().any(|t| t == name), "{label}: must not advertise {name}; got {tools:?}");
+    }
 }
 
 fn assert_codex(tools: &[String], label: &str) {
@@ -104,6 +133,25 @@ fn openai_models_default_to_codex_and_headless_sessions_hide_ask_user() {
         let custom = open_session(&conn, &cwd, OPENAI_MODEL, false, Some(custom_profile)).await;
         prompt_turn(&conn, &custom, "Reply DONE without using tools.").await;
 
+        // In-process SDK MCP servers registered at session/new count as configured MCP.
+        let with_mcp = tokio::time::timeout(
+            RPC_TIMEOUT,
+            conn.new_session(acp::NewSessionRequest::new(cwd.to_path_buf()).meta(
+                json!({
+                    "modelId": OPENAI_MODEL,
+                    "startupHints": { "nonInteractive": true, "skipGitStatus": true, "skipProjectLayout": true },
+                    "fuigo/mcp/servers": [{ "name": "sdk-tools", "serverId": "sdk-1" }],
+                })
+                .as_object()
+                .cloned(),
+            )),
+        )
+        .await
+        .expect("session/new (mcp) timed out")
+        .expect("session/new (mcp) failed")
+        .session_id;
+        prompt_turn(&conn, &with_mcp, "Reply DONE without using tools.").await;
+
         let requests = mock.requests();
         let fresh_tools = last_tool_names(&requests, &fresh);
         assert_codex(&fresh_tools, "session/new");
@@ -120,5 +168,27 @@ fn openai_models_default_to_codex_and_headless_sessions_hide_ask_user() {
         assert!(mid_before.iter().any(|t| t == "ask_user_question"), "interactive stock session must keep ask_user_question; got {mid_before:?}");
         assert_stock(&last_tool_names(&requests, &mid), "mid-session switch");
         assert_stock(&last_tool_names(&requests, &custom), "custom profile");
+
+        // Headless: no todo list is rendered and no plan-mode keybind exists, so neither is advertised.
+        assert_lacks(&switched_tools, &["todo_write", "enter_plan_mode", "exit_plan_mode"], "non-interactive codex session");
+        // Interactive default profile keeps them; the curated plan profile keeps the plan-mode tools.
+        assert_has(&mid_before, &["todo_write", "enter_plan_mode", "exit_plan_mode"], "interactive stock session");
+        assert_has(&fresh_tools, &["enter_plan_mode", "exit_plan_mode"], "interactive plan profile");
+        // No MCP server is configured in this harness: the MCP meta-tools are dead bytes and stay out.
+        for (label, tools) in [("headless", &switched_tools), ("interactive", &mid_before), ("plan profile", &fresh_tools)] {
+            assert_lacks(tools, &["search_tool", "use_tool"], label);
+        }
+        // Registering SDK MCP servers at session/new brings them back.
+        let mcp_tools = last_tool_names(&requests, &with_mcp);
+        assert_codex(&mcp_tools, "sdk mcp session");
+        assert_has(&mcp_tools, &["search_tool", "use_tool"], "session with fuigo/mcp/servers");
+        assert_lacks(&mcp_tools, &["todo_write"], "headless session with MCP");
+        // The codex read_file reads several paths in one call and says so; the output tool waits by default.
+        let read_desc = last_tool_description(&requests, &switched, "read_file");
+        assert!(read_desc.contains("several paths in one call") && read_desc.contains("whole files by default"), "read_file description: {read_desc}");
+        let wait_desc = last_tool_description(&requests, &switched, "get_command_or_subagent_output");
+        assert!(wait_desc.contains("Omit timeout_ms to wait up to 120000 ms"), "output tool description: {wait_desc}");
+        let bash_desc = last_tool_description(&requests, &switched, "run_terminal_command");
+        assert!(bash_desc.contains("keeps running in the background and you get a task id"), "shell description: {bash_desc}");
     });
 }
