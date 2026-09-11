@@ -840,6 +840,9 @@ pub(crate) struct SessionActor {
     pub(crate) session_start: std::time::Instant,
     /// Per-chunk idle timeout for inference streaming; a stall aborts the stream.
     pub(crate) inference_idle_timeout: Duration,
+    /// Park a turn on a credential-less 401 whose recovery failed transiently instead of failing it
+    /// (remote `uncharged_401_park` kill switch; see `resolve_uncharged_401_park`).
+    pub(crate) uncharged_401_park_enabled: bool,
     pub(crate) max_retries: u32,
     /// Fixed bounds on a subagent turn's 429 waiting.
     pub(crate) rate_limit_waits: RateLimitWaitConfig,

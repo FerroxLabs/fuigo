@@ -234,6 +234,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Whether to enrich path-not-found errors with hints.
     /// Inherited from the parent session.
     pub path_not_found_hints: bool,
+    /// Per-tool params resolved from the parent's config, forwarded verbatim to the child spawn.
+    /// A default here silently drops the child's bash tool to the compiled 5-minute ceiling and the tool's own auto-background default.
+    pub tool_params_json: crate::session::agent_rebuild::ResolvedToolParamsJson,
     /// Plugin registry for plugin-aware agent lookup.
     pub plugin_registry: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>,
     /// Shared models manager for etag-triggered refresh.

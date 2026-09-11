@@ -27,6 +27,24 @@ impl crate::auth::refresh::TokenRefresher for AlwaysSucceedRefresher {
     }
 }
 
+/// Test refresher that always fails transiently — the shape of a sleep-gate
+/// deferral ("refresh deferred: system sleep imminent") or a network blip.
+struct AlwaysTransientFailRefresher {
+    called: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl crate::auth::refresh::TokenRefresher for AlwaysTransientFailRefresher {
+    async fn refresh(
+        &self,
+        _reason: crate::auth::refresh::RefreshReason,
+    ) -> crate::auth::refresh::RefreshOutcome {
+        self.called.store(true, Ordering::SeqCst);
+        crate::auth::refresh::RefreshOutcome::TransientFailure {
+            message: "refresh deferred: system sleep imminent".to_string(),
+        }
+    }
+}
+
 /// `(tempdir, manager)` with an expired OIDC token loaded so `unauthorized_recovery()` actually dispatches to the refresher.
 /// Tempdir must outlive the manager (auth.json path).
 fn auth_manager_with_refresher(
@@ -60,6 +78,16 @@ fn auth_error() -> fuigo_sampler::SamplingErrorInfo {
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
         credential: fuigo_sampling_types::SentCredential::Unknown,
+    }
+}
+
+/// [`auth_error`] with the wire-credential provenance pinned.
+fn auth_error_with_credential(
+    credential: fuigo_sampling_types::SentCredential,
+) -> fuigo_sampler::SamplingErrorInfo {
+    fuigo_sampler::SamplingErrorInfo {
+        credential,
+        ..auth_error()
     }
 }
 
@@ -99,6 +127,23 @@ async fn make_actor_with_method_and_credentials(
     auth_type: fuigo_chat_state::AuthType,
     api_key: String,
 ) -> (Arc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+    let (actor, rx) = make_actor_parts_with_method_and_credentials(
+        auth_manager,
+        auth_method_id,
+        auth_type,
+        api_key,
+    )
+    .await;
+    (Arc::new(actor), rx)
+}
+
+/// [`make_actor_with_method_and_credentials`] before the `Arc` wrap, for tests that pin actor fields (e.g. the park kill switch).
+async fn make_actor_parts_with_method_and_credentials(
+    auth_manager: Option<Arc<AuthManager>>,
+    auth_method_id: &str,
+    auth_type: fuigo_chat_state::AuthType,
+    api_key: String,
+) -> (SessionActor, mpsc::UnboundedReceiver<PersistenceMsg>) {
     let (gateway_tx, _) = mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel();
     let mut actor = create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
@@ -111,7 +156,7 @@ async fn make_actor_with_method_and_credentials(
             auth_type,
             ..Default::default()
         });
-    (Arc::new(actor), persistence_rx)
+    (actor, persistence_rx)
 }
 
 /// `(tempdir, manager)` holding a valid OIDC token (so `get_valid_token()` is a cache hit).
@@ -139,7 +184,13 @@ async fn no_emit_when_auth_manager_is_none() {
             let (actor, _rx) = make_actor_with_auth_manager(None).await;
             crate::auth::attribution::reset_test_emit_count();
             let _ = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert_eq!(
                 crate::auth::attribution::test_emit_count(),
@@ -166,7 +217,13 @@ async fn no_recovery_without_auth_manager() {
             .await;
             crate::auth::attribution::reset_test_emit_count();
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 result.is_err(),
@@ -195,7 +252,13 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
             let (_dir, am) = auth_manager_with_refresher(refresher);
             let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -208,6 +271,342 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
                 "session-based auth with a working refresher must return RefreshAuthAndResubmit"
             );
             assert!(called.load(Ordering::SeqCst), "refresher must be invoked");
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 with transiently-failed recovery parks on the
+/// uncharged path instead of failing the turn.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_deferred_refresh_parks_on_uncharged_resubmit() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        credential: fuigo_sampling_types::SentCredential::Missing,
+                        store: RecoveredStore::SessionToken,
+                    })
+                ),
+                "credential-less 401 with self-healing deferred refresh must park on \
+                 the uncharged resubmit path"
+            );
+            assert!(called.load(Ordering::SeqCst), "refresher must be consulted");
+        })
+        .await;
+}
+
+/// Rule: an already-parked credential-less 401 re-parks without touching the
+/// refresher — parked cycles must not consume the shared escalation budget.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn parked_credential_less_401_reparks_without_recovery_dispatch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Parked,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        credential: fuigo_sampling_types::SentCredential::Missing,
+                        store: RecoveredStore::SessionToken,
+                    })
+                ),
+                "an already-parked credential-less 401 must re-park"
+            );
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "a parked cycle must not dispatch a recovery refresh"
+            );
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 on a Length-salvage continuation still parks, fresh or
+/// parked — the quiet truncated-complete arm excludes `Auth` kinds, so it neither
+/// completes the turn truncated nor goes terminal.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn mid_salvage_credential_less_401_still_parks() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for park in [TurnParkState::Fresh, TurnParkState::Parked] {
+                let called = Arc::new(AtomicBool::new(false));
+                let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                    Arc::new(AlwaysTransientFailRefresher {
+                        called: called.clone(),
+                    });
+                let (_dir, am) = auth_manager_with_refresher(refresher);
+                let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+                // A window the seeded estimate exceeds: only the quiet arm's
+                // `Auth` exclusion keeps this 401 out of it.
+                let error = fuigo_sampler::SamplingErrorInfo {
+                    model_metadata: Some(fuigo_sampling_types::ResponseModelMetadata {
+                        context_window: Some(1),
+                        max_completion_tokens: None,
+                        models_etag: None,
+                    }),
+                    ..auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing)
+                };
+                let result = actor
+                    .handle_sampling_failure(error, 0, transient_state(0, true), true, park)
+                    .await;
+                assert!(
+                    matches!(
+                        result,
+                        Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                            credential: fuigo_sampling_types::SentCredential::Missing,
+                            store: RecoveredStore::SessionToken,
+                        })
+                    ),
+                    "a mid-salvage credential-less 401 must park ({park:?})"
+                );
+                assert_eq!(
+                    called.load(Ordering::SeqCst),
+                    !park.is_parked(),
+                    "one recovery dispatch when fresh, none when already parked ({park:?})"
+                );
+            }
+        })
+        .await;
+}
+
+/// Rule: a credentialed (or `Unknown` — fails closed) 401 stays terminal when recovery fails.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credentialed_401_with_deferred_refresh_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for credential in [
+                fuigo_sampling_types::SentCredential::Sent,
+                fuigo_sampling_types::SentCredential::Unknown,
+            ] {
+                let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                    Arc::new(AlwaysTransientFailRefresher {
+                        called: Arc::new(AtomicBool::new(false)),
+                    });
+                let (_dir, am) = auth_manager_with_refresher(refresher);
+                let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+                let result = actor
+                    .handle_sampling_failure(
+                        auth_error_with_credential(credential),
+                        0,
+                        transient_state(0, true),
+                        false,
+                        TurnParkState::Fresh,
+                    )
+                    .await;
+                assert!(
+                    result.is_err(),
+                    "{credential:?} 401 with failed recovery must stay terminal"
+                );
+            }
+        })
+        .await;
+}
+
+/// Rule: kill switch off restores terminal behavior for the exact input that otherwise parks.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_park_kill_switch_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: Arc::new(AtomicBool::new(false)),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                fuigo_chat_state::AuthType::SessionToken,
+                "initial-test-key".to_string(),
+            )
+            .await;
+            actor.uncharged_401_park_enabled = false;
+            let actor = Arc::new(actor);
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "kill switch off: the otherwise-parking input must stay terminal"
+            );
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 stays terminal under a provider refresh authority —
+/// parking would loop on a token only an interactive flow can mint.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_provider_authority_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let am = Arc::new(AuthManager::new(
+                dir.path(),
+                FuigoComConfig {
+                    auth_provider_command: Some("acme-auth".to_owned()),
+                    auth_provider_label: Some("Acme SSO".to_owned()),
+                    ..FuigoComConfig::default()
+                },
+            ));
+            am.hot_swap(FuigoAuth {
+                key: "expired-external".into(),
+                auth_mode: AuthMode::External,
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+                ..FuigoAuth::test_default()
+            });
+            am.set_refresher(Arc::new(AlwaysTransientFailRefresher {
+                called: Arc::new(AtomicBool::new(false)),
+            }));
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "credential-less 401 under a provider refresh authority must stay terminal"
+            );
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 stays terminal when the remedy is a manual re-login —
+/// resubmits would loop on a credential no refresh can mint.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_permanent_failure_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: Arc::new(AtomicBool::new(false)),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            am.record_permanent_failure(
+                "initial-test-key".to_string(),
+                crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected.into(),
+            );
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "credential-less 401 with a permanent refresh failure must stay terminal"
+            );
+        })
+        .await;
+}
+
+/// Rule: budgeted workflow children are excluded from the park — the output-budget gate
+/// fails the request closed before the auth arms run, so no recovery is dispatched, fresh or parked.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn budgeted_workflow_child_credential_less_401_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for park in [TurnParkState::Fresh, TurnParkState::Parked] {
+                let called = Arc::new(AtomicBool::new(false));
+                let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                    Arc::new(AlwaysTransientFailRefresher {
+                        called: called.clone(),
+                    });
+                let (_dir, am) = auth_manager_with_refresher(refresher);
+                let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                    Some(am),
+                    "cached_token",
+                    fuigo_chat_state::AuthType::SessionToken,
+                    "initial-test-key".to_string(),
+                )
+                .await;
+                actor.tool_context.task_output_token_budget = Some(
+                    crate::tools::tool_context::TaskOutputTokenBudget::limited(100_000),
+                );
+                let actor = Arc::new(actor);
+                let result = actor
+                    .handle_sampling_failure(
+                        auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing),
+                        0,
+                        transient_state(0, true),
+                        false,
+                        park,
+                    )
+                    .await;
+                let Err(err) = result else {
+                    panic!("a budgeted child's credential-less 401 must be terminal ({park:?})");
+                };
+                let rendered = serde_json::to_string(&err.data).unwrap_or_default();
+                assert!(
+                    rendered.contains("budgeted workflow child model request failed"),
+                    "failure must classify via the output-budget gate ({park:?}), got: {rendered}"
+                );
+                assert!(
+                    !called.load(Ordering::SeqCst),
+                    "the output-budget gate runs before any recovery dispatch ({park:?})"
+                );
+            }
         })
         .await;
 }
@@ -236,7 +635,13 @@ async fn sampler_401_with_api_key_auth_skips_refresh_and_surfaces_error() {
             .await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
 
             assert!(
@@ -557,6 +962,7 @@ async fn legacy_auth_hint_on_404_model_not_found() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -641,6 +1047,7 @@ async fn legacy_auth_hint_on_401_unauthorized() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -698,6 +1105,7 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -745,6 +1153,7 @@ async fn no_legacy_hint_for_oidc_auth() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -817,7 +1226,13 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
             .await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
 
             assert!(
@@ -856,7 +1271,13 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
             .await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
 
             assert!(
@@ -1306,7 +1727,13 @@ async fn sampler_401_on_provider_model_remints_and_resubmits() {
             );
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1353,7 +1780,13 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
             let mut error = auth_error();
             error.kind = fuigo_sampler::SamplingErrorKind::Api;
             let result = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1389,7 +1822,13 @@ async fn sampler_401_with_no_key_on_provider_model_mints_and_resubmits() {
             seed_provider_memo(&actor, provider).await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1436,7 +1875,13 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
             );
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1519,7 +1964,13 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
             seed_provider_memo(&actor, provider).await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 result.is_err(),

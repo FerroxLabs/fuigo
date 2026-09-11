@@ -1198,14 +1198,51 @@ impl SessionActor {
         }
     }
 
+    /// Park eligibility for a credential-less 401: kill switch on, provably no credential on the
+    /// wire, a self-healing remedy (manual/provider login stays terminal). One predicate so the two
+    /// fail-closed gates cannot drift.
+    fn uncharged_401_park_eligible(
+        &self,
+        am: &crate::auth::AuthManager,
+        credential: fuigo_sampling_types::SentCredential,
+    ) -> bool {
+        self.uncharged_401_park_enabled
+            && credential.is_missing()
+            && am.auth_remedy().is_self_healing()
+    }
+
+    /// Park outcome plus its log line; `dispatch_skipped` marks the already-parked arm.
+    fn park_uncharged_401(
+        &self,
+        credential: fuigo_sampling_types::SentCredential,
+        dispatch_skipped: bool,
+    ) -> SamplerFailureRecovery {
+        tracing::warn!(
+            session_id = %self.session_info.id.0,
+            dispatch_skipped,
+            "auth recovery: credential-less 401, parking on uncharged resubmit"
+        );
+        fuigo_telemetry::unified_log::warn(
+            "auth recovery: credential-less 401, parking on uncharged resubmit",
+            Some(self.session_info.id.0.as_ref()),
+            dispatch_skipped.then(|| serde_json::json!({ "dispatch": "skipped_already_parked" })),
+        );
+        SamplerFailureRecovery::RefreshAuthAndResubmit {
+            credential,
+            store: RecoveredStore::SessionToken,
+        }
+    }
+
     /// Classify a terminal sampler failure and decide recovery.
     /// `transient`: turn-loop retry state (the loop owns the counters).
+    /// `park`: already parked — a still-credential-less 401 re-parks without a recovery dispatch.
     pub(crate) async fn handle_sampling_failure(
         self: &Arc<Self>,
         error: fuigo_sampler::SamplingErrorInfo,
         rate_limit_waits: u32,
         transient: TransientRetryState,
         mid_salvage_continuation: bool,
+        park: TurnParkState,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use fuigo_sampler::SamplingErrorKind;
 
@@ -1439,6 +1476,13 @@ impl SessionActor {
         // That bearer was resubmitted until the turn's retry budget ran out
         // `try_recover_unauthorized`'s state machine already ends in a devbox mint, in the right place: after disk adoption and the authority
         if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
+            // Already parked and still credential-less: re-park without a recovery dispatch.
+            // A parked turn makes at most one recovery attempt (the pre-park one): each dispatch spends
+            // refresh attempts against the IdP, and repeated failures escalate into a process-wide permanent
+            // verdict, so parked cycles must not drive refreshes — the proactive refresh loop owns refresh while parked.
+            if park.is_parked() && self.uncharged_401_park_eligible(am, error.credential) {
+                return Ok(self.park_uncharged_401(error.credential, true));
+            }
             if am
                 .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
                 .await
@@ -1456,11 +1500,22 @@ impl SessionActor {
                 });
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
+            // `park_enabled` makes a kill-switch flip observable; `credential`
+            // distinguishes a Sent/Unknown refusal from a remedy refusal.
             fuigo_telemetry::unified_log::warn(
                 "auth recovery: sampler 401, refresh failed",
                 Some(self.session_info.id.0.as_ref()),
-                None,
+                Some(serde_json::json!({
+                    "park_enabled": self.uncharged_401_park_enabled,
+                    "credential": error.credential,
+                })),
             );
+            // The 401 says nothing about the missing credential (an expired token during a network outage):
+            // park instead of failing the turn and losing its work.
+            // Do not add `prepare_sampler_for_turn` here — a prepare's refresh would count against the shared escalation budget.
+            if self.uncharged_401_park_eligible(am, error.credential) {
+                return Ok(self.park_uncharged_401(error.credential, false));
+            }
         }
 
         // 4c. Auth failure or bare 401 on a provider-backed model (gateway 401s can classify under other error kinds).
@@ -1678,16 +1733,21 @@ impl SessionActor {
     }
 
     /// Drive one turn through the sampler, pacing a subagent's 429s via `budget`.
+    /// `Parked` resubmits skip every refresh-driving prepare (see the re-park arm);
+    /// the wire bearer comes from the live resolver at send time.
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
         request: ConversationRequest,
         budget: &mut RateLimitWaitBudget,
         transient: TransientRetryState,
         mid_salvage_continuation: bool,
+        park: TurnParkState,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         // Per-turn auth refresh and sampler config push
         // Mirrors `prepare_chat_completion(false)` from the legacy path
-        self.prepare_sampler_for_turn().await;
+        if !park.is_parked() {
+            self.prepare_sampler_for_turn().await;
+        }
 
         if !budget.can_wait() {
             // Nothing will send this request a second time, so move it into the sampler instead of deep-cloning the whole message history on every main-session turn
@@ -1699,6 +1759,7 @@ impl SessionActor {
                         budget,
                         transient,
                         mid_salvage_continuation,
+                        park,
                     )
                     .await
                 }
@@ -1721,14 +1782,18 @@ impl SessionActor {
                                 budget,
                                 transient,
                                 mid_salvage_continuation,
+                                park,
                             )
                             .await;
                     };
                     self.notify_rate_limit_wait(attempt, budget, backoff).await;
                     // Esc cancels a turn by aborting its task, so this await point is itself the cancellation point; no select needed
                     sleep(backoff).await;
-                    // A token can expire across minutes of accumulated waits.
-                    self.prepare_sampler_for_turn().await;
+                    // A token can expire across minutes of accumulated waits
+                    // (parked turns skip it — see `run_turn_via_sampler`).
+                    if !park.is_parked() {
+                        self.prepare_sampler_for_turn().await;
+                    }
                 }
             }
         }
@@ -1882,6 +1947,7 @@ impl SessionActor {
         budget: &RateLimitWaitBudget,
         transient: TransientRetryState,
         mid_salvage_continuation: bool,
+        park: TurnParkState,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         // Single funnel for every sampler-call failure.
         super::turn::record_failed_sample_on_turn_span(&tracing::Span::current(), info.kind);
@@ -1891,6 +1957,7 @@ impl SessionActor {
                 budget.attempts_used(),
                 transient,
                 mid_salvage_continuation,
+                park,
             )
             .await?
         {
