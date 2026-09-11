@@ -7673,3 +7673,24 @@ fn harness_switch_decision_keeps_explicit_rules_and_relaxes_inferred_ones() {
         );
     }
 }
+
+/// A model harness that replaces `fuigo-build-plan-no-subagents` must not bring `spawn_subagent` back; other profiles keep it.
+#[test]
+fn stock_no_subagents_profile_strips_spawn_from_replacing_harness() {
+    use crate::agent::mvp_agent::carry_stock_profile_subagent_choice;
+    let spawns = |def: &fuigo_agent::AgentDefinition| {
+        def.tool_config.tools.iter().any(|t| t.id == "FuigoBuild:task")
+    };
+    assert!(spawns(&fuigo_agent::AgentDefinition::codex()), "codex ships spawn_subagent");
+    for (profile, keeps) in [
+        (Some("fuigo-build-plan-no-subagents"), false),
+        (Some("fuigo-build-plan"), true),
+        (Some("fuigo-build-ask-user"), true),
+        (Some("custom-devbox-profile"), true),
+        (None, true),
+    ] {
+        let mut def = fuigo_agent::AgentDefinition::codex();
+        carry_stock_profile_subagent_choice(&mut def, profile);
+        assert_eq!(spawns(&def), keeps, "profile {profile:?}");
+    }
+}

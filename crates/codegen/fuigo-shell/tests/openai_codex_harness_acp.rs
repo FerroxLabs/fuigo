@@ -112,6 +112,11 @@ fn openai_models_default_to_codex_and_headless_sessions_hide_ask_user() {
         let switched_tools = last_tool_names(&requests, &switched);
         assert_codex(&switched_tools, "zero-turn switch");
         assert!(!switched_tools.iter().any(|t| t == "ask_user_question"), "non-interactive session must not advertise ask_user_question; got {switched_tools:?}");
+        assert_eq!(
+            fresh_tools.iter().any(|t| t == "spawn_subagent"),
+            mid_before.iter().any(|t| t == "spawn_subagent"),
+            "codex harness must match the stock harness on spawn_subagent; codex {fresh_tools:?} stock {mid_before:?}"
+        );
         assert_stock(&mid_before, "stock model");
         assert!(mid_before.iter().any(|t| t == "ask_user_question"), "interactive stock session must keep ask_user_question; got {mid_before:?}");
         assert_stock(&last_tool_names(&requests, &mid), "mid-session switch");

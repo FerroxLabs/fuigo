@@ -1054,6 +1054,37 @@ pub(crate) fn is_stock_session_profile(name: &str) -> bool {
             | BuiltinAgentName::FuigoBuildAskUser)
     )
 }
+/// Keep a stock session profile's subagent choice when a model harness replaces that profile.
+/// The pager expresses `--no-subagents` only by choosing `fuigo-build-plan-no-subagents`, so a harness that ships `spawn_subagent` drops it for that session.
+pub(crate) fn carry_stock_profile_subagent_choice(
+    definition: &mut fuigo_agent::AgentDefinition,
+    session_profile: Option<&str>,
+) {
+    use fuigo_agent::config::BuiltinAgentName;
+    use std::str::FromStr;
+    let Some(profile) = session_profile
+        .filter(|name| is_stock_session_profile(name))
+        .and_then(|name| BuiltinAgentName::from_str(name).ok())
+    else {
+        return;
+    };
+    let task_tool_id = format!(
+        "{}:task",
+        fuigo_tools::types::tool::ToolNamespace::FuigoBuild
+    );
+    let profile_spawns = profile
+        .definition()
+        .tool_config
+        .tools
+        .iter()
+        .any(|tool| tool.id == task_tool_id);
+    if !profile_spawns {
+        definition
+            .tool_config
+            .tools
+            .retain(|tool| tool.id != task_tool_id);
+    }
+}
 /// Whether the user picked an agent outside the session request: `FUIGO_AGENT`, `[agent] name` / `definition`, or `--agent-profile`.
 /// Each outranks an inferred model harness.
 pub(crate) fn explicit_agent_selection(
