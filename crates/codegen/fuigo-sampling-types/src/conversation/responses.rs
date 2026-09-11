@@ -236,7 +236,7 @@ pub(super) fn build_responses_input(req: &ConversationRequest) -> rs::InputParam
                 pending.push(item);
             }
             ConversationItem::Assistant(a) => {
-                assistant_to_input_items(a, &mut pending, &mut custom_call_ids, &mut items);
+                assistant_to_input_items(a, req, &mut pending, &mut custom_call_ids, &mut items);
             }
             ConversationItem::ToolResult(t) => {
                 flush_pending(&mut pending, &mut items);
@@ -259,9 +259,59 @@ fn flush_pending(pending: &mut Vec<&ConversationItem>, out: &mut Vec<rs::InputIt
     out.extend(pending.drain(..).flat_map(conversation_item_to_input_items));
 }
 
+/// How a stored tool call goes back on the wire.
+enum CallWire {
+    Function,
+    /// `custom_tool_call`; `id` is the recorded wire item id, empty when the call was stored as a function call
+    Custom { id: String },
+}
+
+/// The wire form of a tool call follows the tool's *current* declaration: a name the `tools` list declares as a
+/// `custom` tool always replays as `custom_tool_call` (a JSON-era apply_patch call is unwrapped to its text), and a
+/// name declared as a function always replays as `function_call` (a freeform-era call is wrapped under its input
+/// key). The prefix therefore never mixes item kinds for one tool name. An undeclared name keeps its recorded kind.
+fn call_wire(req: &ConversationRequest, tc: &ToolCall, recorded: CallWire) -> CallWire {
+    match req.tools.iter().find(|t| t.name == tc.name) {
+        Some(spec) if spec.is_freeform() => CallWire::Custom {
+            id: match recorded {
+                CallWire::Custom { id } => id,
+                CallWire::Function => String::new(),
+            },
+        },
+        Some(_) => CallWire::Function,
+        None => recorded,
+    }
+}
+
+/// The input key freeform text is wrapped under for a tool (the schema's single required string property, `patch`).
+fn input_key(req: &ConversationRequest, name: &str) -> String {
+    req.tools
+        .iter()
+        .find(|t| t.name == name)
+        .map(ToolSpec::freeform_input_key)
+        .unwrap_or_else(|| "raw".to_owned())
+}
+
+fn tool_call_input_item(
+    req: &ConversationRequest,
+    tc: &ToolCall,
+    recorded: CallWire,
+    custom_call_ids: &mut std::collections::HashSet<String>,
+) -> rs::InputItem {
+    let from_freeform = matches!(recorded, CallWire::Custom { .. });
+    match call_wire(req, tc, recorded) {
+        CallWire::Function => function_call_input_item(req, tc, from_freeform),
+        CallWire::Custom { id } => {
+            custom_call_ids.insert(tc.id.as_ref().to_owned());
+            custom_tool_call_input_item(req, tc, &id)
+        }
+    }
+}
+
 /// Emit one assistant turn: the held-back siblings, the message text and the tool calls, in recorded emission order.
 fn assistant_to_input_items(
     a: &AssistantItem,
+    req: &ConversationRequest,
     pending: &mut Vec<&ConversationItem>,
     custom_call_ids: &mut std::collections::HashSet<String>,
     out: &mut Vec<rs::InputItem>,
@@ -271,7 +321,11 @@ fn assistant_to_input_items(
         if !a.content.is_empty() {
             out.push(assistant_message_input_item(&a.content));
         }
-        out.extend(a.tool_calls.iter().map(function_call_input_item));
+        out.extend(
+            a.tool_calls
+                .iter()
+                .map(|tc| tool_call_input_item(req, tc, CallWire::Function, custom_call_ids)),
+        );
         return;
     };
 
@@ -314,13 +368,17 @@ fn assistant_to_input_items(
             }
             OutputSlot::FunctionCall { call_id } => {
                 if let Some(tc) = take_tool_call(a, &mut call_used, call_id) {
-                    ordered.push(function_call_input_item(tc));
+                    ordered.push(tool_call_input_item(req, tc, CallWire::Function, custom_call_ids));
                 }
             }
             OutputSlot::CustomToolCall { call_id, id } => {
                 if let Some(tc) = take_tool_call(a, &mut call_used, call_id) {
-                    custom_call_ids.insert(call_id.clone());
-                    ordered.push(custom_tool_call_input_item(tc, id));
+                    ordered.push(tool_call_input_item(
+                        req,
+                        tc,
+                        CallWire::Custom { id: id.clone() },
+                        custom_call_ids,
+                    ));
                 }
             }
         }
@@ -340,7 +398,7 @@ fn assistant_to_input_items(
     out.extend(ordered);
     for (i, tc) in a.tool_calls.iter().enumerate() {
         if !call_used[i] {
-            out.push(function_call_input_item(tc));
+            out.push(tool_call_input_item(req, tc, CallWire::Function, custom_call_ids));
         }
     }
 }
@@ -367,8 +425,17 @@ fn assistant_message_input_item(text: &str) -> rs::InputItem {
     })
 }
 
-fn function_call_input_item(tc: &ToolCall) -> rs::InputItem {
-    let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
+/// A function call's JSON arguments. A call recorded in the freeform form (`from_freeform`) carries raw text, which
+/// is wrapped under the tool's input key; anything else that is not JSON is sanitized to `{}` as before.
+fn function_call_input_item(req: &ConversationRequest, tc: &ToolCall, from_freeform: bool) -> rs::InputItem {
+    let arguments = if from_freeform
+        && serde_json::from_str::<serde::de::IgnoredAny>(&tc.arguments).is_err()
+    {
+        let key = input_key(req, &tc.name);
+        Arc::<str>::from(serde_json::json!({ key: tc.arguments.as_ref() }).to_string())
+    } else {
+        sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone())
+    };
     rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
         call_id: tc.id.as_ref().to_owned(),
         name: tc.name.clone(),
@@ -379,13 +446,25 @@ fn function_call_input_item(tc: &ToolCall) -> rs::InputItem {
 }
 
 /// A freeform tool call replays verbatim: the input is the raw text the model produced, never JSON-wrapped.
-fn custom_tool_call_input_item(tc: &ToolCall, id: &str) -> rs::InputItem {
+/// A call stored in the JSON function form (`{"patch": text}`, or the `input` / `raw` envelopes) is unwrapped to its text.
+fn custom_tool_call_input_item(req: &ConversationRequest, tc: &ToolCall, id: &str) -> rs::InputItem {
+    let text = freeform_text(&tc.arguments, &input_key(req, &tc.name));
     rs::InputItem::Item(rs::Item::CustomToolCall(custom_tool_call(
-        &tc.id,
-        &tc.name,
-        &tc.arguments,
-        id,
+        &tc.id, &tc.name, &text, id,
     )))
+}
+
+/// The freeform text behind stored arguments: the string under `key` (or `patch` / `input` / `raw`) of a JSON
+/// object, else the arguments themselves.
+fn freeform_text(arguments: &str, key: &str) -> String {
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(arguments) {
+        for k in [key, "patch", "input", "raw"] {
+            if let Some(serde_json::Value::String(text)) = obj.get(k) {
+                return text.clone();
+            }
+        }
+    }
+    arguments.to_owned()
 }
 
 /// Build an `rs::CustomToolCall` (a `custom_tool_call` item).
@@ -444,14 +523,24 @@ fn tool_result_to_input_item(t: &ToolResultItem, custom: bool) -> rs::InputItem 
     ))
 }
 
-/// Inject the `type: "reasoning_text"` discriminator the API requires.
-/// `async-openai`'s `ReasoningTextContent` has no `type` field, so it serializes to `{"text": ...}` and the API answers 400.
-/// Delete this once upstream grows the field.
+/// Wire fixups `async-openai`'s input types cannot express:
+/// - inject the `type: "reasoning_text"` discriminator the API requires (`ReasoningTextContent` has no `type` field,
+///   so it serializes to `{"text": ...}` and the API answers 400);
+/// - drop an empty `id` from a `custom_tool_call` (the field is mandatory on the struct but optional on input; it is
+///   empty when a JSON-era call replays in the custom form).
+/// Delete the first once upstream grows the field.
 pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) else {
         return;
     };
     for item in input.iter_mut() {
+        if item.get("type").and_then(|t| t.as_str()) == Some("custom_tool_call")
+            && item.get("id").and_then(|i| i.as_str()) == Some("")
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.remove("id");
+            continue;
+        }
         if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
             continue;
         }
@@ -507,7 +596,16 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
             if !a.content.is_empty() {
                 items.push(assistant_message_input_item(&a.content));
             }
-            items.extend(a.tool_calls.iter().map(function_call_input_item));
+            items.extend(a.tool_calls.iter().map(|tc| {
+                let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
+                rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
+                    call_id: tc.id.as_ref().to_owned(),
+                    name: tc.name.clone(),
+                    arguments: arguments.as_ref().to_owned(),
+                    id: None,
+                    status: None,
+                }))
+            }));
             items
         }
         ConversationItem::ToolResult(t) => vec![tool_result_to_input_item(t, false)],

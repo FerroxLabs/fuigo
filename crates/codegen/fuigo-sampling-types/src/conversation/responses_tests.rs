@@ -2088,3 +2088,80 @@ fn output_order_serde_round_trip() {
     let legacy: AssistantItem = serde_json::from_str(r#"{"content":"x"}"#).unwrap();
     assert_eq!(legacy.output_order, None);
 }
+
+/// The wire form of a call follows the tool's current declaration, so a prefix never mixes `function_call` and
+/// `custom_tool_call` for one name: a JSON-era apply_patch call replays as `custom_tool_call` (text unwrapped, no
+/// synthetic id) once the tool is freeform, and a freeform-era call replays as `function_call` (`{"patch": text}`)
+/// once the tool is a plain function again. Results follow the call's kind.
+#[test]
+fn tool_call_wire_form_follows_the_current_tool_declaration() {
+    let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
+    let json_era = AssistantItem {
+        content: "".into(),
+        tool_calls: vec![ToolCall {
+            id: "call_j".into(),
+            name: "apply_patch".into(),
+            arguments: serde_json::json!({ "patch": patch }).to_string().into(),
+        }],
+        model_id: None,
+        model_fingerprint: None,
+        reasoning_effort: None,
+        output_order: None,
+    };
+    let freeform_era = AssistantItem {
+        content: "".into(),
+        tool_calls: vec![ToolCall { id: "call_f".into(), name: "apply_patch".into(), arguments: patch.into() }],
+        model_id: None,
+        model_fingerprint: None,
+        reasoning_effort: None,
+        output_order: Some(vec![
+            OutputSlot::Reasoning { id: "rs_f".into() },
+            OutputSlot::CustomToolCall { call_id: "call_f".into(), id: "ctc_f".into() },
+        ]),
+    };
+    let items = vec![
+        ConversationItem::user("u"),
+        reasoning_sibling("rs_j", "", Some("enc_j")),
+        ConversationItem::Assistant(json_era),
+        ConversationItem::tool_result("call_j", "ok j"),
+        reasoning_sibling("rs_f", "", Some("enc_f")),
+        ConversationItem::Assistant(freeform_era),
+        ConversationItem::tool_result("call_f", "ok f"),
+    ];
+    let function_spec = ToolSpec {
+        name: "apply_patch".to_string(),
+        description: Some("json apply_patch".to_string()),
+        parameters: serde_json::json!({"type": "object", "properties": {"patch": {"type": "string"}}, "required": ["patch"]}),
+        freeform: None,
+    };
+
+    // Tool declared custom now: both calls go back as custom_tool_call, the JSON-era one without an id
+    let req = ConversationRequest::from_items(items.clone()).with_tools(vec![freeform_apply_patch_spec()]);
+    let input = input_items_json(&req);
+    assert_eq!(
+        input[2],
+        serde_json::json!({"type": "custom_tool_call", "call_id": "call_j", "name": "apply_patch", "input": patch})
+    );
+    assert_eq!(input[3], serde_json::json!({"type": "custom_tool_call_output", "call_id": "call_j", "output": "ok j"}));
+    assert_eq!(
+        input[5],
+        serde_json::json!({"type": "custom_tool_call", "call_id": "call_f", "name": "apply_patch", "input": patch, "id": "ctc_f"})
+    );
+    assert_eq!(input[6]["type"], "custom_tool_call_output");
+    let body = serde_json::to_string(&input).unwrap();
+    assert!(!body.contains("function_call"), "{body}");
+
+    // Tool declared as a function now: both go back as function_call with {"patch": text}
+    let req = ConversationRequest::from_items(items).with_tools(vec![function_spec]);
+    let input = input_items_json(&req);
+    for (idx, call_id) in [(2, "call_j"), (5, "call_f")] {
+        assert_eq!(input[idx]["type"], "function_call", "{}", input[idx]);
+        assert_eq!(input[idx]["call_id"], call_id);
+        let args: serde_json::Value =
+            serde_json::from_str(input[idx]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args, serde_json::json!({ "patch": patch }));
+        assert_eq!(input[idx + 1]["type"], "function_call_output");
+    }
+    let body = serde_json::to_string(&input).unwrap();
+    assert!(!body.contains("custom_tool_call"), "{body}");
+}
