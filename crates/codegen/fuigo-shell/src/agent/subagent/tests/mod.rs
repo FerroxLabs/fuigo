@@ -2333,6 +2333,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             system_prompt_label: None,
             use_concise: false,
             agent_type: crate::agent::config::default_agent_type(),
+            agent_type_inferred: false,
             inference_idle_timeout_secs: None,
             max_retries: None,
             subagent_rate_limit_max_attempts: None,

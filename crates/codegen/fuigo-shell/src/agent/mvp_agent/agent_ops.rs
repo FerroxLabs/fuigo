@@ -3814,13 +3814,39 @@ impl MvpAgent {
         acp_agent_profile: Option<fuigo_agent::AgentDefinition>,
         model_agent_type: Option<&str>,
     ) -> fuigo_agent::AgentDefinition {
+        Self::resolve_agent_definition_for_model(
+            cwd,
+            agent_profile_path,
+            agent_config,
+            acp_agent_profile,
+            model_agent_type,
+            false,
+        )
+    }
+    /// [`Self::resolve_agent_definition`] for a model whose `agent_type` may be inferred ([`config::ModelInfo::agent_type_inferred`]).
+    ///
+    /// An inferred strict harness (an OpenAI model defaulting to `codex`) outranks only the stock session profiles a client derives from its UI flags.
+    /// It yields to a custom ACP `_meta.agentProfile`, `--agent-profile` and `[agent] definition`, and like every model harness to `FUIGO_AGENT` and `[agent] name`.
+    pub fn resolve_agent_definition_for_model(
+        cwd: &std::path::Path,
+        agent_profile_path: Option<&std::path::Path>,
+        agent_config: &config::AgentSelectionConfig,
+        acp_agent_profile: Option<fuigo_agent::AgentDefinition>,
+        model_agent_type: Option<&str>,
+        model_agent_type_inferred: bool,
+    ) -> fuigo_agent::AgentDefinition {
         use fuigo_agent::AgentDefinition;
         let fuigo_agent_env_set = std::env::var("FUIGO_AGENT")
             .ok()
             .is_some_and(|s| !s.trim().is_empty());
         let config_agent_explicitly_set = agent_config.name.is_some();
-        let model_requires_strict_harness = model_agent_type
-            .is_some_and(fuigo_agent::config::is_strict_harness_agent_type);
+        let inferred_harness_yields = model_agent_type_inferred
+            && (crate::agent::mvp_agent::explicit_agent_selection(agent_config, agent_profile_path)
+                || acp_agent_profile.as_ref().is_some_and(|def| {
+                    !crate::agent::mvp_agent::is_stock_session_profile(&def.name)
+                }));
+        let model_requires_strict_harness = !inferred_harness_yields
+            && model_agent_type.is_some_and(fuigo_agent::config::is_strict_harness_agent_type);
         if !fuigo_agent_env_set && !config_agent_explicitly_set
             && model_requires_strict_harness && let Some(required) = model_agent_type
             && let Some(def) = fuigo_agent::discovery::by_name_in_cwd(required, cwd)
@@ -4024,6 +4050,7 @@ impl MvpAgent {
             persisted_announcement_state,
             session_meta,
             model_agent_type,
+            model_agent_type_inferred,
             session_model_id,
             initial_reasoning_effort,
             session_yolo_mode,
@@ -4317,12 +4344,13 @@ impl MvpAgent {
             .map(|d| d.name.clone());
         let mut agent_definition = {
             let cfg = self.cfg.borrow();
-            Self::resolve_agent_definition(
+            Self::resolve_agent_definition_for_model(
                 cwd.as_path(),
                 cfg.agent_profile_path.as_deref(),
                 &cfg.agent,
                 acp_agent_profile,
                 model_agent_type,
+                model_agent_type_inferred,
             )
         };
         {
