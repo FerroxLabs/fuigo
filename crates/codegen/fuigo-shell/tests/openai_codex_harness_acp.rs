@@ -124,7 +124,9 @@ fn openai_models_default_to_codex_and_headless_sessions_hide_ask_user() {
         // A mid-session switch to an inferred harness succeeds and keeps the running harness.
         let mid = open_session(&conn, &cwd, STOCK_MODEL, false, None).await;
         prompt_turn(&conn, &mid, "Reply DONE without using tools.").await;
-        let mid_before = last_tool_names(&mock.requests(), &mid);
+        let mid_before_tools = last_tools(&mock.requests(), &mid);
+        let mid_before: Vec<String> =
+            mid_before_tools.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect();
         switch_model(&conn, &mid, OPENAI_MODEL).await;
         prompt_turn(&conn, &mid, "Reply DONE without using tools.").await;
 
@@ -190,5 +192,32 @@ fn openai_models_default_to_codex_and_headless_sessions_hide_ask_user() {
         assert!(wait_desc.contains("Omit timeout_ms to wait up to 120000 ms"), "output tool description: {wait_desc}");
         let bash_desc = last_tool_description(&requests, &switched, "run_terminal_command");
         assert!(bash_desc.contains("keeps running in the background and you get a task id"), "shell description: {bash_desc}");
+
+        // The compact-presentation catalog must track the live read_file definition on both harnesses: the compact
+        // swap matches `original` + `parameters` byte-for-byte, so a stale entry silently disables compaction.
+        // Both read_file tools state the shared per-call byte cap (40 KB, ~10K tokens) in the description and the
+        // `files` parameter.
+        let catalog: Vec<Value> =
+            serde_json::from_str(include_str!("../src/session/compact_tool_descriptions.json")).expect("valid catalog");
+        for (label, tools, own_param) in [("codex", last_tools(&requests, &switched), "file_path"), ("stock", mid_before_tools, "target_file")] {
+            let live = tools
+                .iter()
+                .find(|t| t["function"]["name"] == "read_file")
+                .unwrap_or_else(|| panic!("{label}: read_file missing"));
+            let entry = catalog
+                .iter()
+                .find(|e| e["name"] == "read_file" && e["parameters"]["properties"].get(own_param).is_some())
+                .unwrap_or_else(|| panic!("catalog has no read_file entry with a {own_param} parameter"));
+            assert_eq!(live["function"]["description"], entry["original"], "{label}: compact catalog read_file description is stale");
+            assert_eq!(
+                live["function"]["parameters"]["properties"]["files"]["description"],
+                entry["parameters"]["properties"]["files"]["description"],
+                "{label}: compact catalog read_file `files` parameter is stale"
+            );
+            for text in [&live["function"]["description"], &live["function"]["parameters"]["properties"]["files"]["description"]] {
+                let text = text.as_str().unwrap_or_default();
+                assert!(text.contains("about 40 KB") && !text.contains("200 KB"), "{label}: read_file must state the 40 KB per-call cap: {text}");
+            }
+        }
     });
 }

@@ -40,7 +40,7 @@
   },
   {
     "name": "read_file",
-    "original": "Reads whole files by default, with 1-indexed line numbers (L{n}: content; lines longer than 500 characters are cut). Pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files. A call returns at most about 200 KB across its files; past that the read is truncated at a line boundary and the result names the next offset. Indentation mode expands around an anchor line.",
+    "original": "Reads whole files by default, with 1-indexed line numbers (L{n}: content; lines longer than 500 characters are cut). Pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files. A call returns at most about 40 KB across its files; past that the read is truncated at a line boundary and the result names the next offset. Indentation mode expands around an anchor line.",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -50,7 +50,7 @@
           "default": ""
         },
         "files": {
-          "description": "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 200 KB in total.",
+          "description": "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total.",
           "type": [
             "array",
             "null"
@@ -164,7 +164,7 @@
       "type": "object",
       "required": []
     },
-    "compact": "Read whole files by default with 1-indexed L{n}: lines (lines over 500 characters are cut); pass several paths in one call as files=[{path, offset?, limit?}] to read them together; use offset/limit only for very large files. A call returns at most about 200 KB across its files, then truncates at a line boundary and names the next offset. Indentation mode expands around an anchor line."
+    "compact": "Read whole files by default with 1-indexed L{n}: lines (lines over 500 characters are cut); pass several paths in one call as files=[{path, offset?, limit?}] to read them together; use offset/limit only for very large files. A call returns at most about 40 KB across its files, then truncates at a line boundary and names the next offset. Indentation mode expands around an anchor line."
   },
   {
     "name": "list_dir",
@@ -303,7 +303,7 @@
   },
   {
     "name": "read_file",
-    "original": "Read a file, or several files in one call.\n\nUsage:\n- Reads whole files by default; pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files.\n- The target_file parameter (or each files[].path) can be a relative path in the workspace or an absolute path\n- A call returns up to 20000 lines and about 200 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from\n- Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line\n- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc); read PDFs and images one per call\n- When reading an image file the contents are presented visually as this tool uses multimodal LLMs.",
+    "original": "Read a file, or several files in one call.\n\nUsage:\n- Reads whole files by default; pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files.\n- The target_file parameter (or each files[].path) can be a relative path in the workspace or an absolute path\n- A call returns up to 20000 lines and about 40 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from\n- Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line\n- This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc); read PDFs and images one per call\n- When reading an image file the contents are presented visually as this tool uses multimodal LLMs.",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -313,7 +313,7 @@
           "default": ""
         },
         "files": {
-          "description": "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 200 KB in total.",
+          "description": "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total.",
           "type": [
             "array",
             "null"
@@ -367,7 +367,7 @@
       "type": "object",
       "required": []
     },
-    "compact": "Read whole files by default; pass several paths in one call as files=[{path, offset?, limit?}] to read them together; use offset/limit only for very large files. Paths are workspace-relative or absolute. A call returns up to 20000 lines and about 200 KB across its files, then truncates at a line boundary and names the next offset. Line anchors are 1-based LINE_NUMBER→LINE_CONTENT on the first returned line and every tenth file line; count intervening lines from the nearest anchor. Supports text, PDF, PowerPoint, notebooks and images (read PDFs/images one per call); images are presented visually."
+    "compact": "Read whole files by default; pass several paths in one call as files=[{path, offset?, limit?}] to read them together; use offset/limit only for very large files. Paths are workspace-relative or absolute. A call returns up to 20000 lines and about 40 KB across its files, then truncates at a line boundary and names the next offset. Line anchors are 1-based LINE_NUMBER→LINE_CONTENT on the first returned line and every tenth file line; count intervening lines from the nearest anchor. Supports text, PDF, PowerPoint, notebooks and images (read PDFs/images one per call); images are presented visually."
   },
   {
     "name": "grep",

@@ -58,9 +58,13 @@ impl ReadFileVersion {
 /// is the practical bound.
 pub const MAX_LINES_READ: usize = 20_000;
 /// Byte cap per `read_file` call (formatted content, summed across every file
-/// in the call). Past it the read is truncated at a line boundary and the
-/// result names the next offset to continue from.
-pub const MAX_READ_BYTES: usize = 200 * 1024;
+/// in the call): ~10K tokens, the same order as a shell command's output cap,
+/// so one read never floods the context. Past it the read is truncated at a
+/// line boundary and the result names the next offset to continue from.
+pub const MAX_READ_BYTES: usize = 40 * 1024;
+/// Tail of the truncation hint a cut read ends with; a multi-file call treats
+/// a cut file as having exhausted the shared budget.
+pub(crate) const READ_CUT_MARKER: &str = "KB per-call cap); continue with ";
 pub use crate::implementations::read_file::{
     FileMetadata, PDF_MAX_PAGES_PER_READ, bytes_to_metadata, parse_page_range,
 };
@@ -112,7 +116,7 @@ pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file, or several files in on
 Usage:
 - Reads whole files by default; pass several paths in one call (files: [{path}, {path, offset, limit}, ...]) to read them together; use offset/limit only for very large files.
 - The ${{ params.read.target_file }} parameter (or each files[].path) can be a relative path in the workspace or an absolute path
-- A call returns up to {max_lines_read} lines and about 200 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from
+- A call returns up to {max_lines_read} lines and about 40 KB across all of its files; past that the read is truncated at a line boundary and the result names the next offset to continue from
 - Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc); read PDFs and images one per call
 - When reading an image file the contents are presented visually as this tool uses multimodal LLMs."#;
@@ -153,7 +157,7 @@ pub struct ReadFileInput {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 200 KB in total."
+        description = "Several files to read together in one call, each {path, offset?, limit?}. Whole files by default; the call is capped at about 40 KB in total."
     )]
     pub files: Option<Vec<ReadFileEntry>>,
     #[serde(
@@ -422,7 +426,7 @@ pub(crate) async fn run_read_file(
     let mut absolute_path: Option<std::path::PathBuf> = None;
     let count = entries.len();
     let mut unread: Vec<String> = Vec::new();
-    for (idx, entry) in entries.into_iter().enumerate() {
+    for entry in entries {
         if remaining == 0 {
             unread.push(entry.path);
             continue;
@@ -448,7 +452,14 @@ pub(crate) async fn run_read_file(
         .await?;
         let (body, body_concise, raw, lines, images, path, used) = match output {
             ReadFileOutput::FileContent(fc) => {
-                let used = fc.content.len();
+                // A cut file used up the budget: whatever is left is under one
+                // line, so later files are listed as unread rather than read
+                // into a sliver.
+                let used = if fc.content.contains(READ_CUT_MARKER) {
+                    remaining
+                } else {
+                    fc.content.len()
+                };
                 let body = if fc.content.is_empty() {
                     if fc.total_lines == 0 {
                         "(empty file)".to_string()
@@ -476,6 +487,13 @@ pub(crate) async fn run_read_file(
                 );
                 (note.clone(), note, String::new(), 0, Vec::new(), None, 0)
             }
+            // The first line no longer fits what earlier files left of the
+            // budget: defer the file to another call instead of reporting it
+            // as an oversized line.
+            ReadFileOutput::FileTooLarge(_) if remaining < MAX_READ_BYTES => {
+                unread.push(entry.path);
+                continue;
+            }
             ReadFileOutput::FileNotFound(msg)
             | ReadFileOutput::IsADirectory(msg)
             | ReadFileOutput::PermissionDenied(msg)
@@ -485,7 +503,7 @@ pub(crate) async fn run_read_file(
                 (msg.clone(), msg, String::new(), 0, Vec::new(), None, 0)
             }
         };
-        if idx > 0 {
+        if !content.is_empty() {
             content.push_str("\n\n");
             content_concise.push_str("\n\n");
             raw_output.push('\n');
@@ -1382,7 +1400,7 @@ mod tests {
     async fn byte_cap_truncates_large_file_with_next_offset() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
-        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+        let big_content = std::iter::repeat_n(line.as_str(), 220)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
@@ -1403,13 +1421,13 @@ mod tests {
         let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
             .unwrap();
-        // 1100 lines x 200 chars is ~221 KB: over the 200 KB cap, so the read is
+        // 220 lines x 200 chars is ~44 KB: over the 40 KB cap, so the read is
         // cut at a line boundary and the hint names the next offset.
         match result {
             ReadFileOutput::FileContent(fc) => {
                 let hint = fc.content.rsplit('\n').next().unwrap();
                 assert!(
-                    hint.starts_with("[... truncated at line ") && hint.contains("of 1100 (200 KB per-call cap); continue with offset="),
+                    hint.starts_with("[... truncated at line ") && hint.contains("of 220 (40 KB per-call cap); continue with offset="),
                     "hint: {hint}"
                 );
                 let last: usize = hint
@@ -1421,7 +1439,7 @@ mod tests {
                     .unwrap()
                     .parse()
                     .unwrap();
-                assert!(last < 1100 && last > 900, "kept {last} lines");
+                assert!(last < 220 && last > 180, "kept {last} lines");
                 assert!(hint.ends_with(&format!("offset={}]", last + 1)), "hint: {hint}");
                 assert_eq!(fc.limit, Some(last), "stored limit reflects the truncated window");
                 assert!(fc.content.len() <= MAX_READ_BYTES + hint.len() + 1);
@@ -1434,7 +1452,7 @@ mod tests {
     async fn byte_cap_hint_when_range_specified_names_next_offset() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
-        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+        let big_content = std::iter::repeat_n(line.as_str(), 220)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
@@ -1444,11 +1462,11 @@ mod tests {
             [(ToolKind::Search, "Grep".to_string())].into(),
             Default::default(),
         ));
-        // An 800-line window (~160 KB) fits the cap and comes back whole.
+        // A 160-line window (~32 KB) fits the cap and comes back whole.
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: Some(1),
-            limit: Some(800),
+            limit: Some(160),
             pages: None,
             format: None,
             files: None,
@@ -1458,14 +1476,14 @@ mod tests {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(!fc.content.contains("truncated"), "800 lines fit: {}", &fc.content[fc.content.len() - 200..]);
-                assert_eq!(fc.limit, Some(800));
+                assert!(!fc.content.contains("truncated"), "160 lines fit: {}", &fc.content[fc.content.len() - 200..]);
+                assert_eq!(fc.limit, Some(160));
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
-        // A window from offset 200 into a 2000-line file overflows, is cut, and continues from the right line.
+        // A 220-line window (~44 KB) from offset 200 into a 600-line file overflows, is cut, and continues from the right line.
         let tmp2 = TempDir::new().unwrap();
-        let bigger_content = std::iter::repeat_n(line.as_str(), 2000)
+        let bigger_content = std::iter::repeat_n(line.as_str(), 600)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp2.path().join("big.txt"), &bigger_content).unwrap();
@@ -1473,7 +1491,7 @@ mod tests {
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: Some(200),
-            limit: Some(1100),
+            limit: Some(220),
             pages: None,
             format: None,
             files: None,
@@ -1485,7 +1503,7 @@ mod tests {
             ReadFileOutput::FileContent(fc) => {
                 let hint = fc.content.rsplit('\n').next().unwrap();
                 let last: usize = hint.split("truncated at line ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
-                assert!((200 + 900..200 + 1100).contains(&last), "cut at {last}");
+                assert!((200 + 180..200 + 220).contains(&last), "cut at {last}");
                 assert!(hint.contains(&format!("continue with offset={}", last + 1)), "hint: {hint}");
                 assert!(fc.content.starts_with("200→"), "window starts at offset 200");
             }
@@ -1498,7 +1516,7 @@ mod tests {
     async fn byte_cap_hint_uses_invoking_tool_param_names_not_kind_wide() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
-        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+        let big_content = std::iter::repeat_n(line.as_str(), 220)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
@@ -1519,7 +1537,7 @@ mod tests {
         let input = ReadFileInput {
             path: "big.txt".to_string(),
             offset: Some(1),
-            limit: Some(1100),
+            limit: Some(220),
             pages: None,
             format: None,
             files: None,
@@ -1639,7 +1657,7 @@ mod tests {
     #[tokio::test]
     async fn files_share_one_byte_budget_and_list_unread_files() {
         let tmp = TempDir::new().unwrap();
-        let big: String = (0..1500).map(|_| format!("{}\n", "y".repeat(99))).collect(); // ~150 KB
+        let big: String = (0..300).map(|_| format!("{}\n", "y".repeat(99))).collect(); // ~30 KB
         std::fs::write(tmp.path().join("a.txt"), &big).unwrap();
         std::fs::write(tmp.path().join("b.txt"), &big).unwrap();
         std::fs::write(tmp.path().join("c.txt"), "gamma\n").unwrap();
@@ -1664,7 +1682,49 @@ mod tests {
                 let a_end = fc.content.find("==> b.txt <==").unwrap();
                 assert!(!fc.content[..a_end].contains("truncated"), "first file fits whole");
                 assert!(fc.content[a_end..].contains("[... truncated at line "), "second file is cut: {}", &fc.content[a_end..a_end + 200]);
-                assert!(fc.content.ends_with("[200 KB cap reached: 1 of 3 files not read: c.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
+                assert!(fc.content.ends_with("[40 KB cap reached: 1 of 3 files not read: c.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
+                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
+    }
+    /// When earlier files leave less budget than the next file's first line,
+    /// that file is deferred to another call (listed as unread), not reported
+    /// as an oversized line; smaller files after it still fit.
+    #[tokio::test]
+    async fn file_whose_first_line_outgrows_the_leftover_budget_is_listed_unread() {
+        let tmp = TempDir::new().unwrap();
+        let almost_full: String = (0..390).map(|_| format!("{}\n", "y".repeat(99))).collect(); // ~39 KB
+        std::fs::write(tmp.path().join("a.txt"), &almost_full).unwrap();
+        std::fs::write(tmp.path().join("b.txt"), format!("{}\n", "z".repeat(5_000))).unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "gamma\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(TemplateRenderer::new(
+            [(ToolKind::Search, "grep".to_string()), (ToolKind::Execute, "run_terminal_command".to_string())].into(),
+            Default::default(),
+        ));
+        let input = ReadFileInput {
+            path: String::new(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: Some(vec![
+                ReadFileEntry { path: "a.txt".into(), offset: None, limit: None },
+                ReadFileEntry { path: "b.txt".into(), offset: None, limit: None },
+                ReadFileEntry { path: "c.txt".into(), offset: None, limit: None },
+            ]),
+        };
+        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(fc.content.starts_with("==> a.txt <==\n1→yyy"), "{}", &fc.content[..60]);
+                assert!(!fc.content.contains("truncated") && !fc.content.contains("alone is"), "a fits whole and b is not blamed as an oversized line: {}", &fc.content[fc.content.len() - 300..]);
+                assert!(!fc.content.contains("==> b.txt <=="), "b is deferred, not read into a sliver");
+                assert!(fc.content.contains("\n\n==> c.txt <==\n1→gamma\n"), "c still fits the leftover budget: {}", &fc.content[fc.content.len() - 300..]);
+                assert!(fc.content.ends_with("[40 KB cap reached: 1 of 3 files not read: b.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
                 assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
             }
             other => panic!("Expected FileContent, got {:?}", other),
@@ -2813,16 +2873,18 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         }
     }
     /// Regression for the "death spiral" incident: a single-line
-    /// ~49.5KB JSON payload must be readable in full with default config.
-    /// The old 2000-char per-line clip made such files unreadable by
-    /// construction (bash output and MCP results are byte-capped too), so the
-    /// model could never load a payload it needed to re-emit as tool input.
+    /// ~35KB JSON payload (under the per-call byte cap) must be readable in
+    /// full with default config. The old 2000-char per-line clip made such
+    /// files unreadable by construction (bash output and MCP results are
+    /// byte-capped too), so the model could never load a payload it needed to
+    /// re-emit as tool input. A single line above the cap routes to the
+    /// shell-tool hint instead (see `oversized_single_line_gets_shell_hint`).
     #[tokio::test]
     async fn single_line_payload_reads_in_full_by_default() {
         let tmp = TempDir::new().unwrap();
         let payload = format!(
             "{{\"uid\":\"cdlmfnq6x2o74e\",\"panels\":\"{}\"}}",
-            "x".repeat(49_500)
+            "x".repeat(35_000)
         );
         std::fs::write(tmp.path().join("payload.json"), &payload).unwrap();
         let resources = test_resources(tmp.path());
@@ -2868,13 +2930,13 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     }
     /// A single-line file that busts the per-call byte cap gets the
     /// shell-tool hint — line-based offset/limit cannot narrow one line.
-    /// A ~250KB single line > MAX_READ_BYTES (200 KB).
+    /// A ~50KB single line > MAX_READ_BYTES (40 KB).
     #[tokio::test]
     async fn oversized_single_line_gets_shell_hint() {
         for content in [
-            "z".repeat(250_000),
-            format!("{}\n", "z".repeat(250_000)),
-            format!("{}\r\n", "z".repeat(250_000)),
+            "z".repeat(50_000),
+            format!("{}\n", "z".repeat(50_000)),
+            format!("{}\r\n", "z".repeat(50_000)),
         ] {
             match read_huge_file(&content, true).await {
                 ReadFileOutput::FileTooLarge(msg) => {
@@ -2892,7 +2954,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     /// to a tool it cannot call).
     #[tokio::test]
     async fn oversized_single_line_hint_suppressed_without_execute_tool() {
-        match read_huge_file(&"z".repeat(250_000), false).await {
+        match read_huge_file(&"z".repeat(50_000), false).await {
             ReadFileOutput::FileTooLarge(msg) => {
                 assert!(
                     !msg.contains("single very long line"),
@@ -2908,7 +2970,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
     #[tokio::test]
     async fn oversized_narrowed_window_single_line_gets_shell_hint() {
         let tmp = TempDir::new().unwrap();
-        let content = format!("# header\n{}\nfooter\n", "z".repeat(250_000));
+        let content = format!("# header\n{}\nfooter\n", "z".repeat(50_000));
         std::fs::write(tmp.path().join("huge.json"), content).unwrap();
         let mut resources = test_resources(tmp.path());
         let mut kinds = std::collections::HashMap::from([(ToolKind::Search, "grep".to_string())]);

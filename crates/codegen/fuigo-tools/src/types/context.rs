@@ -19,7 +19,7 @@ pub struct TruncationConfig {
     pub default_max_output_bytes: Option<usize>,
     /// Per-tool overrides keyed by canonical tool name.
     pub per_tool_max_output_bytes: HashMap<String, usize>,
-    /// Max lines to read (read_file). Default: 20000 (the 200 KB per-call byte cap is the practical bound).
+    /// Max lines to read (read_file). Default: 20000 (the 40 KB per-call byte cap is the practical bound).
     pub max_lines_read: Option<usize>,
     /// Inline cap for MCP tool results only (bytes). Consulted by the MCP
     /// truncation path (`mcp_max_output_bytes_for`) between the per-tool map
