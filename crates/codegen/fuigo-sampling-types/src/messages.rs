@@ -168,6 +168,8 @@ pub enum ToolChoiceParam {
     Auto,
     Any,
     Tool { name: String },
+    /// The model must not call a tool; the definitions stay in the request (and in the cached prefix).
+    None,
 }
 
 /// Extended thinking configuration
