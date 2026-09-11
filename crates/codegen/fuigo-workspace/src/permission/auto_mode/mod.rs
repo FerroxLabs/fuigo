@@ -1834,6 +1834,67 @@ mod tests {
         assert_eq!(v("topgrade"), ClassifierVerdict::Block);
     }
 
+    #[test]
+    fn heuristic_routes_git_segments_through_allowlist() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(v("timeout 30 git checkout main"), ClassifierVerdict::Allow);
+        assert_eq!(
+            v("git status && git checkout -- src/lib.rs"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("git checkout main && cargo test"),
+            ClassifierVerdict::Allow
+        );
+    }
+
+    /// Discarding git shapes must reach the model instead of auto-running; branch switches and the local workflow stay routine.
+    #[test]
+    fn heuristic_bash_git_discards_are_not_routine() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        for cmd in [
+            "git checkout -- app.py",
+            "git checkout -- .",
+            "git checkout HEAD -- src/schema.rs Cargo.toml",
+            "git checkout -f main",
+            "git checkout main src/lib.rs",
+            "git checkout Cargo.toml",
+            "git switch --discard-changes main",
+            "git switch -f main",
+            "git stash drop",
+            "git stash clear",
+        ] {
+            assert_eq!(v(cmd), ClassifierVerdict::Block, "{cmd}");
+        }
+        for cmd in [
+            "git checkout main",
+            "git checkout -b feature/x",
+            "git switch -c feature/y",
+            "git stash",
+            "git stash pop",
+            "git add -A",
+            "git commit -m x",
+        ] {
+            assert_eq!(v(cmd), ClassifierVerdict::Allow, "{cmd}");
+        }
+    }
+
     /// A routine prefix must not smuggle a follow-on command: every chained segment has to be routine, and command substitution is rejected outright.
     #[test]
     fn heuristic_bash_compound_requires_all_routine() {
