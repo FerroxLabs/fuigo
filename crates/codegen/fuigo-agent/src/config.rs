@@ -334,6 +334,7 @@ fn codex_toolset() -> ToolServerConfig {
             kill_task_tool_config(),
             (&fuigo_build::TodoWriteTool).into(),
             task_output_tool_config(),
+            task_tool_config(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
         ],
@@ -1803,6 +1804,16 @@ mod tests {
                  change is intentional.",
             );
         }
+    }
+    /// OpenAI models default to the codex harness, so it keeps subagent spawning like the stock fuigo-build sets.
+    #[test]
+    fn codex_toolset_keeps_subagent_spawn() {
+        let task_id = task_tool_config().id;
+        assert!(
+            codex_toolset().tools.iter().any(|t| t.id == task_id),
+            "codex toolset must ship spawn_subagent"
+        );
+        assert!(AgentDefinition::codex().is_strict_harness());
     }
     #[test]
     fn is_strict_harness_agent_type_classifies_by_name() {
