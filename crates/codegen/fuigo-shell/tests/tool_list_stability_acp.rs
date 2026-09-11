@@ -1,83 +1,114 @@
-//! The advertised tool list is constant for a session: every main-turn request carries the byte-identical `tools`
-//! array, including the finalize request, which closes the final-answer slot with `tool_choice: "none"` instead of
-//! dropping the definitions (OpenAI prompt caching: keep `tools` constant, steer with `tool_choice`).
+//! The advertised tool list on the OpenAI Responses profile is constant for a session: every main-turn request
+//! carries the byte-identical `tools` array, including the finalize request, which closes the final-answer slot with
+//! `tool_choice: "none"` instead of dropping the definitions (OpenAI prompt caching: keep `tools` constant, steer with
+//! `tool_choice`). The fail-closed shape every other backend keeps is covered by tool_list_finalize_stock_acp.rs.
 //! One real agent over ACP; the mock model keeps calling a tool until the process model-call budget forces finalize.
 #[allow(dead_code)]
 mod acp_harness;
 
-use acp_harness::{AutoApproveClient, RPC_TIMEOUT, connect_client, new_session, run_agent_test, spawn_agent_local_with_config};
+use acp_harness::{AutoApproveClient, RPC_TIMEOUT, connect_client, run_agent_test, spawn_agent_local_with_config};
 use agent_client_protocol::{self as acp, Agent as _};
-use fuigo_test_support::{InferenceEndpoint, InferenceRequestMatcher};
-use fuigo_test_support::mock_server::LogEntry;
+use fuigo_test_support::mock_server::{LogEntry, MockModelEntry};
 use fuigo_test_support::scripted::ScriptedResponse;
-use fuigo_test_support::sse::chat_completions_reasoning_then_tool_call_events;
+use fuigo_test_support::sse::responses_api_reasoning_then_tool_call_events;
+use fuigo_test_support::{InferenceEndpoint, InferenceRequestMatcher};
 use serde_json::{Value, json};
 
-const MODEL: &str = "test-model";
+const STOCK_MODEL: &str = "test-model";
+const OPENAI_MODEL: &str = "gpt-5.6-acp-test";
 
-fn main_turn_requests<'a>(requests: &'a [LogEntry], session: &str) -> Vec<&'a LogEntry> {
+fn main_turn_requests<'a>(requests: &'a [LogEntry], path: &str, session: &str) -> Vec<&'a LogEntry> {
     requests
         .iter()
-        .filter(|r| r.path == "/v1/chat/completions")
+        .filter(|r| r.path == path)
         .filter(|r| r.header("x-fuigo-session-id") == Some(session))
         .filter(|r| r.header("x-fuigo-turn-idx").is_some())
         .collect()
 }
 
+/// Function tool names in either wire shape: chat-completions nests them under `function`, Responses keeps them flat.
 fn tool_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
-        .map(|tools| tools.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().or_else(|| t["name"].as_str()).map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
+async fn open_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path, model: &str) -> acp::SessionId {
+    tokio::time::timeout(
+        RPC_TIMEOUT,
+        conn.new_session(acp::NewSessionRequest::new(cwd.to_path_buf()).meta(json!({ "modelId": model }).as_object().cloned())),
+    )
+    .await
+    .expect("session/new timed out")
+    .expect("session/new failed")
+    .session_id
+}
+
+async fn prompt_until_finalize(conn: &acp::ClientSideConnection, session: &acp::SessionId) {
+    // A capacity-forced finalize ends in a partial execution receipt by design (bounded capacity), which the
+    // prompt reports as an error; the request log, not the prompt result, is what these tests are about.
+    let result = tokio::time::timeout(
+        RPC_TIMEOUT,
+        conn.prompt(acp::PromptRequest::new(
+            session.clone(),
+            vec![acp::ContentBlock::Text(acp::TextContent::new("Read notes.txt twice, then summarize it.".to_owned()))],
+        )),
+    )
+    .await
+    .expect("prompt timed out");
+    if let Err(e) = &result {
+        assert!(e.to_string().contains("execution_id"), "unexpected prompt error: {e}");
+    }
+}
+
+fn agent_config() -> fuigo_shell::agent::config::Config {
+    let mut config = fuigo_shell::agent::config::Config::default();
+    config.session.title_policy = Some(fuigo_shell::agent::config::TitlePolicy::Local);
+    config
+}
+
 #[test]
-fn tool_list_is_identical_on_every_request_including_finalize() {
+fn responses_profile_keeps_the_tool_list_identical_on_every_request_including_finalize() {
     // Three model calls per execution: two tool rounds, then the third call is the finalize slot.
-    // One test in this binary; set before the helper creates any worker threads.
+    // One test body per process; set before the helper creates any worker threads.
     unsafe { std::env::set_var("FUIGO_MAX_MODEL_CALLS", "3") };
     run_agent_test(|cwd, mock| async move {
         std::fs::write(cwd.join("notes.txt"), "hello\n").expect("fixture file");
-        let matcher = InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions);
+        mock.set_models(vec![
+            MockModelEntry::new(STOCK_MODEL),
+            MockModelEntry::new(OPENAI_MODEL).with_api_backend("responses"),
+        ]);
+        let matcher = InferenceRequestMatcher::foreground(InferenceEndpoint::Responses);
         let mut expectations = Vec::new();
         for (n, call_id) in ["call_1", "call_2"].iter().enumerate() {
             expectations.push(mock.expect_response(
                 format!("tool-round-{n}"),
                 matcher,
-                ScriptedResponse::sse(chat_completions_reasoning_then_tool_call_events(
+                ScriptedResponse::sse(responses_api_reasoning_then_tool_call_events(
                     "reading",
                     call_id,
                     "read_file",
-                    r#"{"target_file":"notes.txt"}"#,
-                    MODEL,
+                    r#"{"file_path":"notes.txt"}"#,
+                    OPENAI_MODEL,
                 )),
             ));
         }
         // The finalize request gets the fallback echo (a text reply), which ends the turn.
-        let mut config = fuigo_shell::agent::config::Config::default();
-        config.session.title_policy = Some(fuigo_shell::agent::config::TitlePolicy::Local);
-        let (conn, _) = connect_client(AutoApproveClient, "tool-list-stability", spawn_agent_local_with_config(config)).await;
-        let session = new_session(&conn, &cwd).await;
-        // A capacity-forced finalize ends in a partial execution receipt by design (bounded capacity), which the
-        // prompt reports as an error; the request log, not the prompt result, is what this test is about.
-        let result = tokio::time::timeout(
-            RPC_TIMEOUT,
-            conn.prompt(acp::PromptRequest::new(
-                session.clone(),
-                vec![acp::ContentBlock::Text(acp::TextContent::new("Read notes.txt twice, then summarize it.".to_owned()))],
-            )),
-        )
-        .await
-        .expect("prompt timed out");
-        if let Err(e) = &result {
-            assert!(e.to_string().contains("execution_id"), "unexpected prompt error: {e}");
-        }
+        let (conn, _) = connect_client(AutoApproveClient, "tool-list-stability", spawn_agent_local_with_config(agent_config())).await;
+        let session = open_session(&conn, &cwd, OPENAI_MODEL).await;
+        prompt_until_finalize(&conn, &session).await;
         for expectation in &expectations {
             expectation.assert_satisfied();
         }
 
         let requests = mock.requests();
-        let main = main_turn_requests(&requests, &session.0);
+        let main = main_turn_requests(&requests, "/v1/responses", &session.0);
         assert_eq!(main.len(), 3, "two tool rounds and one finalize request expected: {}", mock.request_log_summary());
         let bodies: Vec<&Value> = main.iter().map(|r| r.body.as_ref().expect("json body")).collect();
         let first_tools = serde_json::to_string(&bodies[0]["tools"]).unwrap();

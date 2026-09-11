@@ -2608,16 +2608,32 @@ impl SessionActor {
             } else { false };
             let finalize_response = finalize_recall || finalize_execution;
             let recall_exhausted = memory_recall_rounds >= 2;
-            // The advertised tool list never changes within a session: every edit to `tools` invalidates the whole
-            // server-side prompt cache (OpenAI: keep `tools` constant, steer with `tool_choice`). Restrictions are
-            // therefore expressed as reminders plus `tool_choice` (finalize) or execution-time rejection (recall limit),
-            // never by removing definitions.
+            // OpenAI Responses profile: the advertised tool list never changes within a session, because every edit to
+            // `tools` invalidates the whole server-side prompt cache (keep `tools` constant, steer with `tool_choice`).
+            // Restrictions are expressed as reminders plus `tool_choice` (finalize) or execution-time rejection (recall
+            // limit). Every other backend keeps the fail-closed shape: the final-answer slot and the post-limit recall
+            // rounds advertise no callable action, so a model or proxy that ignores `tool_choice` cannot act there
+            // (release gate: scripts/memory-bench/native_smoke.py).
+            let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
+            let openai_responses = self.openai_responses_profile(sampling_cfg.as_ref());
+            let constant_tool_list = openai_responses;
             if recall_exhausted && !finalize_response {
+                if !constant_tool_list {
+                    effective_tools.retain(|tool| {
+                        !matches!(
+                            self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+                            Some(ToolKind::MemorySearch | ToolKind::MemoryGet)
+                        )
+                    });
+                }
                 self.push_system_reminder(
                     "The memory recall limit for this step is reached. Continue the requested \
                      work using the evidence already collected. Treat missing facts as UNKNOWN; \
                      do not repeat memory searches. Other task tools remain available.",
                 );
+            }
+            if finalize_response && !constant_tool_list {
+                effective_tools.clear();
             }
             if finalize_recall {
                 self.push_system_reminder(
@@ -2650,7 +2666,7 @@ impl SessionActor {
             let adaptive = self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() == "adaptive";
             let deferred_native = if adaptive { self.adaptive_deferred_native(&effective_tools) } else { Default::default() };
             if adaptive {
-                let enabled = effective_tools.iter().any(|tool| tool.name == "search_tool");
+                let enabled = (constant_tool_list || !finalize_response) && effective_tools.iter().any(|tool| tool.name == "search_tool");
                 effective_tools = self.tool_metadata_snapshot.lock().unwrap().native_presentation.project(
                     req_id, effective_tools, &deferred_native.keys().cloned().collect(), enabled,
                 );
@@ -2668,8 +2684,6 @@ impl SessionActor {
             // OpenAI-family models on the Responses backend get the request profile Codex uses: freeform
             // `apply_patch` (a grammar-constrained `custom` tool, no JSON escaping of the patch), `text.verbosity: low`
             // Both are part of the cached prefix / constant per session, so they are decided once per request from the model
-            let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-            let openai_responses = self.openai_responses_profile(sampling_cfg.as_ref());
             if openai_responses {
                 mark_freeform_apply_patch(&mut effective_tools);
             }
@@ -2725,16 +2739,27 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            // Hosted tools (including the programmatic-tool-calling runtime) are part of `tools` too, so they stay
-            // on the finalize call; `tool_choice` is what closes the final-answer slot.
-            request.hosted_tools = self.hosted_tools_for_agent_turn();
+            // Constant tool list: hosted tools (including the programmatic-tool-calling runtime) are part of `tools`
+            // too, so they stay on the finalize call and `tool_choice` closes the final-answer slot. Other backends
+            // strip them with the client tools.
+            request.hosted_tools = if finalize_response && !constant_tool_list {
+                vec![]
+            } else {
+                self.hosted_tools_for_agent_turn()
+            };
             if finalize_response {
-                // The final slot either produces the structured answer through its tool or calls nothing at all
-                request.tool_choice = Some(if structured_output_tool && json_schema.is_some() {
-                    fuigo_sampling_types::ConversationToolChoice::Function(STRUCTURED_OUTPUT_TOOL.to_string())
+                // Constant tool list: the final slot either produces the structured answer through its tool or calls
+                // nothing at all. Other backends advertise no action tool here, and a `tool_choice` without `tools`
+                // is rejected by chat-completions providers, so the choice is left open as before.
+                request.tool_choice = if constant_tool_list {
+                    Some(if structured_output_tool && json_schema.is_some() {
+                        fuigo_sampling_types::ConversationToolChoice::Function(STRUCTURED_OUTPUT_TOOL.to_string())
+                    } else {
+                        fuigo_sampling_types::ConversationToolChoice::None
+                    })
                 } else {
-                    fuigo_sampling_types::ConversationToolChoice::None
-                });
+                    None
+                };
             }
             request.max_output_tokens = self
                 .tool_context
