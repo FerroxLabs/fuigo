@@ -96,6 +96,7 @@ async fn responses_large_tool_result_images_fit_transport_limit() {
         name: "read_file".into(),
         description: Some("Reads a file".into()),
         parameters: json!({"type":"object","properties":{}}),
+        freeform: None,
     }];
     let mut source = vec![
         ConversationItem::system("You are a helpful assistant."),

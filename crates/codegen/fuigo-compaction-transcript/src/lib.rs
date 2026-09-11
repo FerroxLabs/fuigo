@@ -779,6 +779,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                output_order: None,
             }),
             ConversationItem::tool_result("c", "file contents"),
         ];

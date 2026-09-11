@@ -1,6 +1,7 @@
 //! The actor's `Submit` handler spawns this task; it owns the retry loop and consumes a Layer 2 stream from the matching backend transform.
 //! Cancellation is cooperative via `CancellationToken`.
 
+use std::collections::HashSet;
 use std::pin::pin;
 use std::sync::{
     Arc, Mutex,
@@ -682,6 +683,8 @@ async fn run_one_attempt(
             .await
         }
         ApiBackend::Responses => {
+            let client_tools: HashSet<String> =
+                request.tools.iter().map(|t| t.name.clone()).collect();
             let (raw, metadata, doom_loop) =
                 match client.conversation_stream_responses(request).await {
                     Ok(parts) => parts,
@@ -707,6 +710,7 @@ async fn run_one_attempt(
                 doom_loop,
                 Arc::clone(&output_observed),
                 failed_response.clone(),
+                client_tools,
             );
             drive_l2(
                 l2,

@@ -299,7 +299,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         ConversationToolChoice::Auto => ToolChoiceParam::Auto,
         ConversationToolChoice::Required => ToolChoiceParam::Any,
         ConversationToolChoice::Function(name) => ToolChoiceParam::Tool { name: name.clone() },
-        ConversationToolChoice::None => ToolChoiceParam::Auto, // ToolChoiceParam has no none variant, so fall back to the default
+        ConversationToolChoice::None => ToolChoiceParam::None,
     });
 
     let effort = req
@@ -385,6 +385,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
             model_id: Some(resp.model),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     }
 }

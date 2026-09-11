@@ -357,6 +357,7 @@ fn subscription_switch_filters_foreign_reasoning_but_preserves_history_and_tool_
             model_id: Some(model.into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         })
     };
     let original = vec![

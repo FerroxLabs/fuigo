@@ -1712,6 +1712,7 @@ async fn side_question_trims_reasoning_orphaned_by_mid_turn_truncation() {
                     model_id: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    output_order: None,
                 }),
             ]);
 
