@@ -25,10 +25,10 @@ use fuigo_tool_types::{
     MultiTaskOutputResult, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
 };
 
-/// Default wait budget when a caller is already in wait mode but omitted
-/// `timeout_ms` (legacy `wait_tasks` / internal `capped_wait_timeout`). On
-/// `get_task_output`, omitting `timeout_ms` is a non-blocking snapshot — this
-/// constant is not applied unless a wait is active.
+/// Default wait budget for the legacy `wait_tasks` alias when it omits
+/// `timeout_ms` (via `capped_wait_timeout`). `get_task_output` itself uses
+/// [`effective_wait_timeout`]: omitted waits the shared 120 s default, short
+/// positive waits are raised to the 5 s floor, and `0` is a snapshot.
 pub(crate) const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The blocking-wait ceiling: `FUIGO_MAX_WAIT_BLOCK_MS`, else 10 min.
@@ -49,11 +49,17 @@ pub(crate) fn capped_wait_timeout(timeout_ms: Option<u64>, cap: Duration) -> Dur
     base.min(cap)
 }
 
-/// The caller's requested wait before capping, or the default when omitted.
+/// `get_task_output`'s effective blocking wait: omitted → the shared
+/// default, a positive value below the floor → the floor, then clamped to
+/// `cap`. `Some(0)` never reaches here (it is a snapshot) and maps to zero.
+pub(crate) fn effective_wait_timeout(timeout_ms: Option<u64>, cap: Duration) -> Duration {
+    Duration::from_millis(fuigo_tool_types::effective_task_output_wait_ms(timeout_ms).unwrap_or(0))
+        .min(cap)
+}
+
+/// The caller's requested wait before capping (default / floor applied).
 fn requested_wait_timeout(timeout_ms: Option<u64>) -> Duration {
-    timeout_ms
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_WAIT_TIMEOUT)
+    Duration::from_millis(fuigo_tool_types::effective_task_output_wait_ms(timeout_ms).unwrap_or(0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,7 +105,9 @@ fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
         WaitHint::ReturnedEarly => {
             format!("Wait returned early because another finished; this {noun} is still running.")
         }
-        WaitHint::NotRequested => "Use timeout_ms to wait for completion.".to_string(),
+        WaitHint::NotRequested => {
+            "Omit timeout_ms (or pass a positive value) to wait for completion.".to_string()
+        }
     };
     format!("{lead} You will be notified automatically when the {noun} completes.")
 }
@@ -198,15 +206,15 @@ impl TaskOutputTool {
         let wait_hint = if waits {
             WaitHint::Elapsed {
                 requested: requested_wait_timeout(timeout_ms),
-                waited: capped_wait_timeout(timeout_ms, wait_cap),
+                waited: effective_wait_timeout(timeout_ms, wait_cap),
             }
         } else {
             WaitHint::NotRequested
         };
         let snapshot = if waits {
             // Cap the blocking wait so a large `timeout_ms` can't wedge the turn;
-            // the model is pinged on completion regardless (see `capped_wait_timeout`).
-            let timeout = capped_wait_timeout(timeout_ms, wait_cap);
+            // the model is pinged on completion regardless (see `effective_wait_timeout`).
+            let timeout = effective_wait_timeout(timeout_ms, wait_cap);
             terminal.wait_for_completion(task_id, Some(timeout)).await
         } else {
             terminal.get_task(task_id).await
@@ -249,7 +257,7 @@ impl TaskOutputTool {
         // Same cap as the bash path: a blocking subagent query can't wedge the
         // turn beyond the wait cap (the parent is pinged when the child finishes).
         let query_timeout_ms = if waits {
-            Some(capped_wait_timeout(timeout_ms, wait_cap).as_millis() as u64)
+            Some(effective_wait_timeout(timeout_ms, wait_cap).as_millis() as u64)
         } else {
             timeout_ms
         };
@@ -292,7 +300,7 @@ impl TaskOutputTool {
     ) -> Result<TaskOutputOutput, fuigo_tool_runtime::ToolError> {
         let waits = fuigo_tool_types::task_output_waits(timeout_ms);
         let requested = requested_wait_timeout(timeout_ms);
-        let timeout = capped_wait_timeout(timeout_ms, max_wait_block());
+        let timeout = effective_wait_timeout(timeout_ms, max_wait_block());
 
         let (terminal, backend, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
@@ -1105,15 +1113,38 @@ mod tests {
         );
     }
 
+    /// Omitted `timeout_ms` now waits the shared default; short positive
+    /// polls are raised to the floor; an explicit 0 is the only snapshot.
     #[test]
-    fn still_running_wait_hint_omitted_invites_timeout_ms() {
+    fn effective_wait_timeout_defaults_and_floors() {
+        let cap = Duration::from_millis(fuigo_tool_types::MAX_WAIT_BLOCK_MS_DEFAULT);
+        assert_eq!(
+            effective_wait_timeout(None, cap),
+            Duration::from_millis(fuigo_tool_types::DEFAULT_TASK_OUTPUT_WAIT_MS)
+        );
+        assert_eq!(
+            effective_wait_timeout(Some(1_000), cap),
+            Duration::from_millis(fuigo_tool_types::MIN_TASK_OUTPUT_WAIT_MS)
+        );
+        assert_eq!(
+            effective_wait_timeout(Some(30_000), cap),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(effective_wait_timeout(Some(36_000_000), cap), cap);
+        assert_eq!(effective_wait_timeout(Some(0), cap), Duration::ZERO);
+        let short_cap = Duration::from_millis(60_000);
+        assert_eq!(effective_wait_timeout(None, short_cap), short_cap);
+    }
+
+    #[test]
+    fn still_running_wait_hint_snapshot_invites_a_wait() {
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Task),
-            "Use timeout_ms to wait for completion. You will be notified automatically when the task completes."
+            "Omit timeout_ms (or pass a positive value) to wait for completion. You will be notified automatically when the task completes."
         );
         assert_eq!(
             still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Subagent),
-            "Use timeout_ms to wait for completion. You will be notified automatically when the subagent completes."
+            "Omit timeout_ms (or pass a positive value) to wait for completion. You will be notified automatically when the subagent completes."
         );
     }
 
@@ -1792,8 +1823,10 @@ mod tests {
         }
     }
 
+    /// A short poll is raised to the 5 s floor: the mock sleeps the wait it
+    /// is handed, so the elapsed time proves the floor was applied.
     #[tokio::test]
-    async fn blocking_get_on_still_running_task_still_waits() {
+    async fn blocking_get_on_still_running_task_still_waits_and_floors_short_polls() {
         let snapshot = make_snapshot("task-run", false, None);
         let (resources, waited, stamped) = resources_with_stamp_wait(snapshot);
         let started = std::time::Instant::now();
@@ -1813,12 +1846,111 @@ mod tests {
         );
         assert!(!stamped.load(std::sync::atomic::Ordering::SeqCst));
         assert!(
-            started.elapsed() >= Duration::from_millis(150),
-            "still-running wait must block; elapsed {:?}",
+            started.elapsed() >= Duration::from_millis(fuigo_tool_types::MIN_TASK_OUTPUT_WAIT_MS),
+            "a 200 ms poll must be raised to the {} ms floor; elapsed {:?}",
+            fuigo_tool_types::MIN_TASK_OUTPUT_WAIT_MS,
             started.elapsed()
         );
         match result {
-            TaskOutputOutput::Result(r) => assert_eq!(r.status, "running"),
+            TaskOutputOutput::Result(r) => {
+                assert_eq!(r.status, "running");
+                assert!(
+                    r.output.contains("Waited the requested 5s"),
+                    "hint must report the floored wait: {}",
+                    r.output
+                );
+            }
+            other => panic!("Expected Result, got {other:?}"),
+        }
+    }
+
+    /// Records the wait handed to `wait_for_completion` and returns quickly,
+    /// so the test proves the default without sleeping it.
+    struct RecordingWaitTerminal {
+        snapshot: TaskSnapshot,
+        handed: std::sync::Arc<std::sync::Mutex<Option<Option<Duration>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TerminalBackend for RecordingWaitTerminal {
+        async fn run(
+            &self,
+            _request: TerminalRunRequest,
+        ) -> Result<TerminalRunResult, crate::computer::types::ComputerError> {
+            unimplemented!()
+        }
+
+        async fn run_background(
+            &self,
+            _request: TerminalRunRequest,
+        ) -> Result<BackgroundHandle, crate::computer::types::ComputerError> {
+            unimplemented!()
+        }
+
+        async fn kill_task(&self, _task_id: &str) -> KillOutcome {
+            unimplemented!()
+        }
+
+        async fn get_task(&self, _task_id: &str) -> Option<TaskSnapshot> {
+            Some(self.snapshot.clone())
+        }
+
+        async fn wait_for_completion(
+            &self,
+            _task_id: &str,
+            timeout: Option<Duration>,
+        ) -> Option<TaskSnapshot> {
+            *self.handed.lock().unwrap() = Some(timeout);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Some(self.snapshot.clone())
+        }
+
+        async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+            vec![self.snapshot.clone()]
+        }
+    }
+
+    /// Omitted `timeout_ms` on a still-running task is a blocking wait for the
+    /// shared 120 s default (not a snapshot), and the hint names that wait.
+    #[tokio::test]
+    async fn omitted_timeout_on_running_task_waits_the_default() {
+        let handed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut resources = Resources::new();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingWaitTerminal {
+            snapshot: make_snapshot("task-run", false, None),
+            handed: handed.clone(),
+        });
+        resources.insert(Terminal(backend));
+        resources.insert(TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::Read, "read_file".to_string())]),
+            std::collections::HashMap::new(),
+        ));
+        let result = fuigo_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["task-run".into()],
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *handed.lock().unwrap(),
+            Some(Some(Duration::from_millis(
+                fuigo_tool_types::DEFAULT_TASK_OUTPUT_WAIT_MS
+            ))),
+            "omitted timeout_ms must wait the 120 s default, not snapshot"
+        );
+        match result {
+            TaskOutputOutput::Result(r) => {
+                assert_eq!(r.status, "running");
+                assert!(
+                    r.output.contains("Waited the requested 120s"),
+                    "hint must name the default wait: {}",
+                    r.output
+                );
+            }
             other => panic!("Expected Result, got {other:?}"),
         }
     }
@@ -1893,7 +2025,7 @@ mod tests {
         );
     }
 
-    /// Positive `timeout_ms` deserializes as waits(); omit/0 does not.
+    /// Positive or omitted `timeout_ms` deserializes as waits(); only 0 does not.
     #[test]
     fn deserialize_timeout_ms_controls_wait() {
         let with_timeout: TaskOutputToolInput = serde_json::from_value(serde_json::json!({
@@ -1921,13 +2053,16 @@ mod tests {
         }))
         .unwrap();
         assert!(
-            !legacy_block_only.waits(),
-            "legacy block=true without timeout_ms must not wait"
+            legacy_block_only.waits(),
+            "legacy block is ignored; omitted timeout_ms waits by default"
         );
 
         let no_timeout: TaskOutputToolInput =
             serde_json::from_value(serde_json::json!({"task_ids": ["t"]})).unwrap();
-        assert!(!no_timeout.waits());
+        assert!(
+            no_timeout.waits(),
+            "omitted timeout_ms waits for a running task (120 s default)"
+        );
 
         let zero_timeout: TaskOutputToolInput = serde_json::from_value(serde_json::json!({
             "task_ids": ["t"],
@@ -2285,7 +2420,7 @@ mod tests {
             test_ctx(resources.into_shared()),
             TaskOutputToolInput {
                 task_ids: vec!["missing-a".into(), "missing-b".into()],
-                ..Default::default()
+                timeout_ms: Some(0),
             },
         )
         .await
@@ -2296,6 +2431,28 @@ mod tests {
                 assert_eq!(m.results.len(), 2);
                 assert!(m.results.iter().all(|r| r.status == "not_found"));
             }
+            other => panic!("expected MultiResult, got {other:?}"),
+        }
+    }
+
+    /// Omitted `timeout_ms` is a wait; with nothing pending it returns at once.
+    #[tokio::test]
+    async fn multi_task_ids_omitted_timeout_is_wait_all_and_returns_when_nothing_pending() {
+        let resources = resources_with_terminal(None);
+        let started = std::time::Instant::now();
+        let out = fuigo_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["missing-a".into(), "missing-b".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        match out {
+            TaskOutputOutput::MultiResult(m) => assert_eq!(m.mode, "wait_all"),
             other => panic!("expected MultiResult, got {other:?}"),
         }
     }

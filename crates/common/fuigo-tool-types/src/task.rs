@@ -528,7 +528,7 @@ pub struct TaskOutputToolInput {
     /// with "Provide a non-empty task_ids list", after which they abandoned
     /// the background-task workflow for shell polling.
     #[schemars(
-        description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot."
+        description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With timeout_ms omitted or positive, multiple ids wait until all complete. Pass timeout_ms=0 for a non-blocking snapshot."
     )]
     #[serde(
         default,
@@ -537,13 +537,15 @@ pub struct TaskOutputToolInput {
     )]
     pub task_ids: Vec<String>,
 
-    /// When set and positive, wait up to this many milliseconds; omit or `0` polls.
+    /// Omitted: wait up to [`DEFAULT_TASK_OUTPUT_WAIT_MS`] while a task is
+    /// still running. Positive: wait up to that long, raised to
+    /// [`MIN_TASK_OUTPUT_WAIT_MS`] when shorter. `0`: non-blocking snapshot.
     ///
     /// `{max_wait_ms}` is resolved at finalize from the session's wait ceiling,
     /// which also pins it as the schema `maximum` — the tool description cannot
     /// carry the bound alone, since randomization may replace it wholesale.
     #[schemars(
-        description = "Max wait time in milliseconds, up to {max_wait_ms}. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
+        description = "Max wait time in milliseconds, up to {max_wait_ms}. Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot."
     )]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -570,7 +572,7 @@ impl TaskOutputToolInput {
         resolve_task_ids(&self.task_ids)
     }
 
-    /// True only when `timeout_ms` is set and greater than zero.
+    /// True unless `timeout_ms` is an explicit `0` (omitted waits by default).
     pub fn waits(&self) -> bool {
         task_output_waits(self.timeout_ms)
     }
@@ -578,9 +580,27 @@ impl TaskOutputToolInput {
 
 /// Whether `get_task_output` should wait, from optional `timeout_ms`.
 ///
-/// Positive `timeout_ms` waits; omit or `0` polls without blocking.
+/// Omitted or positive `timeout_ms` waits; an explicit `0` polls without blocking.
 pub fn task_output_waits(timeout_ms: Option<u64>) -> bool {
-    timeout_ms.is_some_and(|ms| ms > 0)
+    timeout_ms.is_none_or(|ms| ms > 0)
+}
+
+/// Blocking wait applied when `timeout_ms` is omitted and a task is still running.
+pub const DEFAULT_TASK_OUTPUT_WAIT_MS: u64 = 120_000;
+
+/// Floor for positive `timeout_ms` values: a shorter poll costs a whole model
+/// call and almost never finds the task finished.
+pub const MIN_TASK_OUTPUT_WAIT_MS: u64 = 5_000;
+
+/// The wait a `get_task_output` call actually performs, before the session cap:
+/// omitted → [`DEFAULT_TASK_OUTPUT_WAIT_MS`]; positive below the floor →
+/// [`MIN_TASK_OUTPUT_WAIT_MS`]; `0` → `None` (non-blocking snapshot).
+pub fn effective_task_output_wait_ms(timeout_ms: Option<u64>) -> Option<u64> {
+    match timeout_ms {
+        None => Some(DEFAULT_TASK_OUTPUT_WAIT_MS),
+        Some(0) => None,
+        Some(ms) => Some(ms.max(MIN_TASK_OUTPUT_WAIT_MS)),
+    }
 }
 
 /// Default ceiling on a single blocking wait (`get_task_output` with a positive
@@ -1268,12 +1288,14 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
         None => String::new(),
     };
     let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
+    let default_wait = DEFAULT_TASK_OUTPUT_WAIT_MS;
+    let min_wait = MIN_TASK_OUTPUT_WAIT_MS;
 
     format!(
         "Get output and status from a background task{target_suffix}.\n\n\
          Usage notes:\n\
-         - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
-         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
+         - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with {timeout_ms_param} omitted or positive wait until all complete\n\
+         - Omit {timeout_ms_param} to wait up to {default_wait} ms for completion; a positive {timeout_ms_param} waits up to that many milliseconds, capped at {wait_cap} (values below {min_wait} ms are raised to {min_wait} ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -1720,6 +1742,28 @@ mod tests {
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
     }
 
+    #[test]
+    fn omitted_timeout_waits_and_short_waits_are_floored() {
+        assert!(task_output_waits(None), "omitted timeout_ms waits by default");
+        assert!(!task_output_waits(Some(0)), "explicit 0 stays a snapshot");
+        assert!(task_output_waits(Some(1)));
+        assert_eq!(
+            effective_task_output_wait_ms(None),
+            Some(DEFAULT_TASK_OUTPUT_WAIT_MS)
+        );
+        assert_eq!(effective_task_output_wait_ms(Some(0)), None);
+        assert_eq!(
+            effective_task_output_wait_ms(Some(1_000)),
+            Some(MIN_TASK_OUTPUT_WAIT_MS),
+            "sub-floor polls are raised to the floor"
+        );
+        assert_eq!(effective_task_output_wait_ms(Some(30_000)), Some(30_000));
+        assert!(task_output_waits_from_json(&serde_json::json!({"task_ids": ["t"]})));
+        assert!(!task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["t"], "timeout_ms": 0})
+        ));
+    }
+
     // ── Lifecycle tool descriptions ──────────────────────────────────────
     //
     // These lock the exact model-facing text. The "cli_default" cases must
@@ -1855,8 +1899,8 @@ mod tests {
             desc,
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
-             - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n\
+             - Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at {max_wait_ms} (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1877,8 +1921,8 @@ mod tests {
             desc,
             "Get output and status from a background task or subagent.\n\n\
              Usage notes:\n\
-             - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n\
+             - Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at {max_wait_ms} (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
