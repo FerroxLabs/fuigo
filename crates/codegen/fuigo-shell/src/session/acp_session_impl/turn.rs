@@ -2646,6 +2646,7 @@ impl SessionActor {
                             .to_string(),
                     ),
                     parameters: schema,
+                    freeform: None,
                 });
             }
             // Presentation is applied AFTER recall-only classification and all
@@ -2667,6 +2668,14 @@ impl SessionActor {
                 receive.await.map_err(|_| acp::Error::internal_error().data("Presentation persistence acknowledgment lost"))?
                     .map_err(|error| acp::Error::internal_error().data(format!("Presentation persistence failed: {error}")))?;
                 self.tool_metadata_snapshot.lock().unwrap().native_presentation.checkpoint_saved(hints);
+            }
+            // OpenAI-family models on the Responses backend get the request profile Codex uses: freeform
+            // `apply_patch` (a grammar-constrained `custom` tool, no JSON escaping of the patch), `text.verbosity: low`
+            // Both are part of the cached prefix / constant per session, so they are decided once per request from the model
+            let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
+            let openai_responses = self.openai_responses_profile(sampling_cfg.as_ref());
+            if openai_responses {
+                mark_freeform_apply_patch(&mut effective_tools);
             }
             let advertised_native: std::collections::BTreeSet<String> = effective_tools.iter().map(|t| t.name.clone()).collect();
             // Cache-aligned side calls replay exactly this list (see `side_call_tool_specs`)
@@ -2708,6 +2717,10 @@ impl SessionActor {
             request.x_fuigo_agent_id = Some(fuigo_telemetry::id::agent_id());
             request.x_fuigo_transient_retry =
                 (transient_retry_attempts > 0).then(|| transient_retry_attempts.to_string());
+            request.text_verbosity =
+                openai_responses.then_some(fuigo_sampling_types::TextVerbosity::Low);
+            // A reasoning summary is display-only: a non-interactive attachment (`fuigo -p`, SDK) never shows it
+            request.suppress_reasoning_summary = self.attach_non_interactive.get();
             if request.x_fuigo_deployment_id.is_none() {
                 request.x_fuigo_deployment_id = crate::managed_config::resolve_deployment_id(
                     crate::managed_config::resolve_deployment_key().as_deref(),
@@ -4259,5 +4272,41 @@ mod recall_finalization_tests {
         assert!(finalizing(2, 3, None, true));
         assert!(!finalizing(2, 3, None, false));
         assert!(!finalizing(0, 4, Some(4), false));
+    }
+}
+
+impl SessionActor {
+    /// Whether the session's model is an OpenAI-family model served over the Responses backend.
+    /// The catalog entry decides (`model_family` or a recognized slug); an unlisted slug falls back to the slug check.
+    pub(crate) fn openai_responses_profile(
+        &self,
+        cfg: Option<&fuigo_sampling_types::SamplingConfig>,
+    ) -> bool {
+        let Some(cfg) = cfg else {
+            return false;
+        };
+        if cfg.api_backend != fuigo_sampling_types::ApiBackend::Responses {
+            return false;
+        }
+        let models = self.agent.borrow().models_manager.models();
+        match models.values().find(|entry| entry.info.model == cfg.model) {
+            Some(entry) => entry.info.is_openai_model(),
+            None => crate::agent::config::is_openai_model_slug(&cfg.model),
+        }
+    }
+}
+
+/// Advertise `apply_patch` as a freeform (grammar-constrained `custom`) tool: the patch travels as raw text.
+/// Only the Responses backend understands the marker; the JSON schema stays for the other backends.
+pub(crate) fn mark_freeform_apply_patch(tools: &mut [ToolSpec]) {
+    use fuigo_tools::implementations::codex::apply_patch::tool::{
+        APPLY_PATCH_FREEFORM_DESCRIPTION, APPLY_PATCH_LARK_GRAMMAR,
+    };
+    for tool in tools.iter_mut().filter(|t| t.name == "apply_patch") {
+        tool.description = Some(APPLY_PATCH_FREEFORM_DESCRIPTION.to_string());
+        tool.freeform = Some(fuigo_sampling_types::FreeformFormat {
+            syntax: fuigo_sampling_types::FreeformSyntax::Lark,
+            definition: APPLY_PATCH_LARK_GRAMMAR.to_string(),
+        });
     }
 }

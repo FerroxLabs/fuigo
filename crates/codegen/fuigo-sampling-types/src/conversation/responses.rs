@@ -2,7 +2,14 @@ use super::*;
 
 /// Flatten `response.output` into `ConversationItem`s, preserving emission order.
 /// Replaying that order byte for byte on the next turn is what keeps the server-side prefix cache hot.
-pub fn response_to_conversation_items(response: rs::Response) -> Vec<ConversationItem> {
+///
+/// `is_client_tool` names the function/freeform tools this request advertised.
+/// A `custom_tool_call` naming one of them is a client tool call (freeform input, executed locally);
+/// any other `custom_tool_call` is a backend-executed hosted tool (x_search) and is kept for replay only.
+pub fn response_to_conversation_items(
+    response: rs::Response,
+    is_client_tool: impl Fn(&str) -> bool,
+) -> Vec<ConversationItem> {
     let model_id = response.model.clone();
     let model_fingerprint = response
         .metadata
@@ -19,22 +26,34 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
     let mut items: Vec<ConversationItem> = Vec::with_capacity(response.output.len() + 1);
     let mut content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut order: Vec<OutputSlot> = Vec::with_capacity(response.output.len());
     let mut backend_tool_count: usize = 0;
 
     for item in response.output {
         match item {
             rs::OutputItem::Message(msg) => {
+                let mut text = String::new();
                 for content_part in msg.content {
                     if let rs::OutputMessageContent::OutputText(text_content) = content_part {
-                        if !content.is_empty() {
-                            content.push('\n');
+                        if !text.is_empty() {
+                            text.push('\n');
                         }
-                        content.push_str(&text_content.text);
+                        text.push_str(&text_content.text);
                     }
                 }
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&text);
+                order.push(OutputSlot::Message {
+                    text: Arc::<str>::from(text),
+                });
             }
             rs::OutputItem::FunctionCall(fc) => {
                 // Tied to the assistant turn: a ToolResult must follow each one in conversation order, so they are not siblings
+                order.push(OutputSlot::FunctionCall {
+                    call_id: fc.call_id.clone(),
+                });
                 tool_calls.push(ToolCall {
                     id: Arc::<str>::from(fc.call_id),
                     name: fc.name,
@@ -42,23 +61,39 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
                 });
             }
             rs::OutputItem::Reasoning(r) => {
+                order.push(OutputSlot::Reasoning { id: r.id.clone() });
                 items.push(ConversationItem::Reasoning(r));
             }
             // These calls already ran server-side; they are kept so later turns replay the same context
             rs::OutputItem::WebSearchCall(ws) => {
                 backend_tool_count += 1;
+                order.push(OutputSlot::BackendToolCall { id: ws.id.clone() });
                 items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
                     kind: BackendToolKind::WebSearch(ws),
                 }));
             }
+            // A freeform client tool (`custom` tool, e.g. apply_patch) arrives as a custom_tool_call whose input is the raw text
+            rs::OutputItem::CustomToolCall(ct) if is_client_tool(&ct.name) => {
+                order.push(OutputSlot::CustomToolCall {
+                    call_id: ct.call_id.clone(),
+                    id: ct.id.clone(),
+                });
+                tool_calls.push(ToolCall {
+                    id: Arc::<str>::from(ct.call_id),
+                    name: ct.name,
+                    arguments: Arc::<str>::from(ct.input),
+                });
+            }
             rs::OutputItem::CustomToolCall(ct) => {
                 backend_tool_count += 1;
+                order.push(OutputSlot::BackendToolCall { id: ct.id.clone() });
                 items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
                     kind: BackendToolKind::XSearch(ct),
                 }));
             }
             rs::OutputItem::CodeInterpreterCall(ci) => {
                 backend_tool_count += 1;
+                order.push(OutputSlot::BackendToolCall { id: ci.id.clone() });
                 items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
                     kind: BackendToolKind::CodeInterpreter(ci),
                 }));
@@ -77,6 +112,10 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         );
     }
 
+    // The legacy layout (siblings, message, function calls) already replays most turns verbatim; only record the
+    // order when it differs, so text-only turns stay byte-identical on disk.
+    let output_order = (!legacy_order_equivalent(&order)).then_some(order);
+
     tracing::info!(model_id = %model_id, ?model_fingerprint, ?reasoning_effort, "response_to_conversation_items setting model metadata on AssistantItem");
     items.push(ConversationItem::Assistant(AssistantItem {
         content: Arc::<str>::from(content),
@@ -84,9 +123,24 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         model_id: Some(model_id),
         model_fingerprint,
         reasoning_effort,
+        output_order,
     }));
 
     items
+}
+
+/// Whether replaying `[siblings..., message?, function_calls...]` reproduces `order` exactly.
+fn legacy_order_equivalent(order: &[OutputSlot]) -> bool {
+    let mut phase = 0u8; // 0 siblings, 1 message seen, 2 function calls
+    for slot in order {
+        match slot {
+            OutputSlot::Reasoning { .. } | OutputSlot::BackendToolCall { .. } if phase == 0 => {}
+            OutputSlot::Message { .. } if phase == 0 => phase = 1,
+            OutputSlot::FunctionCall { .. } => phase = 2,
+            _ => return false,
+        }
+    }
+    true
 }
 
 impl From<&ConversationRequest> for rs::CreateResponse {
@@ -105,20 +159,24 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             }
         });
 
-        let text = req
-            .json_schema
-            .as_ref()
-            .map(|schema| rs::ResponseTextParam {
-                format: rs::TextResponseFormatConfiguration::JsonSchema(
-                    rs::ResponseFormatJsonSchema {
-                        description: None,
-                        name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
-                        schema: Some(schema.clone()),
-                        strict: Some(true),
-                    },
-                ),
-                verbosity: None,
-            });
+        let verbosity = req.text_verbosity.map(|v| v.to_responses_api());
+        let text = match (&req.json_schema, verbosity) {
+            (None, None) => None,
+            (schema, verbosity) => Some(rs::ResponseTextParam {
+                format: match schema {
+                    Some(schema) => rs::TextResponseFormatConfiguration::JsonSchema(
+                        rs::ResponseFormatJsonSchema {
+                            description: None,
+                            name: STRUCTURED_OUTPUT_SCHEMA_NAME.to_string(),
+                            schema: Some(schema.clone()),
+                            strict: Some(true),
+                        },
+                    ),
+                    None => rs::TextResponseFormatConfiguration::Text,
+                },
+                verbosity,
+            }),
+        };
 
         rs::CreateResponse {
             background: None,
@@ -130,7 +188,8 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             max_tool_calls: None,
             metadata: None,
             model: req.model.clone(),
-            parallel_tool_calls: None,
+            // Explicit and constant: it is part of the cached prefix, and the model may batch independent calls
+            parallel_tool_calls: Some(true),
             previous_response_id: None,
             prompt: None,
             prompt_cache_key: req
@@ -140,7 +199,8 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             prompt_cache_retention: None,
             reasoning: Some(rs::Reasoning {
                 effort: req.reasoning_effort.map(|e| e.to_responses_api()),
-                summary: Some(rs::ReasoningSummary::Concise),
+                // A summary is display-only; a non-interactive session never shows it
+                summary: (!req.suppress_reasoning_summary).then_some(rs::ReasoningSummary::Concise),
             }),
             safety_identifier: None,
             service_tier: None,
@@ -159,13 +219,229 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 }
 
 /// Reasoning items stay top-level siblings rather than folding into the assistant, so the input replays the model's original order.
+///
+/// A run of `Reasoning` / `BackendToolCall` siblings is held back until the assistant item that follows it: when that
+/// item recorded an [`AssistantItem::output_order`], the siblings, the message text and the tool calls are emitted in
+/// exactly that order (a reasoning item must directly precede the item it produced). Without a recorded order the
+/// legacy layout applies: siblings, then the message, then the calls.
+/// `function_call_output` / `custom_tool_call_output` items always follow their calls.
 pub(super) fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-    let items: Vec<rs::InputItem> = req
-        .items
-        .iter()
-        .flat_map(conversation_item_to_input_items)
-        .collect();
+    let mut items: Vec<rs::InputItem> = Vec::with_capacity(req.items.len());
+    let mut pending: Vec<&ConversationItem> = Vec::new();
+    // Call ids replayed as `custom_tool_call`; their results go back as `custom_tool_call_output`
+    let mut custom_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &req.items {
+        match item {
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {
+                pending.push(item);
+            }
+            ConversationItem::Assistant(a) => {
+                assistant_to_input_items(a, &mut pending, &mut custom_call_ids, &mut items);
+            }
+            ConversationItem::ToolResult(t) => {
+                flush_pending(&mut pending, &mut items);
+                items.push(tool_result_to_input_item(
+                    t,
+                    custom_call_ids.contains(&t.tool_call_id),
+                ));
+            }
+            other => {
+                flush_pending(&mut pending, &mut items);
+                items.extend(conversation_item_to_input_items(other));
+            }
+        }
+    }
+    flush_pending(&mut pending, &mut items);
     rs::InputParam::Items(items)
+}
+
+fn flush_pending(pending: &mut Vec<&ConversationItem>, out: &mut Vec<rs::InputItem>) {
+    out.extend(pending.drain(..).flat_map(conversation_item_to_input_items));
+}
+
+/// Emit one assistant turn: the held-back siblings, the message text and the tool calls, in recorded emission order.
+fn assistant_to_input_items(
+    a: &AssistantItem,
+    pending: &mut Vec<&ConversationItem>,
+    custom_call_ids: &mut std::collections::HashSet<String>,
+    out: &mut Vec<rs::InputItem>,
+) {
+    let Some(order) = a.output_order.as_deref() else {
+        flush_pending(pending, out);
+        if !a.content.is_empty() {
+            out.push(assistant_message_input_item(&a.content));
+        }
+        out.extend(a.tool_calls.iter().map(function_call_input_item));
+        return;
+    };
+
+    let mut sibling_used = vec![false; pending.len()];
+    let mut call_used = vec![false; a.tool_calls.len()];
+    let message_slots = order
+        .iter()
+        .filter(|s| matches!(s, OutputSlot::Message { .. }))
+        .count();
+    let mut message_placed = false;
+    let mut ordered: Vec<rs::InputItem> = Vec::with_capacity(order.len());
+    for slot in order {
+        match slot {
+            OutputSlot::Reasoning { id } => {
+                let found = pending.iter().enumerate().position(|(i, p)| {
+                    !sibling_used[i] && matches!(p, ConversationItem::Reasoning(r) if r.id == *id)
+                });
+                if let Some(i) = found {
+                    sibling_used[i] = true;
+                    ordered.extend(conversation_item_to_input_items(pending[i]));
+                }
+            }
+            OutputSlot::BackendToolCall { id } => {
+                let found = pending.iter().enumerate().position(|(i, p)| {
+                    !sibling_used[i]
+                        && matches!(p, ConversationItem::BackendToolCall(b) if b.id() == id)
+                });
+                if let Some(i) = found {
+                    sibling_used[i] = true;
+                    ordered.extend(conversation_item_to_input_items(pending[i]));
+                }
+            }
+            OutputSlot::Message { text } => {
+                // A single message replays the (possibly rewritten) assistant content; several keep their own text
+                let text: &str = if message_slots == 1 { &a.content } else { text };
+                message_placed = true;
+                if !text.is_empty() {
+                    ordered.push(assistant_message_input_item(text));
+                }
+            }
+            OutputSlot::FunctionCall { call_id } => {
+                if let Some(tc) = take_tool_call(a, &mut call_used, call_id) {
+                    ordered.push(function_call_input_item(tc));
+                }
+            }
+            OutputSlot::CustomToolCall { call_id, id } => {
+                if let Some(tc) = take_tool_call(a, &mut call_used, call_id) {
+                    custom_call_ids.insert(call_id.clone());
+                    ordered.push(custom_tool_call_input_item(tc, id));
+                }
+            }
+        }
+    }
+
+    // Anything the recorded order does not account for keeps the legacy layout around the ordered block:
+    // unmatched siblings first, an unplaced message next, unmatched calls last.
+    for (i, p) in pending.iter().enumerate() {
+        if !sibling_used[i] {
+            out.extend(conversation_item_to_input_items(p));
+        }
+    }
+    pending.clear();
+    if !message_placed && !a.content.is_empty() {
+        out.push(assistant_message_input_item(&a.content));
+    }
+    out.extend(ordered);
+    for (i, tc) in a.tool_calls.iter().enumerate() {
+        if !call_used[i] {
+            out.push(function_call_input_item(tc));
+        }
+    }
+}
+
+fn take_tool_call<'a>(
+    a: &'a AssistantItem,
+    call_used: &mut [bool],
+    call_id: &str,
+) -> Option<&'a ToolCall> {
+    let i = a
+        .tool_calls
+        .iter()
+        .enumerate()
+        .position(|(i, tc)| !call_used[i] && tc.id.as_ref() == call_id)?;
+    call_used[i] = true;
+    Some(&a.tool_calls[i])
+}
+
+fn assistant_message_input_item(text: &str) -> rs::InputItem {
+    rs::InputItem::EasyMessage(rs::EasyInputMessage {
+        r#type: rs::MessageType::Message,
+        role: rs::Role::Assistant,
+        content: rs::EasyInputContent::Text(text.to_owned()),
+    })
+}
+
+fn function_call_input_item(tc: &ToolCall) -> rs::InputItem {
+    let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
+    rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
+        call_id: tc.id.as_ref().to_owned(),
+        name: tc.name.clone(),
+        arguments: arguments.as_ref().to_owned(),
+        id: None,
+        status: None,
+    }))
+}
+
+/// A freeform tool call replays verbatim: the input is the raw text the model produced, never JSON-wrapped.
+fn custom_tool_call_input_item(tc: &ToolCall, id: &str) -> rs::InputItem {
+    rs::InputItem::Item(rs::Item::CustomToolCall(custom_tool_call(
+        &tc.id,
+        &tc.name,
+        &tc.arguments,
+        id,
+    )))
+}
+
+/// Build an `rs::CustomToolCall` (a `custom_tool_call` item).
+/// The type is `#[non_exhaustive]` with no builder, so deserializing its four wire fields is the only constructor.
+pub fn custom_tool_call(call_id: &str, name: &str, input: &str, id: &str) -> rs::CustomToolCall {
+    serde_json::from_value(serde_json::json!({
+        "call_id": call_id,
+        "name": name,
+        "input": input,
+        "id": id,
+    }))
+    .expect("custom_tool_call has exactly these four fields")
+}
+
+fn tool_result_content_parts(t: &ToolResultItem) -> Vec<rs::InputContent> {
+    let mut parts: Vec<rs::InputContent> = vec![rs::InputContent::InputText(rs::InputTextContent {
+        text: t.content.as_ref().to_owned(),
+    })];
+    for img in &t.images {
+        if let ContentPart::Image { url } = img {
+            parts.push(rs::InputContent::InputImage(rs::InputImageContent {
+                detail: rs::ImageDetail::Auto,
+                file_id: None,
+                image_url: Some(url.as_ref().to_owned()),
+            }));
+        }
+    }
+    parts
+}
+
+fn tool_result_to_input_item(t: &ToolResultItem, custom: bool) -> rs::InputItem {
+    if custom {
+        let output = if t.images.is_empty() {
+            rs::CustomToolCallOutputOutput::Text(t.content.as_ref().to_owned())
+        } else {
+            rs::CustomToolCallOutputOutput::List(tool_result_content_parts(t))
+        };
+        return rs::InputItem::Item(rs::Item::CustomToolCallOutput(rs::CustomToolCallOutput {
+            call_id: t.tool_call_id.clone(),
+            output,
+            id: None,
+        }));
+    }
+    let output = if t.images.is_empty() {
+        rs::FunctionCallOutput::Text(t.content.as_ref().to_owned())
+    } else {
+        rs::FunctionCallOutput::Content(tool_result_content_parts(t))
+    };
+    rs::InputItem::Item(rs::Item::FunctionCallOutput(
+        rs::FunctionCallOutputItemParam {
+            call_id: t.tool_call_id.clone(),
+            output,
+            id: None,
+            status: None,
+        },
+    ))
 }
 
 /// Inject the `type: "reasoning_text"` discriminator the API requires.
@@ -191,6 +467,19 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     }
 }
 
+/// Strip what the API does not want back on a reasoning item.
+/// `status` is output-only. With `store: false` the `encrypted_content` blob is the reasoning; plaintext `content`
+/// beside it would only be the same reasoning twice (GPT-5.x omits it anyway), so it is dropped whenever the
+/// encrypted blob is present. The `summary` stays: the API accepts it and it is what a display-only fallback carries.
+pub(super) fn reasoning_item_for_input(r: &rs::ReasoningItem) -> rs::ReasoningItem {
+    let mut r = r.clone();
+    r.status = None;
+    if r.encrypted_content.is_some() {
+        r.content = None;
+    }
+    r
+}
+
 fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
     match item {
         ConversationItem::System(s) => {
@@ -209,65 +498,19 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
             })]
         }
         ConversationItem::Reasoning(r) => {
-            // `status` is output-only and rejected on input.
-            let mut r = r.clone();
-            r.status = None;
-            vec![rs::InputItem::Item(rs::Item::Reasoning(r))]
+            vec![rs::InputItem::Item(rs::Item::Reasoning(
+                reasoning_item_for_input(r),
+            ))]
         }
         ConversationItem::Assistant(a) => {
             let mut items = Vec::new();
-
             if !a.content.is_empty() {
-                items.push(rs::InputItem::EasyMessage(rs::EasyInputMessage {
-                    r#type: rs::MessageType::Message,
-                    role: rs::Role::Assistant,
-                    content: rs::EasyInputContent::Text(a.content.as_ref().to_owned()),
-                }));
+                items.push(assistant_message_input_item(&a.content));
             }
-
-            for tc in &a.tool_calls {
-                let arguments = sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone());
-                items.push(rs::InputItem::Item(rs::Item::FunctionCall(
-                    rs::FunctionToolCall {
-                        call_id: tc.id.as_ref().to_owned(),
-                        name: tc.name.clone(),
-                        arguments: arguments.as_ref().to_owned(),
-                        id: None,
-                        status: None,
-                    },
-                )));
-            }
-
+            items.extend(a.tool_calls.iter().map(function_call_input_item));
             items
         }
-        ConversationItem::ToolResult(t) => {
-            let output = if t.images.is_empty() {
-                rs::FunctionCallOutput::Text(t.content.as_ref().to_owned())
-            } else {
-                let mut parts: Vec<rs::InputContent> =
-                    vec![rs::InputContent::InputText(rs::InputTextContent {
-                        text: t.content.as_ref().to_owned(),
-                    })];
-                for img in &t.images {
-                    if let ContentPart::Image { url } = img {
-                        parts.push(rs::InputContent::InputImage(rs::InputImageContent {
-                            detail: rs::ImageDetail::Auto,
-                            file_id: None,
-                            image_url: Some(url.as_ref().to_owned()),
-                        }));
-                    }
-                }
-                rs::FunctionCallOutput::Content(parts)
-            };
-            vec![rs::InputItem::Item(rs::Item::FunctionCallOutput(
-                rs::FunctionCallOutputItemParam {
-                    call_id: t.tool_call_id.clone(),
-                    output,
-                    id: None,
-                    status: None,
-                },
-            ))]
-        }
+        ConversationItem::ToolResult(t) => vec![tool_result_to_input_item(t, false)],
         ConversationItem::BackendToolCall(b) => {
             vec![match &b.kind {
                 BackendToolKind::WebSearch(ws) => {
@@ -308,8 +551,9 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
     rs::EasyInputContent::ContentList(items)
 }
 
-/// The request's client function tools.
-/// A function tool whose name collides with a backend-hosted tool is dropped: sending both is rejected as a duplicate, so the hosted tool wins.
+/// The request's client tools: JSON function tools, or `custom` (grammar-constrained freeform) tools for specs that carry a
+/// [`FreeformFormat`].
+/// A tool whose name collides with a backend-hosted tool is dropped: sending both is rejected as a duplicate, so the hosted tool wins.
 ///
 /// No hosted tool is emitted here.
 /// Both ride the raw-JSON [`extra_tool_entries`] channel instead.
@@ -327,13 +571,24 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
             }
             !collides
         })
-        .map(|t| {
-            rs::Tool::Function(rs::FunctionTool {
+        .map(|t| match &t.freeform {
+            Some(format) => rs::Tool::Custom(rs::CustomToolParam {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                format: rs::CustomToolParamFormat::Grammar(rs::CustomGrammarFormatParam {
+                    definition: format.definition.clone(),
+                    syntax: match format.syntax {
+                        FreeformSyntax::Lark => rs::GrammarSyntax::Lark,
+                        FreeformSyntax::Regex => rs::GrammarSyntax::Regex,
+                    },
+                }),
+            }),
+            None => rs::Tool::Function(rs::FunctionTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 parameters: Some(t.parameters.clone()),
                 strict: None,
-            })
+            }),
         })
         .collect();
 

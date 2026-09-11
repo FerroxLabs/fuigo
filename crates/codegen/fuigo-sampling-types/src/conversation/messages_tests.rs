@@ -307,6 +307,7 @@ fn test_tool_result_with_images_to_anthropic() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            output_order: None,
         }),
         ConversationItem::tool_result_with_images(
             "call_1",

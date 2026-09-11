@@ -238,9 +238,9 @@ mod tests {
     }
 
     fn native_tools() -> Vec<ToolSpec> {
-        vec![ToolSpec {name:"search_tool".into(),description:Some("Search MCP".into()),parameters:serde_json::json!({})},
-             ToolSpec {name:"read_file".into(),description:Some("Read".into()),parameters:serde_json::json!({})},
-             ToolSpec {name:"image_gen".into(),description:Some("Generate image artwork".into()),parameters:serde_json::json!({"type":"object","required":["prompt"]})}]
+        vec![ToolSpec {name:"search_tool".into(),description:Some("Search MCP".into()),parameters:serde_json::json!({}), freeform: None},
+             ToolSpec {name:"read_file".into(),description:Some("Read".into()),parameters:serde_json::json!({}), freeform: None},
+             ToolSpec {name:"image_gen".into(),description:Some("Generate image artwork".into()),parameters:serde_json::json!({"type":"object","required":["prompt"]}), freeform: None}]
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
     }
 
     fn fixture(entry: &Entry) -> ToolSpec {
-        ToolSpec { name: entry.name.clone(), description: Some(entry.original.clone()), parameters: entry.parameters.clone() }
+        ToolSpec { name: entry.name.clone(), description: Some(entry.original.clone()), parameters: entry.parameters.clone(), freeform: None }
     }
 
     #[test]

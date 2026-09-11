@@ -639,7 +639,7 @@ pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
             Ok(ConversationItem::User(UserItem { synthetic_reason: None, .. })) => {
                 turn_count += 1;
             }
-            Ok(ConversationItem::Assistant(AssistantItem { ref tool_calls, .. })) => {
+            Ok(ConversationItem::Assistant(AssistantItem { ref tool_calls, .., output_order: None })) => {
                 tool_call_count += tool_calls.len();
             }
             _ => {}
