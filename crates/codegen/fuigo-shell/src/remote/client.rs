@@ -840,6 +840,11 @@ pub(crate) fn parse_remote_model_value(
             .or_else(|| meta.and_then(|m| m.get("supportsBackendSearch")))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        programmatic_tool_calling: obj
+            .get("programmaticToolCalling")
+            .or_else(|| obj.get("programmatic_tool_calling"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         compactions_remaining: obj
             .get("compactionsRemaining")
             .or_else(|| obj.get("compactions_remaining"))
