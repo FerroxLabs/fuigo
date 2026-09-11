@@ -23,7 +23,10 @@ pub const MAX_SKILL_WALK_DEPTH: usize = 5;
 /// `skills` is the standard layout (`.fuigo/skills/`, `.claude/skills/`,
 /// `.cursor/skills/`). The product-specific `skills-cursor/` layout is no
 /// longer scanned — it pulled vendor default skills into Fuigo sessions.
-const SKILL_SUBDIRS: &[&str] = &["skills"];
+pub const SKILL_SUBDIRS: &[&str] = &["skills"];
+
+/// Subdirectory name that holds `.md` command definitions (`.fuigo/commands/`).
+pub const COMMAND_SUBDIR: &str = "commands";
 
 /// Cursor ships these default skills in `~/.cursor/skills-cursor/`
 /// (per its `.cursor-managed-skills-manifest.json` / `.sync-manifest.json`).
@@ -79,7 +82,7 @@ pub fn find_skill_paths(dir: &Path) -> Vec<PathBuf> {
 
 /// Find `.md` files inside a `commands/` subdirectory.
 pub fn find_command_paths(dir: &Path) -> Vec<PathBuf> {
-    scan_md_files(&dir.join("commands"))
+    scan_md_files(&dir.join(COMMAND_SUBDIR))
 }
 
 /// Scan a directory for `.md` files (flat, no recursion).

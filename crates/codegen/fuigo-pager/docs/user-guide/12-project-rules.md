@@ -1,6 +1,6 @@
 # Project Rules (AGENTS.md)
 
-Project rules let you configure Fuigo per project or directory. By placing an AGENTS.md file in your repository, you can set coding conventions, build instructions, style guides, and any other instructions that Fuigo should follow when working in that codebase.
+Project rules let you configure Fuigo per project or directory. By placing an AGENTS.md file in your repository, you can set coding conventions, build instructions, style guides, and any other instructions that Fuigo should follow when working in that codebase. Project rules load only in trusted folders (`--trust` or an interactive grant); `~/.fuigo/` rules always load.
 
 ---
 

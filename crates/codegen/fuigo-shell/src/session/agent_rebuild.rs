@@ -286,6 +286,9 @@ impl AgentRebuildSpec {
         .with_persona_instructions(persona_instructions.clone())
         .with_skills_config(skills_config.clone())
         .with_compat_config(*compat)
+        .with_project_trusted(crate::agent::folder_trust::project_scope_allowed(
+            working_directory,
+        ))
         .with_context_window(*context_window_tokens)
         .with_mcp_max_output_bytes(
             crate::util::config::resolve_max_mcp_output_bytes_for_cwd(working_directory),
@@ -499,6 +502,82 @@ mod tests {
             .find(|definition| definition.function.name == task_name)
             .and_then(|definition| definition.function.description)
             .expect("FuigoBuild Task description should be present")
+    }
+    /// Folder trust gates project instructions and project skills at agent build: an untrusted cwd omits both, a trusted one loads both.
+    #[tokio::test(flavor = "current_thread")]
+    async fn untrusted_cwd_omits_project_instructions_and_skills() {
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        std::fs::write(
+            repo.path().join("AGENTS.md"),
+            "trust-gate-project-instructions\n",
+        )
+        .unwrap();
+        let skill_dir = repo
+            .path()
+            .join(".fuigo")
+            .join("skills")
+            .join("trust-gate-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: trust-gate-skill\ndescription: repo skill\n---\nbody\n",
+        )
+        .unwrap();
+        let spec = || {
+            let mut spec = test_rebuild_spec_default();
+            Arc::get_mut(&mut spec)
+                .expect("test rebuild spec should be uniquely owned")
+                .working_directory = repo.path().to_path_buf();
+            spec
+        };
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                crate::agent::folder_trust::record_for_test(repo.path(), false);
+                let agent = spec()
+                    .build_agent(AgentDefinition::default_fuigo_build())
+                    .await
+                    .expect("agent build should succeed");
+                assert!(
+                    !agent
+                        .agents_md_section()
+                        .unwrap_or_default()
+                        .contains("trust-gate-project-instructions"),
+                    "untrusted cwd must not load project AGENTS.md"
+                );
+                assert!(
+                    !agent
+                        .tool_bridge()
+                        .skill_discovery_snapshot_names()
+                        .await
+                        .iter()
+                        .any(|name| name == "trust-gate-skill"),
+                    "untrusted cwd must not load project skills"
+                );
+
+                crate::agent::folder_trust::record_for_test(repo.path(), true);
+                let agent = spec()
+                    .build_agent(AgentDefinition::default_fuigo_build())
+                    .await
+                    .expect("agent build should succeed");
+                assert!(
+                    agent
+                        .agents_md_section()
+                        .unwrap_or_default()
+                        .contains("trust-gate-project-instructions"),
+                    "trusted cwd must load project AGENTS.md"
+                );
+                assert!(
+                    agent
+                        .tool_bridge()
+                        .skill_discovery_snapshot_names()
+                        .await
+                        .iter()
+                        .any(|name| name == "trust-gate-skill"),
+                    "trusted cwd must load project skills"
+                );
+            })
+            .await;
     }
     /// The `[toolset.web_search]` policy is authoritative on the backend-hosted path.
     /// Agent frontmatter is model-writable (`.fuigo/agents/*.md`), so a configured blocklist must survive a frontmatter allowlist.

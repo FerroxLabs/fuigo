@@ -1069,11 +1069,15 @@ pub(super) async fn run_session(
                                 let cwd = s.tool_context.cwd.as_path().to_string_lossy();
                                 let skills_config = crate::util::config::load_config().await.skills;
                                 let pr = s.plugin_registry.borrow().clone();
+                                let project_trusted = crate::agent::folder_trust::project_scope_allowed(
+                                    s.tool_context.cwd.as_path(),
+                                );
                                 let new_skills = fuigo_agent::prompt::skills::list_skills_with_plugins(
                                     Some(&cwd),
                                     &skills_config,
                                     pr.as_deref(),
                                     s.rebuild_spec.compat,
+                                    project_trusted,
                                 )
                                 .await;
                                 tracing::info!(skills = new_skills.len(), "refreshed skill baseline after bundle sync");
