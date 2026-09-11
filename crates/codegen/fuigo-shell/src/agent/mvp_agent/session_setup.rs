@@ -483,7 +483,16 @@ impl MvpAgent {
                     relay_sync,
                     gateway: Some(self.gateway.clone()),
                     session_summary_model: summary_model,
-                    title_policy: self.cfg.borrow().session.title_policy.unwrap_or_default(),
+                    title_policy: self
+                        .cfg
+                        .borrow()
+                        .session
+                        .title_policy
+                        .unwrap_or_default()
+                        .for_attachment(
+                            startup_hints_from_meta(arguments.meta.as_ref(), init.meta.as_ref())
+                                .non_interactive,
+                        ),
                     registry_title_sync,
                     search_index: self.search_index_cell(),
                     session_kind: client_session_kind,
@@ -843,7 +852,16 @@ impl MvpAgent {
                 relay_sync,
                 gateway: Some(self.gateway.clone()),
                 session_summary_model: summary_model,
-                title_policy: self.cfg.borrow().session.title_policy.unwrap_or_default(),
+                title_policy: self
+                    .cfg
+                    .borrow()
+                    .session
+                    .title_policy
+                    .unwrap_or_default()
+                    .for_attachment(
+                        startup_hints_from_meta(request_meta.as_ref(), init.meta.as_ref())
+                            .non_interactive,
+                    ),
                 registry_title_sync,
                 search_index: self.search_index_cell(),
                 session_kind: None,
