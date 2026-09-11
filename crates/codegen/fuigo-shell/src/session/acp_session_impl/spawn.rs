@@ -1864,6 +1864,7 @@ pub(crate) async fn spawn_session_actor(
         turn_summary_generation: std::cell::Cell::new(0),
         turn_summary_enabled: effective_config.is_turn_summary_enabled(),
         title_refresh_enabled,
+        last_sent_tool_specs: std::cell::RefCell::new(None),
         title_refresh_task: std::cell::RefCell::new(None),
         title_refresh_generation: std::cell::Cell::new(0),
         next_title_refresh_idx: std::cell::Cell::new(initial_title_refresh_idx),

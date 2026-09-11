@@ -57,6 +57,27 @@ pub(crate) async fn persist_hints(dir: &std::path::Path, hints: &PresentationHin
     ).await
 }
 
+/// The advertised list for an enabled projection: deferred schemas stay hidden unless selected (or `full`),
+/// and `search_tool` names what is still hidden. Tool order and every visible schema are preserved.
+fn render(
+    tools: Vec<ToolSpec>, deferred: &std::collections::BTreeSet<String>, full: bool,
+    selected: impl Fn(&ToolSpec) -> bool,
+) -> Vec<ToolSpec> {
+    let hidden: Vec<_> = tools.iter().filter(|t| deferred.contains(&t.name) && !selected(t)).map(|t| t.name.clone()).collect();
+    let mut visible: Vec<_> = tools.into_iter().filter(|t| full || !deferred.contains(&t.name) || selected(t)).collect();
+    if let Some(search) = visible.iter_mut().find(|t| t.name == "search_tool") {
+        let base = search.description.get_or_insert_with(String::new);
+        if !hidden.is_empty() && !full {
+            base.push_str(" Native media tools are available via scope=native: ");
+            // Names come only from eligible native registry, never descriptions
+            // from external servers. Keep the discovery hint bounded.
+            base.push_str(&hidden.iter().take(16).cloned().collect::<Vec<_>>().join(", "));
+            base.push_str(". Search reveals schemas for the next request; call native tools directly, never through use_tool. Discovery is not approval.");
+        }
+    }
+    visible
+}
+
 impl NativePresentation {
     pub(crate) fn load(dir: &std::path::Path) -> Self {
         use std::io::Read;
@@ -112,19 +133,18 @@ impl NativePresentation {
         self.catalog = tools.iter().filter(|t| deferred.contains(&t.name)).cloned().collect();
         self.selected.retain(|name, hash| self.catalog.iter().any(|t| &t.name == name && fingerprint(t) == *hash));
         if !enabled { return tools; }
-        let hidden: Vec<_> = self.catalog.iter().filter(|t| !self.selected.contains_key(&t.name)).map(|t| t.name.clone()).collect();
-        let mut visible: Vec<_> = tools.into_iter().filter(|t| self.full || !deferred.contains(&t.name) || self.selected.contains_key(&t.name)).collect();
-        if let Some(search) = visible.iter_mut().find(|t| t.name == "search_tool") {
-            let base = search.description.get_or_insert_with(String::new);
-            if !hidden.is_empty() && !self.full {
-                base.push_str(" Native media tools are available via scope=native: ");
-                // Names come only from eligible native registry, never descriptions
-                // from external servers. Keep the discovery hint bounded.
-                base.push_str(&hidden.iter().take(16).cloned().collect::<Vec<_>>().join(", "));
-                base.push_str(". Search reveals schemas for the next request; call native tools directly, never through use_tool. Discovery is not approval.");
-            }
-        }
-        visible
+        let selected = &self.selected;
+        render(tools, deferred, self.full, |t| selected.contains_key(&t.name))
+    }
+
+    /// What [`Self::project`] would advertise from the current selection, without touching any state.
+    /// Cache-aligned side calls use it only before this session actor has sent a main-turn request.
+    pub(crate) fn preview(
+        &self, tools: Vec<ToolSpec>,
+        deferred: &std::collections::BTreeSet<String>, enabled: bool,
+    ) -> Vec<ToolSpec> {
+        if !enabled { return tools; }
+        render(tools, deferred, self.full, |t| self.selected.get(&t.name).is_some_and(|hash| *hash == fingerprint(t)))
     }
 
     pub(crate) fn discover(&mut self, query: &str, limit: usize) -> serde_json::Value {
@@ -237,6 +257,28 @@ mod tests {
         assert_eq!(next.len(),3);
         assert_eq!(next[2].parameters,all[2].parameters);
         assert_eq!(state.project("different-task",all,&deferred,true).len(),2);
+    }
+
+    #[test]
+    fn preview_matches_project_without_mutating_state() {
+        let json = |tools: &Vec<ToolSpec>| serde_json::to_string(tools).unwrap();
+        let deferred=std::collections::BTreeSet::from(["image_gen".into()]);
+        let mut state=NativePresentation::default();
+        let hidden=state.preview(native_tools(),&deferred,true);
+        assert_eq!(hidden.len(),2);
+        assert_eq!(json(&hidden), json(&state.clone().project("task",native_tools(),&deferred,true)));
+        state.project("task",native_tools(),&deferred,true);
+        state.discover("image_gen",3);
+        let before=format!("{state:?}");
+        let revealed=state.preview(native_tools(),&deferred,true);
+        assert_eq!(format!("{state:?}"),before,"preview must not mutate presentation state");
+        assert_eq!(revealed.len(),3);
+        assert_eq!(json(&revealed), json(&state.clone().project("task",native_tools(),&deferred,true)));
+        let mut changed=native_tools(); changed[2].parameters["required"]=serde_json::json!(["different"]);
+        let stale=state.preview(changed.clone(),&deferred,true);
+        assert_eq!(stale.len(),2,"a stale selection never reveals a changed schema");
+        assert_eq!(json(&stale), json(&state.clone().project("task",changed,&deferred,true)));
+        assert_eq!(json(&state.preview(native_tools(),&deferred,false)), json(&native_tools()));
     }
 
     #[test]
