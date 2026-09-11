@@ -196,11 +196,14 @@ impl SessionActor {
         let cwd = &self.session_info.cwd;
         let skills_config = crate::util::config::load_config().await.skills;
         let plugin_snapshot = self.plugin_registry.borrow().clone();
+        let project_trusted =
+            crate::agent::folder_trust::project_scope_allowed(std::path::Path::new(cwd));
         let new_skills = fuigo_agent::prompt::skills::list_skills_with_plugins(
             Some(cwd),
             &skills_config,
             plugin_snapshot.as_deref(),
             self.rebuild_spec.compat,
+            project_trusted,
         )
         .await;
         let skill_count = new_skills.len();

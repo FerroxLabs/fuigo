@@ -1193,6 +1193,7 @@ pub(crate) async fn run_shell_child(
                 &ctx.parent_skills_config,
                 ctx.plugin_registry.as_deref(),
                 ctx.parent_compat,
+                crate::agent::folder_trust::project_scope_allowed(&ctx.parent_cwd),
             )
             .await,
         );
