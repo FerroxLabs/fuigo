@@ -4,7 +4,8 @@
 //! The resolved flag travels on `fuigo_sampler::SamplerConfig::programmatic_tool_calling` to the session actor,
 //! which adds `HostedTool::ProgrammaticToolCalling` to agent turns.
 
-use crate::agent::config::{ApiBackend, ModelInfo};
+use crate::agent::config::ModelInfo;
+use crate::sampling::ApiBackend;
 
 /// Environment override: `1|true|on|yes` forces PTC on for every model, `0|false|off|no` forces it off.
 /// Any other value (or unset) defers to the model entry.
