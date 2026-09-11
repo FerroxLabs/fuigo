@@ -1,6 +1,6 @@
 # Skills
 
-Skills are reusable prompt packages that extend Fuigo with task-specific instructions. They let you capture a repeatable procedure once, instead of re-explaining it each session.
+Skills are reusable prompt packages that extend Fuigo with task-specific instructions. They let you capture a repeatable procedure once, instead of re-explaining it each session. Project skills and commands load only in trusted folders; skills in `~/.fuigo/` always load (see [Folder Trust in Headless Runs](14-headless-mode.md#folder-trust-in-headless-runs)).
 
 ---
 

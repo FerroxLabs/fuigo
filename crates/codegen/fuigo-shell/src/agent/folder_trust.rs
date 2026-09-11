@@ -1,11 +1,11 @@
 //! Folder-trust gate ("do you trust this folder?").
 //!
-//! Repo-local MCP / LSP servers and permission policy are configured by files an attacker can ship inside a cloned repository.
-//! Those files include `.mcp.json`, project `.fuigo/config.toml` (`[permission]` / `[mcp_servers]` / `[plugins].paths`), and `.fuigo/lsp.json`.
+//! Repo-local MCP / LSP servers, permission policy, and project instructions/skills are configured by files an attacker can ship inside a cloned repository.
+//! Those files include `.mcp.json`, project `.fuigo/config.toml` (`[permission]` / `[mcp_servers]` / `[plugins].paths`), `.fuigo/lsp.json`, `AGENTS.md` / `CLAUDE.md` / rules dirs, and `.fuigo/skills` / `.fuigo/commands`.
 //! `~/.claude.json` `projects.<cwd>` is another such source.
-//! Those configs contain commands or auto-approve rules the CLI would otherwise honor automatically, a 1-click RCE / policy bypass.
+//! Those configs contain commands, auto-approve rules, or agent instructions the CLI would otherwise honor automatically, a 1-click RCE / policy bypass.
 //! This module resolves a VS-Code-style trust decision ONCE per workspace, BEFORE any repo-local server is spawned.
-//! It exposes a cheap [`project_scope_allowed`] check that the MCP/LSP/permission loaders consult.
+//! It exposes a cheap [`project_scope_allowed`] check that the MCP/LSP/permission, instruction, and skill loaders consult.
 //!
 //! Resolution lives here (not in `acp_session`) so the session core stays free of feature logic.
 //! The loaders only call [`project_scope_allowed`].
@@ -910,6 +910,87 @@ mod tests {
         assert!(
             !project_scope_allowed(tmp.path()),
             "skill-only untrusted repo must be denied"
+        );
+    }
+
+    /// The optional workspace-user overlay (`FUIGO_ROOT` / `FUIGO_USER`) is project content too: its instructions and skills gate on trust and load once granted.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn project_scope_allowed_denies_workspace_user_only_instructions() {
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("FUIGO_HOME", home.path());
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+        let tmp = repo_tmp();
+        let workspace_user = tmp.path().join("x/alice");
+        std::fs::create_dir_all(&workspace_user).unwrap();
+        std::fs::write(
+            workspace_user.join("AGENTS.md"),
+            "workspace-user-only-instructions",
+        )
+        .unwrap();
+        let skill_dir = workspace_user.join(".fuigo/skills/workspace-user-only-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: workspace-user-only-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        let _root = EnvGuard::set("FUIGO_ROOT", tmp.path().as_os_str());
+        let _user = EnvGuard::set("FUIGO_USER", "alice");
+
+        let cwd = tmp.path().to_string_lossy().into_owned();
+        let verdict = project_scope_allowed(tmp.path());
+        assert!(!verdict, "workspace-user-only markers must trigger trust");
+        let instructions = fuigo_agent::prompt::agents_md::read_agents_config_with_paths(
+            &cwd,
+            fuigo_agent::prompt::skills::CompatConfig::default(),
+            verdict,
+        )
+        .await;
+        let skills = fuigo_agent::prompt::skills::list_skills(
+            Some(&cwd),
+            &fuigo_agent::prompt::skills::SkillsConfig::default(),
+            fuigo_agent::prompt::skills::CompatConfig::default(),
+            verdict,
+        )
+        .await;
+        assert!(
+            instructions
+                .iter()
+                .all(|config| config.content != "workspace-user-only-instructions")
+        );
+        assert!(
+            skills
+                .iter()
+                .all(|skill| skill.name != "workspace-user-only-skill")
+        );
+
+        grant_folder_trust(tmp.path());
+        let verdict = project_scope_allowed(tmp.path());
+        assert!(verdict);
+        let instructions = fuigo_agent::prompt::agents_md::read_agents_config_with_paths(
+            &cwd,
+            fuigo_agent::prompt::skills::CompatConfig::default(),
+            verdict,
+        )
+        .await;
+        let skills = fuigo_agent::prompt::skills::list_skills(
+            Some(&cwd),
+            &fuigo_agent::prompt::skills::SkillsConfig::default(),
+            fuigo_agent::prompt::skills::CompatConfig::default(),
+            verdict,
+        )
+        .await;
+        assert!(
+            instructions
+                .iter()
+                .any(|config| config.content == "workspace-user-only-instructions")
+        );
+        assert!(
+            skills
+                .iter()
+                .any(|skill| skill.name == "workspace-user-only-skill")
         );
     }
 

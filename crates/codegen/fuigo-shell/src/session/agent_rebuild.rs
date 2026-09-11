@@ -286,6 +286,9 @@ impl AgentRebuildSpec {
         .with_persona_instructions(persona_instructions.clone())
         .with_skills_config(skills_config.clone())
         .with_compat_config(*compat)
+        .with_project_trusted(crate::agent::folder_trust::project_scope_allowed(
+            working_directory,
+        ))
         .with_context_window(*context_window_tokens)
         .with_mcp_max_output_bytes(
             crate::util::config::resolve_max_mcp_output_bytes_for_cwd(working_directory),
@@ -505,8 +508,16 @@ mod tests {
     async fn untrusted_cwd_omits_project_instructions_and_skills() {
         let repo = tempfile::tempdir().unwrap();
         git2::Repository::init(repo.path()).unwrap();
-        std::fs::write(repo.path().join("AGENTS.md"), "trust-gate-project-instructions\n").unwrap();
-        let skill_dir = repo.path().join(".fuigo").join("skills").join("trust-gate-skill");
+        std::fs::write(
+            repo.path().join("AGENTS.md"),
+            "trust-gate-project-instructions\n",
+        )
+        .unwrap();
+        let skill_dir = repo
+            .path()
+            .join(".fuigo")
+            .join("skills")
+            .join("trust-gate-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
