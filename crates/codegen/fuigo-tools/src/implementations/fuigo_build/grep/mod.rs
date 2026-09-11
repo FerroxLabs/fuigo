@@ -275,7 +275,7 @@ impl crate::types::tool_metadata::ToolMetadata for GrepTool {
 
 - Full regex syntax, so escape literal special characters: `functionCall\(`, or `interface\{\}` to find interface{} in Go.
 - Pass ${{ params.search.pattern }} as a raw regex string — no surrounding quotes. Combine related searches into one call with alternation (`foo|bar|baz`; a JSON array of patterns is also accepted and OR-ed) instead of one call per term.
-- Results are the matching lines with file and line number; add ${{ params.search.-C }} (or -A/-B) for surrounding context lines in the same call.
+- Results are the matching lines with file and line number; add -C (or -A/-B) for surrounding context lines in the same call.
 - Respects .gitignore unless you pass a broad glob like '--glob *'.
 - Only filter by '${{ params.search.type }}' or '${{ params.search.glob }}' when you are sure of the file type; import paths may not match source file types (.js vs .ts).
 - Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report "at least" counts."#
