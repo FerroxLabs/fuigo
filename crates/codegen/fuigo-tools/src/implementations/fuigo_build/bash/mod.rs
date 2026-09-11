@@ -478,11 +478,10 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
 // the background-task tooling. Absolute safety clamp for configured maxes: 10h.
 pub(crate) const DEFAULT_MAX_TIMEOUT_MS: u64 = 300_000; // 5 minutes
 const ABSOLUTE_MAX_TIMEOUT_MS: u64 = 36_000_000;
-/// The FG block budget has no fixed default any more: when unset it equals the
-/// resolved `timeout` (default 120s) capped at [`MAX_FOREGROUND_BLOCK`], so a
-/// command blocks for as long as the description says before auto-bg.
-/// Matches the terminal backend's `FOREGROUND_BLOCK_BUDGET` fallback (120s).
-pub(crate) const DEFAULT_FOREGROUND_BLOCK_BUDGET_MS: u64 = DEFAULT_TIMEOUT.as_millis() as u64;
+// The FG block budget has no fixed default: when unset it equals the resolved
+// `timeout` (default 120s) capped at `MAX_FOREGROUND_BLOCK`, so a command blocks
+// for as long as the description says before auto-bg (see
+// `BashTool::effective_foreground_block_budget`).
 
 /// Internal version discriminant for run_terminal_cmd.
 ///
@@ -1421,8 +1420,10 @@ impl BashTool {
                         )
                     } else if auto_bg {
                         let block_ms = Self::max_foreground_block_ms();
+                        let omit_wait_ms =
+                            Self::effective_auto_bg_wait_ms(params).unwrap_or(default_ms);
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. A foreground command blocks up to this long (at most {block_ms} ms of blocking); on expiry it keeps running in the background and returns a task id."
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. A foreground command blocks up to this long (omitted: {omit_wait_ms} ms; at most {block_ms} ms of blocking); on expiry it keeps running in the background and returns a task id."
                         )
                     } else {
                         format!(
@@ -4179,9 +4180,8 @@ mod tests {
             );
             assert_eq!(
                 BashTool::effective_auto_bg_wait_ms(&params),
-                Some(DEFAULT_FOREGROUND_BLOCK_BUDGET_MS),
+                Some(DEFAULT_TIMEOUT.as_millis() as u64),
             );
-            assert_eq!(DEFAULT_FOREGROUND_BLOCK_BUDGET_MS, 120_000);
         }
 
         /// The rendered description must state the real blocking behaviour.
