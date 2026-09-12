@@ -4172,6 +4172,15 @@ mod server_name_sanitizing {
         assert_eq!(sanitize_mcp_server_name("caf\u{e9}"), "caf");
         assert_eq!(sanitize_mcp_server_name("..."), "mcp");
         assert_eq!(sanitize_mcp_server_name(""), "mcp");
+        // An edge `_` would fuse with the `__` delimiter into `___`, an ambiguous qualified name.
+        assert_eq!(sanitize_mcp_server_name("com.foo_"), "com-foo");
+        assert_eq!(sanitize_mcp_server_name("_lead"), "lead");
+        assert_eq!(sanitize_mcp_server_name("_-_"), "mcp");
+        assert!(parse_mcp_qualified_name("com-foo___tool").is_none());
+        assert!(
+            parse_mcp_qualified_name(&format!("{}__tool", sanitize_mcp_server_name("com.foo_")))
+                .is_some()
+        );
     }
 
     #[test]

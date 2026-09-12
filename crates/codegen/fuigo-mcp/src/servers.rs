@@ -4878,7 +4878,9 @@ pub async fn start_mcp_servers(
 ///
 /// - every character outside `[A-Za-z0-9_-]` becomes `-`
 /// - a run of two or more `_` collapses to one, so the single `__` boundary stays unambiguous
-/// - leading and trailing `-` are trimmed; an empty result becomes `mcp`
+/// - leading and trailing `-` and `_` are trimmed (an edge `_` would fuse with the `__`
+///   delimiter into `___`, which [`parse_mcp_qualified_name`] rejects as ambiguous); an empty
+///   result becomes `mcp`
 ///
 /// Identity for a name that is already well-formed, so hosts with clean names see no change.
 pub fn sanitize_mcp_server_name(raw: &str) -> String {
@@ -4902,7 +4904,7 @@ pub fn sanitize_mcp_server_name(raw: &str) -> String {
         }
         out.push(mapped);
     }
-    let trimmed = out.trim_matches('-');
+    let trimmed = out.trim_matches(|c| c == '-' || c == '_');
     if trimmed.is_empty() {
         "mcp".to_owned()
     } else {
