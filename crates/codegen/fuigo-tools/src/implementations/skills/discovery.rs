@@ -829,7 +829,8 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
 ///
 /// For each path in `file_paths`, walks from `dirname(path)` upward toward
 /// `cwd` (exclusive). At each directory, checks for `.fuigo/skills/`,
-/// `.agents/skills/`, and (gated on `compat.claude.skills`) `.claude/skills/`.
+/// (gated on `compat.agents.skills`) `.agents/skills/`, and (gated on
+/// `compat.claude.skills`) `.claude/skills/`.
 /// Skips already-checked dirs.
 ///
 /// Skill/command roots are **not** filtered by `.gitignore`. Discovery only
@@ -852,9 +853,12 @@ pub fn discover_skills_for_paths(
     already_checked: &mut HashSet<PathBuf>,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
-    // `.fuigo` and `.agents` are always scanned; `.claude` is gated on the
-    // claude-vendor skills cell. (`.cursor` is excluded here by design — see fn docs.)
-    let mut config_dir_names: Vec<&str> = vec![".fuigo", ".agents"];
+    // `.fuigo` is always scanned; `.agents` and `.claude` are gated on their
+    // skills cells. (`.cursor` is excluded here by design — see fn docs.)
+    let mut config_dir_names: Vec<&str> = vec![".fuigo"];
+    if compat.agents.skills {
+        config_dir_names.push(".agents");
+    }
     if compat.claude.skills {
         config_dir_names.push(".claude");
     }
