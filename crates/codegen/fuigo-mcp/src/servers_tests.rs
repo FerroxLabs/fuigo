@@ -1937,6 +1937,146 @@ fn event_types(jsonl: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+// ── Protocol-version downgrade (GitHub-shaped server) ────────────────────────
+
+/// Mirrors api.githubcopilot.com/mcp as observed 2026-09-12: `initialize` at a version newer than
+/// 2025-11-25 is answered 200 with `protocolVersion: 2025-11-25`, but the session is bound to the
+/// version the client REQUESTED - every later request whose `mcp-protocol-version` header differs
+/// from that (rmcp sends the negotiated one, starting with `notifications/initialized`) is
+/// `400 invalid session`. Initialising at 2025-11-25 (or older) gives a working session.
+#[derive(Clone, Default)]
+struct GithubLikeHandles {
+    /// `protocolVersion` of every `initialize`, in order.
+    init_versions: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// session id -> the version that session was initialised WITH (not the negotiated one).
+    sessions: Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    rejected: Arc<AtomicUsize>,
+}
+
+const GITHUB_LIKE_MAX_VERSION: &str = "2025-11-25";
+
+async fn github_like_handle_post(
+    axum::extract::State(handles): axum::extract::State<GithubLikeHandles>,
+    headers: axum::http::HeaderMap,
+    axum::Json(req): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let id = req["id"].clone();
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    if req["method"].as_str() == Some("initialize") {
+        let requested = req["params"]["protocolVersion"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let negotiated = if requested.as_str() > GITHUB_LIKE_MAX_VERSION {
+            GITHUB_LIKE_MAX_VERSION.to_owned()
+        } else {
+            requested.clone()
+        };
+        let session = format!("s{}", handles.init_versions.lock().len() + 1);
+        handles.init_versions.lock().push(requested.clone());
+        handles.sessions.lock().insert(session.clone(), requested);
+        let result = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": negotiated,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "github-like", "version": "0.0.0"},
+            },
+        });
+        return ([("mcp-session-id", session)], axum::Json(result)).into_response();
+    }
+    let bound_version =
+        header("mcp-session-id").and_then(|s| handles.sessions.lock().get(&s).cloned());
+    if bound_version.is_none() || bound_version != header("mcp-protocol-version") {
+        handles.rejected.fetch_add(1, Ordering::Relaxed);
+        return (axum::http::StatusCode::BAD_REQUEST, "invalid session").into_response();
+    }
+    match req["method"].as_str() {
+        Some("tools/list") => axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"tools": [{"name": "get_me", "inputSchema": {"type": "object"}}]},
+        }))
+        .into_response(),
+        _ => axum::http::StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+async fn spawn_github_like_mcp() -> (String, GithubLikeHandles) {
+    let handles = GithubLikeHandles::default();
+    let app = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::get(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED })
+                .post(github_like_handle_post),
+        )
+        .with_state(handles.clone());
+    (spawn_test_http_server(app).await, handles)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_handshake_falls_back_to_the_previous_protocol_version_when_the_server_rejects_the_session()
+ {
+    let (url, handles) = spawn_github_like_mcp().await;
+    let client = fake_http_client(&url, 5);
+    let service = client.ensure_initialized().await.expect("handshake");
+
+    // First initialise at the requested version (whose session the server then rejects), second
+    // at the fallback.
+    assert_eq!(
+        *handles.init_versions.lock(),
+        vec![
+            REQUESTED_PROTOCOL_VERSION.as_str().to_owned(),
+            FALLBACK_PROTOCOL_VERSION.as_str().to_owned()
+        ]
+    );
+    assert_eq!(FALLBACK_PROTOCOL_VERSION.as_str(), GITHUB_LIKE_MAX_VERSION);
+    assert!(
+        handles.rejected.load(Ordering::Relaxed) >= 1,
+        "the first session must have been rejected"
+    );
+    assert_eq!(
+        service
+            .peer_info()
+            .map(|info| info.protocol_version.as_str().to_owned()),
+        Some(GITHUB_LIKE_MAX_VERSION.to_owned())
+    );
+    // The live session is the second one: its requests carry the version it was initialised
+    // with, so the server accepts them. Without the fallback the handshake itself fails.
+    let tools = service
+        .list_tools(None)
+        .await
+        .expect("tools/list on the re-initialised session");
+    assert_eq!(
+        tools
+            .tools
+            .iter()
+            .map(|t| t.name.as_ref())
+            .collect::<Vec<_>>(),
+        vec!["get_me"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_handshake_initialises_once_when_the_server_speaks_the_requested_version() {
+    // The stock fake echoes the requested version back: no downgrade, no second `initialize`.
+    let (url, handles) = spawn_fake_mcp(CallToolBehavior::HangThenOk { hang_ms: 0 }).await;
+    let client = fake_http_client(&url, 5);
+    client.ensure_initialized().await.expect("handshake");
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.init_version.lock().as_deref(),
+        Some(REQUESTED_PROTOCOL_VERSION.as_str())
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn http_transport_sends_default_user_agent_on_initialize() {
     let (url, handles) = spawn_fake_mcp(CallToolBehavior::HangThenOk { hang_ms: 0 }).await;
@@ -2556,7 +2696,11 @@ async fn try_call_tool_reconnects_then_succeeds_after_retriable_transport_error(
             }
         });
         let handler = FuigoClientHandler {
-            info: McpClient::make_client_info("dead", /* advertise_elicitation */ true),
+            info: McpClient::make_client_info(
+                "dead",
+                /* advertise_elicitation */ true,
+                REQUESTED_PROTOCOL_VERSION,
+            ),
             server_name: "dead".to_string(),
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
@@ -2666,7 +2810,11 @@ async fn watched_live_client(name: &str) -> Arc<McpClient> {
         }
     });
     let handler = FuigoClientHandler {
-        info: McpClient::make_client_info(name, /* advertise_elicitation */ true),
+        info: McpClient::make_client_info(
+            name,
+            /* advertise_elicitation */ true,
+            REQUESTED_PROTOCOL_VERSION,
+        ),
         server_name: name.to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
@@ -3247,14 +3395,23 @@ async fn is_healthy_pending_does_not_block_on_handshake() {
 #[test]
 fn make_client_info_pins_protocol_version() {
     assert_eq!(
-        McpClient::make_client_info("test-srv", /* advertise_elicitation */ true).protocol_version,
+        McpClient::make_client_info(
+            "test-srv",
+            /* advertise_elicitation */ true,
+            REQUESTED_PROTOCOL_VERSION
+        )
+        .protocol_version,
         rmcp::model::ProtocolVersion::V_2026_07_28
     );
 }
 
 #[test]
 fn make_client_info_advertises_form_and_url_elicitation() {
-    let info = McpClient::make_client_info("test-srv", /* advertise_elicitation */ true);
+    let info = McpClient::make_client_info(
+        "test-srv",
+        /* advertise_elicitation */ true,
+        REQUESTED_PROTOCOL_VERSION,
+    );
     let elicitation = info
         .capabilities
         .elicitation
@@ -3300,7 +3457,9 @@ fn acp_zero_ipc_client_info_does_not_advertise_elicitation() {
         None,
         None,
     );
-    let acp_info = acp.make_client_handler().get_info();
+    let acp_info = acp
+        .make_client_handler(REQUESTED_PROTOCOL_VERSION)
+        .get_info();
     assert!(
         acp_info.capabilities.elicitation.is_none(),
         "ACP zero-IPC cannot deliver elicitation/create"
@@ -3309,7 +3468,7 @@ fn acp_zero_ipc_client_info_does_not_advertise_elicitation() {
     let no_bridge = McpClient::stub("stdio");
     assert!(
         no_bridge
-            .make_client_handler()
+            .make_client_handler(REQUESTED_PROTOCOL_VERSION)
             .get_info()
             .capabilities
             .elicitation
@@ -3320,7 +3479,7 @@ fn acp_zero_ipc_client_info_does_not_advertise_elicitation() {
     let hitl = McpClient::stub("stdio");
     hitl.set_elicitation_tx(Some(crate::elicitation::ElicitationInbox::new()));
     assert!(
-        hitl.make_client_handler()
+        hitl.make_client_handler(REQUESTED_PROTOCOL_VERSION)
             .get_info()
             .capabilities
             .elicitation
@@ -3333,7 +3492,11 @@ fn acp_zero_ipc_client_info_does_not_advertise_elicitation() {
 async fn client_handler_routes_tools_changed() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
     let handler = FuigoClientHandler {
-        info: McpClient::make_client_info("test", /* advertise_elicitation */ true),
+        info: McpClient::make_client_info(
+            "test",
+            /* advertise_elicitation */ true,
+            REQUESTED_PROTOCOL_VERSION,
+        ),
         server_name: "test".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(Some(tx))),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
@@ -3353,7 +3516,7 @@ async fn client_handler_observes_post_handshake_set_event_tx() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
     let client = Arc::new(McpClient::stub("test"));
 
-    let handler = client.make_client_handler();
+    let handler = client.make_client_handler(REQUESTED_PROTOCOL_VERSION);
 
     assert!(handler.notify_tx.lock().is_none());
 

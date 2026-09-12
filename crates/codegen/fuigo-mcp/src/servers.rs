@@ -3050,6 +3050,33 @@ fn restorable_transport(pending: &PendingTransport) -> Option<PendingTransport> 
     }
 }
 
+/// Like [`restorable_transport`], but only for the HTTP transports whose sessions live on the
+/// server: those are the ones that can bind a session to the protocol version the client REQUESTED
+/// rather than the one the server negotiated. Stdio has no server-side session; the ACP bridge is
+/// in-process.
+fn restorable_http_transport(pending: &PendingTransport) -> Option<PendingTransport> {
+    match pending {
+        PendingTransport::Http(_) | PendingTransport::HttpAuth { .. } => {
+            restorable_transport(pending)
+        }
+        PendingTransport::Stdio(_) | PendingTransport::Acp { .. } => None,
+    }
+}
+
+/// The protocol version this client asks for on the first `initialize`.
+///
+/// This pin currently equals rmcp 3.2 LATEST. The explicit constant must remain so a future rmcp
+/// bump cannot silently move the wire. 2026-07-28 brings SEP-2322 multi round-trip requests
+/// (`input_required` results); older servers negotiate down and keep the server-initiated
+/// `elicitation/create` flow.
+const REQUESTED_PROTOCOL_VERSION: rmcp::model::ProtocolVersion =
+    rmcp::model::ProtocolVersion::V_2026_07_28;
+
+/// The version the first handshake falls back to when an HTTP server rejects the requested one.
+/// rmcp's `LATEST` and the newest version hosted servers are known to hold a session at.
+const FALLBACK_PROTOCOL_VERSION: rmcp::model::ProtocolVersion =
+    rmcp::model::ProtocolVersion::V_2025_11_25;
+
 /// Monotonic source for [`McpClient::client_id`].
 /// Process-global so every client instance (including test stubs) gets a unique identity.
 static NEXT_CLIENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -3721,8 +3748,39 @@ impl McpClient {
             restore: restore_for_guard,
         };
 
+        // Third clone, for the protocol-version fallback below (HTTP only)
+        let restore_for_fallback = restorable_http_transport(&pending);
+
         let handshake_start = std::time::Instant::now();
-        let mut result = self.try_handshake(pending).await;
+        let mut protocol_version = REQUESTED_PROTOCOL_VERSION;
+        let mut result = self.try_handshake(pending, protocol_version.clone()).await;
+
+        // An HTTP server that cannot hold a session initialised at the requested version gets one
+        // more `initialize`, at the widely-deployed fallback. Spec-wise a server that negotiates
+        // DOWN in its `initialize` reply should then accept requests carrying
+        // `MCP-Protocol-Version: <negotiated>`. GitHub's hosted server
+        // (api.githubcopilot.com/mcp, observed 2026-09-12) answers 200 to a 2026-07-28 `initialize`,
+        // negotiates to 2025-11-25, then rejects every request on that session - starting with
+        // rmcp's own `notifications/initialized` - with `400 invalid session`, so the handshake
+        // fails inside `serve` and the negotiated version is never observable here. Initialising
+        // at 2025-11-25 gives a working session. One extra `initialize`, only after a failure that
+        // is not a timeout; a server that speaks the requested version pays nothing.
+        if let Some(retry_transport) = restore_for_fallback
+            && let Err(err) = &result
+            && !matches!(err, McpError::Timeout { .. })
+        {
+            tracing::info!(
+                server = %self.server_name,
+                requested = REQUESTED_PROTOCOL_VERSION.as_str(),
+                fallback = FALLBACK_PROTOCOL_VERSION.as_str(),
+                error = %err,
+                "MCP handshake failed at the requested protocol version; retrying at the fallback"
+            );
+            protocol_version = FALLBACK_PROTOCOL_VERSION;
+            result = self
+                .try_handshake(retry_transport, protocol_version.clone())
+                .await;
+        }
 
         let handshake_elapsed = handshake_start.elapsed().as_micros() as u64;
         tracing::info!(target: fuigo_telemetry::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", elapsed_us = handshake_elapsed);
@@ -3749,7 +3807,7 @@ impl McpClient {
                     config: config.clone(),
                     auth_manager: auth_mgr.clone(),
                 };
-                result = self.try_handshake(retry_transport).await;
+                result = self.try_handshake(retry_transport, protocol_version).await;
             }
         }
 
@@ -3829,13 +3887,14 @@ impl McpClient {
     async fn try_handshake(
         &self,
         pending: PendingTransport,
+        protocol_version: rmcp::model::ProtocolVersion,
     ) -> Result<rmcp::service::RunningService<RoleClient, FuigoClientHandler>, McpError> {
         let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
         let name = &self.server_name;
 
         match pending {
             PendingTransport::Stdio(process) => {
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(protocol_version.clone());
                 tokio::time::timeout(timeout, handler.serve(*process))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3847,7 +3906,7 @@ impl McpClient {
             PendingTransport::Http(config) => {
                 let transport =
                     Self::build_http_transport(&config, name, self.warn_budget.clone())?;
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(protocol_version.clone());
                 tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3908,7 +3967,7 @@ impl McpClient {
                     StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
                 let transport =
                     StreamableHttpClientTransport::with_client(mcp_http_client, transport_config);
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(protocol_version.clone());
                 tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3928,7 +3987,7 @@ impl McpClient {
                 );
                 let transport =
                     crate::acp_transport::acp_bridge_transport(server_id, invoker, invoke_timeout);
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(protocol_version.clone());
                 tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3940,7 +3999,11 @@ impl McpClient {
         }
     }
 
-    fn make_client_info(server_name: &str, advertise_elicitation: bool) -> ClientInfo {
+    fn make_client_info(
+        server_name: &str,
+        advertise_elicitation: bool,
+        protocol_version: rmcp::model::ProtocolVersion,
+    ) -> ClientInfo {
         use rmcp::model::{
             ElicitationCapability, FormElicitationCapability, UrlElicitationCapability,
         };
@@ -3969,21 +4032,23 @@ impl McpClient {
                 fuigo_version::VERSION.to_string(),
             ),
         )
-        // This pin currently equals rmcp 3.2 LATEST
-        // The explicit setter must remain so a future rmcp bump cannot silently move the wire
-        // 2026-07-28 brings SEP-2322 multi round-trip requests (`input_required` results); older
-        // servers negotiate down and keep the server-initiated `elicitation/create` flow
-        .with_protocol_version(rmcp::model::ProtocolVersion::V_2026_07_28)
+        // `REQUESTED_PROTOCOL_VERSION` on the first handshake; `FALLBACK_PROTOCOL_VERSION` on the
+        // HTTP retry (see `ensure_initialized`)
+        .with_protocol_version(protocol_version)
     }
 
     /// Build the [`FuigoClientHandler`] that drives `client.serve(...)`.
     ///
     /// The handler holds a **clone of `Arc<Mutex<Option<Sender>>>`**, not a snapshot, so a later [`Self::set_event_tx`] reaches the live handler.
-    fn make_client_handler(&self) -> FuigoClientHandler {
+    fn make_client_handler(
+        &self,
+        protocol_version: rmcp::model::ProtocolVersion,
+    ) -> FuigoClientHandler {
         FuigoClientHandler {
             info: Self::make_client_info(
                 &self.server_name,
                 !self.is_acp() && self.elicitation_tx.lock().is_some(),
+                protocol_version,
             ),
             server_name: self.server_name.clone(),
             notify_tx: Arc::clone(&self.notify_tx),
