@@ -4122,3 +4122,95 @@ async fn grok_agent_id_header_rejects_invalid_session_id() {
     };
     assert!(error.to_string().contains("invalid X-Grok-Agent-ID value"));
 }
+
+mod server_name_sanitizing {
+    use super::*;
+
+    #[test]
+    fn identity_for_well_formed_names() {
+        // Every name a known host sends today, verbatim: Murage's four and a few common shapes.
+        for name in [
+            "agents",
+            "browser",
+            "composio",
+            "computer",
+            "github",
+            "chrome-devtools",
+            "my_server-2",
+            "A1",
+        ] {
+            assert_eq!(
+                sanitize_mcp_server_name(name),
+                name,
+                "{name} must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_dns_ids_become_tool_id_safe() {
+        assert_eq!(
+            sanitize_mcp_server_name("com.microsoft-playwright-mcp"),
+            "com-microsoft-playwright-mcp"
+        );
+        assert_eq!(
+            sanitize_mcp_server_name("com.notion-notion-mcp"),
+            "com-notion-notion-mcp"
+        );
+        assert_eq!(
+            sanitize_mcp_server_name("com.github-github-mcp-server"),
+            "com-github-github-mcp-server"
+        );
+    }
+
+    #[test]
+    fn delimiter_runs_collapse_and_edges_trim() {
+        assert_eq!(sanitize_mcp_server_name("a__b"), "a_b");
+        assert_eq!(sanitize_mcp_server_name("a___b"), "a_b");
+        assert_eq!(sanitize_mcp_server_name(".hidden."), "hidden");
+        assert_eq!(sanitize_mcp_server_name("a b/c"), "a-b-c");
+        assert_eq!(sanitize_mcp_server_name("caf\u{e9}"), "caf");
+        assert_eq!(sanitize_mcp_server_name("..."), "mcp");
+        assert_eq!(sanitize_mcp_server_name(""), "mcp");
+    }
+
+    #[test]
+    fn sanitized_name_yields_a_registrable_qualified_name() {
+        let raw = "com.microsoft-playwright-mcp";
+        let broken = format!("{raw}{MCP_TOOL_NAME_DELIMITER}browser_click");
+        assert!(
+            parse_mcp_qualified_name(&broken).is_none(),
+            "the raw reverse-DNS name is rejected by the tool-id charset; that is the defect"
+        );
+        let fixed = format!(
+            "{}{MCP_TOOL_NAME_DELIMITER}browser_click",
+            sanitize_mcp_server_name(raw)
+        );
+        let (_, server, tool) = parse_mcp_qualified_name(&fixed).expect("sanitized name registers");
+        assert_eq!(server, "com-microsoft-playwright-mcp");
+        assert_eq!(tool, "browser_click");
+        assert!(validate_tool_name(&fixed).is_ok());
+    }
+
+    #[test]
+    fn set_name_round_trips_through_every_variant() {
+        let mut stdio = acp::McpServer::Stdio(acp::McpServerStdio::new(
+            "x".to_string(),
+            PathBuf::from("cmd"),
+        ));
+        set_mcp_server_name(&mut stdio, "y".to_string());
+        assert_eq!(mcp_server_name(&stdio), "y");
+        let mut http = acp::McpServer::Http(acp::McpServerHttp::new(
+            "x".to_string(),
+            "https://e/".to_string(),
+        ));
+        set_mcp_server_name(&mut http, "y".to_string());
+        assert_eq!(mcp_server_name(&http), "y");
+        let mut sse = acp::McpServer::Sse(acp::McpServerSse::new(
+            "x".to_string(),
+            "https://e/".to_string(),
+        ));
+        set_mcp_server_name(&mut sse, "y".to_string());
+        assert_eq!(mcp_server_name(&sse), "y");
+    }
+}
