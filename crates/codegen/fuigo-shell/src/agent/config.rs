@@ -824,6 +824,7 @@ pub fn resolve_compat_sessions_from_raw(
             CompatVendor::Cursor => config.cursor.sessions = value,
             CompatVendor::Claude => config.claude.sessions = value,
             CompatVendor::Codex => config.codex.sessions = value,
+            CompatVendor::Agents => config.agents.sessions = value,
         }
     }
     resolve_compat_config(&config, remote)

@@ -62,7 +62,7 @@ pub struct SkillsConfig {
 ///
 /// When `working_directory` is `None`, only User-scoped skills are returned.
 ///
-/// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned.
+/// `compat` gates which vendor (`.agents`/`.claude`/`.cursor`) dirs are scanned.
 /// Pass `CompatConfig::default()` to preserve the historical all-vendors behavior.
 /// `project_trusted` is the folder-trust verdict for `working_directory`; when false, the project chain and the workspace-user overlay are omitted.
 pub async fn list_skills(
@@ -211,7 +211,7 @@ fn collect_skill_config_dirs_from_sources(
         }
     };
 
-    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat config; `.fuigo` and `.agents` are always present
+    // `.agents`/`.claude`/`.cursor` are gated by the resolved compat config; `.fuigo` is always present
     // When all cells are on, this list equals the historical `[".fuigo", ".agents", ".claude", ".cursor"]`
     let config_dir_names = compat.skill_config_dirs();
 
@@ -225,10 +225,12 @@ fn collect_skill_config_dirs_from_sources(
     }
 
     // Priority 3: Global user dirs. `.fuigo` comes from `fuigo_home` (which may be overridden), so it's handled separately.
-    // `.agents` is always added, while `.claude`/`.cursor` are gated by the skills compat cells
+    // `.agents`/`.claude`/`.cursor` are gated by their skills compat cells
     try_add(fuigo_home);
     if let Some(home) = fuigo_dirs::home_dir() {
-        try_add(home.join(".agents"));
+        if compat.agents.skills {
+            try_add(home.join(".agents"));
+        }
         if compat.claude.skills {
             try_add(home.join(".claude"));
         }
@@ -2508,6 +2510,62 @@ mod tests {
         );
         assert!(ends_with(&dirs, ".claude"), "claude must remain: {dirs:?}");
         assert!(ends_with(&dirs, ".fuigo"), "fuigo must remain: {dirs:?}");
+    }
+
+    /// RAII guard: set an env var, restore the prior value (or unset) on drop.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(home_env)]
+    fn collect_skill_config_dirs_gates_home_agents_dir() {
+        // Pin both HOME and USERPROFILE so Windows home_dir() sees the tempdir too
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", home.path());
+        let home_agents = home.path().join(".agents");
+        fs::create_dir_all(home_agents.join("skills")).unwrap();
+        let fuigo_home = tempfile::tempdir().unwrap();
+
+        let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let has_home_agents =
+            |dirs: &[PathBuf]| dirs.iter().any(|d| canon(d) == canon(&home_agents));
+
+        // Default ON: `~/.agents` is scanned (historical CLI behavior)
+        let dirs =
+            collect_skill_config_dirs(None, None, fuigo_home.path(), &[], CompatConfig::default());
+        assert!(
+            has_home_agents(&dirs),
+            "~/.agents must be scanned by default: {dirs:?}"
+        );
+
+        // `agents.skills = false` (FUIGO_AGENTS_SKILLS_ENABLED=0): `~/.agents` is not scanned
+        let mut compat = CompatConfig::default();
+        compat.agents.skills = false;
+        let dirs = collect_skill_config_dirs(None, None, fuigo_home.path(), &[], compat);
+        assert!(
+            !has_home_agents(&dirs),
+            "~/.agents must be gated off: {dirs:?}"
+        );
     }
 
     // ── Same-scope frontmatter-name collisions (copied skill dirs) ──────

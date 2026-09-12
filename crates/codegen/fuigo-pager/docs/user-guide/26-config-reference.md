@@ -114,6 +114,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
+| `compat.agents.skills` | `boolean` | `yes` | `user` | Scan the vendor-neutral `.agents/skills/` directories. Also FUIGO_AGENTS_SKILLS_ENABLED. |
 | `compat.claude.agents` | `boolean` | `yes` | `user` | Scan CLAUDE.md. Also FUIGO_CLAUDE_AGENTS_ENABLED. |
 | `compat.claude.hooks` | `boolean` | `yes` | `user` | Scan Claude hooks. Also FUIGO_CLAUDE_HOOKS_ENABLED. |
 | `compat.claude.mcps` | `boolean` | `yes` | `user` | Scan Claude MCP config. Also FUIGO_CLAUDE_MCPS_ENABLED. |

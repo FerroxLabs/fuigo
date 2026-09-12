@@ -32,7 +32,7 @@ Flat `*.md` files under a `commands/` directory become user-invocable slash comm
 
 Skill and command discovery does **not** use `.gitignore`. Paths under known skill roots (`.fuigo/`, `.agents/`, `.claude/`, `.cursor/`) always load when present on disk — teams often ignore `.claude/**` as local-only config while still expecting `/frontend`-style project commands to work. To hide a skill, use `[skills] ignore` in config (not repo ignore rules).
 
-Fuigo scans the Claude and Cursor skill directories by default. To stop scanning a vendor, set its `skills` cell to `false` under `[compat.cursor]` or `[compat.claude]` in `~/.fuigo/config.toml`, or set the `FUIGO_CURSOR_SKILLS_ENABLED` or `FUIGO_CLAUDE_SKILLS_ENABLED` environment variable to `false`. See [Configuration](05-configuration.md#harness-compatibility) for details. Fuigo always filters out known vendor-shipped default skills (such as Cursor's `shell`, `canvas`, and `statusline`), regardless of these settings.
+Fuigo scans the Claude, Cursor, and vendor-neutral `.agents/` skill directories by default. To stop scanning one, set its `skills` cell to `false` under `[compat.cursor]`, `[compat.claude]`, or `[compat.agents]` in `~/.fuigo/config.toml`, or set the `FUIGO_CURSOR_SKILLS_ENABLED`, `FUIGO_CLAUDE_SKILLS_ENABLED`, or `FUIGO_AGENTS_SKILLS_ENABLED` environment variable to `false`. See [Configuration](05-configuration.md#harness-compatibility) for details. Fuigo always filters out known vendor-shipped default skills (such as Cursor's `shell`, `canvas`, and `statusline`), regardless of these settings.
 
 ### Additional Skill Directories
 
