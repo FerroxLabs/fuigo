@@ -4123,6 +4123,74 @@ async fn grok_agent_id_header_rejects_invalid_session_id() {
     assert!(error.to_string().contains("invalid X-Grok-Agent-ID value"));
 }
 
+mod tool_name_length_projection {
+    use super::*;
+
+    const SERVER: &str = "io-github-taylorwilsdon-google-workspace-mcp";
+
+    #[test]
+    fn identity_for_a_name_that_fits() {
+        assert_eq!(
+            project_qualified_tool_name("browser", "navigate").as_deref(),
+            Some("browser__navigate")
+        );
+        let exactly_64 = "x".repeat(MAX_TOOL_NAME_LEN - SERVER.len() - 2);
+        let full = project_qualified_tool_name(SERVER, &exactly_64).unwrap();
+        assert_eq!(full.len(), MAX_TOOL_NAME_LEN);
+        assert_eq!(full, format!("{SERVER}__{exactly_64}"));
+    }
+
+    #[test]
+    fn shortens_the_tool_segment_to_the_provider_limit_and_keeps_the_server() {
+        let name =
+            project_qualified_tool_name(SERVER, "batch_modify_gmail_message_labels").unwrap();
+        assert!(name.len() <= MAX_TOOL_NAME_LEN, "{name}");
+        // 44-char server + `__` + 7-char digest leaves an 11-char stem.
+        assert_eq!(name, format!("{SERVER}__batch_modif-580aef"));
+        assert_eq!(name.len(), MAX_TOOL_NAME_LEN);
+        assert!(validate_tool_name(&name).is_ok(), "{name}");
+        let (_id, server, _tool) =
+            parse_mcp_qualified_name(&name).expect("still parses as server__tool");
+        assert_eq!(server, SERVER);
+    }
+
+    #[test]
+    fn siblings_sharing_a_long_prefix_stay_distinct_and_stable() {
+        let a = project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v1").unwrap();
+        let b = project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v2").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v1").unwrap()
+        );
+    }
+
+    #[test]
+    fn refuses_when_the_server_leaves_no_room() {
+        let huge_server = "s".repeat(60);
+        assert_eq!(project_qualified_tool_name(&huge_server, "tool"), None);
+    }
+
+    #[test]
+    fn registration_and_tool_id_agree_on_the_projected_name() {
+        let tool = McpTool::new(
+            "batch_modify_gmail_message_labels".to_string(),
+            "desc".to_string(),
+            SERVER.to_string(),
+            Arc::new(Mutex::new(McpState::new(vec![]))),
+            serde_json::json!({"type": "object"}),
+            None,
+        );
+        let projected = tool.qualified_name().unwrap();
+        let erased = McpErasedTool { tool: tool.clone() };
+        assert_eq!(fuigo_tool_runtime::Tool::id(&erased).as_str(), projected);
+        let registration = tool
+            .into_registration()
+            .expect("registers under the projected name");
+        assert_eq!(registration.name, projected);
+    }
+}
+
 mod server_name_sanitizing {
     use super::*;
 
