@@ -113,12 +113,53 @@ pub(crate) fn admit_client_mcp_servers(
         );
     }
     if blocked.is_empty() {
-        return client_mcp_servers;
+        return normalize_client_mcp_server_names(client_mcp_servers);
     }
-    client_mcp_servers
-        .into_iter()
-        .filter(|s| !blocked.contains(&mcp_vendor_block_key(s)))
-        .collect()
+    // Block by the raw name first: a vendor entry is matched on what the client sent, not on the projected name.
+    normalize_client_mcp_server_names(
+        client_mcp_servers
+            .into_iter()
+            .filter(|s| !blocked.contains(&mcp_vendor_block_key(s)))
+            .collect(),
+    )
+}
+
+/// Rename client servers whose name cannot be a tool-id segment (see
+/// [`fuigo_mcp::servers::sanitize_mcp_server_name`]) so their tools register instead of
+/// being skipped. A name that is already well-formed is never touched, so a host whose ids
+/// are clean sees exactly today's behaviour, duplicates included. Only a *renamed* server can
+/// collide with another name in the list; it gets a `-2`, `-3`, ... suffix in list order.
+/// Each rename is logged so a host can see the name to expect in `tool_call` ids.
+fn normalize_client_mcp_server_names(servers: Vec<acp::McpServer>) -> Vec<acp::McpServer> {
+    use fuigo_mcp::servers::{sanitize_mcp_server_name, set_mcp_server_name};
+    let mut taken: std::collections::HashSet<String> = servers
+        .iter()
+        .map(|s| mcp_server_name(s).to_owned())
+        .collect();
+    let mut out = Vec::with_capacity(servers.len());
+    for mut server in servers {
+        let raw = mcp_server_name(&server).to_owned();
+        let sanitized = sanitize_mcp_server_name(&raw);
+        if sanitized == raw {
+            out.push(server);
+            continue;
+        }
+        let mut name = sanitized.clone();
+        let mut n = 2;
+        while taken.contains(&name) {
+            name = format!("{sanitized}-{n}");
+            n += 1;
+        }
+        taken.insert(name.clone());
+        tracing::warn!(
+            from = %raw,
+            to = %name,
+            "MCP server renamed: name is not a valid tool-id segment ([A-Za-z0-9_-], single `__`); tools register under the new name"
+        );
+        set_mcp_server_name(&mut server, name);
+        out.push(server);
+    }
+    out
 }
 
 pub(crate) fn merge_managed_mcp_servers_with_policy(
@@ -548,6 +589,85 @@ mod tests {
 
     fn client_stdio(name: &str) -> acp::McpServer {
         acp::McpServer::Stdio(acp::McpServerStdio::new(name.to_string(), "true"))
+    }
+
+    fn names(servers: &[acp::McpServer]) -> Vec<&str> {
+        servers.iter().map(mcp_server_name).collect()
+    }
+
+    /// A host that keys connectors by reverse-DNS id must still get tools: the name is projected
+    /// onto the tool-id charset at admission, before anything downstream keys on it.
+    #[test]
+    fn admit_renames_reverse_dns_client_servers() {
+        let cwd = empty_cwd();
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let admitted = admit_client_mcp_servers(
+            vec![
+                client_stdio("com.microsoft-playwright-mcp"),
+                client_stdio("com.notion-notion-mcp"),
+            ],
+            cwd.path(),
+            &compat,
+        );
+        assert_eq!(
+            names(&admitted),
+            vec!["com-microsoft-playwright-mcp", "com-notion-notion-mcp"]
+        );
+    }
+
+    /// Murage's four server names, verbatim: admission must be the identity for them, duplicates
+    /// included (the merge dedupes by name later exactly as before).
+    #[test]
+    fn admit_is_identity_for_well_formed_client_names() {
+        let cwd = empty_cwd();
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let input = vec![
+            client_stdio("agents"),
+            client_stdio("browser"),
+            client_stdio("composio"),
+            client_stdio("computer"),
+            client_stdio("computer"),
+        ];
+        let admitted = admit_client_mcp_servers(input.clone(), cwd.path(), &compat);
+        assert_eq!(names(&admitted), names(&input));
+    }
+
+    /// Only a renamed server can collide; it takes a numeric suffix rather than shadowing a
+    /// server whose name was already clean.
+    #[test]
+    fn admit_suffixes_a_renamed_server_that_collides() {
+        let cwd = empty_cwd();
+        let compat = fuigo_tools::types::compat::CompatConfig::default();
+        let admitted = admit_client_mcp_servers(
+            vec![
+                client_stdio("com-x"),
+                client_stdio("com.x"),
+                client_stdio("com_x"),
+                client_stdio("com x"),
+            ],
+            cwd.path(),
+            &compat,
+        );
+        assert_eq!(
+            names(&admitted),
+            vec!["com-x", "com-x-2", "com_x", "com-x-3"]
+        );
+    }
+
+    /// The vendor kill switch matches on the raw client name; projecting first would let a
+    /// blocked dotted vendor server slip through under its new name.
+    #[test]
+    fn admit_blocks_by_raw_name_before_renaming() {
+        let cwd = empty_cwd();
+        write_cursor_project_mcp(cwd.path(), "com.blocked");
+        let mut compat = fuigo_tools::types::compat::CompatConfig::default();
+        compat.cursor.mcps = false;
+        let admitted = admit_client_mcp_servers(
+            vec![client_stdio("com.blocked"), client_stdio("com.kept")],
+            cwd.path(),
+            &compat,
+        );
+        assert_eq!(names(&admitted), vec!["com-kept"]);
     }
 
     /// Vendor mcps kill switch must drop client-forwarded servers that match on-disk vendor config (pager may still load with default-on compat).
