@@ -12,6 +12,11 @@
 //!   cell is `Option<bool>` so `None` falls through to the resolution chain.
 //! - [`CompatConfig`] — resolved plain bools consumed at runtime. Every cell
 //!   defaults on.
+//!
+//! The vendor-neutral `.agents` directory (the cross-agent skills layout) is
+//! registered as its own vendor with a single runtime cell, `agents.skills`,
+//! so an embedder can turn the `~/.agents/skills` scan off the same way it
+//! turns off `~/.claude/skills` or `~/.cursor/skills`.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +25,8 @@ pub enum CompatVendor {
     Cursor,
     Claude,
     Codex,
+    /// The vendor-neutral `.agents` directory shared across agent tools.
+    Agents,
 }
 
 impl CompatVendor {
@@ -28,6 +35,7 @@ impl CompatVendor {
             Self::Cursor => "cursor",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Agents => "agents",
         }
     }
 }
@@ -119,11 +127,12 @@ impl CompatCell {
         match self.vendor {
             CompatVendor::Cursor | CompatVendor::Claude => true,
             CompatVendor::Codex => matches!(self.surface, CompatSurface::Sessions),
+            CompatVendor::Agents => matches!(self.surface, CompatSurface::Skills),
         }
     }
 }
 
-pub const COMPAT_CELLS: [CompatCell; 18] = [
+pub const COMPAT_CELLS: [CompatCell; 19] = [
     CompatCell::new(
         CompatVendor::Cursor,
         CompatSurface::Skills,
@@ -232,6 +241,12 @@ pub const COMPAT_CELLS: [CompatCell; 18] = [
         "FUIGO_CODEX_SESSIONS_ENABLED",
         Some(CompatRemoteKey::CodexSessions),
     ),
+    CompatCell::new(
+        CompatVendor::Agents,
+        CompatSurface::Skills,
+        "FUIGO_AGENTS_SKILLS_ENABLED",
+        None,
+    ),
 ];
 
 /// Raw per-vendor compat cells parsed from `[compat.<vendor>]` TOML.
@@ -269,6 +284,9 @@ pub struct CompatConfigToml {
     pub claude: VendorCompatToml,
     #[serde(default)]
     pub codex: VendorCompatToml,
+    /// `[compat.agents]`: only `skills` is consumed at runtime.
+    #[serde(default)]
+    pub agents: VendorCompatToml,
 }
 
 impl CompatConfigToml {
@@ -277,6 +295,7 @@ impl CompatConfigToml {
             CompatVendor::Cursor => self.cursor.value(cell.surface()),
             CompatVendor::Claude => self.claude.value(cell.surface()),
             CompatVendor::Codex => self.codex.value(cell.surface()),
+            CompatVendor::Agents => self.agents.value(cell.surface()),
         }
     }
 }
@@ -331,13 +350,15 @@ impl Default for VendorCompat {
 
 /// Resolved `[compat]` configuration threaded into compatibility consumers.
 ///
-/// Every cell defaults on. Codex's non-session cells are reserved and are not
-/// consumed by discovery.
+/// Every cell defaults on. Codex's non-session cells and the non-skills
+/// `agents` cells are reserved and are not consumed by discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CompatConfig {
     pub cursor: VendorCompat,
     pub claude: VendorCompat,
     pub codex: VendorCompat,
+    /// Vendor-neutral `.agents` directory; only `skills` is consumed.
+    pub agents: VendorCompat,
 }
 
 impl CompatConfig {
@@ -346,6 +367,7 @@ impl CompatConfig {
             CompatVendor::Cursor => self.cursor.value(cell.surface()),
             CompatVendor::Claude => self.claude.value(cell.surface()),
             CompatVendor::Codex => self.codex.value(cell.surface()),
+            CompatVendor::Agents => self.agents.value(cell.surface()),
         }
     }
 
@@ -354,18 +376,22 @@ impl CompatConfig {
             CompatVendor::Cursor => self.cursor.set(cell.surface(), value),
             CompatVendor::Claude => self.claude.set(cell.surface(), value),
             CompatVendor::Codex => self.codex.set(cell.surface(), value),
+            CompatVendor::Agents => self.agents.set(cell.surface(), value),
         }
     }
 
     /// Config directories that may contain `skills/` subdirectories, in
-    /// priority order. `.fuigo` and `.agents` are always included; `.claude`
+    /// priority order. `.fuigo` is always included; `.agents`, `.claude`
     /// and `.cursor` are gated on their respective `skills` cell.
     ///
     /// Replaces the hard-coded `[".fuigo", ".agents", ".claude", ".cursor"]`
     /// in `collect_skill_config_dirs`. When all cells are on, the returned
     /// list is identical to the historical constant.
     pub fn skill_config_dirs(&self) -> Vec<&'static str> {
-        let mut dirs = vec![".fuigo", ".agents"];
+        let mut dirs = vec![".fuigo"];
+        if self.agents.skills {
+            dirs.push(".agents");
+        }
         if self.claude.skills {
             dirs.push(".claude");
         }
@@ -467,6 +493,7 @@ mod tests {
                 ("codex", "mcps", None),
                 ("codex", "hooks", None),
                 ("codex", "sessions", Some(CodexSessions)),
+                ("agents", "skills", None),
             ]
         );
 
@@ -479,7 +506,12 @@ mod tests {
                 cell.surface().as_str()
             );
         }
-        for vendor in [defaults.cursor, defaults.claude, defaults.codex] {
+        for vendor in [
+            defaults.cursor,
+            defaults.claude,
+            defaults.codex,
+            defaults.agents,
+        ] {
             assert!(vendor.skills && vendor.rules && vendor.agents);
             assert!(vendor.mcps && vendor.hooks);
             assert!(vendor.sessions);
@@ -505,6 +537,7 @@ mod tests {
                 ("claude", "hooks"),
                 ("claude", "sessions"),
                 ("codex", "sessions"),
+                ("agents", "skills"),
             ]
         );
     }
@@ -531,6 +564,27 @@ mod tests {
         let mut c2 = CompatConfig::default();
         c2.claude.skills = false;
         assert_eq!(c2.skill_config_dirs(), vec![".fuigo", ".agents", ".cursor"]);
+    }
+
+    #[test]
+    fn agents_skills_cell_gates_dot_agents_dir() {
+        // Default ON keeps the historical `.agents` scan for CLI users.
+        assert!(
+            CompatConfig::default()
+                .skill_config_dirs()
+                .contains(&".agents")
+        );
+
+        // `agents.skills = false` (FUIGO_AGENTS_SKILLS_ENABLED / `[compat.agents]`)
+        // drops `.agents` and leaves every other root untouched.
+        let mut c = CompatConfig::default();
+        c.agents.skills = false;
+        assert_eq!(c.skill_config_dirs(), vec![".fuigo", ".claude", ".cursor"]);
+
+        // Off with the vendor cells also off: only the native root remains.
+        c.claude.skills = false;
+        c.cursor.skills = false;
+        assert_eq!(c.skill_config_dirs(), vec![".fuigo"]);
     }
 
     #[test]
@@ -628,5 +682,12 @@ mod tests {
         assert_eq!(parsed.claude.sessions, None);
         assert_eq!(parsed.cursor, VendorCompatToml::default());
         assert_eq!(parsed.codex, VendorCompatToml::default());
+        assert_eq!(parsed.agents, VendorCompatToml::default());
+
+        // `[compat.agents] skills = false` parses into the agents vendor cell.
+        let parsed: CompatConfigToml = serde_yaml::from_str("agents:\n  skills: false\n").unwrap();
+        assert_eq!(parsed.agents.skills, Some(false));
+        assert_eq!(parsed.agents.rules, None);
+        assert_eq!(parsed.claude, VendorCompatToml::default());
     }
 }

@@ -6349,6 +6349,34 @@ fn resolve_compat_env_sessions_disable_independently() {
 }
 #[test]
 #[serial]
+fn resolve_compat_agents_skills_env_and_toml() {
+    let _env = isolate_compat_env();
+    // Default ON: the `~/.agents/skills` scan stays on for CLI users.
+    assert!(
+        resolve_compat_config(&CompatConfigToml::default(), None)
+            .agents
+            .skills
+    );
+
+    // `[compat.agents] skills = false` turns it off; other skills cells are untouched.
+    let config = parse_compat("[compat.agents]\nskills = false");
+    let resolved = resolve_compat_config(&config, None);
+    assert!(!resolved.agents.skills);
+    assert!(resolved.claude.skills && resolved.cursor.skills);
+
+    // The env var wins over TOML in both directions.
+    let _on = EnvGuard::set("FUIGO_AGENTS_SKILLS_ENABLED", "true");
+    assert!(resolve_compat_config(&config, None).agents.skills);
+    drop(_on);
+    let _off = EnvGuard::set("FUIGO_AGENTS_SKILLS_ENABLED", "false");
+    assert!(
+        !resolve_compat_config(&CompatConfigToml::default(), None)
+            .agents
+            .skills
+    );
+}
+#[test]
+#[serial]
 fn resolve_compat_precedence_and_reserved_codex_hook() {
     let _env = isolate_compat_env();
     let config = parse_compat("[compat.cursor]\nsessions = false\n[compat.codex]\nhooks = false");

@@ -199,7 +199,7 @@ mod tests {
         let report = resolve_without_env(Ok(&effective_config));
 
         assert!(!report.remote_settings_loaded);
-        assert_eq!(report.cells.len(), 13);
+        assert_eq!(report.cells.len(), 14);
         assert!(
             report
                 .cells
