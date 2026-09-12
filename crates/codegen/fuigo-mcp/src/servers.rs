@@ -4868,6 +4868,61 @@ pub async fn start_mcp_servers(
     .await
 }
 
+/// Project a host-supplied MCP server name onto the tool-id charset.
+///
+/// A server name is the namespace half of every `server__tool` qualified name the model
+/// sees, and a tool id admits only `[A-Za-z0-9_-]` per segment (see [`parse_mcp_qualified_name`]
+/// and `fuigo_tool_protocol::ToolId`) - the rule the provider APIs impose on function names.
+/// A host that keys connectors by reverse-DNS ids (`com.microsoft-playwright-mcp`) otherwise
+/// loses every tool on that server to "Skipping MCP tool with invalid or ambiguous qualified name".
+///
+/// - every character outside `[A-Za-z0-9_-]` becomes `-`
+/// - a run of two or more `_` collapses to one, so the single `__` boundary stays unambiguous
+/// - leading and trailing `-` and `_` are trimmed (an edge `_` would fuse with the `__`
+///   delimiter into `___`, which [`parse_mcp_qualified_name`] rejects as ambiguous); an empty
+///   result becomes `mcp`
+///
+/// Identity for a name that is already well-formed, so hosts with clean names see no change.
+pub fn sanitize_mcp_server_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut underscores = 0usize;
+    for ch in raw.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || ch == '-' {
+            ch
+        } else if ch == '_' {
+            '_'
+        } else {
+            '-'
+        };
+        if mapped == '_' {
+            underscores += 1;
+            if underscores > 1 {
+                continue;
+            }
+        } else {
+            underscores = 0;
+        }
+        out.push(mapped);
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '_');
+    if trimmed.is_empty() {
+        "mcp".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Replace the name inside an MCP server enum variant.
+pub fn set_mcp_server_name(server: &mut acp::McpServer, name: String) {
+    match server {
+        acp::McpServer::Stdio(stdio) => stdio.name = name,
+        acp::McpServer::Http(http) => http.name = name,
+        acp::McpServer::Sse(sse) => sse.name = name,
+        // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
+        _ => {}
+    }
+}
+
 /// Extract the name from an MCP server enum variant.
 pub fn mcp_server_name(server: &acp::McpServer) -> &str {
     match server {
