@@ -172,16 +172,21 @@ fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFa
         None => format!("{COMPACT_FAILED_PREFIX}{message}"),
     });
 
-    // An explicit retryable HTTP status outranks the size text. A tokens-per-minute
+    // An explicit retryable code outranks the size text. A tokens-per-minute
     // 429 is delivered with a body that opens "Request too large for <model> ... on
     // tokens per min (TPM)", which is exactly the anchor `is_context_length_error`
     // matches — so without this the rate limit reads as an overflow, burning a
     // full-context summarization call and stepping the input ladder down for good.
     // The envelope path already carves 429 out (`classify_sampling_error`); this is
     // the same carve-out for stream-delivered `ResponseFailed`/`ResponseError`.
-    // Only 429/408 qualify: 413 and every other 4xx keep reaching the ladder.
-    if let Some(status_code) = code.and_then(|c| c.parse::<u16>().ok())
-        && (status_code == 408 || status_code == 429)
+    //
+    // The `code` slot is not always numeric — the doc comment above says so, and
+    // `is_size_overflow_error_code` right below accepts slugs — so a rate limit
+    // spelled `rate_limit_error` / `rate_limit_exceeded` / `too_many_requests`
+    // must be matched too, not just the literal "429".
+    // Only rate limits and 408 qualify: 413 and every other 4xx keep reaching the ladder.
+    if code.is_some_and(fuigo_sampling_types::is_rate_limit_error_code)
+        || code.and_then(|c| c.parse::<u16>().ok()) == Some(408)
     {
         return CompactFailure::Transient(acp_err);
     }
