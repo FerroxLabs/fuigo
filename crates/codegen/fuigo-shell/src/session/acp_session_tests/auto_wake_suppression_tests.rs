@@ -1813,3 +1813,80 @@ async fn task_output_not_found_status_does_not_consume() {
         "not_found must not consume a completion"
     );
 }
+
+/// Reading a NON-`completed` terminal task's output sweeps its buffered
+/// `MonitorEvent` notifications too, exactly as a `completed` read does.
+///
+/// This is deliberate, not collateral damage from widening
+/// `consumed_completion_ids`:
+///
+/// * A monitor's events are produced by tailing the task's own output file
+///   (`monitor/tool.rs` `read_new_bytes` -> `process_event`), which is the
+///   same file the `get_task_output` result the model just read comes from.
+///   The queued lines are a subset of what it has already seen.
+/// * A surviving `NotificationSource::MonitorEvent` is queued at
+///   `NotificationPriority::Next`, so it starts a whole `NotificationDrain`
+///   turn -- a full-context sampling round-trip -- to re-deliver those lines.
+///   For a monitor that failed or timed out (the common case) that is the
+///   exact duplicate-delivery waste this suppression exists to prevent.
+/// * `kill_task` already consumes unconditionally, so scoping the sweep to
+///   `completed` would mean a killed monitor loses its queued events while
+///   the same monitor timing out keeps them.
+///
+/// Unrelated tasks' notifications are untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn failed_monitor_read_also_sweeps_its_buffered_monitor_events() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(task_completed_input("mon-fail"));
+                state
+                    .pending_notifications
+                    .push(monitor_event_notification("mon-fail"));
+                state
+                    .pending_notifications
+                    .push(monitor_completed_notification("mon-fail"));
+                state
+                    .pending_notifications
+                    .push(monitor_event_notification("mon-live"));
+            }
+            let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(task_output_result(
+                "mon-fail", "failed",
+            )));
+            let consumed = consumed_completion_ids(&output);
+            assert_eq!(
+                consumed,
+                vec!["mon-fail"],
+                "a failed read consumes the completion"
+            );
+            actor
+                .drop_pending_items_for_consumed_completions(&consumed)
+                .await;
+            let state = actor.state.lock().await;
+            assert!(
+                state.pending_inputs.is_empty(),
+                "the synthetic auto-wake prompt must be dropped"
+            );
+            let remaining: Vec<&str> = state
+                .pending_notifications
+                .iter()
+                .map(|n| n.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                remaining,
+                vec!["monitor-mon-live"],
+                "every notification for the consumed task -- buffered MonitorEvent \
+                 stdout included -- must be swept for a FAILED read just as it is \
+                 for a completed one; other tasks' notifications must survive"
+            );
+        })
+        .await;
+}
