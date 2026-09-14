@@ -2596,6 +2596,14 @@ impl SessionActor {
     /// Note on `MonitorEvent` interaction: any pending `MonitorEvent` notification whose `task_id` matches a consumed completion is also dropped.
     /// This is intentional: the model just learned via the `get_task_output` / `kill_task` result that the task is done.
     /// Any pending monitor stdout for it is stale.
+    ///
+    /// This holds for EVERY terminal status, not just `completed`.
+    /// `consumed_completion_ids` reports `failed` / `cancelled` / `timed_out` reads as consumed too, so a failed monitor's buffered event lines are swept as well.
+    /// That is deliberate:
+    /// a monitor's events are produced by tailing the task's own output file (`monitor/tool.rs` `read_new_bytes` -> `process_event`), which is the same file the result the model just read comes from, so the queued lines are a subset of what it has already seen;
+    /// a surviving `MonitorEvent` is queued at `NotificationPriority::Next` and therefore starts a whole `NotificationDrain` turn (a full-context sampling round-trip) to re-deliver them, which for a failed or timed-out monitor -- the common case -- is exactly the duplicate delivery this sweep exists to prevent;
+    /// and `kill_task` already consumes unconditionally, so scoping the notification sweep to `completed` would leave a killed monitor losing its events while the same monitor timing out kept them.
+    /// Pinned by `failed_monitor_read_also_sweeps_its_buffered_monitor_events`.
     pub(super) async fn drop_pending_items_for_consumed_completions(&self, consumed_ids: &[&str]) {
         if consumed_ids.is_empty() {
             return;
