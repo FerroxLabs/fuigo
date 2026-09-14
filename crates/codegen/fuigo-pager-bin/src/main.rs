@@ -2415,6 +2415,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                total_timeout: args
+                    .headless_timeout_secs
+                    .map(std::time::Duration::from_secs),
                 memory_flush,
                 memory_enabled_override,
             },

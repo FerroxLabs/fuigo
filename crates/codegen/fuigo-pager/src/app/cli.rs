@@ -720,6 +720,16 @@ pub struct PagerArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub background_wait_timeout_secs: u64,
+    /// Hard cap on a headless (`-p`) turn, in seconds. Off by default: without it a turn whose agent
+    /// never produces an end event waits forever. On elapse the run kills pending background work,
+    /// prints an error result and exits non-zero. Does not apply to the interactive TUI.
+    #[arg(
+        long = "timeout",
+        env = "FUIGO_HEADLESS_TIMEOUT_SECS",
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub headless_timeout_secs: Option<u64>,
     /// Sandbox profile for filesystem and network access.
     #[arg(long, env = "FUIGO_SANDBOX", value_name = "PROFILE")]
     pub sandbox: Option<String>,
