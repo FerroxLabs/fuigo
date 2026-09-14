@@ -132,8 +132,15 @@ pub fn classify_error(
         if next_attempt >= max_retries.min(rate_limit_threshold) {
             return RetryDecision::Fatal(clone_error(err));
         }
+        // `> 0` is a floor, not a formality: a zero backoff here is an
+        // immediate re-dispatch against a provider that just rate-limited us,
+        // repeated to `rate_limit_threshold`. `Retry-After: 0` is the shape
+        // that reaches this. `retry_after_or_backoff` filters the same way; the
+        // raw value is kept (not jittered or capped at `MAX_RETRY_BACKOFF`)
+        // because a rate limit's server-stated wait must be honoured in full.
         let backoff = err
             .retry_after()
+            .filter(|secs| *secs > 0)
             .map(Duration::from_secs)
             .unwrap_or_else(|| retry_backoff_with_jitter(next_attempt));
         return RetryDecision::RetryWithBackoff {
@@ -586,6 +593,37 @@ mod tests {
             classify_error(&no_retry_after, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::Fatal(_)
         ));
+    }
+
+    #[test]
+    fn a_zero_retry_after_does_not_become_a_zero_backoff() {
+        // `Retry-After: 0` (and, before the header fallbacks learned to drop a
+        // zero, an already-refilled token bucket) produced
+        // `RetryWithBackoff { backoff: ZERO }`, which `request_task` turns into
+        // an immediate re-dispatch -- a hot retry loop against a provider that
+        // just rate-limited us, up to `rate_limit_threshold` times.
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 0);
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff {
+                backoff,
+                is_rate_limited,
+            } => {
+                assert!(is_rate_limited);
+                assert!(
+                    backoff > Duration::ZERO,
+                    "a rate limit must never retry with no wait at all",
+                );
+            }
+            other => panic!("expected RetryWithBackoff, got {other:?}"),
+        }
+        // A real server-stated wait is still honoured verbatim.
+        let err = api_err_with_retry_after(StatusCode::TOO_MANY_REQUESTS, 7);
+        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::RetryWithBackoff { backoff, .. } => {
+                assert_eq!(backoff, Duration::from_secs(7));
+            }
+            other => panic!("expected RetryWithBackoff, got {other:?}"),
+        }
     }
 
     #[test]

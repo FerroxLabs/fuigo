@@ -230,6 +230,13 @@ fn splice_extra_tool_entries(
 /// fallbacks apply only where they mean what they say: 429, and the 408 the retry
 /// loop treats the same way.
 ///
+/// A zero-valued fallback is dropped rather than honoured. Both headers report a
+/// bucket refill time that providers attach per bucket, so an RPM-triggered 429
+/// routinely reads `x-ratelimit-reset-tokens: 0s` while the limit that actually
+/// fired is elsewhere; `Some(0)` there would mean "retry immediately" and hot-loop
+/// against a provider that just rate-limited us. `None` instead falls through to
+/// the retry ladder's own backoff.
+///
 /// Capped at 120s, the same cap the standard header gets.
 fn extract_retry_after(
     status: reqwest::StatusCode,
@@ -253,6 +260,7 @@ fn extract_retry_after(
                         .and_then(|s| s.parse::<f64>().ok())
                         .filter(|ms| ms.is_finite() && *ms >= 0.0)
                         .map(millis_to_whole_seconds)
+                        .filter(|secs| *secs > 0)
                 })
                 .flatten()
         })
@@ -263,6 +271,7 @@ fn extract_retry_after(
                     header("x-ratelimit-reset-tokens")
                         .and_then(parse_reset_duration_millis)
                         .map(millis_to_whole_seconds)
+                        .filter(|secs| *secs > 0)
                 })
                 .flatten()
         })?;
@@ -2713,6 +2722,29 @@ mod tests {
             extract_retry_after(reqwest::StatusCode::REQUEST_TIMEOUT, &headers),
             Some(2),
         );
+    }
+
+    #[test]
+    fn a_zero_valued_fallback_bucket_is_not_a_backoff() {
+        // OpenAI/Azure send a reset time per bucket, so an RPM-triggered 429
+        // routinely reports the TOKENS bucket as already refilled. Reading that
+        // as `Some(0)` makes the rate-limited retry branch re-dispatch with no
+        // wait at all, up to `rate_limit_threshold` times, against a provider
+        // that just rate-limited us. Dropping the zero falls back to the retry
+        // ladder's own backoff instead.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset-tokens", "0s".parse().unwrap());
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), None);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after-ms", "0".parse().unwrap());
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), None);
+
+        // A sub-second value still rounds up to a real wait; only zero is dropped.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset-tokens", "0s".parse().unwrap());
+        headers.insert("retry-after-ms", "120".parse().unwrap());
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(1));
     }
 
     #[test]
