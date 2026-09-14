@@ -223,6 +223,25 @@ pub fn is_size_overflow_error_code(code: &str) -> bool {
         || code.eq_ignore_ascii_case("context_length_exceeded")
 }
 
+/// True when a wire `code` slot means the server refused for rate/quota reasons rather than request size.
+///
+/// Rate limits and size overflows are told apart by the `code`, never by the
+/// message: a tokens-per-minute 429 arrives with a body that opens "Request too
+/// large for <model> ... on tokens per min (TPM)", which is exactly the anchor
+/// [`is_context_length_error`] matches. Retrying a rate limit works; retrying a
+/// real overflow does not, so the two must not be confused.
+///
+/// Both spellings occur: the numeric HTTP status as a string (OpenAI-compatible
+/// gateways) and a provider slug (Anthropic streams `rate_limit_error` as the
+/// error *type*).
+pub fn is_rate_limit_error_code(code: &str) -> bool {
+    code.parse::<u16>() == Ok(StatusCode::TOO_MANY_REQUESTS.as_u16())
+        || code.eq_ignore_ascii_case("rate_limit_error")
+        || code.eq_ignore_ascii_case("rate_limit_exceeded")
+        || code.eq_ignore_ascii_case("rate_limited")
+        || code.eq_ignore_ascii_case("too_many_requests")
+}
+
 /// 413-style subset of [`is_size_overflow_error_code`]: byte-or-count caps where stripping inline images may shrink the request under the limit.
 /// Token-tier codes are excluded: images barely move token counts.
 fn is_byte_size_overflow_error_code(code: &str) -> bool {
@@ -494,9 +513,27 @@ impl SamplingError {
                 }
                 size_coded || is_context_length_error(message)
             }
-            SamplingError::StreamError { message, code, .. } => {
-                code.as_ref().is_some_and(ApiErrorCode::is_size_overflow)
-                    || is_context_length_error(message)
+            SamplingError::StreamError {
+                error_type,
+                message,
+                code,
+            } => {
+                let size_coded = code.as_ref().is_some_and(ApiErrorCode::is_size_overflow);
+                // Same carve-out as the `Api` arm above, keyed on the parsed wire
+                // type instead of a status: a Messages-backend TPM 429 arrives as
+                // `rate_limit_error` with size wording, and the compaction loop
+                // reads this predicate to decide between a retry and a permanent
+                // step down the input ladder. `is_overloaded` already trusts
+                // `error_type` alone for the same reason.
+                if !size_coded
+                    && (is_rate_limit_error_code(error_type)
+                        || code
+                            .as_ref()
+                            .is_some_and(|c| is_rate_limit_error_code(c.as_str())))
+                {
+                    return false;
+                }
+                size_coded || is_context_length_error(message)
             }
             // Explicit so a new variant must state its size classification.
             SamplingError::Auth { .. }
@@ -1749,6 +1786,94 @@ mod tests {
         );
         // Unstructured bodies.
         assert_eq!(parse_error_code(b"<html>502</html>"), None);
+    }
+
+    /// The wording an Anthropic/Messages gateway puts on a tokens-per-minute 429.
+    /// It opens with "Request too large", the exact anchor `is_context_length_error`
+    /// matches, so the size text and the wire type disagree about what this is.
+    const TPM_RATE_LIMIT_BODY: &str = "Request too large for claude-sonnet-4 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000.";
+
+    #[test]
+    fn stream_rate_limit_type_is_not_a_size_overflow() {
+        // The Messages backend is Fuigo's Anthropic path and delivers its errors
+        // as stream events, so this predicate -- not the `Api` status -- is what
+        // the compaction loop reads. Classifying a TPM 429 as an overflow costs a
+        // wasted full-context summarization call AND a permanent step down the
+        // Verbatim -> VerbatimFitted -> Lossy ladder.
+        for error_type in [
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "too_many_requests",
+            "429",
+        ] {
+            let err = SamplingError::StreamError {
+                error_type: error_type.into(),
+                message: TPM_RATE_LIMIT_BODY.into(),
+                code: None,
+            };
+            assert!(
+                !err.is_context_length_error(),
+                "a {error_type} stream error must retry, not ladder",
+            );
+        }
+    }
+
+    #[test]
+    fn stream_rate_limit_code_is_not_a_size_overflow() {
+        let err = SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: TPM_RATE_LIMIT_BODY.into(),
+            code: Some(ApiErrorCode::parse("rate_limit_error")),
+        };
+        assert!(!err.is_context_length_error());
+    }
+
+    #[test]
+    fn a_size_coded_rate_limit_still_classifies_as_overflow() {
+        // The carve-out must never outrank a structured size code: a server that
+        // stamps both is telling us the request itself is too big.
+        let err = SamplingError::StreamError {
+            error_type: "rate_limit_error".into(),
+            message: TPM_RATE_LIMIT_BODY.into(),
+            code: Some(ApiErrorCode::parse("request_too_large")),
+        };
+        assert!(err.is_context_length_error());
+    }
+
+    #[test]
+    fn a_genuine_stream_overflow_still_classifies() {
+        // Regression guard for the carve-out: a real overflow carries no
+        // rate-limit type and must keep reaching the input ladder.
+        let err = SamplingError::StreamError {
+            error_type: "invalid_request_error".into(),
+            message: "prompt is too long: 300000 tokens > 200000 maximum".into(),
+            code: None,
+        };
+        assert!(err.is_context_length_error());
+    }
+
+    #[test]
+    fn rate_limit_error_codes_cover_numeric_and_slug_spellings() {
+        for code in [
+            "429",
+            "rate_limit_error",
+            "RATE_LIMIT_ERROR",
+            "rate_limit_exceeded",
+            "rate_limited",
+            "too_many_requests",
+        ] {
+            assert!(is_rate_limit_error_code(code), "should match: {code}");
+        }
+        for code in [
+            "413",
+            "400",
+            "request_too_large",
+            "context_length_exceeded",
+            "invalid_request_error",
+            "overloaded_error",
+        ] {
+            assert!(!is_rate_limit_error_code(code), "should not match: {code}");
+        }
     }
 
     #[test]
