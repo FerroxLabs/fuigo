@@ -16,6 +16,7 @@ use crate::bridge::ToolBridge;
 use crate::implementations::fuigo_build::task::types::{
     SubagentCompletionSummary, SubagentCompletionsRequest, SubagentEvent, SubagentEventSender,
 };
+use crate::implementations::fuigo_build::task_output::is_terminal_status;
 use crate::types::TaskSnapshot;
 use crate::types::output::ToolOutput;
 use crate::types::resources::{SharedResources, State, Terminal};
@@ -628,13 +629,20 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         ids.push(uuid);
     }
     match output {
-        ToolOutput::TaskOutput(TaskOutputOutput::Result(r)) if r.status == "completed" => {
+        // Any TERMINAL status counts as consumed, not just `"completed"`.
+        // `failed` / `cancelled` / `timed_out` results carry the same body the
+        // queued `task-completed-{id}` auto-wake prompt would re-deliver, so a
+        // `"completed"`-only guard leaves that prompt to fire again at turn end
+        // (duplicate reminder + a forced extra full-context sampling round-trip).
+        // The predicate is shared with the multi-wait summary counter so the two
+        // cannot drift.
+        ToolOutput::TaskOutput(TaskOutputOutput::Result(r)) if is_terminal_status(&r.status) => {
             ids.push(r.task_id.as_str());
         }
         ToolOutput::TaskOutput(TaskOutputOutput::Result(_)) => {}
         ToolOutput::TaskOutput(TaskOutputOutput::MultiResult(mr)) => {
             for r in &mr.results {
-                if r.status == "completed" {
+                if is_terminal_status(&r.status) {
                     ids.push(r.task_id.as_str());
                 }
             }
