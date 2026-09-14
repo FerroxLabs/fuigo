@@ -62,17 +62,30 @@ FUIGO_HEADLESS_TIMEOUT_SECS=900 fuigo -p "review this diff"
 - **Off by default.** Without the flag (or the environment variable) nothing changes: existing runs
   keep waiting indefinitely, exactly as before.
 - The value is whole seconds and must be at least `1`. The flag wins over the environment variable.
+  An empty, zero or unparsable `FUIGO_HEADLESS_TIMEOUT_SECS` is ignored with a warning and the run
+  proceeds uncapped — a bad value exported into a shell must never break unrelated `fuigo`
+  invocations, and the variable has no effect on the interactive TUI at all.
+- The clock starts before the agent spawns and covers the whole run: `initialize`, `authenticate`,
+  `session/new` / `session/load` / `fuigo/session/fork`, the model and effort application, the
+  turn itself, and `--memory-flush`. Each of those is an ACP request that otherwise waits for a
+  reply with no deadline; under `--timeout` every one of them is bounded by whatever the run has
+  left, and the failure names the step (`timed out after 900s waiting for session/new`).
 - On elapse Fuigo kills any background tasks and subagents the run started, prints an error result
   (`"type": "error"` for `--output-format json`, a `cancelled` stop reason for the streaming
   formats) and exits non-zero — so a CI step fails rather than hanging a runner.
+- **A turn that already answered is still reported.** The cap often lands during the wait for
+  background work — a `monitor(persistent: true)` never completes and always waits out
+  `--background-wait-timeout`. When that happens the completed turn's result line, its `usage` and
+  its structured output are emitted first, and the timeout error follows. The exit code is still
+  non-zero, because background work was killed.
 - It is a cap on the run, not a budget for the model: it is unrelated to `--max-turns`,
   `FUIGO_MAX_RUNTIME_SECS` and `FUIGO_MAX_MODEL_CALLS`, which gate how much work is admitted rather
   than how long the process may live.
 - `--background-wait-timeout` only bounds the wait for background work *after* the first turn ends;
   `--timeout` bounds everything, including a turn that never ends.
 
-The `initialize` and `authenticate` handshakes are separately capped at 120 seconds, so a backend
-that never answers them fails startup with an error instead of hanging.
+Without `--timeout`, the `initialize` and `authenticate` handshakes are still capped at 120 seconds
+on their own, so a backend that never answers them fails startup with an error instead of hanging.
 
 ### Tool Filtering
 
@@ -583,6 +596,7 @@ Key environment variables that affect headless mode:
 | Variable                        | Description                                                   |
 | ------------------------------- | ------------------------------------------------------------- |
 | `FUIGO_API_KEY`        | API key for authentication (required when no browser login)   |
+| `FUIGO_HEADLESS_TIMEOUT_SECS`   | Fallback for `--timeout`: hard cap on the whole headless run, in whole seconds. Unset, empty, `0` or unparsable means no cap. Ignored by the interactive TUI. See [Run timeout](#run-timeout) |
 | `FUIGO_HOME`                    | Override config directory (default: `~/.fuigo`)                |
 | `FUIGO_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
