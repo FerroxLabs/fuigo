@@ -817,6 +817,7 @@ async fn stale_completion_does_not_post_process_the_successor_turn() {
         h.actor.pending_interjections.push(PendingInterjection {
             text: "keep this with the successor".into(),
             attachments: vec![],
+            ..Default::default()
         });
         let idles_before = h.lifecycle.idles.get();
         let (command, _fired) = h.spawn_loop().await;

@@ -13,6 +13,7 @@ use crate::DEFAULT_TOOL_OUTPUT_BYTES;
 use crate::implementations::BashTool;
 use crate::implementations::fuigo_build::task::TaskTool;
 use crate::implementations::fuigo_build::task::backend::SubagentBackendResource;
+use crate::implementations::fuigo_build::task::parent_message::ParentMessageSignal;
 use crate::implementations::fuigo_build::task::types::{SubagentSnapshot, SubagentSnapshotStatus};
 use crate::implementations::fuigo_build_concise::BashConciseTool;
 use crate::implementations::opencode::OpenCodeBashTool;
@@ -62,14 +63,25 @@ fn requested_wait_timeout(timeout_ms: Option<u64>) -> Duration {
     Duration::from_millis(fuigo_tool_types::effective_task_output_wait_ms(timeout_ms).unwrap_or(0))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WaitHint {
     NotRequested,
+    /// The wait's outcome is reported once elsewhere (the multi-wait summary),
+    /// so individual results carry no advisory tail. Keeps one interrupt from
+    /// costing one copy of the notice per still-running task.
+    ReportedOnce,
     Elapsed {
         requested: Duration,
         waited: Duration,
     },
     ReturnedEarly,
+    /// The wait was cut short because the owning parent agent sent a message.
+    /// Carries the identifiers of every parent message pending delivery.
+    Interrupted {
+        requested: Duration,
+        waited: Duration,
+        messages: std::sync::Arc<[String]>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,13 +99,13 @@ impl WaitSubject {
     }
 }
 
-fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
+fn still_running_wait_hint(hint: &WaitHint, subject: WaitSubject) -> String {
     let noun = subject.noun();
     let lead = match hint {
         WaitHint::Elapsed { requested, waited } => {
-            let waited_label = format_waited_duration(waited);
+            let waited_label = format_waited_duration(*waited);
             if requested > waited {
-                let requested_label = format_waited_duration(requested);
+                let requested_label = format_waited_duration(*requested);
                 format!(
                     "Waited {waited_label}, the per-call maximum, of the {requested_label} you requested; \
                      the {noun} is still running. You do not need to call this again."
@@ -105,11 +117,58 @@ fn still_running_wait_hint(hint: WaitHint, subject: WaitSubject) -> String {
         WaitHint::ReturnedEarly => {
             format!("Wait returned early because another finished; this {noun} is still running.")
         }
+        WaitHint::Interrupted {
+            requested,
+            waited,
+            messages,
+        } => {
+            let waited_label = format_waited_duration(*waited);
+            let requested_label = format_waited_duration(*requested);
+            let count = messages.len();
+            let plural = if count == 1 { "message" } else { "messages" };
+            let named = messages.join(", ");
+            format!(
+                "Wait interrupted after {waited_label} of the {requested_label} requested: \
+                 {count} {plural} from the parent agent arrived ({named}). \
+                 Read it before continuing; this {noun} is still running."
+            )
+        }
         WaitHint::NotRequested => {
             "Omit timeout_ms (or pass a positive value) to wait for completion.".to_string()
         }
+        WaitHint::ReportedOnce => String::new(),
     };
     format!("{lead} You will be notified automatically when the {noun} completes.")
+}
+
+/// Split a multi-task wait's outcome into a per-result hint and a single
+/// summary notice.
+///
+/// `resolve_tasks` appends the still-running hint to EVERY running result, so
+/// an interrupt over six tasks would render six identical copies of the notice,
+/// message identifiers included. One interrupt is one event about the wait, not
+/// one per task: it belongs on the summary, once. Every other outcome is
+/// genuinely per-task and passes through unchanged.
+fn fold_multi_wait_interrupt(hint: &WaitHint) -> (WaitHint, Option<String>) {
+    let WaitHint::Interrupted {
+        requested,
+        waited,
+        messages,
+    } = hint
+    else {
+        return (hint.clone(), None);
+    };
+    let count = messages.len();
+    let plural = if count == 1 { "message" } else { "messages" };
+    let notice = format!(
+        "Wait interrupted after {} of the {} requested: {count} {plural} from the parent agent \
+         arrived ({}). Read it before continuing; the tasks still running above will notify you \
+         automatically when they complete.",
+        format_waited_duration(*waited),
+        format_waited_duration(*requested),
+        messages.join(", "),
+    );
+    (WaitHint::ReportedOnce, Some(notice))
 }
 
 fn format_waited_duration(d: Duration) -> String {
@@ -121,15 +180,21 @@ fn format_waited_duration(d: Duration) -> String {
     }
 }
 
-fn with_still_running_wait_hint(body: String, hint: WaitHint, subject: WaitSubject) -> String {
+fn with_still_running_wait_hint(body: String, hint: &WaitHint, subject: WaitSubject) -> String {
+    if matches!(hint, WaitHint::ReportedOnce) {
+        return body;
+    }
     format!("{body}\n\n{}", still_running_wait_hint(hint, subject))
 }
 
 fn apply_running_wait_hint(
     mut result: TaskOutputResult,
-    hint: WaitHint,
+    hint: &WaitHint,
     subject: WaitSubject,
 ) -> TaskOutputResult {
+    if matches!(hint, WaitHint::ReportedOnce) {
+        return result;
+    }
     if result.status == "running" {
         result.output =
             with_still_running_wait_hint(std::mem::take(&mut result.output), hint, subject);
@@ -203,19 +268,45 @@ impl TaskOutputTool {
 
         let waits = fuigo_tool_types::task_output_waits(timeout_ms);
         let wait_cap = max_wait_block();
-        let wait_hint = if waits {
+        let requested = requested_wait_timeout(timeout_ms);
+        let timeout = effective_wait_timeout(timeout_ms, wait_cap);
+        let mut wait_hint = if waits {
             WaitHint::Elapsed {
-                requested: requested_wait_timeout(timeout_ms),
-                waited: effective_wait_timeout(timeout_ms, wait_cap),
+                requested,
+                waited: timeout,
             }
         } else {
             WaitHint::NotRequested
         };
+        // Subscribe before the wait starts so a parent message committed while
+        // it is in flight cuts it short instead of landing at the deadline.
+        let parent_messages = if waits {
+            parent_message_watch(&resources).await
+        } else {
+            None
+        };
+        let wait_started = tokio::time::Instant::now();
+        let mut interrupted = false;
         let snapshot = if waits {
             // Cap the blocking wait so a large `timeout_ms` can't wedge the turn;
             // the model is pinged on completion regardless (see `effective_wait_timeout`).
-            let timeout = effective_wait_timeout(timeout_ms, wait_cap);
-            terminal.wait_for_completion(task_id, Some(timeout)).await
+            match race_parent_message(
+                parent_messages.as_ref(),
+                terminal.wait_for_completion(task_id, Some(timeout)),
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(messages) => {
+                    interrupted = true;
+                    wait_hint = WaitHint::Interrupted {
+                        requested,
+                        waited: wait_started.elapsed(),
+                        messages,
+                    };
+                    terminal.get_task(task_id).await
+                }
+            }
         } else {
             terminal.get_task(task_id).await
         };
@@ -242,7 +333,7 @@ impl TaskOutputTool {
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
             return Ok(TaskOutputOutput::Result(apply_running_wait_hint(
                 snapshot_to_result(snapshot, &read_file_name, max_output_bytes),
-                wait_hint,
+                &wait_hint,
                 WaitSubject::Task,
             )));
         }
@@ -257,17 +348,33 @@ impl TaskOutputTool {
         // Same cap as the bash path: a blocking subagent query can't wedge the
         // turn beyond the wait cap (the parent is pinged when the child finishes).
         let query_timeout_ms = if waits {
-            Some(effective_wait_timeout(timeout_ms, wait_cap).as_millis() as u64)
+            Some(timeout.as_millis() as u64)
         } else {
             timeout_ms
         };
-        if let Some(backend) = backend
-            && let Some(snapshot) = backend
-                .backend()
-                .query(task_id, waits, query_timeout_ms)
-                .await
-        {
-            return Ok(format_subagent_snapshot(&snapshot, wait_hint));
+        // An interrupted bash wait must not re-block here: the terminal simply
+        // does not own this id, and the pending parent message is why we stopped.
+        let blocks = waits && !interrupted;
+        if let Some(backend) = backend {
+            let queried = race_parent_message(
+                parent_messages.as_ref().filter(|_| blocks),
+                backend.backend().query(task_id, blocks, query_timeout_ms),
+            )
+            .await;
+            let snapshot = match queried {
+                Ok(snapshot) => snapshot,
+                Err(messages) => {
+                    wait_hint = WaitHint::Interrupted {
+                        requested,
+                        waited: wait_started.elapsed(),
+                        messages,
+                    };
+                    backend.backend().query(task_id, false, None).await
+                }
+            };
+            if let Some(snapshot) = snapshot {
+                return Ok(format_subagent_snapshot(&snapshot, &wait_hint));
+            }
         }
 
         // Neither found
@@ -302,10 +409,11 @@ impl TaskOutputTool {
         let requested = requested_wait_timeout(timeout_ms);
         let timeout = effective_wait_timeout(timeout_ms, max_wait_block());
 
-        let (terminal, backend, read_file_name, max_output_bytes) = {
+        let (terminal, backend, parent_messages, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let backend = res.get::<SubagentBackendResource>().cloned();
+            let parent_messages = res.get::<ParentMessageSignal>().cloned();
             let renderer = res.require::<TemplateRenderer>()?;
             let rfn = renderer
                 .render("${{ tools.by_kind.read }}")
@@ -317,7 +425,7 @@ impl TaskOutputTool {
                         .max_output_bytes_for(tool_name_for_truncation, DEFAULT_TOOL_OUTPUT_BYTES)
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
-            (terminal, backend, rfn, mob)
+            (terminal, backend, parent_messages, rfn, mob)
         };
 
         let initial = resolve_tasks(
@@ -326,10 +434,11 @@ impl TaskOutputTool {
             &backend,
             &read_file_name,
             max_output_bytes,
-            WaitHint::NotRequested,
+            &WaitHint::NotRequested,
         )
         .await;
 
+        let mut interrupt_notice: Option<String> = None;
         let results = if waits
             && (!initial.pending_bash_ids.is_empty() || !initial.pending_subagent_ids.is_empty())
         {
@@ -337,19 +446,22 @@ impl TaskOutputTool {
             let wait_hint = wait_all_event_driven(
                 &terminal,
                 &backend,
+                parent_messages.as_ref(),
                 &initial.pending_bash_ids,
                 &initial.pending_subagent_ids,
                 deadline,
             )
             .await
             .hint(requested, timeout);
+            let per_task_hint;
+            (per_task_hint, interrupt_notice) = fold_multi_wait_interrupt(&wait_hint);
             resolve_tasks(
                 task_ids,
                 &terminal,
                 &backend,
                 &read_file_name,
                 max_output_bytes,
-                wait_hint,
+                &per_task_hint,
             )
             .await
             .results
@@ -363,7 +475,11 @@ impl TaskOutputTool {
             .count();
         let total = results.len();
         let mode_str = if waits { "wait_all" } else { "poll" };
-        let summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
+        let mut summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
+        if let Some(notice) = interrupt_notice {
+            summary.push('\n');
+            summary.push_str(&notice);
+        }
 
         Ok(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
             mode: mode_str.to_string(),
@@ -411,7 +527,7 @@ pub(crate) async fn resolve_tasks(
     backend: &Option<SubagentBackendResource>,
     read_file_name: &str,
     max_output_bytes: usize,
-    wait_hint: WaitHint,
+    wait_hint: &WaitHint,
 ) -> ResolveResult {
     let mut results = Vec::with_capacity(task_ids.len());
     let mut pending_bash_ids = Vec::new();
@@ -482,10 +598,15 @@ impl Drop for AbortWaitsOnDrop {
 
 /// Whether a multi-task wait returned because the deadline was hit or because
 /// the wait condition (any/all) completed first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WaitOutcome {
     DeadlineElapsed,
     CompletedEarly,
+    /// A message from the owning parent agent was committed while the wait was
+    /// in flight, so the wait returned instead of running to its deadline.
+    Interrupted {
+        messages: std::sync::Arc<[String]>,
+    },
 }
 
 impl WaitOutcome {
@@ -493,6 +614,11 @@ impl WaitOutcome {
         match self {
             WaitOutcome::DeadlineElapsed => WaitHint::Elapsed { requested, waited },
             WaitOutcome::CompletedEarly => WaitHint::ReturnedEarly,
+            WaitOutcome::Interrupted { messages } => WaitHint::Interrupted {
+                requested,
+                waited,
+                messages,
+            },
         }
     }
 }
@@ -506,10 +632,56 @@ fn finalize_wait_outcome(outcome: WaitOutcome, deadline: tokio::time::Instant) -
     }
 }
 
+/// Race `fut` against the arrival of a message from the owning parent agent.
+///
+/// `Err` carries the pending message identifiers. With no watch (no parent, or
+/// a host that does not admit active-agent messages) the future is simply
+/// awaited, which is the pre-existing behaviour.
+async fn race_parent_message<T>(
+    watch: Option<&crate::implementations::fuigo_build::task::parent_message::ParentMessageWatch>,
+    fut: impl Future<Output = T>,
+) -> Result<T, std::sync::Arc<[String]>> {
+    let Some(watch) = watch else {
+        return Ok(fut.await);
+    };
+    tokio::select! {
+        value = fut => Ok(value),
+        messages = watch.arrived() => Err(messages),
+    }
+}
+
+/// `select!` arm for the arrival of a message from the owning parent agent.
+///
+/// With no signal injected (no parent, or a host that does not admit
+/// active-agent messages) it never resolves, so the surrounding wait behaves
+/// exactly as it did before.
+async fn parent_message_arrival(
+    watch: Option<&crate::implementations::fuigo_build::task::parent_message::ParentMessageWatch>,
+) -> std::sync::Arc<[String]> {
+    match watch {
+        Some(watch) => watch.arrived().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Subscribe to this session's parent-message signal, if one was injected.
+async fn parent_message_watch(
+    resources: &SharedResources,
+) -> Option<crate::implementations::fuigo_build::task::parent_message::ParentMessageWatch> {
+    resources
+        .lock()
+        .await
+        .get::<crate::implementations::fuigo_build::task::parent_message::ParentMessageSignal>()
+        .map(
+            crate::implementations::fuigo_build::task::parent_message::ParentMessageSignal::subscribe,
+        )
+}
+
 /// Wait until any one task (bash or subagent) completes, or deadline is reached.
 pub(crate) async fn wait_any_event_driven(
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
     backend: &Option<SubagentBackendResource>,
+    parent_messages: Option<&ParentMessageSignal>,
     bash_ids: &[String],
     subagent_ids: &[String],
     deadline: tokio::time::Instant,
@@ -518,6 +690,10 @@ pub(crate) async fn wait_any_event_driven(
     if remaining.is_zero() {
         return WaitOutcome::DeadlineElapsed;
     }
+
+    // Subscribe before anything else can await: a parent message committed
+    // from here on interrupts this wait (see `ParentMessageSignal`).
+    let parent_messages = parent_messages.map(ParentMessageSignal::subscribe);
 
     // Register waiter BEFORE spawns to avoid race: a spawned task could complete
     // and call notify_waiters() before the Notified future exists.
@@ -563,6 +739,9 @@ pub(crate) async fn wait_any_event_driven(
 
     let outcome = tokio::select! {
         _ = notified => WaitOutcome::CompletedEarly,
+        messages = parent_message_arrival(parent_messages.as_ref()) => {
+            WaitOutcome::Interrupted { messages }
+        }
         _ = tokio::time::sleep_until(deadline) => WaitOutcome::DeadlineElapsed,
     };
     finalize_wait_outcome(outcome, deadline)
@@ -572,6 +751,7 @@ pub(crate) async fn wait_any_event_driven(
 pub(crate) async fn wait_all_event_driven(
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
     backend: &Option<SubagentBackendResource>,
+    parent_messages: Option<&ParentMessageSignal>,
     bash_ids: &[String],
     subagent_ids: &[String],
     deadline: tokio::time::Instant,
@@ -580,6 +760,9 @@ pub(crate) async fn wait_all_event_driven(
     if remaining.is_zero() {
         return WaitOutcome::DeadlineElapsed;
     }
+
+    // Subscribe before anything else can await (see `wait_any_event_driven`).
+    let parent_messages = parent_messages.map(ParentMessageSignal::subscribe);
 
     let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -610,6 +793,9 @@ pub(crate) async fn wait_all_event_driven(
     let all_fut = futures_util::future::join_all(handles);
     let outcome = tokio::select! {
         _ = all_fut => WaitOutcome::CompletedEarly,
+        messages = parent_message_arrival(parent_messages.as_ref()) => {
+            WaitOutcome::Interrupted { messages }
+        }
         _ = tokio::time::sleep_until(deadline) => WaitOutcome::DeadlineElapsed,
     };
     finalize_wait_outcome(outcome, deadline)
@@ -631,7 +817,7 @@ fn render_legacy_task_output_not_found(task_id: &str) -> String {
 
 pub(crate) fn format_subagent_snapshot(
     snap: &SubagentSnapshot,
-    wait_hint: WaitHint,
+    wait_hint: &WaitHint,
 ) -> TaskOutputOutput {
     let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
     match &snap.status {
@@ -1077,6 +1263,10 @@ pub(crate) mod test_helpers {
 }
 
 #[cfg(test)]
+#[path = "parent_message_interrupt_tests.rs"]
+mod parent_message_interrupt_tests;
+
+#[cfg(test)]
 mod tests {
     use super::test_helpers::*;
     use super::*;
@@ -1142,11 +1332,11 @@ mod tests {
     #[test]
     fn still_running_wait_hint_snapshot_invites_a_wait() {
         assert_eq!(
-            still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Task),
+            still_running_wait_hint(&WaitHint::NotRequested, WaitSubject::Task),
             "Omit timeout_ms (or pass a positive value) to wait for completion. You will be notified automatically when the task completes."
         );
         assert_eq!(
-            still_running_wait_hint(WaitHint::NotRequested, WaitSubject::Subagent),
+            still_running_wait_hint(&WaitHint::NotRequested, WaitSubject::Subagent),
             "Omit timeout_ms (or pass a positive value) to wait for completion. You will be notified automatically when the subagent completes."
         );
     }
@@ -1158,12 +1348,12 @@ mod tests {
             waited: Duration::from_secs(30),
         };
         assert_eq!(
-            still_running_wait_hint(hint, WaitSubject::Task),
+            still_running_wait_hint(&hint, WaitSubject::Task),
             "Waited the requested 30s; the task is still running. \
              You will be notified automatically when the task completes."
         );
         assert_eq!(
-            still_running_wait_hint(hint, WaitSubject::Subagent),
+            still_running_wait_hint(&hint, WaitSubject::Subagent),
             "Waited the requested 30s; the subagent is still running. \
              You will be notified automatically when the subagent completes."
         );
@@ -1176,13 +1366,13 @@ mod tests {
             waited: Duration::from_secs(600),
         };
         assert_eq!(
-            still_running_wait_hint(hint, WaitSubject::Task),
+            still_running_wait_hint(&hint, WaitSubject::Task),
             "Waited 600s, the per-call maximum, of the 2400s you requested; \
              the task is still running. You do not need to call this again. \
              You will be notified automatically when the task completes."
         );
         assert_eq!(
-            still_running_wait_hint(hint, WaitSubject::Subagent),
+            still_running_wait_hint(&hint, WaitSubject::Subagent),
             "Waited 600s, the per-call maximum, of the 2400s you requested; \
              the subagent is still running. You do not need to call this again. \
              You will be notified automatically when the subagent completes."
@@ -1192,12 +1382,12 @@ mod tests {
     #[test]
     fn still_running_wait_hint_returned_early_is_honest() {
         assert_eq!(
-            still_running_wait_hint(WaitHint::ReturnedEarly, WaitSubject::Task),
+            still_running_wait_hint(&WaitHint::ReturnedEarly, WaitSubject::Task),
             "Wait returned early because another finished; this task is still running. \
              You will be notified automatically when the task completes."
         );
         assert_eq!(
-            still_running_wait_hint(WaitHint::ReturnedEarly, WaitSubject::Subagent),
+            still_running_wait_hint(&WaitHint::ReturnedEarly, WaitSubject::Subagent),
             "Wait returned early because another finished; this subagent is still running. \
              You will be notified automatically when the subagent completes."
         );
@@ -2198,7 +2388,7 @@ mod tests {
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 8_500,
         };
-        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let result = format_subagent_snapshot(&snap, &WaitHint::NotRequested);
         match result {
             TaskOutputOutput::Result(r) => {
                 assert_eq!(r.task_id, "sub-init");
@@ -2248,7 +2438,7 @@ mod tests {
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 12_500,
         };
-        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let result = format_subagent_snapshot(&snap, &WaitHint::NotRequested);
         match result {
             TaskOutputOutput::Result(r) => {
                 assert_eq!(r.task_id, "sub-abc");
@@ -2326,13 +2516,13 @@ mod tests {
             snap.description,
             snap.duration_ms as f64 / 1000.0,
         );
-        let not_requested = match format_subagent_snapshot(&snap, WaitHint::NotRequested) {
+        let not_requested = match format_subagent_snapshot(&snap, &WaitHint::NotRequested) {
             TaskOutputOutput::Result(r) => r,
             other => panic!("Expected Result, got {:?}", other),
         };
         let clamped = match format_subagent_snapshot(
             &snap,
-            WaitHint::Elapsed {
+            &WaitHint::Elapsed {
                 requested: Duration::from_secs(2_400),
                 waited: Duration::from_secs(600),
             },
@@ -2371,7 +2561,7 @@ mod tests {
             started_at_epoch_ms: 1_700_000_000_000,
             duration_ms: 500,
         };
-        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let result = format_subagent_snapshot(&snap, &WaitHint::NotRequested);
         match result {
             TaskOutputOutput::Result(r) => {
                 assert!(
