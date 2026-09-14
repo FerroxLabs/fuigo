@@ -332,3 +332,87 @@ fn compaction_outcome_as_str_is_stable() {
     assert_eq!(CompactionOutcome::Degenerate.as_str(), "degenerate");
     assert_eq!(CompactionOutcome::Failed.as_str(), "failed");
 }
+
+// ── streamed TPM rate limits (upstream 1.0.26) ──────────────────────────────
+
+/// The wording an OpenAI-compatible gateway puts on a tokens-per-minute 429.
+/// It opens with "Request too large", which is exactly the anchor
+/// `is_context_length_error` matches, so the size text and the rate-limit code
+/// disagree about what this is.
+const TPM_429_BODY: &str = "Request too large for grok-4.5 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000. Please try again in 42s.";
+
+#[test]
+fn response_event_streamed_tpm_429_is_transient_despite_size_wording() {
+    // A TPM 429 delivered on the STREAM path (`ResponseFailed` / `ResponseError`).
+    // Treating it as Overflow costs a wasted full-context summarization call
+    // (100-400k input tokens) AND a permanent step down the input ladder, with
+    // sticky Size suppression once the ladder is exhausted. The envelope path
+    // already exempts 429; the stream path must agree.
+    assert!(
+        matches!(
+            classify_response_event_error(Some("429"), TPM_429_BODY),
+            CompactFailure::Transient(_)
+        ),
+        "a streamed 429 must retry, not ladder: {TPM_429_BODY}"
+    );
+    // 408 is the other status `classify_sampling_error` deliberately keeps retryable.
+    assert!(
+        matches!(
+            classify_response_event_error(Some("408"), TPM_429_BODY),
+            CompactFailure::Transient(_)
+        ),
+        "a streamed 408 must retry, not ladder"
+    );
+}
+
+#[test]
+fn response_event_streamed_429_classifies_like_the_envelope_path() {
+    // Same body, same verdict, whichever path delivers it: the envelope path
+    // carves 429 out via `SamplingError::is_context_length_error`.
+    let envelope = {
+        let mut err = api_error(StatusCode::TOO_MANY_REQUESTS, TPM_429_BODY);
+        if let SamplingError::Api {
+            retry_after_secs, ..
+        } = &mut err
+        {
+            *retry_after_secs = Some(42);
+        }
+        classify_sampling_error(err)
+    };
+    assert!(
+        matches!(envelope, CompactFailure::Transient(_)),
+        "precondition: the envelope path already treats this as transient"
+    );
+    assert!(matches!(
+        classify_response_event_error(Some("429"), TPM_429_BODY),
+        CompactFailure::Transient(_)
+    ));
+}
+
+#[test]
+fn response_event_overflow_without_a_rate_limit_code_still_ladders() {
+    // Regression guard for the carve-out above: only an explicit 429/408 may
+    // outrank the size text. Every other shape a real overflow arrives in must
+    // keep reaching the input ladder.
+    for (code, message) in [
+        (
+            None,
+            "The prompt is too long for this model's context window.",
+        ),
+        (
+            Some("400"),
+            "prompt is too long: 300000 tokens > 200000 maximum",
+        ),
+        (
+            Some("invalid_request_error"),
+            "prompt is too long: 300000 tokens > 200000 maximum",
+        ),
+        (Some("413"), "Request failed (HTTP 413)."),
+        (Some("500"), "Request too large"),
+    ] {
+        assert!(
+            is_overflow(&classify_response_event_error(code, message)),
+            "should still be overflow: {code:?} / {message}"
+        );
+    }
+}

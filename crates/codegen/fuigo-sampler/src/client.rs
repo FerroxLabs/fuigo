@@ -213,12 +213,90 @@ fn splice_extra_tool_entries(
     }
 }
 
+/// Whole seconds to back off for, from the backoff headers a 429 may carry.
+///
+/// `Retry-After` (integer seconds) is the standard spelling and wins when it
+/// parses. OpenAI/Azure tokens-per-minute 429s commonly send no usable
+/// `Retry-After` at all and answer with `retry-after-ms` or
+/// `x-ratelimit-reset-tokens` instead; without those fallbacks the sampling
+/// envelope carries `retry_after_secs: None`, which is the one signal the
+/// compaction classifier reads to tell "capacity is coming back" from "this
+/// payload is too big". Capped at 120s, the same cap the standard header gets.
 fn extract_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
+    let header = |name: &'static str| {
+        headers
+            .get(reqwest::header::HeaderName::from_static(name))
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
+    let seconds = header("retry-after")
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|s| s.min(120))
+        // `retry-after-ms` is a bare count of milliseconds, never a duration string.
+        .or_else(|| {
+            header("retry-after-ms")
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|ms| ms.is_finite() && *ms >= 0.0)
+                .map(millis_to_whole_seconds)
+        })
+        // `x-ratelimit-reset-tokens` is a Go-style duration ("1s", "88ms", "6m0s").
+        .or_else(|| {
+            header("x-ratelimit-reset-tokens")
+                .and_then(parse_reset_duration_millis)
+                .map(millis_to_whole_seconds)
+        })?;
+    Some(seconds.min(120))
+}
+
+/// Round a backoff up to whole seconds, so a sub-second wait still waits.
+/// Truncating 500ms to 0 would turn a promised backoff into a hot retry.
+fn millis_to_whole_seconds(millis: f64) -> u64 {
+    (millis / 1000.0).ceil().max(0.0) as u64
+}
+
+/// Parse an `x-ratelimit-reset-*` value into milliseconds.
+///
+/// Accepts Go-style duration strings with concatenated units — `88ms`, `1s`,
+/// `1.5s`, `6m0s`, `1h2m3s` — which is what OpenAI and Azure send, plus a bare
+/// number, which those headers also emit and which means seconds. Returns
+/// `None` for anything it does not fully understand, including negatives and
+/// unknown units, so an unparsed value stays "no backoff signal" rather than
+/// becoming a wrong one.
+fn parse_reset_duration_millis(raw: &str) -> Option<f64> {
+    let text = raw.trim();
+    if text.is_empty() || text.starts_with('-') {
+        return None;
+    }
+    let mut rest = text;
+    let mut total_ms = 0.0f64;
+    let mut saw_component = false;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        if digits == 0 {
+            return None;
+        }
+        let value: f64 = rest[..digits].parse().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        rest = &rest[digits..];
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let (unit, remainder) = rest.split_at(unit_len);
+        rest = remainder;
+        let multiplier = match unit {
+            "" | "s" => 1_000.0,
+            "ms" => 1.0,
+            "m" => 60_000.0,
+            "h" => 3_600_000.0,
+            _ => return None,
+        };
+        total_ms += value * multiplier;
+        saw_component = true;
+    }
+    saw_component.then_some(total_ms)
 }
 
 fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
@@ -2505,6 +2583,76 @@ mod tests {
     fn extract_retry_after_none_when_missing() {
         let headers = reqwest::header::HeaderMap::new();
         assert_eq!(extract_retry_after(&headers), None);
+    }
+
+    // ── TPM 429 backoff headers (upstream 1.0.26) ──────────────────────────
+    // OpenAI/Azure tokens-per-minute 429s commonly answer with `retry-after-ms`
+    // or `x-ratelimit-reset-tokens` and NO integer `Retry-After`. Without these
+    // fallbacks the envelope carries `retry_after_secs: None`, so the compaction
+    // classifier loses the one signal that says "capacity is coming back".
+
+    #[test]
+    fn extract_retry_after_falls_back_to_retry_after_ms() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after-ms", "1500".parse().unwrap());
+        assert_eq!(extract_retry_after(&headers), Some(2));
+    }
+
+    #[test]
+    fn extract_retry_after_ms_below_a_second_still_backs_off() {
+        // Rounding 500ms down to 0 would turn a backoff into a hot retry.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after-ms", "500".parse().unwrap());
+        assert_eq!(extract_retry_after(&headers), Some(1));
+    }
+
+    #[test]
+    fn extract_retry_after_falls_back_to_ratelimit_reset_tokens() {
+        for (raw, expected) in [
+            ("1s", 1u64),
+            ("88ms", 1),
+            ("1.5s", 2),
+            ("6m0s", 120), // 360s, capped
+            ("2m30s", 120),
+            ("7", 7), // bare seconds
+        ] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("x-ratelimit-reset-tokens", raw.parse().unwrap());
+            assert_eq!(
+                extract_retry_after(&headers),
+                Some(expected),
+                "x-ratelimit-reset-tokens: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_retry_after_ignores_unparseable_reset_tokens() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset-tokens", "soon".parse().unwrap());
+        assert_eq!(extract_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn extract_retry_after_prefers_the_standard_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "9".parse().unwrap());
+        headers.insert("retry-after-ms", "60000".parse().unwrap());
+        headers.insert("x-ratelimit-reset-tokens", "6m0s".parse().unwrap());
+        assert_eq!(extract_retry_after(&headers), Some(9));
+    }
+
+    #[test]
+    fn extract_retry_after_http_date_still_falls_through_to_ms() {
+        // An HTTP-date `Retry-After` is unparseable here; the ms header beside
+        // it is the usable signal and must not be shadowed.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Fri, 31 Dec 2025 23:59:59 GMT".parse().unwrap(),
+        );
+        headers.insert("retry-after-ms", "3000".parse().unwrap());
+        assert_eq!(extract_retry_after(&headers), Some(3));
     }
 
     #[test]
