@@ -351,6 +351,11 @@ pub(crate) struct TurnEnd<'a> {
     pub result_text: &'a str,
     /// Total wall-clock time for the run (`duration_ms` on the Messages `result`).
     pub duration_ms: u64,
+    /// A run-level failure that arrived after the turn answered (the `--timeout` hard cap).
+    ///
+    /// It is carried on the terminal document rather than emitted as a second one: `json` must stay
+    /// a single parseable object and `stream-json` a single `result` line.
+    pub error: Option<&'a str>,
 }
 
 /// One entry of the Messages API `system`/`init` `mcp_servers` list.

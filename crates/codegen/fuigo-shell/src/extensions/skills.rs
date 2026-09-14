@@ -118,9 +118,17 @@ async fn reload_skills(
     let config = cli_config::load_config().await.skills;
     let project_trusted =
         crate::agent::folder_trust::project_scope_allowed(std::path::Path::new(cwd));
+    // An explicit reload is authoritative: drop the session-start cache so later `session/new`
+    // calls in this process see what this scan is about to read.
+    fuigo_agent::prompt::skills::invalidate_skill_discovery_cache();
     let discovery =
         list_skills_with_plugins(Some(cwd), &config, plugin_registry, compat, project_trusted);
-    match tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await {
+    match tokio::time::timeout(
+        fuigo_agent::prompt::skills::skill_discovery_timeout(),
+        discovery,
+    )
+    .await
+    {
         Ok(skills) => skills,
         Err(_) => {
             tracing::warn!("Skills reload timed out");

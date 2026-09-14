@@ -4,6 +4,7 @@
 //! Streams to stdout and exits via `CancellationToken`.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,9 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background work to finish after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// Hard cap on the whole turn (`--timeout` / `FUIGO_HEADLESS_TIMEOUT_SECS`).
+    /// `None` (the default) keeps the historical behaviour: wait indefinitely for the agent.
+    pub total_timeout: Option<Duration>,
     /// After the prompt (or instead of one when resuming), run `fuigo/memory/flush`.
     pub memory_flush: bool,
     /// CLI `--experimental-memory` / `--no-memory` override for the headless agent.
@@ -95,7 +99,9 @@ struct HeadlessEmitter {
     reducer: Option<Box<dyn Reducer>>,
     /// Set when the prompt is sent; `result.duration_ms` on the terminal line is measured from it.
     prompt_started: Option<Instant>,
-    out: std::io::Stdout,
+    /// Where the wire output goes. Production is stdout; tests capture the bytes so the terminal
+    /// document a machine consumer actually reads can be asserted on.
+    out: Box<dyn std::io::Write + Send>,
     /// Latched once stdout is unwritable so later writes are dropped instead of panicking.
     output_closed: bool,
     /// First hard stdout IO error (not a broken pipe), surfaced so the process exits non-zero.
@@ -104,6 +110,14 @@ struct HeadlessEmitter {
 
 impl HeadlessEmitter {
     fn new(format: OutputFormat, parse_structured_output: bool) -> Self {
+        Self::with_writer(format, parse_structured_output, Box::new(std::io::stdout()))
+    }
+
+    fn with_writer(
+        format: OutputFormat,
+        parse_structured_output: bool,
+        out: Box<dyn std::io::Write + Send>,
+    ) -> Self {
         Self {
             format,
             parse_structured_output,
@@ -113,7 +127,7 @@ impl HeadlessEmitter {
             usage: None,
             reducer: reducer_for(format),
             prompt_started: None,
-            out: std::io::stdout(),
+            out,
             output_closed: false,
             write_error: None,
         }
@@ -125,12 +139,10 @@ impl HeadlessEmitter {
             return Ok(());
         }
         use std::io::Write as _;
-        let result = {
-            let mut handle = self.out.lock();
-            handle
-                .write_all(bytes)
-                .and_then(|()| if flush { handle.flush() } else { Ok(()) })
-        };
+        let mut result = self.out.write_all(bytes);
+        if flush && result.is_ok() {
+            result = self.out.flush();
+        }
         self.record_write_result(result)
     }
 
@@ -306,13 +318,36 @@ impl HeadlessEmitter {
         result
     }
 
-    fn on_end(&mut self, stop_reason: &str, session_id: &str, request_id: &str) {
+    /// Emit the terminal document for a turn that produced a response.
+    ///
+    /// `error` folds a run-level failure that arrived *after* the turn answered (today: the
+    /// `--timeout` hard cap) into that same document. It must never be emitted as a second
+    /// terminal record: every machine consumer of `json`/`stream-json` reads exactly one.
+    fn on_end(
+        &mut self,
+        stop_reason: &str,
+        session_id: &str,
+        request_id: &str,
+        error: Option<&str>,
+    ) {
         match self.format {
             OutputFormat::Plain => {
                 let _ = self.write_out(b"\n", false);
+                // Plain has no terminal document: the failure goes to stderr, as `on_error` does.
+                if let Some(error) = error {
+                    eprintln!("{error}");
+                }
             }
             OutputFormat::Json => {
-                let result = self.build_json_result(stop_reason, session_id, request_id);
+                let mut result = self.build_json_result(stop_reason, session_id, request_id);
+                if let Some(error) = error
+                    && let Some(obj) = result.as_object_mut()
+                {
+                    obj.insert(
+                        "error".to_string(),
+                        serde_json::Value::String(error.to_string()),
+                    );
+                }
                 let mut rendered =
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
                 rendered.push('\n');
@@ -332,6 +367,7 @@ impl HeadlessEmitter {
                         structured_output,
                         result_text: result_text.as_str(),
                         duration_ms,
+                        error,
                     };
                     reducer.finish(&end)
                 });
@@ -533,14 +569,21 @@ async fn open_session(
     cwd: &Path,
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
+    deadline: RunDeadline,
 ) -> anyhow::Result<OpenedSession> {
     // Sessions open before the agent resolves per-vendor compat; default all-on until it does.
     let mcp_servers =
         cli_config::load_mcp_servers(cwd, &fuigo_tools::types::compat::CompatConfig::default());
 
     if let Some(sid) = session_id_flag {
-        let try_load: Result<acp::LoadSessionResponse, _> = acp_send(
-            acp::LoadSessionRequest::new(acp::SessionId::new(sid.to_string()), cwd.to_path_buf())
+        let try_load: Result<acp::LoadSessionResponse, _> = with_send_deadline(
+            "session/load",
+            deadline.budget(None),
+            acp_send(
+                acp::LoadSessionRequest::new(
+                    acp::SessionId::new(sid.to_string()),
+                    cwd.to_path_buf(),
+                )
                 .mcp_servers(mcp_servers.clone())
                 .meta({
                     let mut m = acp::Meta::new();
@@ -550,29 +593,43 @@ async fn open_session(
                     }
                     Some(m)
                 }),
-            acp_tx,
+                acp_tx,
+            ),
         )
         .await;
-        if let Ok(resp) = try_load {
-            return Ok(OpenedSession {
-                session_id: acp::SessionId::new(sid.to_string()),
-                models: ModelState::from(resp.models),
-                cwd: cwd.to_path_buf(),
-            });
+        match try_load {
+            Ok(resp) => {
+                return Ok(OpenedSession {
+                    session_id: acp::SessionId::new(sid.to_string()),
+                    models: ModelState::from(resp.models),
+                    cwd: cwd.to_path_buf(),
+                });
+            }
+            // A run cap that elapsed mid-load is not a missing session: telling the operator their
+            // session is gone sends them to the wrong remedy (re-running without `--resume`, which
+            // loses the conversation). Report the timeout the wrapper already named.
+            Err(e) if e.is::<SendDeadlineElapsed>() => return Err(e),
+            Err(e) => {
+                tracing::debug!(error = %e, session = sid, "headless: session/load failed");
+                anyhow::bail!("Session does not exist");
+            }
         }
-        anyhow::bail!("Session does not exist");
     }
 
-    let new_resp: acp::NewSessionResponse = acp_send(
-        acp::NewSessionRequest::new(cwd.to_path_buf())
-            .mcp_servers(mcp_servers)
-            // Fresh `-p` sessions persist as headless so `/resume` keeps them off its default pages; the load path above never restamps
-            .meta(
-                serde_json::json!({ "sessionKind": "headless" })
-                    .as_object()
-                    .cloned(),
-            ),
-        acp_tx,
+    let new_resp: acp::NewSessionResponse = with_send_deadline(
+        "session/new",
+        deadline.budget(None),
+        acp_send(
+            acp::NewSessionRequest::new(cwd.to_path_buf())
+                .mcp_servers(mcp_servers)
+                // Fresh `-p` sessions persist as headless so `/resume` keeps them off its default pages; the load path above never restamps
+                .meta(
+                    serde_json::json!({ "sessionKind": "headless" })
+                        .as_object()
+                        .cloned(),
+                ),
+            acp_tx,
+        ),
     )
     .await?;
     Ok(OpenedSession {
@@ -586,20 +643,25 @@ async fn open_session_with_id(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_id: &str,
+    deadline: RunDeadline,
 ) -> anyhow::Result<OpenedSession> {
     let cwd_str = cwd.to_string_lossy();
     crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
     let mcp_servers =
         cli_config::load_mcp_servers(cwd, &fuigo_tools::types::compat::CompatConfig::default());
-    let new_resp: acp::NewSessionResponse = acp_send(
-        acp::NewSessionRequest::new(cwd.to_path_buf())
-            .mcp_servers(mcp_servers)
-            .meta(
-                serde_json::json!({ "sessionId": session_id, "sessionKind": "headless" })
-                    .as_object()
-                    .cloned(),
-            ),
-        acp_tx,
+    let new_resp: acp::NewSessionResponse = with_send_deadline(
+        "session/new",
+        deadline.budget(None),
+        acp_send(
+            acp::NewSessionRequest::new(cwd.to_path_buf())
+                .mcp_servers(mcp_servers)
+                .meta(
+                    serde_json::json!({ "sessionId": session_id, "sessionKind": "headless" })
+                        .as_object()
+                        .cloned(),
+                ),
+            acp_tx,
+        ),
     )
     .await?;
     Ok(OpenedSession {
@@ -616,6 +678,7 @@ async fn fork_then_open(
     parent_cwd: Option<&Path>,
     new_id: Option<&str>,
     restore_code: Option<bool>,
+    deadline: RunDeadline,
 ) -> anyhow::Result<OpenedSession> {
     use crate::app::session_startup::{
         effective_fork_new_cwd, ensure_session_id_available, fork_response_error,
@@ -636,13 +699,18 @@ async fn fork_then_open(
     let fork_params = serde_json::value::to_raw_value(&payload)
         .map_err(|e| anyhow::anyhow!("serialize fork params: {e}"))?;
     let req = acp::ExtRequest::new("fuigo/session/fork", fork_params.into());
-    let resp = acp_send(req, acp_tx).await?;
+    let resp = with_send_deadline(
+        "fuigo/session/fork",
+        deadline.budget(None),
+        acp_send(req, acp_tx),
+    )
+    .await?;
     if let Some(err) = fork_response_error(resp.0.get()) {
         anyhow::bail!("fork failed: {err}");
     }
     let child = fork_response_new_session_id(resp.0.get())
         .ok_or_else(|| anyhow::anyhow!("fork response missing newSessionId"))?;
-    match open_session(acp_tx, &write_cwd, Some(&child), restore_code).await {
+    match open_session(acp_tx, &write_cwd, Some(&child), restore_code, deadline).await {
         Ok(opened) => Ok(opened),
         Err(e) => Err(anyhow::anyhow!(
             "fork succeeded as {child} but load failed: {e}"
@@ -658,6 +726,7 @@ async fn apply_headless_model_and_effort(
     models: &ModelState,
     model_name: Option<&str>,
     effort_token: Option<&str>,
+    deadline: RunDeadline,
 ) -> anyhow::Result<()> {
     if model_name.is_none() && effort_token.is_none() {
         return Ok(());
@@ -712,9 +781,13 @@ async fn apply_headless_model_and_effort(
         m
     });
 
-    acp_send(
-        acp::SetSessionModelRequest::new(session_id.clone(), model_id.clone()).meta(meta),
-        acp_tx,
+    with_send_deadline(
+        "session/set_model",
+        deadline.budget(None),
+        acp_send(
+            acp::SetSessionModelRequest::new(session_id.clone(), model_id.clone()).meta(meta),
+            acp_tx,
+        ),
     )
     .await
     .map_err(|e| {
@@ -737,6 +810,117 @@ async fn apply_headless_model_and_effort(
 }
 
 /// Startup-materialization context for headless (`-p`) runs; never chat mode.
+/// Default cap on the pre-turn ACP lifecycle sends (`initialize`, `authenticate`).
+///
+/// `acp_send` awaits a bare oneshot, so an agent that wedges before answering leaves `fuigo -p`
+/// blocked with no deadline at all. The exit reaper already bounds its own sends; these are bounded
+/// the same way so startup fails loudly instead of hanging.
+const DEFAULT_LIFECYCLE_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Escape hatch for the lifecycle cap, in whole seconds. `0` disables it (1.0.16 behaviour).
+const LIFECYCLE_TIMEOUT_ENV: &str = "FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS";
+
+/// The lifecycle cap for this run: `FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` if usable, else 120s.
+///
+/// Unlike `--timeout` this one applies even to runs that asked for no cap, so it needs a way out: a
+/// cold `FUIGO_HOME` on a network mount can legitimately take longer than the default to answer
+/// `initialize`, and that run worked in 1.0.16. Read only on the headless path, and leniently, so a
+/// malformed value can never break an unrelated mode.
+fn lifecycle_send_timeout() -> Option<Duration> {
+    parse_lifecycle_timeout_env(std::env::var(LIFECYCLE_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Lenient parse: unset/empty/garbage keep the default, `0` means "no lifecycle cap at all".
+fn parse_lifecycle_timeout_env(raw: Option<&str>) -> Option<Duration> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Some(DEFAULT_LIFECYCLE_SEND_TIMEOUT);
+    };
+    match raw.parse::<u64>() {
+        Ok(0) => {
+            tracing::warn!("{LIFECYCLE_TIMEOUT_ENV}=0: the startup sends run unbounded");
+            None
+        }
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => {
+            tracing::warn!(
+                value = raw,
+                "{LIFECYCLE_TIMEOUT_ENV} is not a number of seconds; keeping the default"
+            );
+            Some(DEFAULT_LIFECYCLE_SEND_TIMEOUT)
+        }
+    }
+}
+
+/// The `--timeout` budget for one headless run.
+///
+/// `--timeout` is documented as a hard cap on the **whole run**, so every ACP send on the run path
+/// draws its deadline from here — not just the prompt turn. `acp_send` awaits a bare oneshot, so an
+/// agent that answers `initialize` and then goes silent on `session/new` (the slow-skills-scan
+/// shape) would otherwise hang forever with the flag set.
+#[derive(Clone, Copy, Debug, Default)]
+struct RunDeadline(Option<Instant>);
+
+impl RunDeadline {
+    /// Start the clock. `None` keeps the historical behaviour: no cap anywhere.
+    fn start(total: Option<Duration>) -> Self {
+        Self(total.map(|d| Instant::now() + d))
+    }
+    /// Time left before the cap, or `None` when uncapped. Saturates at zero once it has passed.
+    fn remaining(self) -> Option<Duration> {
+        self.0
+            .map(|at| at.saturating_duration_since(Instant::now()))
+    }
+    /// Budget for one send: whichever of the run cap and `cap` comes first.
+    fn budget(self, cap: Option<Duration>) -> Option<Duration> {
+        match (self.remaining(), cap) {
+            (Some(left), Some(cap)) => Some(left.min(cap)),
+            (Some(left), None) => Some(left),
+            (None, cap) => cap,
+        }
+    }
+}
+
+/// A bounded ACP send ran out of budget. Typed so callers can tell a run-cap timeout apart from a
+/// genuine failure of the step (`session/load` reporting "Session does not exist", say).
+#[derive(Debug)]
+struct SendDeadlineElapsed {
+    what: String,
+    limit: Duration,
+}
+
+impl std::fmt::Display for SendDeadlineElapsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "timed out after {}s waiting for {}",
+            self.limit.as_secs(),
+            self.what
+        )
+    }
+}
+
+impl std::error::Error for SendDeadlineElapsed {}
+
+/// Await an ACP send under `limit`, failing with a named error instead of blocking forever.
+/// `None` means unbounded — the shape every send on this path had before `--timeout` existed.
+async fn with_send_deadline<T, E, F>(what: &str, limit: Option<Duration>, fut: F) -> Result<T>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let Some(limit) = limit else {
+        return fut.await.map_err(|e| anyhow::anyhow!("{e}"));
+    };
+    match tokio::time::timeout(limit, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+        Err(_) => Err(anyhow::Error::new(SendDeadlineElapsed {
+            what: what.to_string(),
+            limit,
+        })),
+    }
+}
+
 /// `--worktree` is ignored here: headless never creates a worktree, so a remote miss must not take `DeferToWorktree`.
 fn headless_materialize_ctx(
     resume_title_pinned: bool,
@@ -766,6 +950,11 @@ pub async fn run_single_turn(
 ) -> Result<()> {
     // Stamp proxy requests as headless before the agent issues its first request.
     fuigo_shell::http::set_process_client_mode_headless();
+
+    // `--timeout` is a cap on the whole run, not just the turn: start the clock before the agent
+    // spawns so a wedge anywhere on the path (initialize, session/new, the turn, the memory flush)
+    // is bounded by it.
+    let deadline = RunDeadline::start(options.total_timeout);
 
     let cwd = match options.cwd {
         None => std::env::current_dir()?,
@@ -884,7 +1073,13 @@ pub async fn run_single_turn(
         options.system_prompt_override.as_deref(),
     );
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::AcpInitialize);
-    let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
+    let init_resp: acp::InitializeResponse = match with_send_deadline(
+        "initialize",
+        deadline.budget(lifecycle_send_timeout()),
+        acp_send(init_req, &acp_tx),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             report_startup_failure(&timer);
@@ -901,10 +1096,14 @@ pub async fn run_single_turn(
     let t_auth = Instant::now();
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::EagerAuth);
     let default_auth_method_id = crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
-    let is_api_key_auth = match authenticate(
-        &acp_tx,
-        &init_resp.auth_methods,
-        default_auth_method_id.as_ref(),
+    let is_api_key_auth = match with_send_deadline(
+        "authenticate",
+        deadline.budget(lifecycle_send_timeout()),
+        authenticate(
+            &acp_tx,
+            &init_resp.auth_methods,
+            default_auth_method_id.as_ref(),
+        ),
     )
     .await
     {
@@ -969,9 +1168,9 @@ pub async fn run_single_turn(
     let t_session = Instant::now();
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::SessionCreate);
     let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
+        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None, deadline).await,
         MaterializedStartup::NewWithId { session_id } => {
-            open_session_with_id(&acp_tx, &cwd, &session_id).await
+            open_session_with_id(&acp_tx, &cwd, &session_id, deadline).await
         }
         MaterializedStartup::Resume {
             session_id,
@@ -979,7 +1178,14 @@ pub async fn run_single_turn(
             ..
         } => {
             let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
-            open_session(&acp_tx, load_cwd, Some(session_id.as_str()), restore_code).await
+            open_session(
+                &acp_tx,
+                load_cwd,
+                Some(session_id.as_str()),
+                restore_code,
+                deadline,
+            )
+            .await
         }
         MaterializedStartup::Fork {
             parent_session_id,
@@ -994,6 +1200,7 @@ pub async fn run_single_turn(
                 parent_cwd.as_deref(),
                 new_session_id.as_deref(),
                 restore_code,
+                deadline,
             )
             .await
         }
@@ -1077,7 +1284,13 @@ pub async fn run_single_turn(
             .as_deref()
             .is_some_and(effort_unresolved);
     let session_models = if needs_fresh_catalog {
-        match fuigo_shell::cli_models::fetch_model_state(&acp_tx).await {
+        match with_send_deadline(
+            "the model catalog",
+            deadline.budget(None),
+            fuigo_shell::cli_models::fetch_model_state(&acp_tx),
+        )
+        .await
+        {
             Ok(state) => ModelState::from(Some(state)),
             Err(e) => {
                 tracing::warn!(error = %e, "headless: model catalog refresh failed; using session state");
@@ -1094,6 +1307,7 @@ pub async fn run_single_turn(
         &session_models,
         options.model.as_deref(),
         options.reasoning_effort.as_deref(),
+        deadline,
     )
     .await
     {
@@ -1125,6 +1339,233 @@ pub async fn run_single_turn(
         }
         None => None,
     };
+    let TurnDriveOutcome {
+        prompt_result,
+        connection_closed,
+        timed_out,
+    } = match prompt_fut {
+        Some(prompt_fut) => {
+            drive_prompt_turn(
+                prompt_fut,
+                &mut acp_rx,
+                &acp_tx,
+                &session_id,
+                &mut emitter,
+                &options,
+                deadline,
+                t_prompt,
+                &mut ttf_logged,
+            )
+            .await
+        }
+        None => TurnDriveOutcome::default(),
+    };
+
+    crate::unified_log::flush_blocking().await;
+
+    if track_active {
+        // Non-blocking flock so a slow/network ~/.fuigo can't hang exit.
+        let _ = fuigo_active_sessions::try_unregister(&session_id);
+    }
+    // A mid-turn ACP close already reaped above; return that error before the normal outcome.
+    if connection_closed {
+        anyhow::bail!("Connection closed unexpectedly");
+    }
+    let outcome = finish_turn(
+        &mut emitter,
+        prompt_result,
+        timed_out,
+        options.total_timeout,
+        &session_id,
+        is_api_key_auth,
+    );
+
+    if options.memory_flush
+        && outcome.is_ok()
+        && let Err(e) = run_headless_memory_flush(
+            &acp_tx,
+            &mut acp_rx,
+            &session_id,
+            &mut emitter,
+            options.yolo,
+            deadline,
+        )
+        .await
+    {
+        if let Some(err) = emitter.take_output_error() {
+            return Err(anyhow::Error::new(err).context("headless: stdout write failed"));
+        }
+        return Err(e);
+    }
+
+    // A hard stdout write error outranks the normal outcome: output is dead, so exit non-zero.
+    if let Some(err) = emitter.take_output_error() {
+        return Err(anyhow::Error::new(err).context("headless: stdout write failed"));
+    }
+    outcome
+}
+
+/// Emit the terminal outcome of a finished turn and decide the process exit status.
+///
+/// Split out of `run_single_turn` so the hard-cap path is testable: the cap can fire while a turn
+/// that already produced its answer, usage and structured output is still waiting on background
+/// work, and that work must not be thrown away just because the run ran out of time.
+fn finish_turn(
+    emitter: &mut HeadlessEmitter,
+    prompt_result: Option<Result<acp::PromptResponse, acp::Error>>,
+    timed_out: bool,
+    total_timeout: Option<Duration>,
+    session_id: &acp::SessionId,
+    is_api_key_auth: bool,
+) -> Result<()> {
+    // The hard run cap fired: background work is already reaped, so report it and exit non-zero.
+    if timed_out {
+        let msg = match total_timeout {
+            Some(limit) => format!(
+                "Timed out after {}s waiting for the turn to end",
+                limit.as_secs()
+            ),
+            None => "Timed out waiting for the turn to end".to_string(),
+        };
+        // The cap commonly lands while a turn that already answered is waiting on background work
+        // (a persistent monitor never completes and always waits out `--background-wait-timeout`).
+        // That answer, its usage and its structured output are work that was done and paid for:
+        // report them, and the cap, in ONE terminal document. Dropping them loses both the result
+        // and the spend record of a turn that finished; emitting them as a second document breaks
+        // every machine consumer of `json`/`stream-json`, which reads exactly one terminal record.
+        match prompt_result {
+            Some(Ok(resp)) => emit_completed_response(emitter, resp, session_id, Some(&msg)),
+            // Nothing completed, so the error line IS the terminal document.
+            _ => {
+                emitter.on_error(&msg, Some("cancelled"));
+                false
+            }
+        };
+        anyhow::bail!("{msg}");
+    }
+    match prompt_result {
+        Some(Ok(resp)) => {
+            if emit_completed_response(emitter, resp, session_id, None) {
+                Err(anyhow::anyhow!("max turns reached"))
+            } else {
+                Ok(())
+            }
+        }
+        Some(Err(err)) => {
+            let msg = if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
+                let detail = err.data.as_ref().and_then(error_detail_from_data);
+                crate::app::sanitize_user_error(&format_rate_limited_user_message(
+                    detail.as_deref(),
+                    is_api_key_auth,
+                ))
+            } else {
+                err.to_string()
+            };
+            if let Some(usage) = fuigo_shell::sampling::error::prompt_usage_from_error(&err) {
+                match serde_json::to_value(&usage) {
+                    Ok(v) => emitter.usage = Some(v),
+                    // Log rather than swallow: a serialize failure would drop the frozen spend fields.
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "headless: failed to serialize prompt-error usage; spend fields dropped"
+                    ),
+                }
+            }
+            let stop_reason_override =
+                (fuigo_shell::sampling::error::stop_reason_for_turn_error(&err) == "MaxTokens")
+                    .then_some("max_tokens");
+            emitter.on_error(&msg, stop_reason_override);
+            Err(anyhow::anyhow!("{msg}"))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Emit a completed prompt response: structured output, usage, and the terminal result line.
+///
+/// `run_error` folds a run-level failure that arrived after the turn answered (the `--timeout` hard
+/// cap) into that same terminal document, stamping `cancelled` as the stop reason. Returns whether
+/// the turn stopped because it hit `--max-turns`.
+fn emit_completed_response(
+    emitter: &mut HeadlessEmitter,
+    resp: acp::PromptResponse,
+    session_id: &acp::SessionId,
+    run_error: Option<&str>,
+) -> bool {
+    let stop_reason = if run_error.is_some() {
+        "cancelled".to_string()
+    } else {
+        stop_reason_wire(resp.stop_reason)
+    };
+    emitter.set_structured_output_from_meta(resp.meta.as_ref());
+    emitter.set_usage_from_meta(resp.meta.as_ref());
+    // Prefer the response `_meta` ids, falling back to the typed session id rather than "".
+    let sid = resp
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("sessionId"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| session_id.0.as_ref());
+    let rid = match resp
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("requestId"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(r) => r,
+        None => {
+            tracing::warn!(
+                "headless: prompt response carried no requestId; emitting an empty requestId"
+            );
+            ""
+        }
+    };
+    let is_max_turns = resp
+        .meta
+        .as_ref()
+        .and_then(|m| m.get(crate::app::CANCELLATION_CATEGORY_KEY))
+        .and_then(|v| v.as_str())
+        == Some(fuigo_shell::session::commands::MAX_TURNS_REACHED_CATEGORY);
+    if is_max_turns {
+        emitter.on_max_turns();
+    }
+    emitter.on_end(&stop_reason, sid, rid, run_error);
+    is_max_turns
+}
+
+/// What one headless prompt turn produced, once its stream loop has stopped.
+#[derive(Default)]
+struct TurnDriveOutcome {
+    prompt_result: Option<Result<acp::PromptResponse, acp::Error>>,
+    /// The ACP channel closed mid-turn; background work was still reaped.
+    connection_closed: bool,
+    /// `options.total_timeout` elapsed before the turn ended.
+    timed_out: bool,
+}
+
+/// Drive the prompt future and the ACP stream until the turn ends.
+///
+/// When `options.total_timeout` is set it is a hard cap on the whole turn: on elapse the stream
+/// loop is dropped and the caller leaves through the normal drain/reap path. Without it, an agent
+/// that never produces an end event leaves every `select!` arm pending (the background-wait sleep
+/// arm is gated off until there is pending background work), so the turn waits forever.
+async fn drive_prompt_turn<F>(
+    prompt_fut: F,
+    acp_rx: &mut AcpClientRx,
+    acp_tx: &AcpAgentTx,
+    session_id: &acp::SessionId,
+    emitter: &mut HeadlessEmitter,
+    options: &HeadlessOptions,
+    deadline: RunDeadline,
+    t_prompt: Instant,
+    ttf_logged: &mut bool,
+) -> TurnDriveOutcome
+where
+    F: Future<Output = Result<acp::PromptResponse, acp::Error>>,
+{
+    tokio::pin!(prompt_fut);
     let mut prompt_result = None;
     // Tracked regardless of wait_for_background so the exit reaper always sees running work.
     let mut pending_bg: HashSet<BackgroundWork> = HashSet::new();
@@ -1134,7 +1575,7 @@ pub async fn run_single_turn(
     // On mid-turn channel close, break (not bail) so the exit path still drains and reaps.
     let mut connection_closed = false;
 
-    if let Some(mut prompt_fut) = prompt_fut {
+    let stream = async {
         loop {
             if emitter.write_error.is_some() {
                 tracing::warn!("headless: stdout write failed; stopping the stream loop");
@@ -1143,10 +1584,10 @@ pub async fn run_single_turn(
             // Drain buffered ACP first: PromptResponse can complete while task_backgrounded is still queued.
             if options.wait_for_background && prompt_result.is_some() && pending_bg.is_empty() {
                 drain_pending_acp_messages(
-                    &mut acp_rx,
-                    &mut emitter,
+                    &mut *acp_rx,
+                    &mut *emitter,
                     t_prompt,
-                    &mut ttf_logged,
+                    &mut *ttf_logged,
                     options.yolo,
                     &mut pending_bg,
                     &mut completed_bg,
@@ -1196,9 +1637,9 @@ pub async fn run_single_turn(
                     };
                     handle_headless_acp_message(
                         msg.boxed(),
-                        &mut emitter,
+                        &mut *emitter,
                         t_prompt,
-                        &mut ttf_logged,
+                        &mut *ttf_logged,
                         options.yolo,
                         &mut pending_bg,
                         &mut completed_bg,
@@ -1209,11 +1650,11 @@ pub async fn run_single_turn(
                     prompt_done_at = Some(Instant::now());
                     if !options.wait_for_background {
                         drain_acp_with_grace(
-                            &mut acp_rx,
+                            &mut *acp_rx,
                             Duration::from_millis(750),
-                            &mut emitter,
+                            &mut *emitter,
                             t_prompt,
-                            &mut ttf_logged,
+                            &mut *ttf_logged,
                             options.yolo,
                             &mut pending_bg,
                             &mut completed_bg,
@@ -1223,10 +1664,10 @@ pub async fn run_single_turn(
                     }
                     // Drain now so a task_backgrounded around completion is recorded before the empty-check.
                     drain_pending_acp_messages(
-                        &mut acp_rx,
-                        &mut emitter,
+                        &mut *acp_rx,
+                        &mut *emitter,
                         t_prompt,
-                        &mut ttf_logged,
+                        &mut *ttf_logged,
                         options.yolo,
                         &mut pending_bg,
                         &mut completed_bg,
@@ -1240,131 +1681,45 @@ pub async fn run_single_turn(
                 }
             }
         }
-
-        // Final drain-to-empty so the reaper sees work buffered right at exit (the timeout path skips draining).
-        drain_pending_acp_messages(
-            &mut acp_rx,
-            &mut emitter,
-            t_prompt,
-            &mut ttf_logged,
-            options.yolo,
-            &mut pending_bg,
-            &mut completed_bg,
-        );
-
-        if !pending_bg.is_empty() {
+    };
+    let timed_out = if let Some(limit) = deadline.remaining() {
+        let elapsed = tokio::time::timeout(limit, stream).await.is_err();
+        if elapsed {
             tracing::warn!(
-                pending_bg = pending_bg.len(),
-                "headless: killing background work still pending at exit"
+                timeout_secs = limit.as_secs(),
+                "headless: turn timed out; tearing down"
             );
-            reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
         }
-    }
-
-    crate::unified_log::flush_blocking().await;
-
-    if track_active {
-        // Non-blocking flock so a slow/network ~/.fuigo can't hang exit.
-        let _ = fuigo_active_sessions::try_unregister(&session_id);
-    }
-    // A mid-turn ACP close already reaped above; return that error before the normal outcome.
-    if connection_closed {
-        anyhow::bail!("Connection closed unexpectedly");
-    }
-    let outcome: Result<()> = match prompt_result {
-        Some(Ok(resp)) => {
-            let stop_reason = stop_reason_wire(resp.stop_reason);
-            emitter.set_structured_output_from_meta(resp.meta.as_ref());
-            emitter.set_usage_from_meta(resp.meta.as_ref());
-            // Prefer the response `_meta` ids, falling back to the typed session id rather than "".
-            let sid = resp
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("sessionId"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| session_id.0.as_ref());
-            let rid = match resp
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("requestId"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                Some(r) => r,
-                None => {
-                    tracing::warn!(
-                        "headless: prompt response carried no requestId; emitting an empty requestId"
-                    );
-                    ""
-                }
-            };
-            let is_max_turns = resp
-                .meta
-                .as_ref()
-                .and_then(|m| m.get(crate::app::CANCELLATION_CATEGORY_KEY))
-                .and_then(|v| v.as_str())
-                == Some(fuigo_shell::session::commands::MAX_TURNS_REACHED_CATEGORY);
-            if is_max_turns {
-                emitter.on_max_turns();
-                emitter.on_end(&stop_reason, sid, rid);
-                Err(anyhow::anyhow!("max turns reached"))
-            } else {
-                emitter.on_end(&stop_reason, sid, rid);
-                Ok(())
-            }
-        }
-        Some(Err(err)) => {
-            let msg = if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
-                let detail = err.data.as_ref().and_then(error_detail_from_data);
-                crate::app::sanitize_user_error(&format_rate_limited_user_message(
-                    detail.as_deref(),
-                    is_api_key_auth,
-                ))
-            } else {
-                err.to_string()
-            };
-            if let Some(usage) = fuigo_shell::sampling::error::prompt_usage_from_error(&err) {
-                match serde_json::to_value(&usage) {
-                    Ok(v) => emitter.usage = Some(v),
-                    // Log rather than swallow: a serialize failure would drop the frozen spend fields.
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "headless: failed to serialize prompt-error usage; spend fields dropped"
-                    ),
-                }
-            }
-            let stop_reason_override =
-                (fuigo_shell::sampling::error::stop_reason_for_turn_error(&err) == "MaxTokens")
-                    .then_some("max_tokens");
-            emitter.on_error(&msg, stop_reason_override);
-            Err(anyhow::anyhow!("{msg}"))
-        }
-        None => Ok(()),
+        elapsed
+    } else {
+        stream.await;
+        false
     };
 
-    if options.memory_flush
-        && outcome.is_ok()
-        && let Err(e) = run_headless_memory_flush(
-            &acp_tx,
-            &mut acp_rx,
-            &session_id,
-            &mut emitter,
-            options.yolo,
-        )
-        .await
-    {
-        if let Some(err) = emitter.take_output_error() {
-            return Err(anyhow::Error::new(err).context("headless: stdout write failed"));
-        }
-        return Err(e);
+    // Final drain-to-empty so the reaper sees work buffered right at exit (the timeout path skips draining).
+    drain_pending_acp_messages(
+        &mut *acp_rx,
+        &mut *emitter,
+        t_prompt,
+        &mut *ttf_logged,
+        options.yolo,
+        &mut pending_bg,
+        &mut completed_bg,
+    );
+
+    if !pending_bg.is_empty() {
+        tracing::warn!(
+            pending_bg = pending_bg.len(),
+            "headless: killing background work still pending at exit"
+        );
+        reap_pending_background_tasks(&pending_bg, session_id, acp_tx).await;
     }
 
-    // A hard stdout write error outranks the normal outcome: output is dead, so exit non-zero.
-    if let Some(err) = emitter.take_output_error() {
-        return Err(anyhow::Error::new(err).context("headless: stdout write failed"));
+    TurnDriveOutcome {
+        prompt_result,
+        connection_closed,
+        timed_out,
     }
-    outcome
 }
 
 /// Invoke `fuigo/memory/flush` and wait for the flush LLM to finish.
@@ -1374,6 +1729,7 @@ async fn run_headless_memory_flush(
     session_id: &acp::SessionId,
     emitter: &mut HeadlessEmitter,
     yolo: bool,
+    deadline: RunDeadline,
 ) -> Result<()> {
     let params = serde_json::json!({ "session_id": session_id.0.to_string() });
     let raw = serde_json::value::to_raw_value(&params)
@@ -1384,25 +1740,38 @@ async fn run_headless_memory_flush(
     let mut ttf_logged = true;
     let mut pending_bg = HashSet::new();
     let mut completed_bg = HashSet::new();
-    let response = loop {
-        tokio::select! {
-            biased;
-            msg = acp_rx.recv() => {
-                let Some(msg) = msg else {
-                    anyhow::bail!("connection closed while waiting for memory flush");
-                };
-                handle_headless_acp_message(
-                    msg.boxed(),
-                    emitter,
-                    t0,
-                    &mut ttf_logged,
-                    yolo,
-                    &mut pending_bg,
-                    &mut completed_bg,
-                );
+    // The flush is part of the run, so it draws on the same `--timeout` budget as everything else:
+    // `flush_fut` is a bare `acp_send`, and the ACP arm alone never ends a wedged flush.
+    let drain = async {
+        loop {
+            tokio::select! {
+                biased;
+                msg = acp_rx.recv() => {
+                    let Some(msg) = msg else {
+                        anyhow::bail!("connection closed while waiting for memory flush");
+                    };
+                    handle_headless_acp_message(
+                        msg.boxed(),
+                        emitter,
+                        t0,
+                        &mut ttf_logged,
+                        yolo,
+                        &mut pending_bg,
+                        &mut completed_bg,
+                    );
+                }
+                res = &mut flush_fut => break Ok(res),
             }
-            res = &mut flush_fut => break res,
         }
+    };
+    let response = match deadline.remaining() {
+        Some(limit) => tokio::time::timeout(limit, drain).await.map_err(|_| {
+            anyhow::anyhow!(
+                "timed out after {}s waiting for memory flush",
+                limit.as_secs()
+            )
+        })??,
+        None => drain.await?,
     };
     drain_pending_acp_messages(
         acp_rx,

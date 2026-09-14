@@ -155,6 +155,7 @@ fn end_turn() -> TurnEnd<'static> {
         structured_output: None,
         result_text: "",
         duration_ms: 0,
+        error: None,
     }
 }
 
@@ -190,6 +191,7 @@ fn turn_end(stop_reason: &'static str, result_text: &'static str) -> TurnEnd<'st
         structured_output: None,
         result_text,
         duration_ms: 0,
+        error: None,
     }
 }
 
