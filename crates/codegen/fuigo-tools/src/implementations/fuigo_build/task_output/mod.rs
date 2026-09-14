@@ -66,6 +66,10 @@ fn requested_wait_timeout(timeout_ms: Option<u64>) -> Duration {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WaitHint {
     NotRequested,
+    /// The wait's outcome is reported once elsewhere (the multi-wait summary),
+    /// so individual results carry no advisory tail. Keeps one interrupt from
+    /// costing one copy of the notice per still-running task.
+    ReportedOnce,
     Elapsed {
         requested: Duration,
         waited: Duration,
@@ -132,8 +136,39 @@ fn still_running_wait_hint(hint: &WaitHint, subject: WaitSubject) -> String {
         WaitHint::NotRequested => {
             "Omit timeout_ms (or pass a positive value) to wait for completion.".to_string()
         }
+        WaitHint::ReportedOnce => String::new(),
     };
     format!("{lead} You will be notified automatically when the {noun} completes.")
+}
+
+/// Split a multi-task wait's outcome into a per-result hint and a single
+/// summary notice.
+///
+/// `resolve_tasks` appends the still-running hint to EVERY running result, so
+/// an interrupt over six tasks would render six identical copies of the notice,
+/// message identifiers included. One interrupt is one event about the wait, not
+/// one per task: it belongs on the summary, once. Every other outcome is
+/// genuinely per-task and passes through unchanged.
+fn fold_multi_wait_interrupt(hint: &WaitHint) -> (WaitHint, Option<String>) {
+    let WaitHint::Interrupted {
+        requested,
+        waited,
+        messages,
+    } = hint
+    else {
+        return (hint.clone(), None);
+    };
+    let count = messages.len();
+    let plural = if count == 1 { "message" } else { "messages" };
+    let notice = format!(
+        "Wait interrupted after {} of the {} requested: {count} {plural} from the parent agent \
+         arrived ({}). Read it before continuing; the tasks still running above will notify you \
+         automatically when they complete.",
+        format_waited_duration(*waited),
+        format_waited_duration(*requested),
+        messages.join(", "),
+    );
+    (WaitHint::ReportedOnce, Some(notice))
 }
 
 fn format_waited_duration(d: Duration) -> String {
@@ -146,6 +181,9 @@ fn format_waited_duration(d: Duration) -> String {
 }
 
 fn with_still_running_wait_hint(body: String, hint: &WaitHint, subject: WaitSubject) -> String {
+    if matches!(hint, WaitHint::ReportedOnce) {
+        return body;
+    }
     format!("{body}\n\n{}", still_running_wait_hint(hint, subject))
 }
 
@@ -154,6 +192,9 @@ fn apply_running_wait_hint(
     hint: &WaitHint,
     subject: WaitSubject,
 ) -> TaskOutputResult {
+    if matches!(hint, WaitHint::ReportedOnce) {
+        return result;
+    }
     if result.status == "running" {
         result.output =
             with_still_running_wait_hint(std::mem::take(&mut result.output), hint, subject);
@@ -397,6 +438,7 @@ impl TaskOutputTool {
         )
         .await;
 
+        let mut interrupt_notice: Option<String> = None;
         let results = if waits
             && (!initial.pending_bash_ids.is_empty() || !initial.pending_subagent_ids.is_empty())
         {
@@ -411,13 +453,15 @@ impl TaskOutputTool {
             )
             .await
             .hint(requested, timeout);
+            let per_task_hint;
+            (per_task_hint, interrupt_notice) = fold_multi_wait_interrupt(&wait_hint);
             resolve_tasks(
                 task_ids,
                 &terminal,
                 &backend,
                 &read_file_name,
                 max_output_bytes,
-                &wait_hint,
+                &per_task_hint,
             )
             .await
             .results
@@ -431,7 +475,11 @@ impl TaskOutputTool {
             .count();
         let total = results.len();
         let mode_str = if waits { "wait_all" } else { "poll" };
-        let summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
+        let mut summary = format!("{completed_count}/{total} tasks completed ({mode_str})");
+        if let Some(notice) = interrupt_notice {
+            summary.push('\n');
+            summary.push_str(&notice);
+        }
 
         Ok(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
             mode: mode_str.to_string(),

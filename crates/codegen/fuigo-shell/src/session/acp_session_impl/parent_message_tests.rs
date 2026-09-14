@@ -248,6 +248,10 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
 
 /// Admission must wake any tool wait already in flight in this session, so a
 /// blocked subagent sees the correction now rather than at the wait deadline.
+///
+/// A turn must be running for this to be the case at all: with the session
+/// idle the row simply starts its own turn and nothing is left pending (see
+/// `a_message_delivered_as_its_own_turn_leaves_no_pending_id`).
 #[tokio::test(flavor = "current_thread")]
 async fn admission_signals_in_flight_tool_waits() {
     let local = tokio::task::LocalSet::new();
@@ -255,6 +259,13 @@ async fn admission_signals_in_flight_tool_waits() {
         let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
         let signal = actor.rebuild_spec.parent_message_signal.clone();
         let watch = signal.subscribe();
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state.running_task = Some(super::super::support::running_task_stub("running"));
+        }
         let (receipt_sink, _receipt_rx) = mpsc::channel(1);
         let (respond_to, response_rx) = oneshot::channel();
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
@@ -273,6 +284,52 @@ async fn admission_signals_in_flight_tool_waits() {
         );
         let woken = await_with_timeout(watch.arrived()).await;
         assert_eq!(&*woken, ["woken".to_string()]);
+    }))
+    .await;
+}
+
+/// A message admitted while the session is idle runs as its own turn, so no
+/// row is ever promoted and the signal's pending list must be cleared there
+/// too.
+///
+/// Otherwise the id leaks for the life of the session and every later
+/// interrupt hint names it as still pending — sending the child hunting for a
+/// message it already handled, and keeping the wait interruptible for a
+/// message that is no longer outstanding.
+#[tokio::test(flavor = "current_thread")]
+async fn a_message_delivered_as_its_own_turn_leaves_no_pending_id() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let signal = actor.rebuild_spec.parent_message_signal.clone();
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("m1"),
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        assert!(
+            await_with_timeout(actor.state.lock())
+                .await
+                .running_task
+                .is_some(),
+            "an idle session runs the parent message as its own turn"
+        );
+        assert!(
+            signal.pending_message_ids().is_empty(),
+            "a message delivered through its own turn must not stay pending, got {:?}",
+            signal.pending_message_ids()
+        );
     }))
     .await;
 }

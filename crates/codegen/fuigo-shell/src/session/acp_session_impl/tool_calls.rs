@@ -3523,6 +3523,7 @@ mod wait_interrupt_tests {
         buf.push(PendingInterjection {
             text: "user message".into(),
             attachments: Vec::new(),
+            ..Default::default()
         });
         let out = tokio::select! {
             biased;
