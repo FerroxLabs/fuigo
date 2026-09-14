@@ -366,10 +366,41 @@ fn response_event_streamed_tpm_429_is_transient_despite_size_wording() {
 }
 
 #[test]
-fn response_event_streamed_429_classifies_like_the_envelope_path() {
-    // Same body, same verdict, whichever path delivers it: the envelope path
-    // carves 429 out via `SamplingError::is_context_length_error`.
-    let envelope = {
+fn streamed_rate_limit_slugs_are_transient_too() {
+    // The `code` slot is not always a numeric status: Anthropic-style backends
+    // spell the same rate limit as an error TYPE. Matching only "429" left every
+    // slug spelling classifying as Overflow — the original bug in another
+    // spelling.
+    for code in [
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "too_many_requests",
+        "RATE_LIMIT_ERROR",
+    ] {
+        assert!(
+            matches!(
+                classify_response_event_error(Some(code), TPM_429_BODY),
+                CompactFailure::Transient(_)
+            ),
+            "a streamed {code} must retry, not ladder"
+        );
+    }
+}
+
+#[test]
+fn the_stream_path_carve_out_does_not_require_a_retry_after() {
+    // The two paths agree on a 429 that carries `Retry-After`, and deliberately
+    // do NOT agree without one. The envelope rule
+    // (`SamplingError::is_context_length_error`) exempts a 429 only when the
+    // server promised capacity later; a bare 429 with size wording there means
+    // the request exceeds the cap outright, so it keeps laddering. The stream
+    // event has no header to read — `ResponseFailed`/`ResponseError` carry a
+    // code and a message and nothing else — so it trusts the code alone.
+    //
+    // This test states that rule rather than hiding it: the earlier version
+    // asserted "parity" while setting `retry_after_secs = Some(42)`, the one
+    // input on which the two paths cannot disagree.
+    let with_retry_after = {
         let mut err = api_error(StatusCode::TOO_MANY_REQUESTS, TPM_429_BODY);
         if let SamplingError::Api {
             retry_after_secs, ..
@@ -380,13 +411,23 @@ fn response_event_streamed_429_classifies_like_the_envelope_path() {
         classify_sampling_error(err)
     };
     assert!(
-        matches!(envelope, CompactFailure::Transient(_)),
-        "precondition: the envelope path already treats this as transient"
+        matches!(with_retry_after, CompactFailure::Transient(_)),
+        "envelope path, 429 + Retry-After: transient"
     );
-    assert!(matches!(
-        classify_response_event_error(Some("429"), TPM_429_BODY),
-        CompactFailure::Transient(_)
-    ));
+    assert!(
+        matches!(
+            classify_sampling_error(api_error(StatusCode::TOO_MANY_REQUESTS, TPM_429_BODY)),
+            CompactFailure::Overflow(_)
+        ),
+        "envelope path, 429 with NO Retry-After: still ladders, by design"
+    );
+    assert!(
+        matches!(
+            classify_response_event_error(Some("429"), TPM_429_BODY),
+            CompactFailure::Transient(_)
+        ),
+        "stream path has no header to read, so the code alone decides"
+    );
 }
 
 #[test]
