@@ -9,12 +9,21 @@ use crate::format::{format_interjection, format_parent_agent_interjection};
 /// interjection is the user speaking mid-turn; a parent-agent message is
 /// model-authored, untrusted text from an owning agent. Collapsing them would
 /// let a parent agent speak with user authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// The parent variant carries the message's identity because a buffered entry
+/// is not always drained into the running turn: a turn abort, a chat-state
+/// failure, or a turn-end strand sends it back out as a queued prompt turn, and
+/// the host has to rebuild the original model-authored origin from what the
+/// entry itself carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterjectionAuthority {
     #[default]
     User,
-    ParentAgent,
+    ParentAgent {
+        message_id: String,
+        sender_session_id: String,
+    },
 }
 
 /// A buffered mid-turn interjection awaiting the next safe drain point.
@@ -67,7 +76,7 @@ pub fn drain_formatted<Attachment>(
         .map(|entry| FormattedInterjection {
             text: match entry.authority {
                 InterjectionAuthority::User => format_interjection(sanitize_text(entry.text)),
-                InterjectionAuthority::ParentAgent => {
+                InterjectionAuthority::ParentAgent { .. } => {
                     format_parent_agent_interjection(sanitize_text(entry.text))
                 }
             },
@@ -113,7 +122,10 @@ mod tests {
         let buf: InterjectionBuffer<()> = InterjectionBuffer::new();
         buf.push(PendingInterjection {
             text: "stop and do X instead".into(),
-            authority: InterjectionAuthority::ParentAgent,
+            authority: InterjectionAuthority::ParentAgent {
+                message_id: "m1".into(),
+                sender_session_id: "root-session".into(),
+            },
             ..Default::default()
         });
 

@@ -382,6 +382,7 @@ async fn interjection_fallback_prompt_queues_front_with_prefix() {
                     "steer now".to_string(),
                     vec![test_image_content()],
                     true,
+                    InterjectionAuthority::User,
                 )
                 .await;
 
@@ -500,7 +501,12 @@ async fn fallback_prompt_lands_behind_running_front() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".into());
 
             actor
-                .queue_interjection_fallback_prompt("urgent".to_string(), vec![], true)
+                .queue_interjection_fallback_prompt(
+                    "urgent".to_string(),
+                    vec![],
+                    true,
+                    InterjectionAuthority::User,
+                )
                 .await;
 
             let state = actor.state.lock().await;
@@ -533,7 +539,12 @@ async fn fallback_prompt_respects_active_plan_mode() {
             }
 
             actor
-                .queue_interjection_fallback_prompt("plan steer".to_string(), vec![], true)
+                .queue_interjection_fallback_prompt(
+                    "plan steer".to_string(),
+                    vec![],
+                    true,
+                    InterjectionAuthority::User,
+                )
                 .await;
 
             let state = actor.state.lock().await;
@@ -657,6 +668,183 @@ async fn promoted_parent_message_resolves_slashes_through_the_model_authored_pat
             assert!(
                 !text.contains("Find sessions matching foo"),
                 "the human resolver's whole-text scan must not run on parent text, got: {text}"
+            );
+        })
+        .await;
+}
+
+/// Every route that takes a buffered entry back out of the interjection buffer
+/// and re-queues it as a prompt turn goes through
+/// `queue_interjection_fallback_prompt`. A parent agent's words must come back
+/// out as `PromptOrigin::ParentAgentMessage` — `InputAuthority::ModelAuthoredUntrusted` —
+/// never as a genuine user prompt with the human slash/workflow resolver, prompt
+/// history, and the "the user re-engaged" task-wake gate behind it.
+///
+/// This is the turn-end strand (`run_loop`) and shutdown route, and the tail of
+/// the send-now cancel route (`cancel.rs`): both call
+/// `flush_stranded_interjections` directly.
+#[tokio::test]
+async fn stranded_parent_message_flushes_as_a_parent_prompt_not_a_user_prompt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            actor.pending_interjections.push(PendingInterjection {
+                text: "/compact and then stop".to_string(),
+                attachments: vec![],
+                authority: InterjectionAuthority::ParentAgent {
+                    message_id: "m1".to_string(),
+                    sender_session_id: "root-session".to_string(),
+                },
+            });
+
+            assert_eq!(actor.flush_stranded_interjections().await, 1);
+
+            let state = actor.state.lock().await;
+            let row = state.pending_inputs.front().expect("fallback row");
+            assert!(
+                matches!(
+                    row.input_origin.as_prompt_origin(),
+                    crate::session::PromptOrigin::ParentAgentMessage {
+                        message_id,
+                        sender_session_id,
+                    } if message_id == "m1" && sender_session_id == "root-session"
+                ),
+                "a stranded parent message must keep its origin, got {:?}",
+                row.input_origin.as_prompt_origin()
+            );
+            assert!(
+                !row.input_origin.policy().authority.is_human_intent(),
+                "a parent agent must never speak to its child with user authority"
+            );
+        })
+        .await;
+}
+
+/// The cancel route: a turn abort drops the drain future at one of its awaits,
+/// `RestoreOnCancel` puts the entries back, and `cancel_turn_for_send_now` /
+/// the turn-end arm flush them. The authority has to survive the whole round
+/// trip — promotion, restore, flush — not just the promotion.
+#[tokio::test]
+async fn aborted_drain_of_a_parent_message_keeps_its_authority_through_the_flush() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, _receipt) = parent_agent_message_item("m1", "stop and do X instead");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            actor.promote_parent_agent_messages().await;
+            {
+                let mut drain = std::pin::pin!(actor.drain_pending_interjections());
+                assert!(
+                    futures::poll!(drain.as_mut()).is_pending(),
+                    "drain must hit an await before submitting the batch"
+                );
+                // Dropping the pending future here simulates the turn abort.
+            }
+
+            let restored = actor.pending_interjections.snapshot();
+            assert!(
+                matches!(
+                    restored.first().map(|e| &e.authority),
+                    Some(InterjectionAuthority::ParentAgent { message_id, .. }) if message_id == "m1"
+                ),
+                "the restored entry must still be model-authored, got {:?}",
+                restored.first().map(|e| &e.authority)
+            );
+
+            assert_eq!(actor.flush_stranded_interjections().await, 1);
+            let state = actor.state.lock().await;
+            let row = state
+                .pending_inputs
+                .iter()
+                .find(|i| i.prompt_id.starts_with("interject-fallback-"))
+                .expect("fallback row");
+            assert!(
+                matches!(
+                    row.input_origin.as_prompt_origin(),
+                    crate::session::PromptOrigin::ParentAgentMessage { message_id, .. }
+                        if message_id == "m1"
+                ),
+                "an aborted drain must not launder a parent message into a user prompt, got {:?}",
+                row.input_origin.as_prompt_origin()
+            );
+        })
+        .await;
+}
+
+/// The other half of the boundary: a human interjection still strands into a
+/// real user prompt. Fixing the parent case must not demote the user's own
+/// message.
+#[tokio::test]
+async fn stranded_human_interjection_still_flushes_as_a_user_prompt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            actor.pending_interjections.push(PendingInterjection {
+                text: "actually, stop".to_string(),
+                attachments: vec![],
+                ..Default::default()
+            });
+
+            assert_eq!(actor.flush_stranded_interjections().await, 1);
+
+            let state = actor.state.lock().await;
+            let row = state.pending_inputs.front().expect("fallback row");
+            assert_eq!(
+                row.input_origin.as_prompt_origin(),
+                &crate::session::PromptOrigin::User
+            );
+            assert!(row.input_origin.policy().authority.is_human_intent());
+        })
+        .await;
+}
+
+/// A queue-hidden `interject-fallback-` row carries the parent origin so its
+/// own turn is classified correctly — but it is a rescue, not a fresh parent
+/// message, so the next safe point must leave it alone. Promoting it would put
+/// it straight back into the buffer it was just rescued from.
+#[tokio::test]
+async fn a_flushed_parent_fallback_row_is_not_promoted_again() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            actor.pending_interjections.push(PendingInterjection {
+                text: "stop and do X instead".to_string(),
+                attachments: vec![],
+                authority: InterjectionAuthority::ParentAgent {
+                    message_id: "m1".to_string(),
+                    sender_session_id: "root-session".to_string(),
+                },
+            });
+            assert_eq!(actor.flush_stranded_interjections().await, 1);
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            actor.promote_parent_agent_messages().await;
+
+            assert!(
+                actor.pending_interjections.is_empty(),
+                "a rescued fallback row must not be pulled back into the buffer"
+            );
+            let state = actor.state.lock().await;
+            assert!(
+                state
+                    .pending_inputs
+                    .iter()
+                    .any(|i| i.prompt_id.starts_with("interject-fallback-")),
+                "the fallback row must stay queued to run as its own turn"
             );
         })
         .await;

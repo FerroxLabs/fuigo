@@ -59,6 +59,7 @@ impl SessionActor {
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
             message.text.to_string(),
         ))];
+        let resolves_to_builtin = Self::parent_message_resolves_to_builtin(&prompt_blocks);
         let queue_meta = crate::session::prompt_queue::QueueEntryMeta {
             id: prompt_id.clone(),
             version: 0,
@@ -114,9 +115,17 @@ impl SessionActor {
         // `pending_inputs` until the turn ends — a `get_task_output` wait alone can hold
         // that for the 10-minute ceiling. The next safe point promotes the row
         // (`promote_parent_agent_messages`).
-        self.rebuild_spec
-            .parent_message_signal
-            .message_committed(committed_message_id);
+        //
+        // A static builtin (`/compact`) is the exception: it is not promoted, it
+        // runs on its own turn as it always has. Raising the signal for it would
+        // cut waits short for a message no drain will take, and the identifier
+        // would stay pending until that turn starts — every wait in between
+        // returning instantly.
+        if !resolves_to_builtin {
+            self.rebuild_spec
+                .parent_message_signal
+                .message_committed(committed_message_id);
+        }
         Self::maybe_start_running_task(self.clone(), completion_tx).await;
     }
 

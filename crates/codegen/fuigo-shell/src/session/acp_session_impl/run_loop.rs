@@ -1951,7 +1951,12 @@ pub(super) async fn run_session(
                                 tracing::info!("Queued mid-turn interjection");
                             } else {
                                 session
-                                    .queue_interjection_fallback_prompt(text, images, true)
+                                    .queue_interjection_fallback_prompt(
+                                        text,
+                                        images,
+                                        true,
+                                        InterjectionAuthority::User,
+                                    )
                                     .await;
                                 SessionActor::maybe_start_running_task(
                                     session.clone(),

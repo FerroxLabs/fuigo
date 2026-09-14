@@ -4204,3 +4204,96 @@ async fn parent_agent_message_is_not_promoted_while_idle() {
         })
         .await;
 }
+
+/// `/compact` is the only slash command a parent agent can invoke
+/// (`ModelAuthoredEligibility::ExactCanonical` + `BuiltinGate::AlwaysOn`), and
+/// it is executed by `handle_turn_input`'s `SlashCommandOutcome::Builtin` arm —
+/// on the row's OWN turn. The mid-turn promotion path has no equivalent, so
+/// promoting it would inject the literal `/compact ...` text as
+/// `<parent_agent_message>` and silently drop the compaction.
+///
+/// Leave the row queued: it runs as its own turn at turn end, exactly as it did
+/// before mid-turn promotion existed.
+#[tokio::test]
+async fn parent_agent_compact_is_left_queued_to_run_its_own_turn() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::parent_agent_compact_is_left_queued_to_run_its_own_turn",
+    ) else {
+        return;
+    };
+    std::fs::write(
+        home.join("config.toml"),
+        "[ui]\nfollow_up_behavior = \"queue\"\n",
+    )
+    .expect("write isolated queue setting");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, _receipt) = parent_agent_message_item("m1", "/compact preserve auth");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(
+                !actor.drain_interjections_at_safe_point().await,
+                "a builtin must not be promoted into the running turn"
+            );
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                order,
+                vec!["running", "parent-message-m1"],
+                "the /compact row keeps its own-turn path, where the builtin actually runs"
+            );
+        })
+        .await;
+}
+
+/// Ordinary steering text from the parent is still promoted: the builtin
+/// exception must not swallow the item's headline case.
+#[tokio::test]
+async fn parent_agent_non_builtin_slash_is_still_promoted() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::parent_agent_non_builtin_slash_is_still_promoted",
+    ) else {
+        return;
+    };
+    std::fs::write(
+        home.join("config.toml"),
+        "[ui]\nfollow_up_behavior = \"queue\"\n",
+    )
+    .expect("write isolated queue setting");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, _receipt) =
+                parent_agent_message_item("m1", "/clear is not a parent command");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(actor.drain_interjections_at_safe_point().await);
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["running"]);
+        })
+        .await;
+}
