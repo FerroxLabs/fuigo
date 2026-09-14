@@ -457,3 +457,45 @@ fn response_event_overflow_without_a_rate_limit_code_still_ladders() {
         );
     }
 }
+
+// ── the Messages (Anthropic) backend's own stream errors ────────────────────
+
+/// The verbatim SSE `data:` payload an Anthropic-style backend sends for a
+/// tokens-per-minute 429.
+const ANTHROPIC_TPM_429_FRAME: &str = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Request too large for claude-sonnet-4 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000."}}"#;
+
+/// The same frame shape for a genuine prompt-size rejection.
+const ANTHROPIC_OVERFLOW_FRAME: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 300000 tokens > 200000 maximum"}}"#;
+
+#[test]
+fn an_anthropic_stream_rate_limit_is_transient_on_the_compaction_loop() {
+    // Production path, end to end, with nothing hand-built: the compaction
+    // loop's Messages arm consumes `Client::conversation_stream_messages`,
+    // whose SSE mapping runs `try_parse_stream_error` over every `data:`
+    // payload before attempting a typed `MessageStreamEvent`. A provider error
+    // frame therefore arrives as an `Err` item and lands here, on
+    // `classify_sampling_error` (session_compact.rs, the `Err(e)` arm of the
+    // Messages stream loop) -- not on `classify_response_event_error`, which
+    // only ever sees the Responses backend's typed events.
+    //
+    // Classifying this as Overflow costs a wasted full-context summarization
+    // call (100-400k input tokens) AND a permanent step down the
+    // Verbatim -> VerbatimFitted -> Lossy ladder for the rest of the session.
+    let err = fuigo_sampling_types::error::try_parse_stream_error(ANTHROPIC_TPM_429_FRAME)
+        .expect("an Anthropic error frame parses as a stream error");
+    assert!(
+        matches!(classify_sampling_error(err), CompactFailure::Transient(_)),
+        "a Messages-backend TPM 429 must retry, not ladder"
+    );
+}
+
+#[test]
+fn an_anthropic_stream_overflow_still_ladders() {
+    // The carve-out must not swallow the case the ladder exists for.
+    let err = fuigo_sampling_types::error::try_parse_stream_error(ANTHROPIC_OVERFLOW_FRAME)
+        .expect("an Anthropic error frame parses as a stream error");
+    assert!(
+        is_overflow(&classify_sampling_error(err)),
+        "a real prompt-size rejection must still reach the input ladder"
+    );
+}

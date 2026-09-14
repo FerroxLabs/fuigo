@@ -55,8 +55,7 @@ enum BlockType {
 /// Transform a raw Anthropic Messages API stream into a stream of [`SamplingEvent`]s.
 ///
 /// Yields exactly one terminal event ([`SamplingEvent::Completed`] or [`SamplingEvent::Failed`]) per request.
-/// Server-side `Error` events translate to `SamplingError::StreamError`, keeping the wire
-/// `type` (e.g. `rate_limit_error`, `overloaded_error`) in its own slot.
+/// Server-side `Error` events translate to `SamplingError::Api { status: 500, .. }`.
 /// The actor's retry loop treats them as retryable transport-level errors.
 pub fn stream_messages<'a>(
     raw_stream: BoxStream<'a, Result<MessageStreamEvent, SamplingError>>,
@@ -441,22 +440,15 @@ pub fn stream_messages<'a>(
                 }
 
                 MessageStreamEvent::Error { error } => {
-                    // Keep the wire type in its own slot instead of flattening it
-                    // into a message under a synthesized 500. `rate_limit_error`
-                    // is the Messages spelling of a 429, and a tokens-per-minute
-                    // one carries a body that opens "Request too large for
-                    // <model> ... (TPM)" -- the exact anchor
-                    // `is_context_length_error` matches. Discarding the type made
-                    // that read as a context overflow, which costs a wasted
-                    // full-context summarization call and a permanent step down
-                    // the compaction input ladder. This is also the shape the SSE
-                    // parser already produces for the identical wire event
-                    // (`try_parse_stream_error`), so the two paths now agree.
-                    let err = SamplingError::StreamError {
-                        error_type: error.r#type.clone(),
-                        message: error.message.clone(),
+                    let error_message = format!("{}: {}", error.r#type, error.message);
+                    let err = SamplingError::Api {
+                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                        message: error_message,
+                        model_metadata: None,
+                        retry_after_secs: None,
+                        should_retry: None,
                         // Messages-style error events carry no code slot.
-                        code: None,
+                        error_code: None,
                     };
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),

@@ -1876,6 +1876,50 @@ mod tests {
         }
     }
 
+    /// The verbatim SSE frame an Anthropic-style backend sends for a
+    /// tokens-per-minute 429: `event: error` with this `data:` payload.
+    const ANTHROPIC_TPM_429_FRAME: &str = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Request too large for claude-sonnet-4 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000."}}"#;
+
+    #[test]
+    fn an_anthropic_tpm_429_frame_is_retryable_not_an_overflow() {
+        // The PRODUCTION path for a Messages-backend rate limit, end to end:
+        // the raw SSE mapping in `Client::conversation_stream_messages` runs
+        // `try_parse_stream_error` over every `data:` payload BEFORE trying to
+        // deserialize a `MessageStreamEvent`, so this frame becomes an `Err`
+        // item on the raw stream. `tee_errors` captures it and `drive_l2` hands
+        // that exact value to the retry classifier and to
+        // `classify_sampling_error` on the compaction loop's own Messages arm.
+        // Nothing synthesizes a status in between, so this predicate is what
+        // decides retry-vs-ladder.
+        let err = try_parse_stream_error(ANTHROPIC_TPM_429_FRAME)
+            .expect("an Anthropic error frame must parse as a stream error");
+        assert!(
+            matches!(&err, SamplingError::StreamError { error_type, .. } if error_type == "rate_limit_error"),
+            "the wire type must reach the classifier: {err:?}",
+        );
+        assert!(
+            !err.is_context_length_error(),
+            "a TPM 429 must retry, not step the compaction input ladder: {err}",
+        );
+        assert!(err.is_retryable(), "a rate limit is retryable: {err}");
+    }
+
+    #[test]
+    fn the_error_envelope_parser_claims_the_frame_before_the_event_type_can() {
+        // Why the `MessageStreamEvent::Error` arm in `stream::messages` is not
+        // the place to fix this: `messages::StreamError` requires `type` and
+        // `message` as strings, and any payload satisfying that also satisfies
+        // `ErrorResponse` (whose fields are optional), which
+        // `try_parse_stream_error` tries first. The typed event arm is
+        // therefore unreachable for every frame that could carry a rate limit.
+        assert!(try_parse_stream_error(ANTHROPIC_TPM_429_FRAME).is_some());
+        assert!(
+            serde_json::from_str::<crate::messages::MessageStreamEvent>(ANTHROPIC_TPM_429_FRAME)
+                .is_ok(),
+            "the same frame also deserializes as the typed event; the parser above runs first",
+        );
+    }
+
     #[test]
     fn try_parse_stream_error_captures_code() {
         let data = r#"{"error":{"message":"bad image","type":"invalid_request_error","code":"invalid_image"}}"#;
