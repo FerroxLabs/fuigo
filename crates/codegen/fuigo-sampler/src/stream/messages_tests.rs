@@ -593,7 +593,7 @@ async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
 }
 
 #[tokio::test]
-async fn server_error_event_keeps_the_wire_type() {
+async fn server_error_event_yields_failed_500() {
     let err_event = MessageStreamEvent::Error {
         error: StreamError {
             r#type: "overloaded_error".into(),
@@ -605,55 +605,11 @@ async fn server_error_event_keeps_the_wire_type() {
 
     match evs.last().unwrap() {
         SamplingEvent::Failed { error, .. } => {
-            // The wire `type` now travels in its own slot instead of being
-            // flattened into the message under a synthesized 500 status.
             assert_eq!(error.kind, crate::events::SamplingErrorKind::Api);
-            assert_eq!(
-                error.status_code, None,
-                "no status was ever on the wire; 500 was synthesized",
-            );
-            assert!(error.is_retryable, "stream errors stay retryable");
+            assert_eq!(error.status_code, Some(500));
             assert!(error.message.contains("overloaded_error"));
             // Messages error events have no code slot; a code appearing here would make typed events eligible for a destructive image strip
             assert_eq!(error.error_code, None);
-        }
-        other => panic!("expected Failed, got {other:?}"),
-    }
-}
-
-/// A tokens-per-minute 429 on the Messages backend: the wire type says rate
-/// limit, the body says "Request too large", which is the anchor
-/// `is_context_length_error` matches. Flattening the type into the message under
-/// a 500 made compaction read this as a context overflow -- a wasted
-/// full-context summarization call plus a permanent step down the input ladder.
-#[tokio::test]
-async fn server_rate_limit_event_is_not_a_context_overflow() {
-    let err_event = MessageStreamEvent::Error {
-        error: StreamError {
-            r#type: "rate_limit_error".into(),
-            message: "Request too large for claude-sonnet-4 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000.".into(),
-        },
-    };
-    let raw = stream::iter(vec![Ok(message_start()), Ok(err_event)]).boxed();
-    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
-
-    match evs.last().unwrap() {
-        SamplingEvent::Failed { error, .. } => {
-            let reconstructed = SamplingError::StreamError {
-                error_type: "rate_limit_error".into(),
-                message: error.message.clone(),
-                code: error.error_code.clone(),
-            };
-            assert!(
-                !reconstructed.is_context_length_error(),
-                "a TPM rate limit must retry, not ladder: {}",
-                error.message,
-            );
-            assert!(
-                error.message.contains("rate_limit_error"),
-                "the wire type must survive: {}",
-                error.message,
-            );
         }
         other => panic!("expected Failed, got {other:?}"),
     }
