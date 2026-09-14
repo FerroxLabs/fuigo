@@ -245,3 +245,34 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
     }))
     .await;
 }
+
+/// Admission must wake any tool wait already in flight in this session, so a
+/// blocked subagent sees the correction now rather than at the wait deadline.
+#[tokio::test(flavor = "current_thread")]
+async fn admission_signals_in_flight_tool_waits() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let signal = actor.rebuild_spec.parent_message_signal.clone();
+        let watch = signal.subscribe();
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("woken"),
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        let woken = await_with_timeout(watch.arrived()).await;
+        assert_eq!(&*woken, ["woken".to_string()]);
+    }))
+    .await;
+}

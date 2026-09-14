@@ -4071,3 +4071,135 @@ async fn goal_yield_runs_queued_row_next_then_resumes_goal() {
         })
         .await;
 }
+
+/// A message from the owning parent agent is a different channel from the
+/// user's own follow-ups: `follow_up_behavior` governs the human queue, not
+/// the parent's. With the default `queue` setting the message would otherwise
+/// sit in `pending_inputs` until the whole turn ended — up to the wait ceiling
+/// plus the rest of the turn — while the child kept executing a superseded
+/// instruction.
+#[tokio::test]
+async fn parent_agent_message_promotes_at_the_next_safe_point_with_steer_off() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::parent_agent_message_promotes_at_the_next_safe_point_with_steer_off",
+    ) else {
+        return;
+    };
+    std::fs::write(
+        home.join("config.toml"),
+        "[ui]\nfollow_up_behavior = \"queue\"\n",
+    )
+    .expect("write isolated queue setting");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            assert!(!crate::util::config::follow_up_steer_enabled().await);
+            let (item, mut receipt) = parent_agent_message_item("m1", "stop and do X instead");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(
+                actor.drain_interjections_at_safe_point().await,
+                "a parent-agent message must reach the model at the next safe point"
+            );
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                order,
+                vec!["running"],
+                "the parent-message row must leave the queue"
+            );
+            drop(state);
+            // Delivered, not discarded: `RemovedFromQueue` would fold into the
+            // subagent's final result as "removed before it ran" and fail it.
+            let settled = receipt
+                .try_recv()
+                .expect("a promoted parent message resolves its receipt")
+                .expect("promoted parent messages settle Ok");
+            assert!(
+                matches!(
+                    settled.completion_kind,
+                    crate::session::commands::PromptCompletionKind::Completed
+                ),
+                "unexpected completion kind: {:?}",
+                settled.completion_kind
+            );
+        })
+        .await;
+}
+
+/// A user follow-up queued behind a parent message must still obey the user's
+/// own `follow_up_behavior`: promoting the parent's row must not drag it along.
+#[tokio::test]
+async fn parent_agent_message_promotion_leaves_the_user_queue_alone() {
+    let Some(home) = fuigo_test_support::env::fresh_process_home(
+        "session::acp_session::prompt_queue_actor_tests::parent_agent_message_promotion_leaves_the_user_queue_alone",
+    ) else {
+        return;
+    };
+    std::fs::write(
+        home.join("config.toml"),
+        "[ui]\nfollow_up_behavior = \"queue\"\n",
+    )
+    .expect("write isolated queue setting");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, _receipt) = parent_agent_message_item("m1", "stop and do X instead");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.pending_inputs.push_back(user_item("held", "A"));
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(actor.drain_interjections_at_safe_point().await);
+
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["running", "held"]);
+        })
+        .await;
+}
+
+/// An idle session must not promote: with no running turn the queued parent
+/// message runs as its own turn, exactly as before.
+#[tokio::test]
+async fn parent_agent_message_is_not_promoted_while_idle() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, _receipt) = parent_agent_message_item("m1", "stop and do X instead");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(item);
+            }
+
+            assert!(!actor.drain_interjections_at_safe_point().await);
+            let state = actor.state.lock().await;
+            let order: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(order, vec!["parent-message-m1"]);
+        })
+        .await;
+}

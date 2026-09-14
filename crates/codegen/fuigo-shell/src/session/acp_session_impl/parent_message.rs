@@ -51,6 +51,7 @@ impl SessionActor {
 
         self.ensure_prefix_ready().await;
         let prompt_id = format!("parent-message-{}", message.message_id);
+        let committed_message_id = message.message_id.clone();
         let input_origin = InputOrigin::new(super::PromptOrigin::ParentAgentMessage {
             message_id: message.message_id,
             sender_session_id: message.sender_session_id,
@@ -108,6 +109,14 @@ impl SessionActor {
             },
         });
         let _ = respond_to.send(ActiveMessageAdmission::Admitted);
+        // Wake any tool wait already in flight in this session. `maybe_start_running_task`
+        // below returns early while a turn is running, so without this the row sits in
+        // `pending_inputs` until the turn ends — a `get_task_output` wait alone can hold
+        // that for the 10-minute ceiling. The next safe point promotes the row
+        // (`promote_parent_agent_messages`).
+        self.rebuild_spec
+            .parent_message_signal
+            .message_committed(committed_message_id);
         Self::maybe_start_running_task(self.clone(), completion_tx).await;
     }
 

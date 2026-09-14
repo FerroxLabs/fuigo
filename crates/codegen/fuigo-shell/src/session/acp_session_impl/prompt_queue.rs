@@ -9,6 +9,16 @@ pub(super) struct SendNowOutcome {
     pub(super) mutated: bool,
 }
 
+/// How a promoted queue row's still-pending result is resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PromotedResolution {
+    /// The row never ran and its submitter must discard it (`RemovedFromQueue`).
+    Removed,
+    /// The row's text was merged into the running turn, so whoever awaits it
+    /// must see a normal completion rather than a "removed before it ran" error.
+    DeliveredIntoRunningTurn,
+}
+
 /// Running-turn display fields for `fuigo/queue/changed` (clients paint turn-start UI).
 pub(super) struct RunningPromptDisplay {
     pub id: String,
@@ -637,6 +647,17 @@ impl SessionActor {
         item: InputItem,
         source: crate::session::events::InterjectionSource,
     ) {
+        self.enqueue_prompt_as_interjection_with(item, source, PromotedResolution::Removed);
+    }
+
+    /// `enqueue_prompt_as_interjection`, choosing how the promoted row's
+    /// still-pending result is resolved (see [`PromotedResolution`]).
+    fn enqueue_prompt_as_interjection_with(
+        &self,
+        item: InputItem,
+        source: crate::session::events::InterjectionSource,
+        resolution: PromotedResolution,
+    ) {
         let InputItem {
             prompt_id,
             prompt_blocks,
@@ -670,12 +691,84 @@ impl SessionActor {
                 image_count,
                 redirect_kind: crate::session::events::RedirectKind::Interjection,
             });
-        Self::respond_removed_prompt(respond_to);
+        match resolution {
+            PromotedResolution::Removed => Self::respond_removed_prompt(respond_to),
+            PromotedResolution::DeliveredIntoRunningTurn => {
+                Self::respond_delivered_prompt(respond_to)
+            }
+        }
         tracing::info!(
             ?source,
             prompt_id = %prompt_id,
             "queued prompt promoted as a mid-turn interjection"
         );
+    }
+
+    /// Resolve a promoted row whose text WAS delivered, merged into the running
+    /// turn rather than run as its own.
+    ///
+    /// `RemovedFromQueue` is wrong here: for a parent-agent message the receipt
+    /// folds into the subagent's final result (`reduce_prompt_turn_result`),
+    /// where it would read "Subagent turn was removed before it ran" and mark
+    /// an otherwise successful subagent failed. The tokens belong to the
+    /// running turn, so this carries none of its own.
+    fn respond_delivered_prompt(respond_to: oneshot::Sender<PromptTurnResult>) {
+        let _ = respond_to.send(Ok(PromptTurnOk {
+            stop_reason: acp::StopReason::EndTurn,
+            total_tokens: 0,
+            turn_snapshot: None,
+            completion_kind: PromptCompletionKind::Completed,
+            structured_output: None,
+            usage: None,
+            tool_overrides: None,
+        }));
+    }
+
+    /// Promote every queued message from the owning parent agent into a
+    /// mid-turn interjection.
+    ///
+    /// A parent-agent message is queue-protected (visible, not editable), so
+    /// `promote_queued_as_interjections` stops at it by design, and that
+    /// function is gated on the user's `follow_up_behavior` preference — which
+    /// governs the human queue, not the parent's channel. Without this the
+    /// message waits out the running turn (a `get_task_output` wait alone can
+    /// hold it for the 10-minute ceiling), and the child keeps executing an
+    /// instruction its parent has already superseded.
+    ///
+    /// No-op while idle: with no running turn the queued row simply starts its
+    /// own turn, exactly as before.
+    pub(super) async fn promote_parent_agent_messages(&self) {
+        let mut state = self.state.lock().await;
+        let Some(running_id) = state.running_prompt_id().map(str::to_string) else {
+            return;
+        };
+        let mut promoted = Vec::new();
+        while let Some(pos) = state.pending_inputs.iter().position(|item| {
+            item.prompt_id != running_id
+                && matches!(
+                    item.input_origin.as_prompt_origin(),
+                    PromptOrigin::ParentAgentMessage { .. }
+                )
+        }) {
+            let Some(item) = state.pending_inputs.remove(pos) else {
+                break;
+            };
+            promoted.push(item);
+        }
+        if promoted.is_empty() {
+            return;
+        }
+        for item in promoted {
+            self.enqueue_prompt_as_interjection_with(
+                item,
+                crate::session::events::InterjectionSource::Queue,
+                PromotedResolution::DeliveredIntoRunningTurn,
+            );
+        }
+        // The hint that interrupted an in-flight wait named these; they have
+        // now reached the model, so later waits must not see them as pending.
+        self.rebuild_spec.parent_message_signal.take_pending();
+        self.broadcast_queue_changed(&state);
     }
 
     /// Move held user prompts into `pending_interjections` so the next drain injects them.

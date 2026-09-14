@@ -541,6 +541,52 @@ pub(crate) fn user_item_with_rx(
 pub(crate) fn user_item(id: &str, owner: &str) -> InputItem {
     user_item_with_rx(id, owner).0
 }
+/// A protected queue row exactly as `admit_parent_agent_message` builds it:
+/// `PromptOrigin::ParentAgentMessage`, visible-but-not-editable, not send-now.
+#[cfg(test)]
+pub(crate) fn parent_agent_message_item(
+    message_id: &str,
+    text: &str,
+) -> (InputItem, oneshot::Receiver<PromptTurnResult>) {
+    let (respond_to, rx) = oneshot::channel();
+    let prompt_id = format!("parent-message-{message_id}");
+    let item = InputItem {
+        prompt_id: prompt_id.clone(),
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        ))],
+        prompt_mode: PromptMode::Agent,
+        trace_gcs_config: None,
+        artifact_tracker: None,
+        client_identifier: None,
+        screen_mode: None,
+        verbatim: false,
+        json_schema: None,
+        input_origin: InputOrigin::new(crate::session::PromptOrigin::ParentAgentMessage {
+            message_id: message_id.to_string(),
+            sender_session_id: "root-session".to_string(),
+        }),
+        task_wake_fallback: None,
+        tool_overrides_update: None,
+        respond_to,
+        persist_ack: None,
+        parsed_prompt_tx: None,
+        initial_child_prompt_ready: None,
+        queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
+            id: prompt_id,
+            version: 0,
+            owner: None,
+            last_editor: None,
+            kind: "parent_agent_message".to_string(),
+            text: text.to_string(),
+            combined_texts: None,
+        }),
+        queue_mutation_policy: QueueMutationPolicy::new(true, false),
+        send_now: false,
+        traceparent: None,
+    };
+    (item, rx)
+}
 #[cfg(test)]
 pub(crate) fn input_with_origin_rx(
     prompt_id: &str,
