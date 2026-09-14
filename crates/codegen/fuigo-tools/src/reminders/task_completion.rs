@@ -125,7 +125,6 @@ pub fn format_bash_completion(
     task_output_name: Option<&str>,
     read_tool_name: Option<&str>,
 ) -> String {
-    let command = task.display_command.as_deref().unwrap_or(&task.command);
     let duration_secs = task.duration_secs();
     let status_str = match task.signal.as_deref() {
         Some(sig) => format!("terminated by signal {sig}"),
@@ -140,9 +139,9 @@ pub fn format_bash_completion(
     let notice = user_killed_notice(task);
     let mut msg = format!(
         "Background task \"{}\" completed ({}).\n\
-         Command: {} | Duration: {:.1}s\n\
+         Duration: {:.1}s\n\
          {notice}",
-        task.task_id, status_str, command, duration_secs,
+        task.task_id, status_str, duration_secs,
     );
     if task.signal.is_some() && duration_secs < 1.0 {
         msg.push_str(
@@ -194,12 +193,10 @@ pub fn format_monitor_completion(task: &TaskSnapshot, task_output_name: Option<&
     format!(
         "Monitor \"{id}\" ended: [monitor ended: {reason}].\n\
          Description: {description}\n\
-         Command: {cmd}\n\
          Duration: {dur:.1}s\n\
          Use {tool}(\"{id}\") for full output.\n\
          {notice}",
         id = task.task_id,
-        cmd = task.command,
         dur = task.duration_secs(),
     )
 }
@@ -905,7 +902,10 @@ mod tests {
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("abc-123"));
         assert!(msg.contains("exit code: 0"));
-        assert!(msg.contains("cargo test"));
+        assert!(
+            !msg.contains("cargo test"),
+            "the reminder must not echo the command back to the model: {msg}"
+        );
         assert!(msg.contains("get_command_or_subagent_output(\"abc-123\")"));
         assert!(
             !msg.contains("killed by the user"),
@@ -978,7 +978,10 @@ mod tests {
             "expected ended wording: {msg}"
         );
         assert!(msg.contains("app logs"), "description: {msg}");
-        assert!(msg.contains("tail -f /var/log/app"), "command: {msg}");
+        assert!(
+            !msg.contains("tail -f /var/log/app"),
+            "monitor reminder must not echo the command: {msg}"
+        );
         assert!(
             msg.contains("get_command_or_subagent_output(\"mon-1\")"),
             "poll tool pointer: {msg}"
@@ -1050,34 +1053,6 @@ mod tests {
             !model_msg.contains("killed by the user"),
             "model-tool monitor kill must not carry the UI-kill notice: {model_msg}"
         );
-    }
-    #[test]
-    fn format_bash_completion_prefers_display_command() {
-        let task = TaskSnapshot {
-            task_id: "t1".into(),
-            command: "unshare --mount -- cargo test".into(),
-            display_command: Some("cargo test".into()),
-            cwd: String::new(),
-            start_time: std::time::SystemTime::now(),
-            end_time: Some(std::time::SystemTime::now()),
-            output: String::new(),
-            output_file: std::path::PathBuf::new(),
-            truncated: false,
-            exit_code: Some(0),
-            signal: None,
-            completed: true,
-            kind: Default::default(),
-            block_waited: false,
-            explicitly_killed: false,
-            kill_result_delivered: false,
-            owner_session_id: None,
-            description: None,
-            is_backgrounded: false,
-            output_total_bytes: 0,
-        };
-        let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
-        assert!(msg.contains("cargo test"));
-        assert!(!msg.contains("unshare"));
     }
     #[test]
     fn format_bash_completion_unknown_exit_code() {
@@ -1224,6 +1199,75 @@ mod tests {
             "no-signal short-duration task must not get the hint: {msg}"
         );
     }
+    /// The completion reminder must NOT echo the shell command back at the
+    /// model. The model already has the command in its own tool-call args, and
+    /// this text is persisted into chat history and re-sent as input on every
+    /// later turn of the session — an unbounded, permanently-billed duplicate.
+    #[test]
+    fn format_bash_completion_omits_command_echo() {
+        let mut task = make_completed("no-echo");
+        task.command = "rg --json 'NEEDLE_TOKEN' /a/very/long/path --glob '!target'".into();
+        let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            !msg.contains("Command:"),
+            "reminder must not carry a Command: segment: {msg}"
+        );
+        assert!(
+            !msg.contains("NEEDLE_TOKEN"),
+            "reminder must not echo the raw command: {msg}"
+        );
+        assert!(msg.contains("no-echo"), "task id is still reported: {msg}");
+        assert!(
+            msg.contains("exit code: 0"),
+            "status is still reported: {msg}"
+        );
+        assert!(
+            msg.contains("Duration:"),
+            "duration is still reported: {msg}"
+        );
+    }
+
+    /// `display_command` is the other command spelling reaching the same
+    /// segment; dropping the echo must drop it too.
+    #[test]
+    fn format_bash_completion_omits_display_command_echo() {
+        let mut task = make_completed("no-echo-display");
+        task.command = "unshare --mount -- cargo test".into();
+        task.display_command = Some("cargo test --workspace NEEDLE_TOKEN".into());
+        let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            !msg.contains("NEEDLE_TOKEN") && !msg.contains("unshare"),
+            "neither command spelling may be echoed: {msg}"
+        );
+    }
+
+    /// Same for monitors: the human-authored Description stays (it is not in
+    /// the model's tool-call args in that form), the raw command goes.
+    #[test]
+    fn format_monitor_completion_omits_command_echo() {
+        let mut task = make_completed("mon-no-echo");
+        task.kind = crate::computer::types::TaskKind::Monitor;
+        task.command = "tail -f /var/log/NEEDLE_TOKEN.log".into();
+        task.display_command = Some("[monitor] app logs".into());
+        let msg = format_monitor_completion(&task, Some("get_command_or_subagent_output"));
+        assert!(
+            !msg.contains("Command:"),
+            "monitor reminder must not carry a Command: segment: {msg}"
+        );
+        assert!(
+            !msg.contains("NEEDLE_TOKEN"),
+            "monitor reminder must not echo the raw command: {msg}"
+        );
+        assert!(
+            msg.contains("Description: app logs"),
+            "description is still reported: {msg}"
+        );
+        assert!(
+            msg.contains("Duration:"),
+            "duration is still reported: {msg}"
+        );
+    }
+
     #[test]
     fn reported_state_deduplicates() {
         let mut state = ReportedTaskCompletions::default();
