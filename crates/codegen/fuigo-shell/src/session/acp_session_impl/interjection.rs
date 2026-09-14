@@ -277,6 +277,11 @@ impl SessionActor {
     /// Call after a tool batch, at loop top, and before the turn returns to the user.
     /// Returns `true` if any interjections were drained (caller may `continue` so the model sees them next).
     pub(super) async fn drain_interjections_at_safe_point(&self) -> bool {
+        // A message from the owning parent agent is not a human follow-up: it is
+        // promoted unconditionally, because `follow_up_behavior` is the user's
+        // preference about their own queue and defaults to Queue, which would
+        // otherwise hold the parent's correction until turn end.
+        self.promote_parent_agent_messages().await;
         // Queue (default) must not re-parse config on every tool, model, or turn-end drain
         // `follow_up_steer_enabled` is mtime-keyed on config.toml, so a live pager settings write is visible without restarting the shell agent
         // The pager is a separate process; an unchanged mtime is a cheap stat

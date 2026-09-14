@@ -178,10 +178,13 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             crate::implementations::fuigo_build::task_output::max_wait_block(),
         );
 
-        let (terminal, backend, read_file_name, max_output_bytes) = {
+        let (terminal, backend, parent_messages, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let backend = res.get::<SubagentBackendResource>().cloned();
+            let parent_messages = res
+                .get::<crate::implementations::fuigo_build::task::parent_message::ParentMessageSignal>()
+                .cloned();
             let renderer = res.require::<TemplateRenderer>()?;
             let rfn = renderer
                 .render("${{ tools.by_kind.read }}")
@@ -195,7 +198,7 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
                     )
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
-            (terminal, backend, rfn, mob)
+            (terminal, backend, parent_messages, rfn, mob)
         };
 
         let initial = resolve_tasks(
@@ -204,7 +207,7 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             &backend,
             &read_file_name,
             max_output_bytes,
-            WaitHint::NotRequested,
+            &WaitHint::NotRequested,
         )
         .await;
 
@@ -216,6 +219,7 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             let wait_hint = wait_any_event_driven(
                 &terminal,
                 &backend,
+                parent_messages.as_ref(),
                 &initial.pending_bash_ids,
                 &initial.pending_subagent_ids,
                 deadline,
@@ -228,7 +232,7 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
                 &backend,
                 &read_file_name,
                 max_output_bytes,
-                wait_hint,
+                &wait_hint,
             )
             .await
             .results

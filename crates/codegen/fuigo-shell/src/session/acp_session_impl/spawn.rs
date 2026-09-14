@@ -1008,6 +1008,7 @@ pub(crate) async fn spawn_session_actor(
         subagents_max_depth,
         session_id_str: session_info.id.0.to_string(),
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
+        parent_message_signal: Default::default(),
         respect_gitignore,
         path_not_found_hints,
         scheduler_background_loops,

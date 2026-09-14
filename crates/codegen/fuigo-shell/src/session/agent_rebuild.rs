@@ -117,6 +117,12 @@ pub(crate) struct AgentRebuildSpec {
     pub subagents_max_depth: u32,
     pub session_id_str: String,
     pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
+    /// Wakes this session's in-flight tool waits when its owning parent agent's
+    /// message is committed to the prompt queue.
+    /// Session-scoped and shared with the tool `Resources` on every rebuild, so
+    /// a harness rebuild cannot orphan a wait that is already racing it.
+    pub parent_message_signal:
+        fuigo_tools::implementations::fuigo_build::task::parent_message::ParentMessageSignal,
     pub respect_gitignore: bool,
     pub path_not_found_hints: bool,
     /// Fire side of the scheduler mode.
@@ -218,6 +224,7 @@ impl AgentRebuildSpec {
             subagents_max_depth,
             session_id_str,
             blocking_wait_depth,
+            parent_message_signal,
             respect_gitignore,
             path_not_found_hints,
             scheduler_background_loops,
@@ -383,6 +390,7 @@ impl AgentRebuildSpec {
                         resources.insert(buffer);
                     }
                 }
+                resources.insert(parent_message_signal.clone());
                 resources
                     .insert(
                         fuigo_tools::types::resources::RespectGitignore(
@@ -470,6 +478,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         subagents_max_depth: fuigo_tools::implementations::fuigo_build::task::MAX_SUBAGENT_DEPTH,
         session_id_str: "test-session".to_string(),
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),
+        parent_message_signal: Default::default(),
         respect_gitignore: false,
         scheduler_background_loops: true,
         path_not_found_hints: false,
