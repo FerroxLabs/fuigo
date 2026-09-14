@@ -147,7 +147,7 @@ pub fn format_bash_completion(
         msg.push_str(
             "Note: this is much shorter than expected for a backgrounded command. \
              The wrapper bash may have been killed by signal (e.g. `pkill -f <pat>` \
-             matching its own argv) before the inner command ran. Re-check the \
+             matching its own argv) before the inner command ran. Re-check your \
              command for self-matching kill patterns, signals sent by the script \
              itself, or upstream sources of SIGTERM/SIGHUP.\n",
         );
@@ -1163,6 +1163,36 @@ mod tests {
         assert!(
             msg.contains("`pkill -f <pat>`"),
             "hint should mention the pkill footgun: {msg}"
+        );
+    }
+    /// The wrapper-killed hint has to point the model at something it can
+    /// actually look at. The reminder no longer renders a `Command:` line
+    /// (that echo is the token waste this release removes), so "Re-check the
+    /// command" now names text that is not on screen. The command *is* in the
+    /// model's own `bash` tool-call arguments, so the advice is still
+    /// actionable -- it just has to say whose command it means.
+    #[test]
+    fn format_bash_completion_signal_hint_points_at_the_models_own_command() {
+        let mut task = make_completed("sig-hint");
+        task.command = "pkill -f ./server && ./server".into();
+        task.exit_code = None;
+        task.signal = Some("SIGTERM".into());
+        let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
+        assert!(
+            msg.contains("wrapper bash may have been killed"),
+            "precondition: the short-duration signal hint must fire: {msg}"
+        );
+        assert!(
+            !msg.contains("Command:"),
+            "precondition: the reminder must not render a Command: line: {msg}"
+        );
+        assert!(
+            !msg.contains("Re-check the command"),
+            "the hint must not point at a Command: line the message no longer prints: {msg}"
+        );
+        assert!(
+            msg.contains("Re-check your command"),
+            "the hint must name the model's own tool-call command: {msg}"
         );
     }
     /// Short-duration tasks that exited cleanly (no signal) are normal
