@@ -4,6 +4,7 @@
 //! Streams to stdout and exits via `CancellationToken`.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,9 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background work to finish after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// Hard cap on the whole turn (`--timeout` / `FUIGO_HEADLESS_TIMEOUT_SECS`).
+    /// `None` (the default) keeps the historical behaviour: wait indefinitely for the agent.
+    pub total_timeout: Option<Duration>,
     /// After the prompt (or instead of one when resuming), run `fuigo/memory/flush`.
     pub memory_flush: bool,
     /// CLI `--experimental-memory` / `--no-memory` override for the headless agent.
@@ -737,6 +741,29 @@ async fn apply_headless_model_and_effort(
 }
 
 /// Startup-materialization context for headless (`-p`) runs; never chat mode.
+/// Cap on the pre-turn ACP lifecycle sends (`initialize`, `authenticate`).
+///
+/// `acp_send` awaits a bare oneshot, so an agent that wedges before answering leaves `fuigo -p`
+/// blocked with no deadline at all. The exit reaper already bounds its own sends; these are bounded
+/// the same way so startup fails loudly instead of hanging.
+const LIFECYCLE_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Await a lifecycle send, failing with a named error instead of blocking forever.
+async fn with_lifecycle_timeout<T, E, F>(what: &str, limit: Duration, fut: F) -> Result<T>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(limit, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "timed out after {}s waiting for {what}",
+            limit.as_secs()
+        )),
+    }
+}
+
 /// `--worktree` is ignored here: headless never creates a worktree, so a remote miss must not take `DeferToWorktree`.
 fn headless_materialize_ctx(
     resume_title_pinned: bool,
@@ -884,7 +911,13 @@ pub async fn run_single_turn(
         options.system_prompt_override.as_deref(),
     );
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::AcpInitialize);
-    let init_resp: acp::InitializeResponse = match acp_send(init_req, &acp_tx).await {
+    let init_resp: acp::InitializeResponse = match with_lifecycle_timeout(
+        "initialize",
+        LIFECYCLE_SEND_TIMEOUT,
+        acp_send(init_req, &acp_tx),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             report_startup_failure(&timer);
@@ -901,10 +934,14 @@ pub async fn run_single_turn(
     let t_auth = Instant::now();
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::EagerAuth);
     let default_auth_method_id = crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
-    let is_api_key_auth = match authenticate(
-        &acp_tx,
-        &init_resp.auth_methods,
-        default_auth_method_id.as_ref(),
+    let is_api_key_auth = match with_lifecycle_timeout(
+        "authenticate",
+        LIFECYCLE_SEND_TIMEOUT,
+        authenticate(
+            &acp_tx,
+            &init_resp.auth_methods,
+            default_auth_method_id.as_ref(),
+        ),
     )
     .await
     {
@@ -1125,141 +1162,26 @@ pub async fn run_single_turn(
         }
         None => None,
     };
-    let mut prompt_result = None;
-    // Tracked regardless of wait_for_background so the exit reaper always sees running work.
-    let mut pending_bg: HashSet<BackgroundWork> = HashSet::new();
-    // Tombstone of completed ids so an out-of-order task_backgrounded or subagent_spawned never re-adds them to pending
-    let mut completed_bg: HashSet<BackgroundWork> = HashSet::new();
-    let mut prompt_done_at: Option<Instant> = None;
-    // On mid-turn channel close, break (not bail) so the exit path still drains and reaps.
-    let mut connection_closed = false;
-
-    if let Some(mut prompt_fut) = prompt_fut {
-        loop {
-            if emitter.write_error.is_some() {
-                tracing::warn!("headless: stdout write failed; stopping the stream loop");
-                break;
-            }
-            // Drain buffered ACP first: PromptResponse can complete while task_backgrounded is still queued.
-            if options.wait_for_background && prompt_result.is_some() && pending_bg.is_empty() {
-                drain_pending_acp_messages(
-                    &mut acp_rx,
-                    &mut emitter,
-                    t_prompt,
-                    &mut ttf_logged,
-                    options.yolo,
-                    &mut pending_bg,
-                    &mut completed_bg,
-                );
-                if pending_bg.is_empty() {
-                    tracing::debug!("headless: no pending background tasks, exiting");
-                    break;
-                }
-            }
-
-            if options.wait_for_background
-                && let Some(done_at) = prompt_done_at
-                && done_at.elapsed() >= options.background_wait_timeout
-            {
-                tracing::warn!(
-                    pending_bg = pending_bg.len(),
-                    timeout_secs = options.background_wait_timeout.as_secs(),
-                    "headless: background wait timed out, exiting"
-                );
-                break;
-            }
-
-            let timeout_deadline = if options.wait_for_background
-                && prompt_result.is_some()
-                && !pending_bg.is_empty()
-                && let Some(done_at) = prompt_done_at
-            {
-                let remaining = options
-                    .background_wait_timeout
-                    .saturating_sub(done_at.elapsed());
-                if remaining.is_zero() {
-                    Duration::from_millis(50)
-                } else {
-                    remaining
-                }
-            } else {
-                Duration::from_secs(3600)
-            };
-
-            tokio::select! {
-                biased;
-                msg = acp_rx.recv() => {
-                    let Some(msg) = msg else {
-                        emitter.on_error("Connection closed unexpectedly", None);
-                        connection_closed = true;
-                        break;
-                    };
-                    handle_headless_acp_message(
-                        msg.boxed(),
-                        &mut emitter,
-                        t_prompt,
-                        &mut ttf_logged,
-                        options.yolo,
-                        &mut pending_bg,
-                        &mut completed_bg,
-                    );
-                }
-                res = &mut prompt_fut, if prompt_result.is_none() => {
-                    prompt_result = Some(res);
-                    prompt_done_at = Some(Instant::now());
-                    if !options.wait_for_background {
-                        drain_acp_with_grace(
-                            &mut acp_rx,
-                            Duration::from_millis(750),
-                            &mut emitter,
-                            t_prompt,
-                            &mut ttf_logged,
-                            options.yolo,
-                            &mut pending_bg,
-                            &mut completed_bg,
-                        )
-                        .await;
-                        break;
-                    }
-                    // Drain now so a task_backgrounded around completion is recorded before the empty-check.
-                    drain_pending_acp_messages(
-                        &mut acp_rx,
-                        &mut emitter,
-                        t_prompt,
-                        &mut ttf_logged,
-                        options.yolo,
-                        &mut pending_bg,
-                        &mut completed_bg,
-                    );
-                }
-                _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
-                    && prompt_result.is_some()
-                    && !pending_bg.is_empty() =>
-                {
-                    // Wake to re-check the timeout at the top of the loop.
-                }
-            }
+    let TurnDriveOutcome {
+        prompt_result,
+        connection_closed,
+        timed_out,
+    } = match prompt_fut {
+        Some(prompt_fut) => {
+            drive_prompt_turn(
+                prompt_fut,
+                &mut acp_rx,
+                &acp_tx,
+                &session_id,
+                &mut emitter,
+                &options,
+                t_prompt,
+                &mut ttf_logged,
+            )
+            .await
         }
-
-        // Final drain-to-empty so the reaper sees work buffered right at exit (the timeout path skips draining).
-        drain_pending_acp_messages(
-            &mut acp_rx,
-            &mut emitter,
-            t_prompt,
-            &mut ttf_logged,
-            options.yolo,
-            &mut pending_bg,
-            &mut completed_bg,
-        );
-
-        if !pending_bg.is_empty() {
-            tracing::warn!(
-                pending_bg = pending_bg.len(),
-                "headless: killing background work still pending at exit"
-            );
-            reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
-        }
-    }
+        None => TurnDriveOutcome::default(),
+    };
 
     crate::unified_log::flush_blocking().await;
 
@@ -1270,6 +1192,21 @@ pub async fn run_single_turn(
     // A mid-turn ACP close already reaped above; return that error before the normal outcome.
     if connection_closed {
         anyhow::bail!("Connection closed unexpectedly");
+    }
+    // The hard turn cap fired: background work is already reaped, so report it and exit non-zero.
+    if timed_out {
+        let msg = match options.total_timeout {
+            Some(limit) => format!(
+                "Timed out after {}s waiting for the turn to end",
+                limit.as_secs()
+            ),
+            None => "Timed out waiting for the turn to end".to_string(),
+        };
+        emitter.on_error(&msg, Some("cancelled"));
+        if let Some(err) = emitter.take_output_error() {
+            return Err(anyhow::Error::new(err).context("headless: stdout write failed"));
+        }
+        anyhow::bail!("{msg}");
     }
     let outcome: Result<()> = match prompt_result {
         Some(Ok(resp)) => {
@@ -1365,6 +1302,192 @@ pub async fn run_single_turn(
         return Err(anyhow::Error::new(err).context("headless: stdout write failed"));
     }
     outcome
+}
+
+/// What one headless prompt turn produced, once its stream loop has stopped.
+#[derive(Default)]
+struct TurnDriveOutcome {
+    prompt_result: Option<Result<acp::PromptResponse, acp::Error>>,
+    /// The ACP channel closed mid-turn; background work was still reaped.
+    connection_closed: bool,
+    /// `options.total_timeout` elapsed before the turn ended.
+    timed_out: bool,
+}
+
+/// Drive the prompt future and the ACP stream until the turn ends.
+///
+/// When `options.total_timeout` is set it is a hard cap on the whole turn: on elapse the stream
+/// loop is dropped and the caller leaves through the normal drain/reap path. Without it, an agent
+/// that never produces an end event leaves every `select!` arm pending (the background-wait sleep
+/// arm is gated off until there is pending background work), so the turn waits forever.
+async fn drive_prompt_turn<F>(
+    prompt_fut: F,
+    acp_rx: &mut AcpClientRx,
+    acp_tx: &AcpAgentTx,
+    session_id: &acp::SessionId,
+    emitter: &mut HeadlessEmitter,
+    options: &HeadlessOptions,
+    t_prompt: Instant,
+    ttf_logged: &mut bool,
+) -> TurnDriveOutcome
+where
+    F: Future<Output = Result<acp::PromptResponse, acp::Error>>,
+{
+    tokio::pin!(prompt_fut);
+    let mut prompt_result = None;
+    // Tracked regardless of wait_for_background so the exit reaper always sees running work.
+    let mut pending_bg: HashSet<BackgroundWork> = HashSet::new();
+    // Tombstone of completed ids so an out-of-order task_backgrounded or subagent_spawned never re-adds them to pending
+    let mut completed_bg: HashSet<BackgroundWork> = HashSet::new();
+    let mut prompt_done_at: Option<Instant> = None;
+    // On mid-turn channel close, break (not bail) so the exit path still drains and reaps.
+    let mut connection_closed = false;
+
+    let stream = async {
+        loop {
+            if emitter.write_error.is_some() {
+                tracing::warn!("headless: stdout write failed; stopping the stream loop");
+                break;
+            }
+            // Drain buffered ACP first: PromptResponse can complete while task_backgrounded is still queued.
+            if options.wait_for_background && prompt_result.is_some() && pending_bg.is_empty() {
+                drain_pending_acp_messages(
+                    &mut *acp_rx,
+                    &mut *emitter,
+                    t_prompt,
+                    &mut *ttf_logged,
+                    options.yolo,
+                    &mut pending_bg,
+                    &mut completed_bg,
+                );
+                if pending_bg.is_empty() {
+                    tracing::debug!("headless: no pending background tasks, exiting");
+                    break;
+                }
+            }
+
+            if options.wait_for_background
+                && let Some(done_at) = prompt_done_at
+                && done_at.elapsed() >= options.background_wait_timeout
+            {
+                tracing::warn!(
+                    pending_bg = pending_bg.len(),
+                    timeout_secs = options.background_wait_timeout.as_secs(),
+                    "headless: background wait timed out, exiting"
+                );
+                break;
+            }
+
+            let timeout_deadline = if options.wait_for_background
+                && prompt_result.is_some()
+                && !pending_bg.is_empty()
+                && let Some(done_at) = prompt_done_at
+            {
+                let remaining = options
+                    .background_wait_timeout
+                    .saturating_sub(done_at.elapsed());
+                if remaining.is_zero() {
+                    Duration::from_millis(50)
+                } else {
+                    remaining
+                }
+            } else {
+                Duration::from_secs(3600)
+            };
+
+            tokio::select! {
+                biased;
+                msg = acp_rx.recv() => {
+                    let Some(msg) = msg else {
+                        emitter.on_error("Connection closed unexpectedly", None);
+                        connection_closed = true;
+                        break;
+                    };
+                    handle_headless_acp_message(
+                        msg.boxed(),
+                        &mut *emitter,
+                        t_prompt,
+                        &mut *ttf_logged,
+                        options.yolo,
+                        &mut pending_bg,
+                        &mut completed_bg,
+                    );
+                }
+                res = &mut prompt_fut, if prompt_result.is_none() => {
+                    prompt_result = Some(res);
+                    prompt_done_at = Some(Instant::now());
+                    if !options.wait_for_background {
+                        drain_acp_with_grace(
+                            &mut *acp_rx,
+                            Duration::from_millis(750),
+                            &mut *emitter,
+                            t_prompt,
+                            &mut *ttf_logged,
+                            options.yolo,
+                            &mut pending_bg,
+                            &mut completed_bg,
+                        )
+                        .await;
+                        break;
+                    }
+                    // Drain now so a task_backgrounded around completion is recorded before the empty-check.
+                    drain_pending_acp_messages(
+                        &mut *acp_rx,
+                        &mut *emitter,
+                        t_prompt,
+                        &mut *ttf_logged,
+                        options.yolo,
+                        &mut pending_bg,
+                        &mut completed_bg,
+                    );
+                }
+                _ = tokio::time::sleep(timeout_deadline), if options.wait_for_background
+                    && prompt_result.is_some()
+                    && !pending_bg.is_empty() =>
+                {
+                    // Wake to re-check the timeout at the top of the loop.
+                }
+            }
+        }
+    };
+    let timed_out = if let Some(limit) = options.total_timeout {
+        let elapsed = tokio::time::timeout(limit, stream).await.is_err();
+        if elapsed {
+            tracing::warn!(
+                timeout_secs = limit.as_secs(),
+                "headless: turn timed out; tearing down"
+            );
+        }
+        elapsed
+    } else {
+        stream.await;
+        false
+    };
+
+    // Final drain-to-empty so the reaper sees work buffered right at exit (the timeout path skips draining).
+    drain_pending_acp_messages(
+        &mut *acp_rx,
+        &mut *emitter,
+        t_prompt,
+        &mut *ttf_logged,
+        options.yolo,
+        &mut pending_bg,
+        &mut completed_bg,
+    );
+
+    if !pending_bg.is_empty() {
+        tracing::warn!(
+            pending_bg = pending_bg.len(),
+            "headless: killing background work still pending at exit"
+        );
+        reap_pending_background_tasks(&pending_bg, session_id, acp_tx).await;
+    }
+
+    TurnDriveOutcome {
+        prompt_result,
+        connection_closed,
+        timed_out,
+    }
 }
 
 /// Invoke `fuigo/memory/flush` and wait for the flush LLM to finish.

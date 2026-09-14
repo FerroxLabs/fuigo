@@ -43,8 +43,36 @@ Fuigo processes the prompt, runs any necessary tools, and prints the result to s
 | `--verbatim`            | Send prompt exactly as given                          |
 | `--no-auto-update`      | Disable update checks for this session                |
 | `--sandbox <PROFILE>`   | Sandbox profile for filesystem/network access         |
+| `--timeout <SECS>`      | Hard cap on the whole run, in seconds. **Off by default.** Headless only (see [Run timeout](#run-timeout)). |
 
 > **Note:** `--tools`, `--disallowed-tools`, `--max-turns`, and `--agents` are headless-only flags. If used in the interactive TUI, a warning is printed and the flag is ignored. `--reasoning-effort`/`--effort`, `--permission-mode`, `--allow`, and `--deny` work in both modes. For more flags (agents and worktrees), see [Additional Headless Flags](#additional-headless-flags).
+
+### Run Timeout
+
+`fuigo -p` waits for the agent as long as the agent takes. If the agent never produces an end
+event — a wedged provider connection, a backend that accepts the prompt and then goes silent — the
+run has nothing to fall back on and waits forever. `--timeout` puts a hard cap on the whole run:
+
+```bash
+fuigo -p "review this diff" --timeout 900
+# or, for a whole CI job:
+FUIGO_HEADLESS_TIMEOUT_SECS=900 fuigo -p "review this diff"
+```
+
+- **Off by default.** Without the flag (or the environment variable) nothing changes: existing runs
+  keep waiting indefinitely, exactly as before.
+- The value is whole seconds and must be at least `1`. The flag wins over the environment variable.
+- On elapse Fuigo kills any background tasks and subagents the run started, prints an error result
+  (`"type": "error"` for `--output-format json`, a `cancelled` stop reason for the streaming
+  formats) and exits non-zero — so a CI step fails rather than hanging a runner.
+- It is a cap on the run, not a budget for the model: it is unrelated to `--max-turns`,
+  `FUIGO_MAX_RUNTIME_SECS` and `FUIGO_MAX_MODEL_CALLS`, which gate how much work is admitted rather
+  than how long the process may live.
+- `--background-wait-timeout` only bounds the wait for background work *after* the first turn ends;
+  `--timeout` bounds everything, including a turn that never ends.
+
+The `initialize` and `authenticate` handshakes are separately capped at 120 seconds, so a backend
+that never answers them fails startup with an error instead of hanging.
 
 ### Tool Filtering
 

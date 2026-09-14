@@ -534,3 +534,140 @@ fn handler_answers_ext_method_instead_of_dropping() {
         serde_json::from_str(resp.0.get()).expect("typed wire reply");
     assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
 }
+
+// ── Headless turn hard timeout (`--timeout` / `FUIGO_HEADLESS_TIMEOUT_SECS`) ────────────
+
+fn timeout_test_options(total_timeout: Option<std::time::Duration>) -> super::HeadlessOptions {
+    super::HeadlessOptions {
+        session_id: None,
+        resume: None,
+        resume_title_pinned: false,
+        cwd: None,
+        yolo: false,
+        trust: false,
+        output_format: super::OutputFormat::Json,
+        include_partial_messages: false,
+        json_schema: None,
+        model: None,
+        rules: None,
+        system_prompt_override: None,
+        continue_last_session: false,
+        fork_session: false,
+        worktree: None,
+        restore_code: false,
+        agent: None,
+        agents_json: None,
+        cli_tools: None,
+        cli_disallowed_tools: None,
+        disable_web_search: false,
+        allow_rules: Vec::new(),
+        deny_rules: Vec::new(),
+        max_turns: None,
+        permission_mode_flag: None,
+        reasoning_effort: None,
+        wait_for_background: true,
+        background_wait_timeout: std::time::Duration::from_secs(600),
+        total_timeout,
+        memory_flush: false,
+        memory_enabled_override: None,
+    }
+}
+
+/// Drive a turn whose agent never answers and never streams, with the supplied hard cap.
+async fn drive_silent_turn(total_timeout: Option<std::time::Duration>) -> super::TurnDriveOutcome {
+    // Senders/receivers are held so neither channel ever closes: every `select!` arm stays pending.
+    let (_client_tx, mut acp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let session_id = acp::SessionId::new("sess-1");
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let options = timeout_test_options(total_timeout);
+    let mut ttf_logged = false;
+    let prompt_fut = std::future::pending::<Result<acp::PromptResponse, acp::Error>>();
+    super::drive_prompt_turn(
+        prompt_fut,
+        &mut acp_rx,
+        &acp_tx,
+        &session_id,
+        &mut emitter,
+        &options,
+        std::time::Instant::now(),
+        &mut ttf_logged,
+    )
+    .await
+}
+
+/// The bug: with no end event the prompt future, the ACP stream and the (gated-off) background
+/// sleep arm are all pending forever, so `fuigo -p` never returns. The hard cap must break it.
+#[tokio::test]
+async fn turn_gives_up_when_the_agent_never_responds() {
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        drive_silent_turn(Some(std::time::Duration::from_millis(200))),
+    )
+    .await
+    .expect("headless turn hung past its --timeout instead of giving up");
+    assert!(
+        outcome.timed_out,
+        "the turn must report the hard timeout so the caller exits non-zero"
+    );
+    assert!(
+        outcome.prompt_result.is_none(),
+        "a timed-out turn has no prompt result"
+    );
+    assert!(!outcome.connection_closed, "the channel never closed");
+}
+
+/// Default-off: with no `--timeout` a silent turn keeps waiting exactly as it does today.
+#[tokio::test]
+async fn turn_without_timeout_keeps_waiting() {
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        drive_silent_turn(None),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "without --timeout the turn must not acquire a deadline of its own"
+    );
+}
+
+/// `acp_send` awaits a bare oneshot; the lifecycle sends must not inherit that unbounded wait.
+#[tokio::test]
+async fn lifecycle_send_fails_instead_of_blocking_forever() {
+    let never = std::future::pending::<Result<(), String>>();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::with_lifecycle_timeout("initialize", std::time::Duration::from_millis(200), never),
+    )
+    .await
+    .expect("with_lifecycle_timeout blocked past its own limit");
+    let err = result.expect_err("a send that is never answered must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timed out") && msg.contains("initialize"),
+        "error must name the timeout and the lifecycle step, got: {msg}"
+    );
+}
+
+/// The bound wrapper is transparent otherwise: successes and real errors pass straight through.
+#[tokio::test]
+async fn lifecycle_send_passes_results_through() {
+    let ok = super::with_lifecycle_timeout(
+        "initialize",
+        std::time::Duration::from_secs(5),
+        std::future::ready(Ok::<u8, String>(7)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok, 7);
+    let err = super::with_lifecycle_timeout(
+        "authenticate",
+        std::time::Duration::from_secs(5),
+        std::future::ready(Err::<u8, String>("no credentials".to_string())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.to_string(), "no credentials");
+}
