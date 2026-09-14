@@ -2542,14 +2542,18 @@ async fn ttl_renewal_does_not_resurrect_a_catalog_rewritten_since_its_read() {
     .await
     .expect("the renewal must reach its write window");
 
-    // A models fetch lands and persists the real catalog.
-    writer.persist(
-        &make_prefetched(&["fresh-catalog"]),
-        Some("etag-fresh"),
-        &identity,
-        auth_method.clone(),
-        &origin,
-    );
+    // A writer that could not take the file lock (a filesystem without `flock`)
+    // lands the real catalog inside the window; the compare-and-swap is the
+    // second line that has to catch it.
+    writer.write_locked(&ModelsCache {
+        fetched_at: Utc::now(),
+        fuigo_version: Some(fuigo_version::VERSION.to_string()),
+        identity: Some(identity.clone()),
+        auth_method: Some(auth_method.clone()),
+        origin: Some(origin.clone()),
+        etag: Some("etag-fresh".into()),
+        models: make_prefetched(&["fresh-catalog"]),
+    });
 
     barrier.release.notify_one();
     renewal.await.unwrap();
@@ -2602,4 +2606,156 @@ async fn ttl_renewal_still_stamps_an_untouched_cache() {
     );
     assert!(on_disk.models.contains_key("aged-catalog"));
     assert_eq!(on_disk.etag.as_deref(), Some("etag-aged"));
+}
+
+// ── round 2: cross-path cache identity + a locked TTL renewal ───────────────
+
+#[test]
+fn cache_identity_uses_the_same_auth_accessor_as_the_write_paths() {
+    // The catalog cache is only useful if the identity a WRITE stamps is the
+    // identity a later READ computes. The write paths resolve their auth with
+    // `AuthManager::current()` -- `resolve_disk_auth` for the startup prefetch,
+    // `create_auth_manager().current()` at the server boot, and
+    // `bounded_startup_auth` (which yields `None` exactly when `current()` does)
+    // on the manager's own refresh. Reading through a wider accessor makes an
+    // expired-but-present token a PERMANENT miss: every boot refetches and
+    // `renew_ttl` logs "identity mismatch" forever.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), FuigoComConfig::default()));
+    auth_manager.hot_swap(FuigoAuth {
+        expires_at: Some(Utc::now() - ChronoDuration::hours(1)),
+        ..FuigoAuth::test_default()
+    });
+    assert!(
+        auth_manager.current().is_none(),
+        "precondition: the token is expired, so the write paths see no credential",
+    );
+    assert!(
+        auth_manager.current_or_expired().is_some(),
+        "precondition: the token is still present in memory",
+    );
+
+    let cfg = config::Config::default();
+    let mgr = ModelsManagerBuilder::new(
+        None,
+        IndexMap::new(),
+        acp::ModelId::new("default"),
+        auth_manager.clone(),
+        cfg.clone(),
+    )
+    .cache(test_cache_manager(tmp.path()))
+    .build();
+
+    let write_identity = models_cache_identity(auth_manager.current().as_ref(), &cfg.endpoints);
+    assert_eq!(
+        mgr.cache_identity(),
+        write_identity,
+        "the read/renew identity must be computed from the same auth accessor the write used",
+    );
+
+    // And the round trip that divergence broke: persist as the writer, read back
+    // as the manager.
+    let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+    let origin = mgr.cache_origin();
+    let cache = test_cache_manager(tmp.path());
+    cache.persist(
+        &make_prefetched(&["grok-4.5"]),
+        Some("etag-1"),
+        &write_identity,
+        auth_method.clone(),
+        &origin,
+    );
+    assert!(
+        cache
+            .load_fresh(&mgr.cache_identity(), &auth_method, &origin)
+            .is_some(),
+        "a catalog this process just wrote must be readable by this process",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persist_cannot_land_inside_the_ttl_renewals_read_modify_write() {
+    // The compare-and-swap alone does not close the lost update: everything
+    // after it -- `create_dir_all`, the `sweep_stale_tmp` directory scan, the
+    // serialize and the tmp-file write -- is still a window in which a fresh
+    // catalog can land and then be renamed away. The fix is the `fs_atomic`
+    // write lock, held across the renewal's whole read-modify-write and taken by
+    // `atomic_write` too, so a concurrent persist simply cannot run inside it.
+    let mgr = test_manager();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_method = mgr.inner.fetch_auth.read().cache_auth_method();
+    let identity = mgr.cache_identity();
+    let origin = mgr.cache_origin();
+    let cache_path = tmp.path().join(MODELS_CACHE_FILE);
+
+    let writer = test_cache_manager(tmp.path());
+    writer.persist(
+        &make_prefetched(&["stale-catalog"]),
+        Some("etag-stale"),
+        &identity,
+        auth_method.clone(),
+        &origin,
+    );
+
+    let barrier = Arc::new(RenewBarrier::default());
+    let mut renewer = test_cache_manager(tmp.path());
+    renewer.renew_barrier = Some(barrier.clone());
+
+    let (renew_identity, renew_auth, renew_origin) =
+        (identity.clone(), auth_method.clone(), origin.clone());
+    let renewal = tokio::spawn(async move {
+        renewer
+            .renew_ttl(&renew_identity, &renew_auth, &renew_origin)
+            .await;
+    });
+
+    // The renewal now holds the lock and its snapshot.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        barrier.reached.notified(),
+    )
+    .await
+    .expect("the renewal must reach its write window");
+
+    // A models fetch tries to persist the real catalog from another thread.
+    let (persist_identity, persist_auth, persist_origin) =
+        (identity.clone(), auth_method.clone(), origin.clone());
+    let persist_dir = tmp.path().to_path_buf();
+    let persisting = std::thread::spawn(move || {
+        test_cache_manager(&persist_dir).persist(
+            &make_prefetched(&["fresh-catalog"]),
+            Some("etag-fresh"),
+            &persist_identity,
+            persist_auth,
+            &persist_origin,
+        );
+    });
+
+    // Well inside `CONFIG_LOCK_MAX_WAIT` (2s), so the blocked persist is still
+    // waiting rather than having given up. Unlocked, it lands in ~1ms.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    while std::time::Instant::now() < deadline {
+        let on_disk: ModelsCache =
+            serde_json::from_slice(&std::fs::read(&cache_path).expect("cache file is readable"))
+                .expect("cache file parses");
+        assert!(
+            on_disk.models.contains_key("stale-catalog"),
+            "a persist landed inside the renewal's read-modify-write; the renewal \
+             is about to rename its stale copy back over it",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    barrier.release.notify_one();
+    renewal.await.unwrap();
+    persisting.join().unwrap();
+
+    let on_disk: ModelsCache =
+        serde_json::from_slice(&std::fs::read(&cache_path).expect("cache file is readable"))
+            .expect("cache file parses");
+    assert!(
+        on_disk.models.contains_key("fresh-catalog"),
+        "the freshly persisted catalog must survive the renewal",
+    );
+    assert!(!on_disk.models.contains_key("stale-catalog"));
 }
