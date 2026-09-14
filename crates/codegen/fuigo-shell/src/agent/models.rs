@@ -322,8 +322,11 @@ impl ModelsManager {
         let mut cached_etag = None;
         let prefetched_models = prefetched_models.or_else(|| {
             let cache = ModelsCacheManager::new();
+            // Same accessor the write paths use; see `cache_identity`.
+            let auth_snapshot = auth_manager.current();
             cache
                 .load_fresh(
+                    &models_cache_identity(auth_snapshot.as_ref(), &cfg.endpoints),
                     &fetch_auth.cache_auth_method(),
                     &active_model_source(&cfg.endpoints, fetch_auth).cache_origin(),
                 )
@@ -726,7 +729,11 @@ impl ModelsManager {
             let fetch_auth = *self.inner.fetch_auth.read();
             self.inner
                 .cache
-                .renew_ttl(&fetch_auth.cache_auth_method(), &self.cache_origin())
+                .renew_ttl(
+                    &self.cache_identity(),
+                    &fetch_auth.cache_auth_method(),
+                    &self.cache_origin(),
+                )
                 .await;
             return;
         }
@@ -828,8 +835,11 @@ impl ModelsManager {
 
     fn reload_from_cache_manager(&self, cache: &ModelsCacheManager) {
         let fetch_auth = *self.inner.fetch_auth.read();
-        let Some(cached) = cache.load_fresh(&fetch_auth.cache_auth_method(), &self.cache_origin())
-        else {
+        let Some(cached) = cache.load_fresh(
+            &self.cache_identity(),
+            &fetch_auth.cache_auth_method(),
+            &self.cache_origin(),
+        ) else {
             tracing::debug!("models cache changed on disk but is not loadable; ignoring");
             return;
         };
@@ -1077,6 +1087,29 @@ impl ModelsManager {
         let endpoints = self.inner.cfg.read().endpoints.clone();
         let fetch_auth = *self.inner.fetch_auth.read();
         active_model_source(&endpoints, fetch_auth).cache_origin()
+    }
+
+    /// The account discriminator for this manager's live credentials.
+    /// Read fresh on every call: `on_auth_changed` swaps the identity in place,
+    /// and a cached value would key the new account's writes to the old one.
+    ///
+    /// `current()`, deliberately, and NOT `current_or_expired()`: the identity must
+    /// name the credential the catalog was actually fetched WITH, and every write
+    /// path resolves its auth that way — `resolve_disk_auth` for the startup
+    /// prefetch (`fetch.rs`), `create_auth_manager().current()` at the server boot
+    /// (`agent/server.rs`), and a just-refreshed token on the manager's own refresh
+    /// (`bounded_startup_auth`, which returns `None` exactly when `current()` would).
+    /// Reading through a wider accessor than the writer used makes an
+    /// expired-but-present token a PERMANENT cache miss: the write stamps the
+    /// credential-less identity while every read expects the account's, so
+    /// `load_fresh` misses on every boot and `renew_ttl` logs "identity mismatch"
+    /// and never renews. Collapsing to the credential-less identity while expired is
+    /// correct rather than a leak: with no usable token the fetch is unauthenticated,
+    /// so the catalog it writes carries no account's entitlements.
+    fn cache_identity(&self) -> String {
+        let endpoints = self.inner.cfg.read().endpoints.clone();
+        let auth = self.inner.auth_manager.current();
+        models_cache_identity(auth.as_ref(), &endpoints)
     }
 
     /// A hung IdP on a cold cache degrades to a session-less fetch instead of stalling boot; the catalog stays and the next refresh retries.

@@ -332,3 +332,170 @@ fn compaction_outcome_as_str_is_stable() {
     assert_eq!(CompactionOutcome::Degenerate.as_str(), "degenerate");
     assert_eq!(CompactionOutcome::Failed.as_str(), "failed");
 }
+
+// ── streamed TPM rate limits (upstream 1.0.26) ──────────────────────────────
+
+/// The wording an OpenAI-compatible gateway puts on a tokens-per-minute 429.
+/// It opens with "Request too large", which is exactly the anchor
+/// `is_context_length_error` matches, so the size text and the rate-limit code
+/// disagree about what this is.
+const TPM_429_BODY: &str = "Request too large for grok-4.5 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000. Please try again in 42s.";
+
+#[test]
+fn response_event_streamed_tpm_429_is_transient_despite_size_wording() {
+    // A TPM 429 delivered on the STREAM path (`ResponseFailed` / `ResponseError`).
+    // Treating it as Overflow costs a wasted full-context summarization call
+    // (100-400k input tokens) AND a permanent step down the input ladder, with
+    // sticky Size suppression once the ladder is exhausted. The envelope path
+    // already exempts 429; the stream path must agree.
+    assert!(
+        matches!(
+            classify_response_event_error(Some("429"), TPM_429_BODY),
+            CompactFailure::Transient(_)
+        ),
+        "a streamed 429 must retry, not ladder: {TPM_429_BODY}"
+    );
+    // 408 is the other status `classify_sampling_error` deliberately keeps retryable.
+    assert!(
+        matches!(
+            classify_response_event_error(Some("408"), TPM_429_BODY),
+            CompactFailure::Transient(_)
+        ),
+        "a streamed 408 must retry, not ladder"
+    );
+}
+
+#[test]
+fn streamed_rate_limit_slugs_are_transient_too() {
+    // The `code` slot is not always a numeric status: Anthropic-style backends
+    // spell the same rate limit as an error TYPE. Matching only "429" left every
+    // slug spelling classifying as Overflow — the original bug in another
+    // spelling.
+    for code in [
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "too_many_requests",
+        "RATE_LIMIT_ERROR",
+    ] {
+        assert!(
+            matches!(
+                classify_response_event_error(Some(code), TPM_429_BODY),
+                CompactFailure::Transient(_)
+            ),
+            "a streamed {code} must retry, not ladder"
+        );
+    }
+}
+
+#[test]
+fn the_stream_path_carve_out_does_not_require_a_retry_after() {
+    // The two paths agree on a 429 that carries `Retry-After`, and deliberately
+    // do NOT agree without one. The envelope rule
+    // (`SamplingError::is_context_length_error`) exempts a 429 only when the
+    // server promised capacity later; a bare 429 with size wording there means
+    // the request exceeds the cap outright, so it keeps laddering. The stream
+    // event has no header to read — `ResponseFailed`/`ResponseError` carry a
+    // code and a message and nothing else — so it trusts the code alone.
+    //
+    // This test states that rule rather than hiding it: the earlier version
+    // asserted "parity" while setting `retry_after_secs = Some(42)`, the one
+    // input on which the two paths cannot disagree.
+    let with_retry_after = {
+        let mut err = api_error(StatusCode::TOO_MANY_REQUESTS, TPM_429_BODY);
+        if let SamplingError::Api {
+            retry_after_secs, ..
+        } = &mut err
+        {
+            *retry_after_secs = Some(42);
+        }
+        classify_sampling_error(err)
+    };
+    assert!(
+        matches!(with_retry_after, CompactFailure::Transient(_)),
+        "envelope path, 429 + Retry-After: transient"
+    );
+    assert!(
+        matches!(
+            classify_sampling_error(api_error(StatusCode::TOO_MANY_REQUESTS, TPM_429_BODY)),
+            CompactFailure::Overflow(_)
+        ),
+        "envelope path, 429 with NO Retry-After: still ladders, by design"
+    );
+    assert!(
+        matches!(
+            classify_response_event_error(Some("429"), TPM_429_BODY),
+            CompactFailure::Transient(_)
+        ),
+        "stream path has no header to read, so the code alone decides"
+    );
+}
+
+#[test]
+fn response_event_overflow_without_a_rate_limit_code_still_ladders() {
+    // Regression guard for the carve-out above: only an explicit 429/408 may
+    // outrank the size text. Every other shape a real overflow arrives in must
+    // keep reaching the input ladder.
+    for (code, message) in [
+        (
+            None,
+            "The prompt is too long for this model's context window.",
+        ),
+        (
+            Some("400"),
+            "prompt is too long: 300000 tokens > 200000 maximum",
+        ),
+        (
+            Some("invalid_request_error"),
+            "prompt is too long: 300000 tokens > 200000 maximum",
+        ),
+        (Some("413"), "Request failed (HTTP 413)."),
+        (Some("500"), "Request too large"),
+    ] {
+        assert!(
+            is_overflow(&classify_response_event_error(code, message)),
+            "should still be overflow: {code:?} / {message}"
+        );
+    }
+}
+
+// ── the Messages (Anthropic) backend's own stream errors ────────────────────
+
+/// The verbatim SSE `data:` payload an Anthropic-style backend sends for a
+/// tokens-per-minute 429.
+const ANTHROPIC_TPM_429_FRAME: &str = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Request too large for claude-sonnet-4 in organization org-x on tokens per min (TPM): Limit 30000, Requested 51000."}}"#;
+
+/// The same frame shape for a genuine prompt-size rejection.
+const ANTHROPIC_OVERFLOW_FRAME: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 300000 tokens > 200000 maximum"}}"#;
+
+#[test]
+fn an_anthropic_stream_rate_limit_is_transient_on_the_compaction_loop() {
+    // Production path, end to end, with nothing hand-built: the compaction
+    // loop's Messages arm consumes `Client::conversation_stream_messages`,
+    // whose SSE mapping runs `try_parse_stream_error` over every `data:`
+    // payload before attempting a typed `MessageStreamEvent`. A provider error
+    // frame therefore arrives as an `Err` item and lands here, on
+    // `classify_sampling_error` (session_compact.rs, the `Err(e)` arm of the
+    // Messages stream loop) -- not on `classify_response_event_error`, which
+    // only ever sees the Responses backend's typed events.
+    //
+    // Classifying this as Overflow costs a wasted full-context summarization
+    // call (100-400k input tokens) AND a permanent step down the
+    // Verbatim -> VerbatimFitted -> Lossy ladder for the rest of the session.
+    let err = fuigo_sampling_types::error::try_parse_stream_error(ANTHROPIC_TPM_429_FRAME)
+        .expect("an Anthropic error frame parses as a stream error");
+    assert!(
+        matches!(classify_sampling_error(err), CompactFailure::Transient(_)),
+        "a Messages-backend TPM 429 must retry, not ladder"
+    );
+}
+
+#[test]
+fn an_anthropic_stream_overflow_still_ladders() {
+    // The carve-out must not swallow the case the ladder exists for.
+    let err = fuigo_sampling_types::error::try_parse_stream_error(ANTHROPIC_OVERFLOW_FRAME)
+        .expect("an Anthropic error frame parses as a stream error");
+    assert!(
+        is_overflow(&classify_sampling_error(err)),
+        "a real prompt-size rejection must still reach the input ladder"
+    );
+}
