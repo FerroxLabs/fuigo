@@ -104,6 +104,36 @@ pub async fn list_skills_with_plugins(
     project_trusted: bool,
 ) -> Vec<SkillInfo> {
     let _skill_discovery_timer = crate::timing::timer("skill_discovery");
+    let cwd = working_directory.map(str::to_owned);
+    let scan_config = config.clone();
+    let scanned = run_scan_blocking(move || {
+        scan_filesystem_skills(cwd.as_deref(), &scan_config, compat, project_trusted)
+    })
+    .await;
+    finish_skills(scanned, config, plugins)
+}
+
+/// The filesystem half of discovery: the recursive `read_dir` walk, a `canonicalize` per candidate,
+/// a frontmatter parse per `SKILL.md`, and a libgit2 repo discovery for `[skills].paths`.
+///
+/// All of it is blocking work. It is deliberately a plain `fn` so callers must hand it to the
+/// blocking pool: run inline on a tokio worker, a slow or network-mounted skills directory pins
+/// that worker and no timeout around the call can fire.
+fn scan_filesystem_skills(
+    working_directory: Option<&str>,
+    config: &SkillsConfig,
+    compat: CompatConfig,
+    project_trusted: bool,
+) -> Vec<SkillInfo> {
+    #[cfg(test)]
+    {
+        *SKILL_DISCOVERY_SCANS
+            .lock()
+            .expect("scan tally")
+            .entry(working_directory.map(str::to_owned))
+            .or_insert(0) += 1;
+        test_hooks::delay_for(working_directory);
+    }
     let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
     let (discovery_cwd, discovery_user_dir) = if project_trusted {
         (working_directory, workspace_user_dir.as_deref())
@@ -114,13 +144,12 @@ pub async fn list_skills_with_plugins(
     let mut skills = if config.auto_discover == Some(false) {
         Vec::new()
     } else {
-        list_skills_with_options(
+        list_skills_with_options_blocking(
             discovery_cwd,
             discovery_user_dir,
             &fuigo_tools::util::fuigo_home::fuigo_home(),
             compat,
         )
-        .await
     };
 
     let git_root = working_directory.and_then(|wd| {
@@ -138,8 +167,31 @@ pub async fn list_skills_with_plugins(
         &config.bundled_skill_dirs,
         SkillScope::Bundled,
     ));
+    skills
+}
 
-    let mut skills = filter_skills(skills, &config.ignore);
+/// Run one scan closure on the blocking pool, degrading to an empty list if the task is lost.
+async fn run_scan_blocking<F>(scan: F) -> Vec<SkillInfo>
+where
+    F: FnOnce() -> Vec<SkillInfo> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(scan).await {
+        Ok(skills) => skills,
+        Err(e) => {
+            tracing::warn!(error = %e, "skill discovery task failed; continuing without discovered skills");
+            Vec::new()
+        }
+    }
+}
+
+/// Everything after the filesystem walk: ignore filtering, scope ordering, plugin merge, disable marking.
+/// In-memory only, so it is re-run per session even when the scan itself came from the cache.
+fn finish_skills(
+    scanned: Vec<SkillInfo>,
+    config: &SkillsConfig,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> Vec<SkillInfo> {
+    let mut skills = filter_skills(scanned, &config.ignore);
     skills.sort_by_key(|s| s.scope);
 
     let plugin_skills = if let Some(registry) = plugins {
@@ -162,6 +214,257 @@ pub async fn list_skills_with_plugins(
     }
 
     merged
+}
+
+// ── Session-start skill discovery: bounded, off-worker, and cached ──────────────────────
+//
+// `session/new` rebuilds the agent, and the rebuild discovers skills. That walk is unbounded
+// filesystem work paid once per session; embedded hosts open many sessions against one FUIGO_HOME.
+// The `/skills` reload path has always wrapped the identical work in a timeout; session start now
+// does the same, on the blocking pool, with a process-lifetime cache in front of it.
+
+/// Real filesystem scans performed per working directory. Test-only: cache hits must be
+/// observable without timing, and a per-cwd tally stays exact under a parallel test run.
+#[cfg(test)]
+static SKILL_DISCOVERY_SCANS: std::sync::LazyLock<std::sync::Mutex<HashMap<Option<String>, u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Real filesystem scans performed for `cwd` so far; cache hits do not count.
+#[cfg(test)]
+pub(crate) fn skill_discovery_scan_count(cwd: Option<&str>) -> u64 {
+    SKILL_DISCOVERY_SCANS
+        .lock()
+        .expect("scan tally")
+        .get(&cwd.map(str::to_owned))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Cap on one skills scan. Matches the cap the `/skills` reload path has always used.
+pub const DEFAULT_SKILL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Env override for [`DEFAULT_SKILL_DISCOVERY_TIMEOUT`], in milliseconds.
+pub const SKILL_DISCOVERY_TIMEOUT_ENV: &str = "FUIGO_SKILLS_DISCOVERY_TIMEOUT_MS";
+
+/// The configured scan cap: `FUIGO_SKILLS_DISCOVERY_TIMEOUT_MS` if set and parsable, else the default.
+pub fn skill_discovery_timeout() -> std::time::Duration {
+    parse_skill_discovery_timeout(std::env::var(SKILL_DISCOVERY_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// An unset, empty or unparsable override keeps the default rather than disabling discovery.
+fn parse_skill_discovery_timeout(raw: Option<&str>) -> std::time::Duration {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return DEFAULT_SKILL_DISCOVERY_TIMEOUT;
+    };
+    match raw.parse::<u64>() {
+        Ok(ms) => std::time::Duration::from_millis(ms),
+        Err(_) => {
+            tracing::warn!(
+                value = raw,
+                "{SKILL_DISCOVERY_TIMEOUT_ENV} is not a number of milliseconds; using the default"
+            );
+            DEFAULT_SKILL_DISCOVERY_TIMEOUT
+        }
+    }
+}
+
+/// Identity of one discovery result. Anything that changes which files are read belongs here.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct SkillDiscoveryKey {
+    cwd: Option<String>,
+    fuigo_home: PathBuf,
+    /// Serialized `SkillsConfig`: it derives `Serialize` but not `Hash`.
+    config: String,
+    /// Debug form of the resolved vendor-compat config, for the same reason.
+    compat: String,
+    project_trusted: bool,
+}
+
+impl SkillDiscoveryKey {
+    fn new(
+        working_directory: Option<&str>,
+        config: &SkillsConfig,
+        compat: CompatConfig,
+        project_trusted: bool,
+    ) -> Self {
+        Self {
+            cwd: working_directory.map(str::to_owned),
+            fuigo_home: fuigo_tools::util::fuigo_home::fuigo_home(),
+            config: serde_json::to_string(config).unwrap_or_else(|_| format!("{config:?}")),
+            compat: format!("{compat:?}"),
+            project_trusted,
+        }
+    }
+}
+
+/// Modification times of the skill roots and their `skills`/`commands` subdirectories.
+///
+/// Adding, removing or renaming a skill changes one of these. An edit *inside* an existing
+/// `SKILL.md` does not, by design: the `/skills` reload path and the skills watcher own that case
+/// and both invalidate this cache when they run.
+type RootsFingerprint = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+
+#[derive(Clone)]
+struct CachedDiscovery {
+    fingerprint: RootsFingerprint,
+    skills: Vec<SkillInfo>,
+}
+
+static SKILL_DISCOVERY_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<SkillDiscoveryKey, CachedDiscovery>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Drop every cached scan. The `/skills` reload path calls this so an explicit reload is always
+/// authoritative for later `session/new` calls in the same process.
+pub fn invalidate_skill_discovery_cache() {
+    if let Ok(mut cache) = SKILL_DISCOVERY_CACHE.lock() {
+        cache.clear();
+    }
+}
+
+fn roots_fingerprint(
+    working_directory: Option<&str>,
+    config: &SkillsConfig,
+    compat: CompatConfig,
+    project_trusted: bool,
+) -> RootsFingerprint {
+    let workspace_user_dir = crate::prompt::workspace_user::optional_workspace_user_dir();
+    let (cwd, user_dir) = if project_trusted {
+        (working_directory, workspace_user_dir.as_deref())
+    } else {
+        (None, None)
+    };
+    let roots = collect_skill_config_dirs(
+        cwd.map(Path::new),
+        user_dir,
+        &fuigo_tools::util::fuigo_home::fuigo_home(),
+        &config.paths,
+        compat,
+    );
+    let mtime = |dir: &Path| std::fs::metadata(dir).ok().and_then(|m| m.modified().ok());
+    let mut fingerprint = Vec::with_capacity(roots.len() * (SKILL_SUBDIRS.len() + 2));
+    for root in roots {
+        fingerprint.push((root.clone(), mtime(&root)));
+        for subdir in SKILL_SUBDIRS.iter().copied().chain([COMMAND_SUBDIR]) {
+            let dir = root.join(subdir);
+            let stamp = mtime(&dir);
+            fingerprint.push((dir, stamp));
+        }
+    }
+    fingerprint
+}
+
+/// [`list_skills_with_plugins`] for session start: off the tokio workers, time-capped, and cached
+/// for the life of the process.
+///
+/// A scan that overruns its cap yields an empty list rather than blocking the session: the agent
+/// still builds, and `reload_skills_from_disk` plus the skills watcher backfill the real list.
+pub async fn list_skills_with_plugins_cached(
+    working_directory: Option<&str>,
+    config: &SkillsConfig,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+    compat: CompatConfig,
+    project_trusted: bool,
+) -> Vec<SkillInfo> {
+    list_skills_with_plugins_within(
+        skill_discovery_timeout(),
+        working_directory,
+        config,
+        plugins,
+        compat,
+        project_trusted,
+    )
+    .await
+}
+
+/// [`list_skills_with_plugins_cached`] with an explicit cap, so callers (and tests) can bound it themselves.
+pub async fn list_skills_with_plugins_within(
+    limit: std::time::Duration,
+    working_directory: Option<&str>,
+    config: &SkillsConfig,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+    compat: CompatConfig,
+    project_trusted: bool,
+) -> Vec<SkillInfo> {
+    let _skill_discovery_timer = crate::timing::timer("skill_discovery");
+    let key = SkillDiscoveryKey::new(working_directory, config, compat, project_trusted);
+    let cached = SKILL_DISCOVERY_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned());
+
+    let cwd = working_directory.map(str::to_owned);
+    let scan_config = config.clone();
+    // The fingerprint stats the roots, so it is filesystem work too: it rides the same blocking task.
+    let job = tokio::task::spawn_blocking(move || {
+        let fingerprint = roots_fingerprint(cwd.as_deref(), &scan_config, compat, project_trusted);
+        if let Some(cached) = cached
+            && cached.fingerprint == fingerprint
+        {
+            return (fingerprint, cached.skills, false);
+        }
+        let skills = scan_filesystem_skills(cwd.as_deref(), &scan_config, compat, project_trusted);
+        (fingerprint, skills, true)
+    });
+
+    let scanned = match tokio::time::timeout(limit, job).await {
+        Ok(Ok((fingerprint, skills, scanned))) => {
+            if scanned && let Ok(mut cache) = SKILL_DISCOVERY_CACHE.lock() {
+                cache.insert(
+                    key,
+                    CachedDiscovery {
+                        fingerprint,
+                        skills: skills.clone(),
+                    },
+                );
+            }
+            skills
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "skill discovery task failed; continuing without discovered skills");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = limit.as_millis() as u64,
+                "skill discovery timed out at session start; continuing without discovered skills"
+            );
+            Vec::new()
+        }
+    };
+    finish_skills(scanned, config, plugins)
+}
+
+/// Per-directory scan delays, so a test can simulate a slow filesystem without touching globals
+/// that a parallel test also reads.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Duration;
+
+    static DELAYS: LazyLock<Mutex<HashMap<String, Duration>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Make every scan rooted at `cwd` take `delay`.
+    pub(crate) fn set_delay(cwd: &str, delay: Duration) {
+        DELAYS
+            .lock()
+            .expect("scan delay registry")
+            .insert(cwd.to_string(), delay);
+    }
+
+    pub(crate) fn delay_for(cwd: Option<&str>) {
+        let Some(cwd) = cwd else { return };
+        let delay = DELAYS
+            .lock()
+            .expect("scan delay registry")
+            .get(cwd)
+            .copied();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+    }
 }
 
 /// Canonical source of all config directories that may contain skills.
@@ -303,7 +606,18 @@ fn collect_discovered_paths(
 /// Discover skills and commands from config dirs, workspace, and bundled paths.
 /// Skills are collected before commands so they win name collisions via first-seen-wins dedup.
 /// Returns only global skills when `working_directory` is `None`.
+#[cfg(test)]
 async fn list_skills_with_options(
+    working_directory: Option<&str>,
+    workspace_user_dir: Option<&Path>,
+    global_dir: &Path,
+    compat: CompatConfig,
+) -> Vec<SkillInfo> {
+    list_skills_with_options_blocking(working_directory, workspace_user_dir, global_dir, compat)
+}
+
+/// The blocking walk behind [`list_skills_with_options`]; never call it from a tokio worker directly.
+fn list_skills_with_options_blocking(
     working_directory: Option<&str>,
     workspace_user_dir: Option<&Path>,
     global_dir: &Path,
@@ -2782,5 +3096,154 @@ mod tests {
             .unwrap();
         assert_eq!(rekeyed.display_name.as_deref(), Some("zz-copyfix-japandi"));
         assert!(rekeyed.path.ends_with("zz-copyfix-japandi2/SKILL.md"));
+    }
+}
+
+/// Session-start discovery must be bounded, must not pin a tokio worker, and must not be repaid
+/// by every later session in the same process.
+#[cfg(test)]
+mod discovery_budget_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn write_skill_md(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: A test skill called {name}\n---\n\nBody.\n"),
+        )
+        .unwrap();
+    }
+
+    /// A tempdir project holding one skill, plus the cwd string discovery is keyed on.
+    fn project_with_skill(name: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill_md(&tmp.path().join(".fuigo").join("skills").join(name), name);
+        let cwd = tmp.path().to_str().unwrap().to_string();
+        (tmp, cwd)
+    }
+
+    async fn discover(limit: Duration, cwd: &str) -> Vec<SkillInfo> {
+        list_skills_with_plugins_within(
+            limit,
+            Some(cwd),
+            &SkillsConfig::default(),
+            None,
+            CompatConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await
+    }
+
+    fn has(skills: &[SkillInfo], name: &str) -> bool {
+        skills.iter().any(|s| s.name == name)
+    }
+
+    #[test]
+    fn timeout_override_parses_and_falls_back() {
+        assert_eq!(
+            parse_skill_discovery_timeout(None),
+            DEFAULT_SKILL_DISCOVERY_TIMEOUT
+        );
+        assert_eq!(
+            parse_skill_discovery_timeout(Some("  ")),
+            DEFAULT_SKILL_DISCOVERY_TIMEOUT
+        );
+        assert_eq!(
+            parse_skill_discovery_timeout(Some("nonsense")),
+            DEFAULT_SKILL_DISCOVERY_TIMEOUT
+        );
+        assert_eq!(
+            parse_skill_discovery_timeout(Some("250")),
+            Duration::from_millis(250)
+        );
+    }
+
+    /// The bug: the scan is async in name only. Run inline on a single-threaded runtime a slow
+    /// filesystem pins the worker, so no timeout around it can ever fire and `session/new` waits
+    /// out the whole walk.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_scan_neither_pins_the_runtime_nor_outlives_its_timeout() {
+        let (_tmp, cwd) = project_with_skill("slow-skill");
+        test_hooks::set_delay(&cwd, Duration::from_secs(5));
+        let started = Instant::now();
+        let skills = discover(Duration::from_millis(200), &cwd).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "discovery blocked for {elapsed:?}; the cap must fire while the scan runs off-worker"
+        );
+        assert!(
+            !has(&skills, "slow-skill"),
+            "a scan that overran its cap yields nothing; the reload path backfills"
+        );
+    }
+
+    /// A capped-out scan must not be cached: the next session has to try again.
+    #[tokio::test]
+    async fn a_scan_that_overran_is_not_cached() {
+        let (_tmp, cwd) = project_with_skill("retry-skill");
+        test_hooks::set_delay(&cwd, Duration::from_secs(5));
+        assert!(!has(
+            &discover(Duration::from_millis(200), &cwd).await,
+            "retry-skill"
+        ));
+        test_hooks::set_delay(&cwd, Duration::ZERO);
+        assert!(
+            has(
+                &discover(Duration::from_secs(30), &cwd).await,
+                "retry-skill"
+            ),
+            "the next session must rescan rather than inherit the empty result"
+        );
+    }
+
+    /// The second `session/new` in one process pays nothing: same roots, same answer, no rescan.
+    #[tokio::test]
+    async fn second_session_start_hits_the_cache() {
+        let (_tmp, cwd) = project_with_skill("cached-skill");
+        let before = skill_discovery_scan_count(Some(&cwd));
+        let first = discover(Duration::from_secs(30), &cwd).await;
+        assert_eq!(
+            skill_discovery_scan_count(Some(&cwd)),
+            before + 1,
+            "the first session scans the filesystem"
+        );
+        let second = discover(Duration::from_secs(30), &cwd).await;
+        assert_eq!(
+            skill_discovery_scan_count(Some(&cwd)),
+            before + 1,
+            "the second session must be served from the process cache"
+        );
+        assert!(has(&first, "cached-skill") && has(&second, "cached-skill"));
+        assert_eq!(first.len(), second.len());
+    }
+
+    /// The cache is not sticky: adding a skill changes a root's mtime and forces a rescan.
+    #[tokio::test]
+    async fn a_new_skill_invalidates_the_cache() {
+        let (tmp, cwd) = project_with_skill("first-skill");
+        let before = skill_discovery_scan_count(Some(&cwd));
+        assert!(has(
+            &discover(Duration::from_secs(30), &cwd).await,
+            "first-skill"
+        ));
+        write_skill_md(
+            &tmp.path()
+                .join(".fuigo")
+                .join("skills")
+                .join("second-skill"),
+            "second-skill",
+        );
+        let after = discover(Duration::from_secs(30), &cwd).await;
+        assert_eq!(
+            skill_discovery_scan_count(Some(&cwd)),
+            before + 2,
+            "a changed skills root must force a rescan"
+        );
+        assert!(
+            has(&after, "second-skill"),
+            "the rescan must pick the new skill up"
+        );
     }
 }
