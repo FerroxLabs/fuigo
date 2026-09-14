@@ -858,3 +858,233 @@ async fn the_memory_flush_is_bounded_by_the_run_deadline() {
         "the error must name the step, got: {err}"
     );
 }
+
+/// A stdout seam so a test can assert on the bytes a machine consumer actually reads.
+#[derive(Clone, Default)]
+struct CapturedOut(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedOut {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().expect("capture lock").clone()).expect("utf8 output")
+    }
+}
+
+/// Drive `finish_turn` through the hard cap with a turn that already answered, capturing stdout.
+fn capped_run_output(format: super::OutputFormat) -> String {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(format, true, Box::new(captured.clone()));
+    emitter.on_text_chunk("the answer");
+    let err = super::finish_turn(
+        &mut emitter,
+        Some(Ok(completed_prompt_response())),
+        true,
+        Some(std::time::Duration::from_secs(300)),
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect_err("a capped run must still exit non-zero");
+    assert!(
+        err.to_string().contains("Timed out after 300s"),
+        "the timeout must still be reported, got: {err}"
+    );
+    captured.text()
+}
+
+/// `--output-format json` must stay ONE parseable document. Reporting the cap as a second
+/// document after the completed turn's result breaks `json.loads` / `JSON.parse` outright ("Extra
+/// data"), in the mode `--timeout` is documented for.
+#[test]
+fn the_hard_cap_emits_one_json_document_carrying_both_the_result_and_the_timeout() {
+    let out = capped_run_output(super::OutputFormat::Json);
+    let doc: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("stdout must parse as exactly one JSON document ({e}): {out}"));
+    assert_eq!(
+        doc["stopReason"], "cancelled",
+        "the cap must be visible on the one terminal document: {doc}"
+    );
+    assert_eq!(
+        doc["error"], "Timed out after 300s waiting for the turn to end",
+        "the timeout message must ride on that document: {doc}"
+    );
+    assert_eq!(
+        doc["text"], "the answer",
+        "the completed turn's answer must survive: {doc}"
+    );
+    assert!(
+        doc["usage"].is_object(),
+        "the completed turn's spend record must ride on the same document: {doc}"
+    );
+    assert_eq!(
+        doc["structuredOutput"],
+        serde_json::json!({"answer": "42"}),
+        "the completed turn's structured output must survive: {doc}"
+    );
+}
+
+/// `--output-format stream-json` must carry exactly one `result` line: a consumer that stops at the
+/// first terminal line would otherwise report SUCCESS for a run that timed out and exited 1, and
+/// one that reads to EOF would double-count `usage`.
+#[test]
+fn the_hard_cap_emits_one_stream_json_result_line() {
+    let out = capped_run_output(super::OutputFormat::StreamingMessagesJson);
+    let results: Vec<serde_json::Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("each line is JSON"))
+        .filter(|v| v["type"] == "result")
+        .collect();
+    assert_eq!(
+        results.len(),
+        1,
+        "exactly one terminal result line, got {}: {out}",
+        results.len()
+    );
+    let result = &results[0];
+    assert_eq!(result["is_error"], true, "the run failed: {result}");
+    assert_eq!(
+        result["errors"],
+        serde_json::json!(["Timed out after 300s waiting for the turn to end"]),
+        "the one result line must name the cap: {result}"
+    );
+    assert_eq!(
+        result["result"], "the answer",
+        "the answer the turn already paid for must ride on it: {result}"
+    );
+    assert_eq!(
+        result["structured_output"],
+        serde_json::json!({"answer": "42"}),
+        "so must its structured output: {result}"
+    );
+}
+
+/// Same contract for the native `streaming-json` reducer: one terminal line, not `end` then `error`.
+#[test]
+fn the_hard_cap_emits_one_streaming_json_terminal_line() {
+    let out = capped_run_output(super::OutputFormat::StreamingJson);
+    let terminal: Vec<serde_json::Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("each line is JSON"))
+        .filter(|v| v["type"] == "end" || v["type"] == "error")
+        .collect();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "exactly one terminal line, got {}: {out}",
+        terminal.len()
+    );
+    assert_eq!(terminal[0]["type"], "end");
+    assert_eq!(terminal[0]["stopReason"], "cancelled");
+    assert_eq!(
+        terminal[0]["error"],
+        "Timed out after 300s waiting for the turn to end"
+    );
+    assert_eq!(
+        terminal[0]["structuredOutput"],
+        serde_json::json!({"answer": "42"}),
+        "the completed turn's structured output must ride on it: {}",
+        terminal[0]
+    );
+}
+
+/// A turn that completed with no cap in play keeps its normal single success document.
+#[test]
+fn a_normal_turn_still_emits_one_success_document() {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Json,
+        true,
+        Box::new(captured.clone()),
+    );
+    super::finish_turn(
+        &mut emitter,
+        Some(Ok(completed_prompt_response())),
+        false,
+        None,
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect("an uncapped completed turn succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&captured.text()).expect("one JSON document");
+    assert_eq!(doc["stopReason"], "end_turn");
+    assert!(
+        doc.get("error").is_none(),
+        "no cap fired, so no error field: {doc}"
+    );
+}
+
+/// A `session/load` that runs out of run budget must say so. Reporting "Session does not exist"
+/// sends the operator to the wrong remedy — re-running without `--resume`, losing the conversation.
+#[tokio::test]
+async fn a_session_load_that_hits_the_run_cap_reports_the_timeout() {
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let tmp = tempfile::tempdir().expect("tmp cwd");
+    let msg = match super::open_session(
+        &acp_tx,
+        tmp.path(),
+        Some("sess-resume-1"),
+        None,
+        super::RunDeadline::start(Some(std::time::Duration::from_millis(50))),
+    )
+    .await
+    {
+        Ok(_) => panic!("an unanswered session/load must fail"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("timed out") && msg.contains("session/load"),
+        "a run-cap timeout must be reported as one, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Session does not exist"),
+        "a timeout is not a missing session, got: {msg}"
+    );
+}
+
+/// The 120s lifecycle cap applies even to runs that asked for no `--timeout`, so it needs a way out:
+/// a cold `FUIGO_HOME` on a network mount can legitimately take longer to answer `initialize`, and
+/// that run worked in 1.0.16. `0` disables it; anything malformed keeps the default.
+#[test]
+fn the_lifecycle_cap_has_an_escape_hatch() {
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(None),
+        Some(super::DEFAULT_LIFECYCLE_SEND_TIMEOUT),
+        "unset keeps the default cap"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("  ")),
+        Some(super::DEFAULT_LIFECYCLE_SEND_TIMEOUT),
+        "empty keeps the default cap"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("soon")),
+        Some(super::DEFAULT_LIFECYCLE_SEND_TIMEOUT),
+        "garbage keeps the default cap rather than breaking startup"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("600")),
+        Some(std::time::Duration::from_secs(600)),
+        "a slow host can raise it"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("0")),
+        None,
+        "0 restores the unbounded 1.0.16 startup sends"
+    );
+    assert_eq!(
+        super::RunDeadline::start(None).budget(super::parse_lifecycle_timeout_env(Some("0"))),
+        None,
+        "with the hatch open and no --timeout, the startup sends are unbounded again"
+    );
+}

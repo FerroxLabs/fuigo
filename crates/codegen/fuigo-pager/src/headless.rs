@@ -99,7 +99,9 @@ struct HeadlessEmitter {
     reducer: Option<Box<dyn Reducer>>,
     /// Set when the prompt is sent; `result.duration_ms` on the terminal line is measured from it.
     prompt_started: Option<Instant>,
-    out: std::io::Stdout,
+    /// Where the wire output goes. Production is stdout; tests capture the bytes so the terminal
+    /// document a machine consumer actually reads can be asserted on.
+    out: Box<dyn std::io::Write + Send>,
     /// Latched once stdout is unwritable so later writes are dropped instead of panicking.
     output_closed: bool,
     /// First hard stdout IO error (not a broken pipe), surfaced so the process exits non-zero.
@@ -108,6 +110,14 @@ struct HeadlessEmitter {
 
 impl HeadlessEmitter {
     fn new(format: OutputFormat, parse_structured_output: bool) -> Self {
+        Self::with_writer(format, parse_structured_output, Box::new(std::io::stdout()))
+    }
+
+    fn with_writer(
+        format: OutputFormat,
+        parse_structured_output: bool,
+        out: Box<dyn std::io::Write + Send>,
+    ) -> Self {
         Self {
             format,
             parse_structured_output,
@@ -117,7 +127,7 @@ impl HeadlessEmitter {
             usage: None,
             reducer: reducer_for(format),
             prompt_started: None,
-            out: std::io::stdout(),
+            out,
             output_closed: false,
             write_error: None,
         }
@@ -129,12 +139,10 @@ impl HeadlessEmitter {
             return Ok(());
         }
         use std::io::Write as _;
-        let result = {
-            let mut handle = self.out.lock();
-            handle
-                .write_all(bytes)
-                .and_then(|()| if flush { handle.flush() } else { Ok(()) })
-        };
+        let mut result = self.out.write_all(bytes);
+        if flush && result.is_ok() {
+            result = self.out.flush();
+        }
         self.record_write_result(result)
     }
 
@@ -310,13 +318,36 @@ impl HeadlessEmitter {
         result
     }
 
-    fn on_end(&mut self, stop_reason: &str, session_id: &str, request_id: &str) {
+    /// Emit the terminal document for a turn that produced a response.
+    ///
+    /// `error` folds a run-level failure that arrived *after* the turn answered (today: the
+    /// `--timeout` hard cap) into that same document. It must never be emitted as a second
+    /// terminal record: every machine consumer of `json`/`stream-json` reads exactly one.
+    fn on_end(
+        &mut self,
+        stop_reason: &str,
+        session_id: &str,
+        request_id: &str,
+        error: Option<&str>,
+    ) {
         match self.format {
             OutputFormat::Plain => {
                 let _ = self.write_out(b"\n", false);
+                // Plain has no terminal document: the failure goes to stderr, as `on_error` does.
+                if let Some(error) = error {
+                    eprintln!("{error}");
+                }
             }
             OutputFormat::Json => {
-                let result = self.build_json_result(stop_reason, session_id, request_id);
+                let mut result = self.build_json_result(stop_reason, session_id, request_id);
+                if let Some(error) = error
+                    && let Some(obj) = result.as_object_mut()
+                {
+                    obj.insert(
+                        "error".to_string(),
+                        serde_json::Value::String(error.to_string()),
+                    );
+                }
                 let mut rendered =
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
                 rendered.push('\n');
@@ -336,6 +367,7 @@ impl HeadlessEmitter {
                         structured_output,
                         result_text: result_text.as_str(),
                         duration_ms,
+                        error,
                     };
                     reducer.finish(&end)
                 });
@@ -565,14 +597,23 @@ async fn open_session(
             ),
         )
         .await;
-        if let Ok(resp) = try_load {
-            return Ok(OpenedSession {
-                session_id: acp::SessionId::new(sid.to_string()),
-                models: ModelState::from(resp.models),
-                cwd: cwd.to_path_buf(),
-            });
+        match try_load {
+            Ok(resp) => {
+                return Ok(OpenedSession {
+                    session_id: acp::SessionId::new(sid.to_string()),
+                    models: ModelState::from(resp.models),
+                    cwd: cwd.to_path_buf(),
+                });
+            }
+            // A run cap that elapsed mid-load is not a missing session: telling the operator their
+            // session is gone sends them to the wrong remedy (re-running without `--resume`, which
+            // loses the conversation). Report the timeout the wrapper already named.
+            Err(e) if e.is::<SendDeadlineElapsed>() => return Err(e),
+            Err(e) => {
+                tracing::debug!(error = %e, session = sid, "headless: session/load failed");
+                anyhow::bail!("Session does not exist");
+            }
         }
-        anyhow::bail!("Session does not exist");
     }
 
     let new_resp: acp::NewSessionResponse = with_send_deadline(
@@ -769,12 +810,46 @@ async fn apply_headless_model_and_effort(
 }
 
 /// Startup-materialization context for headless (`-p`) runs; never chat mode.
-/// Cap on the pre-turn ACP lifecycle sends (`initialize`, `authenticate`) when no `--timeout` is set.
+/// Default cap on the pre-turn ACP lifecycle sends (`initialize`, `authenticate`).
 ///
 /// `acp_send` awaits a bare oneshot, so an agent that wedges before answering leaves `fuigo -p`
 /// blocked with no deadline at all. The exit reaper already bounds its own sends; these are bounded
 /// the same way so startup fails loudly instead of hanging.
-const LIFECYCLE_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_LIFECYCLE_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Escape hatch for the lifecycle cap, in whole seconds. `0` disables it (1.0.16 behaviour).
+const LIFECYCLE_TIMEOUT_ENV: &str = "FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS";
+
+/// The lifecycle cap for this run: `FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` if usable, else 120s.
+///
+/// Unlike `--timeout` this one applies even to runs that asked for no cap, so it needs a way out: a
+/// cold `FUIGO_HOME` on a network mount can legitimately take longer than the default to answer
+/// `initialize`, and that run worked in 1.0.16. Read only on the headless path, and leniently, so a
+/// malformed value can never break an unrelated mode.
+fn lifecycle_send_timeout() -> Option<Duration> {
+    parse_lifecycle_timeout_env(std::env::var(LIFECYCLE_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Lenient parse: unset/empty/garbage keep the default, `0` means "no lifecycle cap at all".
+fn parse_lifecycle_timeout_env(raw: Option<&str>) -> Option<Duration> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Some(DEFAULT_LIFECYCLE_SEND_TIMEOUT);
+    };
+    match raw.parse::<u64>() {
+        Ok(0) => {
+            tracing::warn!("{LIFECYCLE_TIMEOUT_ENV}=0: the startup sends run unbounded");
+            None
+        }
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => {
+            tracing::warn!(
+                value = raw,
+                "{LIFECYCLE_TIMEOUT_ENV} is not a number of seconds; keeping the default"
+            );
+            Some(DEFAULT_LIFECYCLE_SEND_TIMEOUT)
+        }
+    }
+}
 
 /// The `--timeout` budget for one headless run.
 ///
@@ -805,6 +880,27 @@ impl RunDeadline {
     }
 }
 
+/// A bounded ACP send ran out of budget. Typed so callers can tell a run-cap timeout apart from a
+/// genuine failure of the step (`session/load` reporting "Session does not exist", say).
+#[derive(Debug)]
+struct SendDeadlineElapsed {
+    what: String,
+    limit: Duration,
+}
+
+impl std::fmt::Display for SendDeadlineElapsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "timed out after {}s waiting for {}",
+            self.limit.as_secs(),
+            self.what
+        )
+    }
+}
+
+impl std::error::Error for SendDeadlineElapsed {}
+
 /// Await an ACP send under `limit`, failing with a named error instead of blocking forever.
 /// `None` means unbounded — the shape every send on this path had before `--timeout` existed.
 async fn with_send_deadline<T, E, F>(what: &str, limit: Option<Duration>, fut: F) -> Result<T>
@@ -818,10 +914,10 @@ where
     match tokio::time::timeout(limit, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
-        Err(_) => Err(anyhow::anyhow!(
-            "timed out after {}s waiting for {what}",
-            limit.as_secs()
-        )),
+        Err(_) => Err(anyhow::Error::new(SendDeadlineElapsed {
+            what: what.to_string(),
+            limit,
+        })),
     }
 }
 
@@ -979,7 +1075,7 @@ pub async fn run_single_turn(
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::AcpInitialize);
     let init_resp: acp::InitializeResponse = match with_send_deadline(
         "initialize",
-        deadline.budget(Some(LIFECYCLE_SEND_TIMEOUT)),
+        deadline.budget(lifecycle_send_timeout()),
         acp_send(init_req, &acp_tx),
     )
     .await
@@ -1002,7 +1098,7 @@ pub async fn run_single_turn(
     let default_auth_method_id = crate::acp::parse_default_auth_method_id(init_resp.meta.as_ref());
     let is_api_key_auth = match with_send_deadline(
         "authenticate",
-        deadline.budget(Some(LIFECYCLE_SEND_TIMEOUT)),
+        deadline.budget(lifecycle_send_timeout()),
         authenticate(
             &acp_tx,
             &init_resp.auth_methods,
@@ -1334,17 +1430,22 @@ fn finish_turn(
         // The cap commonly lands while a turn that already answered is waiting on background work
         // (a persistent monitor never completes and always waits out `--background-wait-timeout`).
         // That answer, its usage and its structured output are work that was done and paid for:
-        // emit them first, then report the cap. Dropping them loses both the result and the spend
-        // record of a turn that finished.
-        if let Some(Ok(resp)) = prompt_result {
-            emit_completed_response(emitter, resp, session_id);
-        }
-        emitter.on_error(&msg, Some("cancelled"));
+        // report them, and the cap, in ONE terminal document. Dropping them loses both the result
+        // and the spend record of a turn that finished; emitting them as a second document breaks
+        // every machine consumer of `json`/`stream-json`, which reads exactly one terminal record.
+        match prompt_result {
+            Some(Ok(resp)) => emit_completed_response(emitter, resp, session_id, Some(&msg)),
+            // Nothing completed, so the error line IS the terminal document.
+            _ => {
+                emitter.on_error(&msg, Some("cancelled"));
+                false
+            }
+        };
         anyhow::bail!("{msg}");
     }
     match prompt_result {
         Some(Ok(resp)) => {
-            if emit_completed_response(emitter, resp, session_id) {
+            if emit_completed_response(emitter, resp, session_id, None) {
                 Err(anyhow::anyhow!("max turns reached"))
             } else {
                 Ok(())
@@ -1381,13 +1482,21 @@ fn finish_turn(
 }
 
 /// Emit a completed prompt response: structured output, usage, and the terminal result line.
-/// Returns whether the turn stopped because it hit `--max-turns`.
+///
+/// `run_error` folds a run-level failure that arrived after the turn answered (the `--timeout` hard
+/// cap) into that same terminal document, stamping `cancelled` as the stop reason. Returns whether
+/// the turn stopped because it hit `--max-turns`.
 fn emit_completed_response(
     emitter: &mut HeadlessEmitter,
     resp: acp::PromptResponse,
     session_id: &acp::SessionId,
+    run_error: Option<&str>,
 ) -> bool {
-    let stop_reason = stop_reason_wire(resp.stop_reason);
+    let stop_reason = if run_error.is_some() {
+        "cancelled".to_string()
+    } else {
+        stop_reason_wire(resp.stop_reason)
+    };
     emitter.set_structured_output_from_meta(resp.meta.as_ref());
     emitter.set_usage_from_meta(resp.meta.as_ref());
     // Prefer the response `_meta` ids, falling back to the typed session id rather than "".
@@ -1422,7 +1531,7 @@ fn emit_completed_response(
     if is_max_turns {
         emitter.on_max_turns();
     }
-    emitter.on_end(&stop_reason, sid, rid);
+    emitter.on_end(&stop_reason, sid, rid, run_error);
     is_max_turns
 }
 
