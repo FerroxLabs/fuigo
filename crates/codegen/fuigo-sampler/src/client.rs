@@ -213,36 +213,58 @@ fn splice_extra_tool_entries(
     }
 }
 
-/// Whole seconds to back off for, from the backoff headers a 429 may carry.
+/// Whole seconds to back off for, from the backoff headers a response may carry.
 ///
-/// `Retry-After` (integer seconds) is the standard spelling and wins when it
-/// parses. OpenAI/Azure tokens-per-minute 429s commonly send no usable
-/// `Retry-After` at all and answer with `retry-after-ms` or
-/// `x-ratelimit-reset-tokens` instead; without those fallbacks the sampling
-/// envelope carries `retry_after_secs: None`, which is the one signal the
-/// compaction classifier reads to tell "capacity is coming back" from "this
-/// payload is too big". Capped at 120s, the same cap the standard header gets.
-fn extract_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+/// `Retry-After` (integer seconds) is the standard spelling, is defined for any
+/// status, and wins when it parses.
+///
+/// The two fallbacks are scoped to `status`, not applied everywhere. OpenAI/Azure
+/// tokens-per-minute 429s commonly send no usable `Retry-After` at all and answer
+/// with `retry-after-ms` or `x-ratelimit-reset-tokens` instead; without those the
+/// sampling envelope carries `retry_after_secs: None`, which is the one signal the
+/// compaction classifier reads to tell "capacity is coming back" from "this payload
+/// is too big". But `x-ratelimit-reset-tokens` is a token-bucket refill time that
+/// those providers attach to essentially EVERY response, 5xx included: honouring it
+/// on an unrelated 502 or 529 would turn a ~2s first backoff into the 30s
+/// `MAX_RETRY_BACKOFF` (`retry::retry_after_or_backoff`) for no reason. So both
+/// fallbacks apply only where they mean what they say: 429, and the 408 the retry
+/// loop treats the same way.
+///
+/// Capped at 120s, the same cap the standard header gets.
+fn extract_retry_after(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<u64> {
     let header = |name: &'static str| {
         headers
             .get(reqwest::header::HeaderName::from_static(name))
             .and_then(|v| v.to_str().ok())
             .map(str::trim)
     };
+    let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT;
     let seconds = header("retry-after")
         .and_then(|s| s.parse::<u64>().ok())
         // `retry-after-ms` is a bare count of milliseconds, never a duration string.
         .or_else(|| {
-            header("retry-after-ms")
-                .and_then(|s| s.parse::<f64>().ok())
-                .filter(|ms| ms.is_finite() && *ms >= 0.0)
-                .map(millis_to_whole_seconds)
+            rate_limited
+                .then(|| {
+                    header("retry-after-ms")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .filter(|ms| ms.is_finite() && *ms >= 0.0)
+                        .map(millis_to_whole_seconds)
+                })
+                .flatten()
         })
         // `x-ratelimit-reset-tokens` is a Go-style duration ("1s", "88ms", "6m0s").
         .or_else(|| {
-            header("x-ratelimit-reset-tokens")
-                .and_then(parse_reset_duration_millis)
-                .map(millis_to_whole_seconds)
+            rate_limited
+                .then(|| {
+                    header("x-ratelimit-reset-tokens")
+                        .and_then(parse_reset_duration_millis)
+                        .map(millis_to_whole_seconds)
+                })
+                .flatten()
         })?;
     Some(seconds.min(120))
 }
@@ -995,7 +1017,7 @@ impl SamplingClient {
     ) -> Result<ChatCompletionResponse> {
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
+        let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
         let bytes = response.bytes().await?;
 
@@ -1147,7 +1169,7 @@ impl SamplingClient {
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
         let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
+        let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1349,7 +1371,7 @@ impl SamplingClient {
 
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
+        let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
         let bytes = response.bytes().await?;
 
@@ -1521,7 +1543,7 @@ impl SamplingClient {
                 ));
             }
             let model_metadata = extract_model_metadata(response.headers());
-            let retry_after_secs = extract_retry_after(response.headers());
+            let retry_after_secs = extract_retry_after(status, response.headers());
             let should_retry = extract_should_retry(response.headers());
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
@@ -1684,7 +1706,7 @@ impl SamplingClient {
 
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
-        let retry_after_secs = extract_retry_after(response.headers());
+        let retry_after_secs = extract_retry_after(status, response.headers());
         let should_retry = extract_should_retry(response.headers());
         let bytes = response.bytes().await?;
 
@@ -1823,7 +1845,7 @@ impl SamplingClient {
                 ));
             }
             let model_metadata = extract_model_metadata(response.headers());
-            let retry_after_secs = extract_retry_after(response.headers());
+            let retry_after_secs = extract_retry_after(status, response.headers());
             let should_retry = extract_should_retry(response.headers());
             let bytes = response.bytes().await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
@@ -2548,25 +2570,28 @@ mod tests {
         }
     }
 
+    /// The status the `retry-after-ms` / `x-ratelimit-reset-tokens` fallbacks are scoped to.
+    const RATE_LIMITED: reqwest::StatusCode = reqwest::StatusCode::TOO_MANY_REQUESTS;
+
     #[test]
     fn extract_retry_after_parses_seconds() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(30));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(30));
     }
 
     #[test]
     fn extract_retry_after_caps_at_120() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "3600".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(120));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(120));
     }
 
     #[test]
     fn extract_retry_after_zero_is_valid() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(0));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(0));
     }
 
     #[test]
@@ -2576,13 +2601,13 @@ mod tests {
             reqwest::header::RETRY_AFTER,
             "Fri, 31 Dec 2025 23:59:59 GMT".parse().unwrap(),
         );
-        assert_eq!(extract_retry_after(&headers), None);
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), None);
     }
 
     #[test]
     fn extract_retry_after_none_when_missing() {
         let headers = reqwest::header::HeaderMap::new();
-        assert_eq!(extract_retry_after(&headers), None);
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), None);
     }
 
     // ── TPM 429 backoff headers (upstream 1.0.26) ──────────────────────────
@@ -2595,7 +2620,7 @@ mod tests {
     fn extract_retry_after_falls_back_to_retry_after_ms() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("retry-after-ms", "1500".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(2));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(2));
     }
 
     #[test]
@@ -2603,7 +2628,7 @@ mod tests {
         // Rounding 500ms down to 0 would turn a backoff into a hot retry.
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("retry-after-ms", "500".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(1));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(1));
     }
 
     #[test]
@@ -2619,7 +2644,7 @@ mod tests {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert("x-ratelimit-reset-tokens", raw.parse().unwrap());
             assert_eq!(
-                extract_retry_after(&headers),
+                extract_retry_after(RATE_LIMITED, &headers),
                 Some(expected),
                 "x-ratelimit-reset-tokens: {raw}"
             );
@@ -2630,7 +2655,7 @@ mod tests {
     fn extract_retry_after_ignores_unparseable_reset_tokens() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-ratelimit-reset-tokens", "soon".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), None);
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), None);
     }
 
     #[test]
@@ -2639,7 +2664,7 @@ mod tests {
         headers.insert(reqwest::header::RETRY_AFTER, "9".parse().unwrap());
         headers.insert("retry-after-ms", "60000".parse().unwrap());
         headers.insert("x-ratelimit-reset-tokens", "6m0s".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(9));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(9));
     }
 
     #[test]
@@ -2652,7 +2677,54 @@ mod tests {
             "Fri, 31 Dec 2025 23:59:59 GMT".parse().unwrap(),
         );
         headers.insert("retry-after-ms", "3000".parse().unwrap());
-        assert_eq!(extract_retry_after(&headers), Some(3));
+        assert_eq!(extract_retry_after(RATE_LIMITED, &headers), Some(3));
+    }
+
+    #[test]
+    fn retry_after_fallbacks_are_scoped_to_rate_limit_statuses() {
+        // `x-ratelimit-reset-tokens` is a token-bucket refill time OpenAI/Azure
+        // attach to essentially every response, 5xx included. Read as a backoff on
+        // an unrelated 502/529 it replaces the ~2s first backoff with the 30s
+        // `MAX_RETRY_BACKOFF` (`retry::retry_after_or_backoff`), and on the
+        // rate-limited branch (`retry.rs`, unclamped) it can park the sampler for
+        // the full 120s cap. Neither header means "retry later" outside a 429.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after-ms", "2000".parse().unwrap());
+        headers.insert("x-ratelimit-reset-tokens", "6m0s".parse().unwrap());
+        for status in [
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::from_u16(529).unwrap(),
+        ] {
+            assert_eq!(
+                extract_retry_after(status, &headers),
+                None,
+                "{status} must not inherit a token-bucket reset as its backoff",
+            );
+        }
+        // The statuses the retry loop actually treats as rate limits keep them.
+        assert_eq!(
+            extract_retry_after(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers),
+            Some(2),
+        );
+        assert_eq!(
+            extract_retry_after(reqwest::StatusCode::REQUEST_TIMEOUT, &headers),
+            Some(2),
+        );
+    }
+
+    #[test]
+    fn the_standard_retry_after_header_is_honoured_at_any_status() {
+        // `Retry-After` is defined for 503 and 3xx as well as 429; only the two
+        // provider-specific fallbacks are scoped.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(
+            extract_retry_after(reqwest::StatusCode::SERVICE_UNAVAILABLE, &headers),
+            Some(5),
+        );
     }
 
     #[test]
