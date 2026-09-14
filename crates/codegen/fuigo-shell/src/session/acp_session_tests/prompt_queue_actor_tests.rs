@@ -3281,6 +3281,7 @@ async fn send_now_cancel_flushes_buffered_interjections_as_prompts() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "buffered steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
 
             let mut replay_buffer = ReplayBuffer::new(None);

@@ -3,6 +3,11 @@ pub const LARGE_PROMPT_THRESHOLD: usize = 25_000;
 
 pub const INTERJECTION_NOTE: &str = "The user sent a message while you were working:";
 pub const INTERRUPT_NOTE: &str = "The user interrupted the previous turn:";
+/// Note for a message sent by an owning parent agent, not by the human user.
+///
+/// Model-authored, untrusted text must never be presented to the child as its
+/// user's own words: a parent agent may not speak with user authority.
+pub const PARENT_AGENT_NOTE: &str = "Your parent agent sent a message while you were working:";
 
 /// Trailing reminder so a mid-turn steer or post-cancel follow-up does not drop in-flight work.
 const UNFINISHED_TASKS_REMINDER: &str =
@@ -17,13 +22,25 @@ pub fn user_query(user_message: &str) -> String {
     )
 }
 
+/// Wrap an owning parent agent's message in its own envelope.
+///
+/// Deliberately NOT `<user_query>`: the tag is what tells the model whose
+/// words these are.
+pub fn parent_agent_message(text: &str) -> String {
+    format!(
+        r#"<parent_agent_message>
+{text}
+</parent_agent_message>"#
+    )
+}
+
 /// Prefix `note` and the unfinished-task trailer around an already-assembled
 /// user turn (a `<user_query>` block, optionally with skill/context tails).
 pub fn frame_user_turn(note: &str, assembled: &str) -> String {
     format!("{note}\n{assembled}\n{UNFINISHED_TASKS_REMINDER}")
 }
 
-fn format_steered_query(note: &str, text: String) -> String {
+fn format_steered_query(note: &str, wrap: impl Fn(&str) -> String, text: String) -> String {
     let truncated = if text.len() <= LARGE_PROMPT_THRESHOLD {
         text
     } else {
@@ -35,19 +52,25 @@ fn format_steered_query(note: &str, text: String) -> String {
             .unwrap_or(text.len());
         format!("{}... [truncated]", &text[..end])
     };
-    frame_user_turn(note, &user_query(&truncated))
+    frame_user_turn(note, &wrap(&truncated))
 }
 
 /// Wrap interjection text as a synthetic user message with a mid-turn note
 /// and a reminder to finish in-flight work from earlier turns.
 pub fn format_interjection(text: String) -> String {
-    format_steered_query(INTERJECTION_NOTE, text)
+    format_steered_query(INTERJECTION_NOTE, user_query, text)
+}
+
+/// Same truncation and trailing reminder as [`format_interjection`], but
+/// framed as what it is: a message from the owning parent agent.
+pub fn format_parent_agent_interjection(text: String) -> String {
+    format_steered_query(PARENT_AGENT_NOTE, parent_agent_message, text)
 }
 
 /// Same envelope as [`format_interjection`], for the next real user query
 /// after a text-only mid-turn abort.
 pub fn format_interrupt(text: String) -> String {
-    format_steered_query(INTERRUPT_NOTE, text)
+    format_steered_query(INTERRUPT_NOTE, user_query, text)
 }
 
 #[cfg(test)]
@@ -74,6 +97,17 @@ mod tests {
                 "{INTERRUPT_NOTE}\n<user_query>\ndo the other thing\n</user_query>\n{UNFINISHED_TASKS_REMINDER}"
             )
         );
+    }
+
+    #[test]
+    fn parent_agent_message_is_not_framed_as_the_user() {
+        let out = format_parent_agent_interjection("stop and do X instead".into());
+        assert!(
+            out.starts_with(&format!("{PARENT_AGENT_NOTE}\n<parent_agent_message>\n")),
+            "got: {out}"
+        );
+        assert!(!out.contains(INTERJECTION_NOTE), "got: {out}");
+        assert!(!out.contains("<user_query>"), "got: {out}");
     }
 
     #[test]

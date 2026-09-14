@@ -662,6 +662,7 @@ impl SessionActor {
             prompt_id,
             prompt_blocks,
             respond_to,
+            input_origin,
             ..
         } = item;
         let mut text_parts = Vec::new();
@@ -680,9 +681,21 @@ impl SessionActor {
         }
         let text = text_parts.join("\n\n");
         let image_count = attachments.len() as u32;
+        // The row's origin, not the drain point, decides whose words these are.
+        // A parent-agent message is `InputAuthority::ModelAuthoredUntrusted`; it
+        // must keep that classification across promotion, or the child is told
+        // its parent spoke with its human user's authority and the text goes
+        // through the human slash resolver.
+        let authority = match input_origin.as_prompt_origin() {
+            PromptOrigin::ParentAgentMessage { .. } => {
+                fuigo_interjection_core::InterjectionAuthority::ParentAgent
+            }
+            _ => fuigo_interjection_core::InterjectionAuthority::User,
+        };
         self.pending_interjections.push(PendingInterjection {
             text: text.clone(),
             attachments,
+            authority,
         });
         self.broadcast_interjection(&text, Some(&prompt_id));
         self.events
@@ -759,15 +772,23 @@ impl SessionActor {
             return;
         }
         for item in promoted {
+            // The hint that interrupted an in-flight wait named this message; it
+            // is reaching the model now, so later waits must not see it as
+            // pending. Per identifier, not a blanket clear: a message committed
+            // since the scan above belongs to a row this drain did not take.
+            if let PromptOrigin::ParentAgentMessage { message_id, .. } =
+                item.input_origin.as_prompt_origin()
+            {
+                self.rebuild_spec
+                    .parent_message_signal
+                    .message_delivered(message_id);
+            }
             self.enqueue_prompt_as_interjection_with(
                 item,
                 crate::session::events::InterjectionSource::Queue,
                 PromotedResolution::DeliveredIntoRunningTurn,
             );
         }
-        // The hint that interrupted an in-flight wait named these; they have
-        // now reached the model, so later waits must not see them as pending.
-        self.rebuild_spec.parent_message_signal.take_pending();
         self.broadcast_queue_changed(&state);
     }
 

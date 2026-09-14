@@ -214,6 +214,7 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
         let has_pending =
             !initial.pending_bash_ids.is_empty() || !initial.pending_subagent_ids.is_empty();
 
+        let mut interrupt_notice: Option<String> = None;
         let results = if has_pending {
             let deadline = tokio::time::Instant::now() + timeout;
             let wait_hint = wait_any_event_driven(
@@ -226,13 +227,15 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             )
             .await
             .hint(requested, timeout);
+            let (per_task_hint, notice) = super::fold_multi_wait_interrupt(&wait_hint);
+            interrupt_notice = notice;
             resolve_tasks(
                 &input.task_ids,
                 &terminal,
                 &backend,
                 &read_file_name,
                 max_output_bytes,
-                &wait_hint,
+                &per_task_hint,
             )
             .await
             .results
@@ -245,7 +248,11 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             .filter(|r| super::is_terminal_status(&r.status))
             .count();
         let total = results.len();
-        let summary = format!("{completed_count}/{total} tasks completed (wait_any)");
+        let mut summary = format!("{completed_count}/{total} tasks completed (wait_any)");
+        if let Some(notice) = interrupt_notice {
+            summary.push('\n');
+            summary.push_str(&notice);
+        }
 
         Ok(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
             mode: "wait_any".to_string(),

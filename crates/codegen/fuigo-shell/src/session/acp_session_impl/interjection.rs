@@ -10,7 +10,8 @@ use super::*;
 // Retained code and co-located tests keep resolving by `acp_session::` path
 #[allow(unused_imports)]
 pub(crate) use fuigo_interjection_core::{
-    INTERRUPT_NOTE, InterjectionBuffer, drain_formatted, format_interjection, frame_user_turn,
+    INTERRUPT_NOTE, InterjectionAuthority, InterjectionBuffer, drain_formatted,
+    format_interjection, format_parent_agent_interjection, frame_user_turn,
 };
 
 /// Shell instantiation of the shared entry type: images are ACP content.
@@ -273,6 +274,71 @@ impl SessionActor {
         .await
     }
 
+    /// Expand a skill slash reference in an owning parent agent's message, using
+    /// the SAME narrow rule its own turn would have used
+    /// (`InputAuthority::ModelAuthoredUntrusted`, `turn.rs`): only the single
+    /// leading command, resolved against the child-visible catalog, and only
+    /// when the child can actually load skill content.
+    ///
+    /// `interjection_skill_information` is the human rule — it scans the whole
+    /// text with the full `build_command_availability` and no skill-loader gate.
+    /// Running a parent's text through it would let a parent agent invoke
+    /// skills its child was never advertised.
+    async fn parent_agent_skill_information(&self, text: &str) -> Option<String> {
+        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        ))];
+        let crate::session::slash_authority::AuthorityResolution::ModelAuthoredSkillCandidate {
+            command_name,
+            args,
+        } = crate::session::slash_authority::resolve(
+            crate::session::InputAuthority::ModelAuthoredUntrusted,
+            &prompt_blocks,
+            slash_commands::BUILTIN_COMMANDS,
+        )
+        else {
+            return None;
+        };
+        let command_name = command_name.to_string();
+        let args = args.to_string();
+        let slash_skills = self.slash_skills_for_resolve().await;
+        let availability = self.command_availability_for_skill_projection().await;
+        let bridge = self.tool_bridge_handle();
+        let has_skill_loader = bridge
+            .tool_for_kind(fuigo_tools::types::tool::ToolKind::Read)
+            .await
+            .is_some()
+            || bridge
+                .tool_for_kind(fuigo_tools::types::tool::ToolKind::Skill)
+                .await
+                .is_some();
+        let Err(SlashCommandOutcome::InvokeSkill { skills, .. }) =
+            slash_commands::resolve_model_authored_skill(
+                prompt_blocks,
+                &command_name,
+                &args,
+                &slash_skills,
+                availability,
+                has_skill_loader,
+            )
+        else {
+            return None;
+        };
+        for sk in &skills {
+            fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::SkillDispatched {
+                skill_name: sk.name.clone(),
+                plugin_source: sk.plugin_name.clone(),
+                trigger: fuigo_telemetry::events::SkillTrigger::SlashCommand,
+            });
+        }
+        slash_commands::build_skill_information_for_refs(
+            &skills,
+            &slash_skills,
+            &self.session_id_string(),
+        )
+        .await
+    }
+
     /// When follow-up behavior is Steer, promote held queue rows into interjections, then drain.
     /// Call after a tool batch, at loop top, and before the turn returns to the user.
     /// Returns `true` if any interjections were drained (caller may `continue` so the model sees them next).
@@ -318,15 +384,31 @@ impl SessionActor {
         }
 
         let mut prepared = Vec::with_capacity(guard.entries.len());
-        for PendingInterjection { text, attachments } in &guard.entries {
+        for PendingInterjection {
+            text,
+            attachments,
+            authority,
+        } in &guard.entries
+        {
             // The sanitizer rewrites `[Image #N: <path>]` to `[Image #N]` before the text reaches the model
             // It covers legacy-client raw text AND text harvested from queued rows sent as interjections
             // Wrapping and truncation stay in the shared crate (`format_interjection`)
             let sanitized = crate::session::placeholder_images::strip_paths_from_image_placeholders(
                 text.clone(),
             );
-            let skill_information = self.interjection_skill_information(&sanitized).await;
-            let mut wrapped = format_interjection(sanitized);
+            // An owning parent agent's message is model-authored and untrusted:
+            // it keeps the narrow leading-command resolver and its own envelope,
+            // never the human interjection note (see `InterjectionAuthority`).
+            let (skill_information, mut wrapped) = match authority {
+                InterjectionAuthority::User => (
+                    self.interjection_skill_information(&sanitized).await,
+                    format_interjection(sanitized),
+                ),
+                InterjectionAuthority::ParentAgent => (
+                    self.parent_agent_skill_information(&sanitized).await,
+                    format_parent_agent_interjection(sanitized),
+                ),
+            };
             // The pipeline consumes a clone; the guard keeps the original attachments restorable
             let images = self
                 .prepare_interjection_images(&mut wrapped, attachments.clone())
@@ -342,7 +424,13 @@ impl SessionActor {
                 }
                 None => wrapped.clone(),
             };
-            let mut item = ConversationItem::interjection(model_text);
+            let mut item = match authority {
+                InterjectionAuthority::User => ConversationItem::interjection(model_text),
+                // Same class the message's own turn would have recorded
+                // (`CompactionClass::ConversationalAgentAnchor`,
+                // `AnalyticsClass::AgentMessage`).
+                InterjectionAuthority::ParentAgent => ConversationItem::agent_message(model_text),
+            };
             for img in &images {
                 item.add_image(pick_user_image_url(img));
             }

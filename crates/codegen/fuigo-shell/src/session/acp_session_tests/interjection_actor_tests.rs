@@ -117,6 +117,7 @@ async fn drain_interjection_with_images_attaches_image_parts() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "look at [Image #1]".to_string(),
                 attachments: vec![test_image_content()],
+                ..Default::default()
             });
 
             assert!(actor.drain_pending_interjections().await);
@@ -164,6 +165,7 @@ async fn drain_interjection_strips_placeholder_paths_from_text() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "look at [Image #1: /tmp/secret/x.png] please".to_string(),
                 attachments: vec![test_image_content()],
+                ..Default::default()
             });
 
             assert!(actor.drain_pending_interjections().await);
@@ -219,6 +221,7 @@ async fn drain_interjection_expands_skill_slash_reference() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "/find-session foo".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             assert!(actor.drain_pending_interjections().await);
 
@@ -246,6 +249,7 @@ async fn drain_interjection_expands_skill_slash_reference() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "don't run /find-session yet".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             assert!(actor.drain_pending_interjections().await);
             let conversation = actor.chat_state_handle.get_conversation().await;
@@ -272,6 +276,7 @@ async fn drain_interjection_truncation_never_touches_image_data() {
             actor.pending_interjections.push(PendingInterjection {
                 text: huge_text,
                 attachments: vec![original_image.clone()],
+                ..Default::default()
             });
 
             assert!(actor.drain_pending_interjections().await);
@@ -312,10 +317,12 @@ async fn cancelled_drain_restores_entries_for_stranded_flush() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "first steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "second steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             let conversation_len_before = actor.chat_state_handle.get_conversation().await.len();
 
@@ -426,10 +433,12 @@ async fn flush_stranded_interjections_converts_to_front_prompts_in_order() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "first steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "second steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
 
             assert_eq!(actor.flush_stranded_interjections().await, 2);
@@ -533,6 +542,121 @@ async fn fallback_prompt_respects_active_plan_mode() {
                 front.prompt_mode,
                 crate::session::plan_mode::PromptMode::Plan,
                 "fallback turn must stay inside plan mode"
+            );
+        })
+        .await;
+}
+
+/// A promoted parent-agent message must keep its `ModelAuthoredUntrusted`
+/// classification.
+///
+/// Running it through the human interjection path frames it with
+/// `INTERJECTION_NOTE` ("The user sent a message while you were working:") and
+/// records it as `ConversationItem::interjection`. That tells the child its
+/// parent's words came from its human user and erases a trust boundary the
+/// code models deliberately: a parent agent must not be able to speak with
+/// user authority.
+#[tokio::test]
+async fn promoted_parent_message_is_attributed_to_the_agent_not_the_user() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let (item, _receipt) = parent_agent_message_item("m1", "stop and do X instead");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(actor.drain_interjections_at_safe_point().await);
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let user_item = match conversation.last() {
+                Some(ConversationItem::User(u)) => u,
+                other => panic!("conversation tail must be a user item, got: {other:?}"),
+            };
+            assert_eq!(
+                user_item.synthetic_reason,
+                Some(SyntheticReason::AgentMessage),
+                "a parent-agent message must stay classed as an agent message, \
+                 not as the user's own interjection"
+            );
+            let text = conversation.last().expect("user item").text_content();
+            assert!(
+                !text.contains(fuigo_interjection_core::INTERJECTION_NOTE),
+                "the child must not be told its parent's words came from the user, got: {text}"
+            );
+            assert!(
+                text.contains("stop and do X instead"),
+                "the message body must still reach the model, got: {text}"
+            );
+        })
+        .await;
+}
+
+/// A promoted parent-agent message's slashes must go through the narrow
+/// model-authored resolver, not the human interjection one.
+///
+/// `interjection_skill_information` runs `parse_skill_references` over the
+/// WHOLE text with the full `build_command_availability`, so a parent could
+/// smuggle a skill invocation past the leading-command rule that governs every
+/// other model-authored input. The model-authored resolver reads only the
+/// single leading command against the child-visible catalog, so a leading
+/// unknown command means no expansion at all.
+#[tokio::test]
+async fn promoted_parent_message_resolves_slashes_through_the_model_authored_path() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("SKILL.md");
+            std::fs::write(&path, "Find sessions matching $ARGUMENTS").unwrap();
+            let skill = fuigo_tools::implementations::skills::types::SkillInfo {
+                name: "find-session".to_owned(),
+                description: "Find past sessions".to_owned(),
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            };
+            actor
+                .agent
+                .borrow()
+                .tool_bridge()
+                .clone()
+                .seed_skill_discovery(
+                    Some(std::path::PathBuf::from("/tmp")),
+                    None,
+                    vec![skill],
+                    None,
+                    Some(256_000),
+                    None,
+                    fuigo_tools::types::compat::CompatConfig::default(),
+                )
+                .await;
+
+            let (item, _receipt) =
+                parent_agent_message_item("m1", "/not-a-skill then /find-session foo");
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(item);
+                state.running_task = Some(running_task_stub("running"));
+            }
+
+            assert!(actor.drain_interjections_at_safe_point().await);
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let text = conversation.last().expect("user item").text_content();
+            assert!(
+                !text.contains("<skill_information>"),
+                "only the leading command may invoke a skill for model-authored input, got: {text}"
+            );
+            assert!(
+                !text.contains("Find sessions matching foo"),
+                "the human resolver's whole-text scan must not run on parent text, got: {text}"
             );
         })
         .await;

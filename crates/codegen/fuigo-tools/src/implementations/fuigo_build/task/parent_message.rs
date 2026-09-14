@@ -14,23 +14,26 @@
 //! (or hosts that do not admit active-agent messages) simply never signal it,
 //! and every wait then behaves exactly as it did before.
 //!
-//! Waits subscribe with [`ParentMessageSignal::subscribe`] BEFORE they start
-//! waiting. A subscription is edge-triggered from the sequence number it
-//! captured, so only a message committed after the wait began interrupts it.
-//! That is deliberate: a level-triggered signal would make every subsequent
-//! wait return instantly until the row drained, turning one interrupt into a
-//! tool-call loop.
+//! The signal is LEVEL-triggered: a watch resolves as soon as the pending list
+//! is non-empty, whether the message landed during the wait or just before it.
+//! Edge-triggering from the wait's own start would miss the common case — the
+//! parent's message is usually committed while the model is sampling, i.e.
+//! after the turn loop's drain point and before the next tool wait begins — and
+//! the child would wait out the whole `timeout_ms` anyway.
+//!
+//! It does not loop, because [`ParentMessageSignal::message_delivered`] drops
+//! the identifier the moment the message reaches the model — at the promoting
+//! drain, or, when the session was idle and the row ran as its own turn, as it
+//! is promoted to the running turn. Every tool batch is followed by a drain, so
+//! at most one wait per batch sees a given message.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::register_resource;
 
 #[derive(Default)]
 struct ParentMessageState {
     notify: tokio::sync::Notify,
-    /// Bumped once per committed message; subscriptions compare against it.
-    seq: AtomicU64,
     /// Identifiers of messages committed but not yet handed to the model.
     pending: std::sync::Mutex<Vec<String>>,
 }
@@ -57,14 +60,13 @@ impl ParentMessageSignal {
     /// Record one committed parent message and wake every subscription taken
     /// before it arrived.
     pub fn message_committed(&self, message_id: impl Into<String>) {
+        // Push under the lock and release it before waking, so a woken watch
+        // reads a list that already contains the identifier.
         self.0
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(message_id.into());
-        // Release-store the sequence before waking so a woken subscription
-        // observes both the new sequence and the pushed identifier.
-        self.0.seq.fetch_add(1, Ordering::Release);
         self.0.notify.notify_waiters();
     }
 
@@ -73,24 +75,29 @@ impl ParentMessageSignal {
         self.0.pending_ids()
     }
 
-    /// Clear the pending list once the messages have reached the model.
-    /// Returns what was cleared.
-    pub fn take_pending(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .0
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+    /// Drop one message from the pending list once it has reached the model.
+    ///
+    /// Per identifier, never "clear everything": a message committed while the
+    /// promoting drain is running belongs to a row that drain did not take, and
+    /// must stay pending. Both delivery routes call this — the promoting drain,
+    /// and the idle path where the row runs as its own turn and no drain ever
+    /// sees it. Left pending, an identifier leaks for the life of the session,
+    /// keeps every later wait interruptible, and is named in interrupt hints as
+    /// still outstanding.
+    pub fn message_delivered(&self, message_id: &str) {
+        self.0
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|id| id != message_id);
     }
 
-    /// Subscribe from the current sequence. Only messages committed after this
-    /// call resolve [`ParentMessageWatch::arrived`].
+    /// Take a watch over this signal. Level-triggered: a message already
+    /// pending when the wait begins interrupts it just as one that arrives
+    /// during it does.
     pub fn subscribe(&self) -> ParentMessageWatch {
         ParentMessageWatch {
             state: Arc::clone(&self.0),
-            baseline: self.0.seq.load(Ordering::Acquire),
         }
     }
 }
@@ -98,29 +105,29 @@ impl ParentMessageSignal {
 impl std::fmt::Debug for ParentMessageSignal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParentMessageSignal")
-            .field("seq", &self.0.seq.load(Ordering::Acquire))
+            .field("pending", &self.0.pending_ids())
             .finish()
     }
 }
 
 register_resource!("fuigo_build", "ParentMessageSignal", ParentMessageSignal);
 
-/// One wait's edge-triggered view of [`ParentMessageSignal`].
+/// One wait's level-triggered view of [`ParentMessageSignal`].
 pub struct ParentMessageWatch {
     state: Arc<ParentMessageState>,
-    baseline: u64,
 }
 
 impl ParentMessageWatch {
-    /// Resolves with every currently pending message identifier as soon as a
-    /// message is committed after this watch was taken. Never resolves while
-    /// no new message arrives, so it is safe as a `select!` arm.
+    /// Resolves with every currently pending message identifier, immediately if
+    /// one is already pending. Never resolves while the list is empty, so it is
+    /// safe as a `select!` arm.
     pub async fn arrived(&self) -> Arc<[String]> {
         loop {
-            // Register before the load: a commit racing the check still wakes us.
+            // Register before the read: a commit racing the check still wakes us.
             let notified = self.state.notify.notified();
-            if self.state.seq.load(Ordering::Acquire) > self.baseline {
-                return Arc::from(self.state.pending_ids());
+            let pending = self.state.pending_ids();
+            if !pending.is_empty() {
+                return Arc::from(pending);
             }
             notified.await;
         }
