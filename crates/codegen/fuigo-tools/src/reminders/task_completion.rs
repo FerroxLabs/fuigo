@@ -618,7 +618,50 @@ fn task_text_agent_id(text: &str) -> Option<&str> {
         .unwrap_or(after.len());
     if end == 0 { None } else { Some(&after[..end]) }
 }
+/// IDs whose queued auto-wake completion PROMPT (`task-completed-{id}` /
+/// `subagent-completed-{id}`) is redundant: this tool result already told the
+/// model the task reached a terminal state.
+///
+/// Wide on purpose. A `failed` / `cancelled` / `timed_out` read ends the task
+/// exactly as a `completed` one does, so a `"completed"`-only guard leaves the
+/// queued prompt to fire again at turn end — a duplicate reminder plus a
+/// forced extra full-context sampling round-trip. Failed builds/tests/lints are
+/// the common case. The predicate is shared with the multi-wait summary counter
+/// (`is_terminal_status`) so the two cannot drift.
+///
+/// **This list may only suppress a redundant NOTIFICATION.** It must never be
+/// used to discard buffered CONTENT — a non-`completed` read does not
+/// necessarily carry what the buffered item carries. Use
+/// [`consumed_completion_content_ids`] for that.
 pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
+    collect_completion_ids(output, is_terminal_status)
+}
+
+/// The subset of [`consumed_completion_ids`] whose buffered CONTENT this tool
+/// result actually delivered, so dropping that buffered content loses nothing.
+///
+/// Narrower than [`consumed_completion_ids`] by exactly the non-`completed`
+/// terminal statuses, and that gap is load-bearing:
+///
+/// * A subagent read comes back through the same `TaskOutput(Result)` arm
+///   (`format_subagent_snapshot`), whose `Failed` arm renders only `error` and
+///   whose `Cancelled` arm renders only `reason`. The child's actual report —
+///   plus its loop-remediation and scheduler-cleanup hints — lives only in the
+///   coordinator's buffered `SubagentCompletionSummary`. Suppressing that
+///   summary on a failed / cancelled / max-turns read destroys the only copy
+///   (the coordinator takes `pending_completions` and never re-offers them).
+/// * A monitor's buffered `MonitorEvent` lines are the TAIL of its output,
+///   while a read that exceeds the byte budget keeps the HEAD
+///   (`truncate_with_preview`), so the queued lines are precisely what the
+///   model has not seen.
+pub fn consumed_completion_content_ids(output: &ToolOutput) -> Vec<&str> {
+    collect_completion_ids(output, |status| status == "completed")
+}
+
+/// Shared body of [`consumed_completion_ids`] and
+/// [`consumed_completion_content_ids`]; `consumed_status` is the only
+/// difference between them.
+fn collect_completion_ids(output: &ToolOutput, consumed_status: fn(&str) -> bool) -> Vec<&str> {
     let mut ids = Vec::new();
     if let ToolOutput::Text(t) = output
         && let Some(uuid) = task_text_agent_id(&t.text)
@@ -626,20 +669,13 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         ids.push(uuid);
     }
     match output {
-        // Any TERMINAL status counts as consumed, not just `"completed"`.
-        // `failed` / `cancelled` / `timed_out` results carry the same body the
-        // queued `task-completed-{id}` auto-wake prompt would re-deliver, so a
-        // `"completed"`-only guard leaves that prompt to fire again at turn end
-        // (duplicate reminder + a forced extra full-context sampling round-trip).
-        // The predicate is shared with the multi-wait summary counter so the two
-        // cannot drift.
-        ToolOutput::TaskOutput(TaskOutputOutput::Result(r)) if is_terminal_status(&r.status) => {
+        ToolOutput::TaskOutput(TaskOutputOutput::Result(r)) if consumed_status(&r.status) => {
             ids.push(r.task_id.as_str());
         }
         ToolOutput::TaskOutput(TaskOutputOutput::Result(_)) => {}
         ToolOutput::TaskOutput(TaskOutputOutput::MultiResult(mr)) => {
             for r in &mr.results {
-                if is_terminal_status(&r.status) {
+                if consumed_status(&r.status) {
                     ids.push(r.task_id.as_str());
                 }
             }
@@ -709,6 +745,13 @@ impl Reminder for TaskCompletionReminder {
             .into_iter()
             .map(str::to_string)
             .collect();
+        // The narrower list: only these had their buffered content delivered by
+        // this result. Suppressing a subagent completion summary for anything
+        // else throws away the child's output for good.
+        let content_ids: Vec<String> = consumed_completion_content_ids(tool_output)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         let reserved_ids = {
             let res = resources.lock().await;
             if res
@@ -722,7 +765,11 @@ impl Reminder for TaskCompletionReminder {
                 .map(TaskCompletionReservations::snapshot)
                 .unwrap_or_default()
         };
-        let suppress_ids = consumed_ids
+        // Deliberately `content_ids`, not `consumed_ids`: this list tells the
+        // subagent coordinator to DROP a buffered completion summary, and for a
+        // failed / cancelled / max-turns child that summary is the only carrier
+        // of its output.
+        let suppress_ids = content_ids
             .iter()
             .chain(&reserved_ids)
             .cloned()
@@ -771,8 +818,16 @@ impl Reminder for TaskCompletionReminder {
                     .map(str::to_string)
             });
             let state = res.get_or_default::<State<ReportedTaskCompletions>>();
+            // Mark consumed terminal-backend tasks as reported so the one-line
+            // bash/monitor completion reminder is not re-emitted for something
+            // the model just read. Scoped to IDs this terminal owns on purpose:
+            // `reported` is shared with the subagent loop below, so marking a
+            // subagent ID here would silently drop its buffered completion
+            // summary even though `suppress_ids` deliberately spared it.
             for id in &consumed_ids {
-                state.reported.insert(id.clone());
+                if tasks.iter().any(|t| &t.task_id == id) {
+                    state.reported.insert(id.clone());
+                }
             }
             if surface_reminders {
                 reminders.extend(
@@ -857,6 +912,10 @@ impl Reminder for TaskCompletionReminder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::implementations::fuigo_build::task::types::{
+        SubagentSnapshot, SubagentSnapshotStatus,
+    };
+    use crate::implementations::fuigo_build::task_output::{WaitHint, format_subagent_snapshot};
     use crate::types::output::TextOutput;
     #[test]
     fn consumed_completion_ids_from_text_with_consumed_id() {
@@ -2357,5 +2416,212 @@ mod tests {
         assert!(batched.contains("description=\"журнал 🚨\""), "{batched}");
         assert!(batched.contains("[1] строка №1"), "{batched}");
         assert!(batched.contains("[2] строка №2"), "{batched}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Subagent-shaped reads: consuming the duplicate PROMPT must not consume
+    // the buffered CONTENT.
+    //
+    // A subagent read comes back through the same `TaskOutput(Result)` arm as
+    // a bash read (`format_subagent_snapshot`), but its `Failed` / `Cancelled`
+    // arms render only `error` / `reason` -- the child's actual report is
+    // dropped by `completed_snapshot` and survives ONLY in the coordinator's
+    // buffered `SubagentCompletionSummary`. Every other test in this module
+    // builds a bash-shaped result, which is why this hole was invisible.
+    // ---------------------------------------------------------------------
+
+    fn subagent_snapshot(id: &str, status: SubagentSnapshotStatus) -> SubagentSnapshot {
+        SubagentSnapshot {
+            subagent_id: id.to_string(),
+            description: "test task".into(),
+            subagent_type: "general-purpose".into(),
+            status,
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 5000,
+            persona: None,
+        }
+    }
+
+    fn subagent_read(id: &str, status: SubagentSnapshotStatus) -> ToolOutput {
+        ToolOutput::TaskOutput(format_subagent_snapshot(
+            &subagent_snapshot(id, status),
+            WaitHint::NotRequested,
+        ))
+    }
+
+    /// The two lists must disagree for a cancelled child: the queued auto-wake
+    /// prompt is redundant (drop it), the buffered summary is not (keep it).
+    #[test]
+    fn a_cancelled_subagent_read_consumes_the_prompt_but_not_the_content() {
+        let output = subagent_read(
+            "sub-cancel",
+            SubagentSnapshotStatus::Cancelled {
+                reason: Some("max turns reached (limit: 8)".into()),
+            },
+        );
+        let ToolOutput::TaskOutput(TaskOutputOutput::Result(r)) = &output else {
+            panic!("expected a Result arm");
+        };
+        assert_eq!(r.status, "cancelled");
+        assert_eq!(
+            r.output, "max turns reached (limit: 8)",
+            "precondition: the snapshot carries only the reason, never the \
+             child's report -- that is why the buffered summary must survive"
+        );
+        assert_eq!(consumed_completion_ids(&output), vec!["sub-cancel"]);
+        assert!(
+            consumed_completion_content_ids(&output).is_empty(),
+            "a cancelled subagent read delivered no content to consume"
+        );
+    }
+
+    /// Same for an errored child.
+    #[test]
+    fn a_failed_subagent_read_consumes_the_prompt_but_not_the_content() {
+        let output = subagent_read(
+            "sub-fail",
+            SubagentSnapshotStatus::Failed {
+                error: "session error: connection reset".into(),
+            },
+        );
+        assert_eq!(consumed_completion_ids(&output), vec!["sub-fail"]);
+        assert!(consumed_completion_content_ids(&output).is_empty());
+    }
+
+    /// The successful read really does carry the child's output, so it belongs
+    /// in both lists -- narrowing the content list must not disable it.
+    #[test]
+    fn a_completed_subagent_read_consumes_both() {
+        let output = subagent_read(
+            "sub-ok",
+            SubagentSnapshotStatus::Completed {
+                output: "the child's report".into(),
+                tool_calls: 3,
+                turns: 2,
+                worktree_path: None,
+            },
+        );
+        let ToolOutput::TaskOutput(TaskOutputOutput::Result(r)) = &output else {
+            panic!("expected a Result arm");
+        };
+        assert!(r.output.contains("the child's report"));
+        assert_eq!(consumed_completion_ids(&output), vec!["sub-ok"]);
+        assert_eq!(consumed_completion_content_ids(&output), vec!["sub-ok"]);
+    }
+
+    /// End to end through the reminder: reading a CANCELLED child's status must
+    /// not make the coordinator throw its buffered completion summary away.
+    /// The coordinator takes `pending_completions` and never re-offers a
+    /// suppressed one, and a cancelled child injects no auto-wake prompt of its
+    /// own, so the summary is the parent's only copy of the child's output.
+    #[tokio::test]
+    async fn a_cancelled_subagent_read_does_not_suppress_its_buffered_summary() {
+        let shared = shared_with_subagent_completions(
+            vec![],
+            vec![make_subagent_completion("sub-1", false)],
+        );
+        let output = subagent_read(
+            "sub-1",
+            SubagentSnapshotStatus::Cancelled {
+                reason: Some("max turns reached (limit: 8)".into()),
+            },
+        );
+        let r = TaskCompletionReminder
+            .collect_reminders(shared, &output)
+            .await;
+        assert_eq!(
+            r.len(),
+            1,
+            "the buffered completion summary must still be delivered: {r:?}"
+        );
+        assert!(
+            r[0].contains("output for sub-1"),
+            "the child's report is the whole point of the summary: {}",
+            r[0]
+        );
+    }
+
+    /// Same for a child that errored out.
+    #[tokio::test]
+    async fn a_failed_subagent_read_does_not_suppress_its_buffered_summary() {
+        let shared = shared_with_subagent_completions(
+            vec![],
+            vec![make_subagent_completion("sub-1", false)],
+        );
+        let output = subagent_read(
+            "sub-1",
+            SubagentSnapshotStatus::Failed {
+                error: "session error: connection reset".into(),
+            },
+        );
+        let r = TaskCompletionReminder
+            .collect_reminders(shared, &output)
+            .await;
+        assert_eq!(r.len(), 1, "buffered summary must survive: {r:?}");
+        assert!(r[0].contains("output for sub-1"), "{}", r[0]);
+    }
+
+    /// The other side of the split: a COMPLETED read did deliver the output, so
+    /// the buffered summary is a genuine duplicate and stays suppressed.
+    #[tokio::test]
+    async fn a_completed_subagent_read_still_suppresses_its_buffered_summary() {
+        let shared =
+            shared_with_subagent_completions(vec![], vec![make_subagent_completion("sub-1", true)]);
+        let output = subagent_read(
+            "sub-1",
+            SubagentSnapshotStatus::Completed {
+                output: "the child's report".into(),
+                tool_calls: 3,
+                turns: 2,
+                worktree_path: None,
+            },
+        );
+        let r = TaskCompletionReminder
+            .collect_reminders(shared, &output)
+            .await;
+        assert!(
+            r.is_empty(),
+            "a completed read already carried the output: {r:?}"
+        );
+    }
+
+    /// A failed BASH task is the case the widened predicate was opened for: its
+    /// `get_task_output` result really does carry the body, so the one-line
+    /// bash reminder must stay suppressed for it even though it is not in the
+    /// content list. `reported` is gated on terminal-backend ownership, not on
+    /// the content list, precisely so this keeps working.
+    #[tokio::test]
+    async fn a_failed_bash_read_is_still_marked_reported() {
+        let mut task = make_completed("bg-fail");
+        task.exit_code = Some(1);
+        task.is_backgrounded = true;
+        let shared = shared_with(vec![task]);
+        let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "bg-fail".into(),
+            command: "cargo test".into(),
+            status: "failed".into(),
+            exit_code: Some(1),
+            started: String::new(),
+            ended: None,
+            duration_secs: 1.0,
+            output: "test failures".into(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 13,
+        }));
+        let r = TaskCompletionReminder
+            .collect_reminders(shared.clone(), &output)
+            .await;
+        assert!(
+            r.is_empty(),
+            "the model just read this task's output; no duplicate reminder: {r:?}"
+        );
+        let res = shared.lock().await;
+        assert!(
+            res.get::<State<ReportedTaskCompletions>>()
+                .is_some_and(|s| s.reported.contains("bg-fail")),
+            "a consumed terminal-backend task must be marked reported"
+        );
     }
 }
