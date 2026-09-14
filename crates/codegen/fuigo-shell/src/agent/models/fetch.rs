@@ -105,6 +105,7 @@ impl ModelsPrefetch {
 pub(in crate::agent::models) struct ModelsCacheWrite {
     models: IndexMap<String, ModelEntry>,
     etag: Option<String>,
+    identity: String,
     auth_method: CacheAuthMethod,
     origin: String,
 }
@@ -114,6 +115,7 @@ impl ModelsCacheWrite {
         ModelsCacheManager::new().persist(
             &self.models,
             self.etag.as_deref(),
+            &self.identity,
             self.auth_method,
             &self.origin,
         );
@@ -130,9 +132,10 @@ fn fetch_models_uncommitted(
     let cache_auth = fetch_auth.cache_auth_method();
     let source = active_model_source(endpoints, fetch_auth);
     let cache_origin = source.cache_origin();
+    let identity = models_cache_identity(auth, endpoints);
 
     let cache = ModelsCacheManager::new();
-    if let Some(cached) = cache.load_fresh(&cache_auth, &cache_origin) {
+    if let Some(cached) = cache.load_fresh(&identity, &cache_auth, &cache_origin) {
         return ModelsPrefetch::Cached(cached.models);
     }
 
@@ -154,6 +157,7 @@ fn fetch_models_uncommitted(
             ModelsPrefetch::Fetched(ModelsCacheWrite {
                 models: map,
                 etag,
+                identity,
                 auth_method: cache_auth,
                 origin: cache_origin,
             })
