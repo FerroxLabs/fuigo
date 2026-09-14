@@ -2580,32 +2580,33 @@ impl SessionActor {
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
-    /// Sweep `pending_inputs` and `pending_notifications` for entries matching `consumed_ids`.
+    /// Sweep `pending_inputs` for entries matching `consumed_ids`, and `pending_notifications` for entries matching `content_ids`.
     /// Called after every successful tool result.
     /// Queued auto-wake synthetic prompts for a task/subagent the model already learned about are dropped before they get flushed to chat history.
     /// Flushed, they would appear as a trailing `<system-reminder>` with no assistant reply.
     ///
-    /// The ID list comes from `fuigo_tools::reminders::task_completion::consumed_completion_ids`.
-    /// `TaskCompletionReminder` uses the same predicate; they cannot drift because they share the function.
+    /// Both ID lists come from `fuigo_tools::reminders::task_completion`.
+    /// `TaskCompletionReminder` calls the same two functions and makes the same split, so the two sites cannot drift.
     ///
-    /// Reservations are deliberately not released here: the tool result that triggered this sweep is what consumed the completion.
-    /// `TaskCompletionReminder` already suppresses the per-tool-call reminder for these IDs via its own suppress list.
-    /// That list is also derived from `consumed_completion_ids`.
-    /// Un-marking here would risk a duplicate reminder for an ID that was just consumed.
+    /// A reservation is released only for a synthetic prompt actually dropped here: the tool result that triggered the sweep is what consumed that completion.
+    /// The reminder does not come back for it — `TaskCompletionReminder` marks every consumed terminal-backend ID as reported from the same `consumed_completion_ids` list.
     ///
-    /// Note on `MonitorEvent` interaction: any pending `MonitorEvent` notification whose `task_id` matches a consumed completion is also dropped.
-    /// This is intentional: the model just learned via the `get_task_output` / `kill_task` result that the task is done.
-    /// Any pending monitor stdout for it is stale.
+    /// The two ID lists are deliberately different and must not be merged.
     ///
-    /// This holds for EVERY terminal status, not just `completed`.
-    /// `consumed_completion_ids` reports `failed` / `cancelled` / `timed_out` reads as consumed too, so a failed monitor's buffered event lines are swept as well.
-    /// That is deliberate:
-    /// a monitor's events are produced by tailing the task's own output file (`monitor/tool.rs` `read_new_bytes` -> `process_event`), which is the same file the result the model just read comes from, so the queued lines are a subset of what it has already seen;
-    /// a surviving `MonitorEvent` is queued at `NotificationPriority::Next` and therefore starts a whole `NotificationDrain` turn (a full-context sampling round-trip) to re-deliver them, which for a failed or timed-out monitor -- the common case -- is exactly the duplicate delivery this sweep exists to prevent;
-    /// and `kill_task` already consumes unconditionally, so scoping the notification sweep to `completed` would leave a killed monitor losing its events while the same monitor timing out kept them.
-    /// Pinned by `failed_monitor_read_also_sweeps_its_buffered_monitor_events`.
-    pub(super) async fn drop_pending_items_for_consumed_completions(&self, consumed_ids: &[&str]) {
-        if consumed_ids.is_empty() {
+    /// `consumed_ids` (`consumed_completion_ids`, every terminal status) only ever drops a REDUNDANT NOTIFICATION: the queued auto-wake synthetic prompt.
+    /// The model was told the task finished by the tool result it just read, so re-delivering that prompt is pure duplication.
+    ///
+    /// `content_ids` (`consumed_completion_content_ids`, `completed` only for a task read) is the narrower list used to drop buffered CONTENT.
+    /// A pending `MonitorEvent` notification carries the TAIL of a monitor's output, while a `get_task_output` read that exceeds the byte budget keeps the HEAD (`truncate_with_preview`), so those queued lines are exactly what the model did NOT see.
+    /// Dropping them is only safe when the read is the successful one whose body the queued notification duplicates.
+    /// For a failed / cancelled / timed-out monitor the lines survive and are delivered as before.
+    /// Pinned by `failed_monitor_read_keeps_its_buffered_monitor_events`.
+    pub(super) async fn drop_pending_items_for_consumed_completions(
+        &self,
+        consumed_ids: &[&str],
+        content_ids: &[&str],
+    ) {
+        if consumed_ids.is_empty() && content_ids.is_empty() {
             return;
         }
         let mut state = self.state.lock().await;
@@ -2618,7 +2619,7 @@ impl SessionActor {
         let before_notifications = state.pending_notifications.len();
         state
             .pending_notifications
-            .retain(|n| !consumed_ids.contains(&n.source.task_id()));
+            .retain(|n| !content_ids.contains(&n.source.task_id()));
         let dropped_notifications = before_notifications - state.pending_notifications.len();
         drop(state);
         if let Some(reservations) = &self.tool_context.task_completion_reservations {
@@ -2634,6 +2635,7 @@ impl SessionActor {
                 dropped_inputs,
                 dropped_notifications,
                 consumed_ids = ?consumed_ids,
+                content_ids = ?content_ids,
                 "auto-wake: dropped queued synthetic items for consumed completions"
             );
         }
@@ -2741,8 +2743,11 @@ impl SessionActor {
         let (mut result, mut tool_layer_images) = drained.into_parts();
         let consumed_ids =
             fuigo_tools::reminders::task_completion::consumed_completion_ids(&result.output);
+        let content_ids = fuigo_tools::reminders::task_completion::consumed_completion_content_ids(
+            &result.output,
+        );
         if !consumed_ids.is_empty() {
-            self.drop_pending_items_for_consumed_completions(&consumed_ids)
+            self.drop_pending_items_for_consumed_completions(&consumed_ids, &content_ids)
                 .await;
         }
         if let ToolsToolOutput::BackgroundTaskStarted(ref bg) = result.output {

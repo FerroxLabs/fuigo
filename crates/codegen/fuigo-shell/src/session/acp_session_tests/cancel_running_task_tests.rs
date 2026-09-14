@@ -1934,7 +1934,7 @@ async fn cancel_after_own_completion_sweep_preserves_queued_user_prompt() {
                 state.pending_inputs.push_back(user_item);
             }
             actor
-                .drop_pending_items_for_consumed_completions(&["bg-1"])
+                .drop_pending_items_for_consumed_completions(&["bg-1"], &["bg-1"])
                 .await;
             let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
