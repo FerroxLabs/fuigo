@@ -2445,7 +2445,7 @@ mod tests {
     fn subagent_read(id: &str, status: SubagentSnapshotStatus) -> ToolOutput {
         ToolOutput::TaskOutput(format_subagent_snapshot(
             &subagent_snapshot(id, status),
-            WaitHint::NotRequested,
+            &WaitHint::NotRequested,
         ))
     }
 

@@ -15,10 +15,14 @@ fn admission_response(
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn message(id: &str) -> ActiveAgentMessage {
+    message_with_text(id, "parent update")
+}
+
+fn message_with_text(id: &str, text: &str) -> ActiveAgentMessage {
     ActiveAgentMessage {
         message_id: id.into(),
         sender_session_id: "root-session".into(),
-        text: Arc::from("parent update"),
+        text: Arc::from(text),
     }
 }
 
@@ -242,6 +246,146 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
             Some(ConversationItem::User(user))
                 if matches!(user.content.first(), Some(ContentPart::Text { text }) if text.as_ref() == "PARENT_PREFIX_READY")
         ));
+    }))
+    .await;
+}
+
+/// Admission must wake any tool wait already in flight in this session, so a
+/// blocked subagent sees the correction now rather than at the wait deadline.
+///
+/// A turn must be running for this to be the case at all: with the session
+/// idle the row simply starts its own turn and nothing is left pending (see
+/// `a_message_delivered_as_its_own_turn_leaves_no_pending_id`).
+#[tokio::test(flavor = "current_thread")]
+async fn admission_signals_in_flight_tool_waits() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let signal = actor.rebuild_spec.parent_message_signal.clone();
+        let watch = signal.subscribe();
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state.running_task = Some(super::super::support::running_task_stub("running"));
+        }
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("woken"),
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        let woken = await_with_timeout(watch.arrived()).await;
+        assert_eq!(&*woken, ["woken".to_string()]);
+    }))
+    .await;
+}
+
+/// A message admitted while the session is idle runs as its own turn, so no
+/// row is ever promoted and the signal's pending list must be cleared there
+/// too.
+///
+/// Otherwise the id leaks for the life of the session and every later
+/// interrupt hint names it as still pending — sending the child hunting for a
+/// message it already handled, and keeping the wait interruptible for a
+/// message that is no longer outstanding.
+#[tokio::test(flavor = "current_thread")]
+async fn a_message_delivered_as_its_own_turn_leaves_no_pending_id() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let signal = actor.rebuild_spec.parent_message_signal.clone();
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message("m1"),
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        assert!(
+            await_with_timeout(actor.state.lock())
+                .await
+                .running_task
+                .is_some(),
+            "an idle session runs the parent message as its own turn"
+        );
+        assert!(
+            signal.pending_message_ids().is_empty(),
+            "a message delivered through its own turn must not stay pending, got {:?}",
+            signal.pending_message_ids()
+        );
+    }))
+    .await;
+}
+
+/// A `/compact` from the parent is the one message that is NOT promoted: it
+/// runs on its own turn, where `handle_turn_input` executes the builtin. Raising
+/// the wake for it would cut every in-flight wait short for a message no drain
+/// will take, and — because the signal is level-triggered — the identifier would
+/// stay pending until that turn starts, so every wait in between would return
+/// `Interrupted` the instant it began.
+#[tokio::test(flavor = "current_thread")]
+async fn a_builtin_parent_message_does_not_signal_tool_waits() {
+    let local = tokio::task::LocalSet::new();
+    await_with_timeout(local.run_until(async {
+        let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
+        let signal = actor.rebuild_spec.parent_message_signal.clone();
+        {
+            let mut state = await_with_timeout(actor.state.lock()).await;
+            state
+                .pending_inputs
+                .push_back(super::super::support::user_item("running", "owner"));
+            state.running_task = Some(super::super::support::running_task_stub("running"));
+        }
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        let (respond_to, response_rx) = oneshot::channel();
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+
+        await_with_timeout(actor.admit_parent_agent_message_for_test(
+            message_with_text("compacting", "/compact preserve auth"),
+            receipt_sink,
+            respond_to,
+            completion_tx,
+        ))
+        .await;
+
+        assert_eq!(
+            admission_response(await_with_timeout(response_rx).await),
+            ActiveMessageAdmission::Admitted
+        );
+        assert!(
+            signal.pending_message_ids().is_empty(),
+            "a builtin parent message must leave no pending wake, got {:?}",
+            signal.pending_message_ids()
+        );
+        let state = await_with_timeout(actor.state.lock()).await;
+        assert!(
+            state
+                .pending_inputs
+                .iter()
+                .any(|i| i.prompt_id == "parent-message-compacting"),
+            "the row is still queued; only the wake is suppressed"
+        );
     }))
     .await;
 }

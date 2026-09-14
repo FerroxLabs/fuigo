@@ -217,6 +217,7 @@ async fn flushed_interjection_stays_parked_under_hold() {
                 .push(crate::session::acp_session::PendingInterjection {
                     text: "steer text typed during the blocked turn".to_string(),
                     attachments: vec![],
+                    ..Default::default()
                 });
 
             assert_eq!(actor.flush_stranded_interjections().await, 1);

@@ -1946,11 +1946,17 @@ pub(super) async fn run_session(
                                 session.pending_interjections.push(PendingInterjection {
                                     text,
                                     attachments: images,
+                                    ..Default::default()
                                 });
                                 tracing::info!("Queued mid-turn interjection");
                             } else {
                                 session
-                                    .queue_interjection_fallback_prompt(text, images, true)
+                                    .queue_interjection_fallback_prompt(
+                                        text,
+                                        images,
+                                        true,
+                                        InterjectionAuthority::User,
+                                    )
                                     .await;
                                 SessionActor::maybe_start_running_task(
                                     session.clone(),
