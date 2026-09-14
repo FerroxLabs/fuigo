@@ -175,6 +175,12 @@ impl Reducer for AcpReducer {
             attach_result_usage(&mut line, usage);
         }
         attach_structured_output(&mut line, end.structured_output.clone());
+        // A run-level failure rides on this line instead of a second terminal `error` line.
+        if let Some(error) = end.error
+            && let Some(obj) = line.as_object_mut()
+        {
+            obj.insert("error".to_string(), Value::String(error.to_string()));
+        }
         vec![line]
     }
 

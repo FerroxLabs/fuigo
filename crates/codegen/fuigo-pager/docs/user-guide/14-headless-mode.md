@@ -70,14 +70,18 @@ FUIGO_HEADLESS_TIMEOUT_SECS=900 fuigo -p "review this diff"
   turn itself, and `--memory-flush`. Each of those is an ACP request that otherwise waits for a
   reply with no deadline; under `--timeout` every one of them is bounded by whatever the run has
   left, and the failure names the step (`timed out after 900s waiting for session/new`).
-- On elapse Fuigo kills any background tasks and subagents the run started, prints an error result
-  (`"type": "error"` for `--output-format json`, a `cancelled` stop reason for the streaming
-  formats) and exits non-zero — so a CI step fails rather than hanging a runner.
-- **A turn that already answered is still reported.** The cap often lands during the wait for
-  background work — a `monitor(persistent: true)` never completes and always waits out
-  `--background-wait-timeout`. When that happens the completed turn's result line, its `usage` and
-  its structured output are emitted first, and the timeout error follows. The exit code is still
-  non-zero, because background work was killed.
+- On elapse Fuigo kills any background tasks and subagents the run started, reports the timeout and
+  exits non-zero — so a CI step fails rather than hanging a runner.
+- **A turn that already answered is still reported, in the same one terminal document.** The cap
+  often lands during the wait for background work — a `monitor(persistent: true)` never completes
+  and always waits out `--background-wait-timeout`. When that happens the completed turn's text,
+  its `usage` and its structured output are reported together with the cap, on a single terminal
+  record: `--output-format json` stays exactly one JSON object (`"stopReason": "cancelled"` plus an
+  `"error"` field), and the streaming formats emit exactly one terminal line (`stream-json` a
+  single `result` with `is_error: true`, `streaming-json` a single `end` carrying `error`). A
+  machine consumer never sees two terminal records for one run, so a reader that stops at the first
+  cannot mistake a capped run for a success, and one that reads to EOF cannot double-count `usage`.
+  The exit code is still non-zero, because background work was killed.
 - It is a cap on the run, not a budget for the model: it is unrelated to `--max-turns`,
   `FUIGO_MAX_RUNTIME_SECS` and `FUIGO_MAX_MODEL_CALLS`, which gate how much work is admitted rather
   than how long the process may live.
@@ -86,6 +90,11 @@ FUIGO_HEADLESS_TIMEOUT_SECS=900 fuigo -p "review this diff"
 
 Without `--timeout`, the `initialize` and `authenticate` handshakes are still capped at 120 seconds
 on their own, so a backend that never answers them fails startup with an error instead of hanging.
+This is the one part of the feature that is *not* off by default, so it has its own escape hatch:
+`FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` raises the cap (whole seconds) and `0` removes it entirely,
+restoring the unbounded 1.0.16 startup. Set it if a cold `FUIGO_HOME` on a slow or network
+filesystem legitimately needs longer than two minutes to answer `initialize`. An empty or
+unparsable value keeps the 120 second default with a warning.
 
 ### Tool Filtering
 
@@ -597,6 +606,7 @@ Key environment variables that affect headless mode:
 | ------------------------------- | ------------------------------------------------------------- |
 | `FUIGO_API_KEY`        | API key for authentication (required when no browser login)   |
 | `FUIGO_HEADLESS_TIMEOUT_SECS`   | Fallback for `--timeout`: hard cap on the whole headless run, in whole seconds. Unset, empty, `0` or unparsable means no cap. Ignored by the interactive TUI. See [Run timeout](#run-timeout) |
+| `FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` | Cap on the `initialize`/`authenticate` handshakes, in whole seconds (default `120`). `0` removes the cap; empty or unparsable keeps the default. Headless only. See [Run timeout](#run-timeout) |
 | `FUIGO_HOME`                    | Override config directory (default: `~/.fuigo`)                |
 | `FUIGO_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
