@@ -40,11 +40,18 @@ impl SessionActor {
     /// Front placement is re-validated under the state lock, because the caller's "no turn running" check ran unlocked.
     /// A concurrent promotion (MCP-init release, plan-approval resume) may have pinned a running prompt at the front in the meantime.
     /// Displacing it would desync `handle_completion`'s front pop, so in that case the item lands right behind the running front.
+    /// `authority` decides whose words these are. A stranded entry that came
+    /// from the owning parent agent must be re-queued as
+    /// `PromptOrigin::ParentAgentMessage`, never as a genuine user prompt:
+    /// `InputAuthority::ModelAuthoredUntrusted` is the boundary that keeps a
+    /// parent agent out of the human slash/workflow resolver, out of prompt
+    /// history, and out of the "the user re-engaged" task-wake gate.
     pub(super) async fn queue_interjection_fallback_prompt(
         &self,
         text: String,
         images: Vec<acp::ImageContent>,
         front: bool,
+        authority: InterjectionAuthority,
     ) {
         let prompt_id = format!("{INTERJECT_FALLBACK_PROMPT_PREFIX}{}", uuid::Uuid::now_v7());
         let mut prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
@@ -56,8 +63,22 @@ impl SessionActor {
             crate::session::plan_mode::PromptMode::Agent
         };
         let (respond_to, _) = tokio::sync::oneshot::channel();
-        // User message (skips queue_input); invalidate in-flight recap now.
-        self.invalidate_side_calls_for_new_prompt();
+        let input_origin = match authority {
+            InterjectionAuthority::User => InputOrigin::new(super::super::PromptOrigin::User),
+            InterjectionAuthority::ParentAgent {
+                message_id,
+                sender_session_id,
+            } => InputOrigin::new(super::super::PromptOrigin::ParentAgentMessage {
+                message_id,
+                sender_session_id,
+            }),
+        };
+        // A real user message (this skips queue_input) invalidates the in-flight
+        // recap now; `queue_input` gates the same call on human intent, so a
+        // parent agent's fallback must not cancel side calls either.
+        if input_origin.policy().authority.is_human_intent() {
+            self.invalidate_side_calls_for_new_prompt();
+        }
         let item = InputItem {
             prompt_id,
             prompt_blocks,
@@ -68,7 +89,7 @@ impl SessionActor {
             screen_mode: None,
             verbatim: false,
             json_schema: None,
-            input_origin: InputOrigin::new(super::super::PromptOrigin::User),
+            input_origin,
             task_wake_fallback: None,
             tool_overrides_update: None,
             respond_to,
@@ -102,8 +123,13 @@ impl SessionActor {
         let count = stranded.len();
         // Reversed push_fronts keep entry 0 front-most.
         for entry in stranded.into_iter().rev() {
-            self.queue_interjection_fallback_prompt(entry.text, entry.attachments, true)
-                .await;
+            self.queue_interjection_fallback_prompt(
+                entry.text,
+                entry.attachments,
+                true,
+                entry.authority,
+            )
+            .await;
         }
         count
     }
@@ -284,6 +310,12 @@ impl SessionActor {
     /// text with the full `build_command_availability` and no skill-loader gate.
     /// Running a parent's text through it would let a parent agent invoke
     /// skills its child was never advertised.
+    ///
+    /// `AuthorityResolution::StaticBuiltin` cannot reach here:
+    /// `promote_parent_agent_messages` leaves a builtin row queued so it runs on
+    /// its own turn, where `handle_turn_input` actually executes it. Returning
+    /// `None` for one would inject the raw `/compact ...` text and drop the
+    /// action.
     async fn parent_agent_skill_information(&self, text: &str) -> Option<String> {
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
             text.to_string(),
@@ -404,7 +436,7 @@ impl SessionActor {
                     self.interjection_skill_information(&sanitized).await,
                     format_interjection(sanitized),
                 ),
-                InterjectionAuthority::ParentAgent => (
+                InterjectionAuthority::ParentAgent { .. } => (
                     self.parent_agent_skill_information(&sanitized).await,
                     format_parent_agent_interjection(sanitized),
                 ),
@@ -429,7 +461,9 @@ impl SessionActor {
                 // Same class the message's own turn would have recorded
                 // (`CompactionClass::ConversationalAgentAnchor`,
                 // `AnalyticsClass::AgentMessage`).
-                InterjectionAuthority::ParentAgent => ConversationItem::agent_message(model_text),
+                InterjectionAuthority::ParentAgent { .. } => {
+                    ConversationItem::agent_message(model_text)
+                }
             };
             for img in &images {
                 item.add_image(pick_user_image_url(img));

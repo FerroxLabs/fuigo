@@ -686,10 +686,18 @@ impl SessionActor {
         // must keep that classification across promotion, or the child is told
         // its parent spoke with its human user's authority and the text goes
         // through the human slash resolver.
+        // The identity rides along: a buffered entry that never reaches the
+        // running turn (abort, chat-state failure, turn-end strand) is re-queued
+        // as its own prompt turn, and `flush_stranded_interjections` rebuilds the
+        // origin from this.
         let authority = match input_origin.as_prompt_origin() {
-            PromptOrigin::ParentAgentMessage { .. } => {
-                fuigo_interjection_core::InterjectionAuthority::ParentAgent
-            }
+            PromptOrigin::ParentAgentMessage {
+                message_id,
+                sender_session_id,
+            } => fuigo_interjection_core::InterjectionAuthority::ParentAgent {
+                message_id: message_id.clone(),
+                sender_session_id: sender_session_id.clone(),
+            },
             _ => fuigo_interjection_core::InterjectionAuthority::User,
         };
         self.pending_interjections.push(PendingInterjection {
@@ -749,7 +757,28 @@ impl SessionActor {
     /// instruction its parent has already superseded.
     ///
     /// No-op while idle: with no running turn the queued row simply starts its
-    /// own turn, exactly as before.
+    /// own turn, exactly as before. Also a no-op for a message that resolves to
+    /// a static builtin (`/compact`), which only the own-turn path can execute.
+    /// Whether an owning parent agent's message resolves to a static builtin
+    /// (`/compact` — the only command with `ModelAuthoredEligibility::ExactCanonical`
+    /// and `BuiltinGate::AlwaysOn`).
+    ///
+    /// Such a message is handled at a turn boundary by `handle_turn_input`'s
+    /// `SlashCommandOutcome::Builtin` arm, which the mid-turn promotion path has
+    /// no equivalent of: promoting it would inject the raw `/compact ...` text as
+    /// `<parent_agent_message>` and silently lose the compaction. Purely
+    /// syntactic and allocation-free — no catalog, no I/O.
+    pub(super) fn parent_message_resolves_to_builtin(prompt_blocks: &[acp::ContentBlock]) -> bool {
+        matches!(
+            crate::session::slash_authority::resolve(
+                crate::session::InputAuthority::ModelAuthoredUntrusted,
+                prompt_blocks,
+                slash_commands::BUILTIN_COMMANDS,
+            ),
+            crate::session::slash_authority::AuthorityResolution::StaticBuiltin(_)
+        )
+    }
+
     pub(super) async fn promote_parent_agent_messages(&self) {
         let mut state = self.state.lock().await;
         let Some(running_id) = state.running_prompt_id().map(str::to_string) else {
@@ -762,6 +791,17 @@ impl SessionActor {
                     item.input_origin.as_prompt_origin(),
                     PromptOrigin::ParentAgentMessage { .. }
                 )
+                // Only the protected row `admit_parent_agent_message` commits.
+                // A queue-hidden row carrying the same origin is an
+                // `interject-fallback-` turn a stranded entry already produced;
+                // promoting it back into the buffer it was rescued from would
+                // undo the rescue.
+                && item.is_queue_protected()
+                // A static builtin (`/compact`) is the one slash a parent agent
+                // can invoke, and `turn.rs` executes it only on the row's own
+                // turn. Promotion would inject the literal text mid-turn and
+                // drop the action, so leave it queued exactly as before.
+                && !Self::parent_message_resolves_to_builtin(&item.prompt_blocks)
         }) {
             let Some(item) = state.pending_inputs.remove(pos) else {
                 break;
