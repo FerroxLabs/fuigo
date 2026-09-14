@@ -86,6 +86,7 @@ fn acp_finish_emits_end_line_with_usage_and_structured_output() {
         structured_output: Some(Ok(json!({"name": "alice"}))),
         result_text: "",
         duration_ms: 0,
+        error: None,
     });
     let end = out.last().unwrap();
     assert_eq!(end["type"], "end");

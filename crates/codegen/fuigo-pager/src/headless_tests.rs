@@ -534,3 +534,557 @@ fn handler_answers_ext_method_instead_of_dropping() {
         serde_json::from_str(resp.0.get()).expect("typed wire reply");
     assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
 }
+
+// ── Headless turn hard timeout (`--timeout` / `FUIGO_HEADLESS_TIMEOUT_SECS`) ────────────
+
+fn timeout_test_options(total_timeout: Option<std::time::Duration>) -> super::HeadlessOptions {
+    super::HeadlessOptions {
+        session_id: None,
+        resume: None,
+        resume_title_pinned: false,
+        cwd: None,
+        yolo: false,
+        trust: false,
+        output_format: super::OutputFormat::Json,
+        include_partial_messages: false,
+        json_schema: None,
+        model: None,
+        rules: None,
+        system_prompt_override: None,
+        continue_last_session: false,
+        fork_session: false,
+        worktree: None,
+        restore_code: false,
+        agent: None,
+        agents_json: None,
+        cli_tools: None,
+        cli_disallowed_tools: None,
+        disable_web_search: false,
+        allow_rules: Vec::new(),
+        deny_rules: Vec::new(),
+        max_turns: None,
+        permission_mode_flag: None,
+        reasoning_effort: None,
+        wait_for_background: true,
+        background_wait_timeout: std::time::Duration::from_secs(600),
+        total_timeout,
+        memory_flush: false,
+        memory_enabled_override: None,
+    }
+}
+
+/// Drive a turn whose agent never answers and never streams, with the supplied hard cap.
+async fn drive_silent_turn(total_timeout: Option<std::time::Duration>) -> super::TurnDriveOutcome {
+    // Senders/receivers are held so neither channel ever closes: every `select!` arm stays pending.
+    let (_client_tx, mut acp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let session_id = acp::SessionId::new("sess-1");
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let options = timeout_test_options(total_timeout);
+    let mut ttf_logged = false;
+    let prompt_fut = std::future::pending::<Result<acp::PromptResponse, acp::Error>>();
+    super::drive_prompt_turn(
+        prompt_fut,
+        &mut acp_rx,
+        &acp_tx,
+        &session_id,
+        &mut emitter,
+        &options,
+        super::RunDeadline::start(total_timeout),
+        std::time::Instant::now(),
+        &mut ttf_logged,
+    )
+    .await
+}
+
+/// The bug: with no end event the prompt future, the ACP stream and the (gated-off) background
+/// sleep arm are all pending forever, so `fuigo -p` never returns. The hard cap must break it.
+#[tokio::test]
+async fn turn_gives_up_when_the_agent_never_responds() {
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        drive_silent_turn(Some(std::time::Duration::from_millis(200))),
+    )
+    .await
+    .expect("headless turn hung past its --timeout instead of giving up");
+    assert!(
+        outcome.timed_out,
+        "the turn must report the hard timeout so the caller exits non-zero"
+    );
+    assert!(
+        outcome.prompt_result.is_none(),
+        "a timed-out turn has no prompt result"
+    );
+    assert!(!outcome.connection_closed, "the channel never closed");
+}
+
+/// Default-off: with no `--timeout` a silent turn keeps waiting exactly as it does today.
+#[tokio::test]
+async fn turn_without_timeout_keeps_waiting() {
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        drive_silent_turn(None),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "without --timeout the turn must not acquire a deadline of its own"
+    );
+}
+
+/// `acp_send` awaits a bare oneshot; a bounded send must not inherit that unbounded wait.
+#[tokio::test]
+async fn lifecycle_send_fails_instead_of_blocking_forever() {
+    let never = std::future::pending::<Result<(), String>>();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::with_send_deadline(
+            "initialize",
+            Some(std::time::Duration::from_millis(200)),
+            never,
+        ),
+    )
+    .await
+    .expect("with_send_deadline blocked past its own limit");
+    let err = result.expect_err("a send that is never answered must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timed out") && msg.contains("initialize"),
+        "error must name the timeout and the lifecycle step, got: {msg}"
+    );
+}
+
+/// The bound wrapper is transparent otherwise: successes and real errors pass straight through.
+#[tokio::test]
+async fn lifecycle_send_passes_results_through() {
+    let ok = super::with_send_deadline(
+        "initialize",
+        Some(std::time::Duration::from_secs(5)),
+        std::future::ready(Ok::<u8, String>(7)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok, 7);
+    let err = super::with_send_deadline(
+        "authenticate",
+        Some(std::time::Duration::from_secs(5)),
+        std::future::ready(Err::<u8, String>("no credentials".to_string())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.to_string(), "no credentials");
+}
+
+/// `--timeout` is documented as a cap on the whole run, but `session/new` is a bare `acp_send`
+/// awaiting a oneshot. An agent that accepts the request and then goes silent — precisely the
+/// slow-skills-scan shape — used to hang `fuigo -p` forever despite the flag.
+#[tokio::test]
+async fn session_new_is_bounded_by_the_run_deadline() {
+    // `_agent_rx` is held so the send succeeds and the reply oneshot is simply never answered.
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let tmp = tempfile::tempdir().expect("tmp cwd");
+    let deadline = super::RunDeadline::start(Some(std::time::Duration::from_millis(200)));
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::open_session(&acp_tx, tmp.path(), None, None, deadline),
+    )
+    .await
+    .expect("session/new ignored the run deadline and blocked forever")
+    .err()
+    .expect("an unanswered session/new must fail, not hang");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timed out") && msg.contains("session/new"),
+        "the error must name the deadline and the step, got: {msg}"
+    );
+}
+
+/// Without `--timeout` those sends keep their historical unbounded shape.
+#[tokio::test]
+async fn session_new_without_a_run_deadline_still_waits() {
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let tmp = tempfile::tempdir().expect("tmp cwd");
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        super::open_session(
+            &acp_tx,
+            tmp.path(),
+            None,
+            None,
+            super::RunDeadline::start(None),
+        ),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "with no --timeout, session/new must not acquire a deadline of its own"
+    );
+}
+
+/// The run budget is shared: one send cannot be given more time than the whole run has left,
+/// and a cap of its own still applies when it is the sooner of the two.
+#[test]
+fn the_run_budget_is_the_sooner_of_the_cap_and_the_run_deadline() {
+    let uncapped = super::RunDeadline::start(None);
+    assert_eq!(uncapped.remaining(), None);
+    assert_eq!(uncapped.budget(None), None);
+    assert_eq!(
+        uncapped.budget(Some(std::time::Duration::from_secs(120))),
+        Some(std::time::Duration::from_secs(120))
+    );
+    let capped = super::RunDeadline::start(Some(std::time::Duration::from_secs(30)));
+    let left = capped.remaining().expect("a cap leaves a remainder");
+    assert!(left <= std::time::Duration::from_secs(30));
+    assert!(
+        capped.budget(Some(std::time::Duration::from_secs(120))) <= Some(left),
+        "a 120s send cap must not outlive a 30s run"
+    );
+    assert_eq!(
+        capped.budget(Some(std::time::Duration::from_millis(1))),
+        Some(std::time::Duration::from_millis(1)),
+        "the sooner cap still wins"
+    );
+    let elapsed = super::RunDeadline::start(Some(std::time::Duration::ZERO));
+    assert_eq!(
+        elapsed.budget(None),
+        Some(std::time::Duration::ZERO),
+        "a spent run gives later sends no budget at all"
+    );
+}
+
+fn completed_prompt_response() -> acp::PromptResponse {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        "usage".to_string(),
+        serde_json::json!({"input_tokens": 1234, "output_tokens": 7}),
+    );
+    meta.insert(
+        "structuredOutput".to_string(),
+        serde_json::json!({"answer": "42"}),
+    );
+    meta.insert(
+        "sessionId".to_string(),
+        serde_json::Value::String("sess-1".into()),
+    );
+    meta.insert(
+        "requestId".to_string(),
+        serde_json::Value::String("req-1".into()),
+    );
+    acp::PromptResponse::new(acp::StopReason::EndTurn).meta(Some(meta))
+}
+
+/// The cap can fire while a turn that already answered is still waiting on background work (a
+/// persistent monitor never completes and always waits out `--background-wait-timeout`). The
+/// answer, its usage and its structured output are real work that must not be discarded: for a
+/// product benchmarked on cost per task, throwing away the spend record of a completed turn is a
+/// silent loss.
+#[test]
+fn the_hard_cap_still_reports_a_turn_that_already_completed() {
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, true);
+    let err = super::finish_turn(
+        &mut emitter,
+        Some(Ok(completed_prompt_response())),
+        true,
+        Some(std::time::Duration::from_secs(300)),
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect_err("a capped run must still exit non-zero");
+    assert!(
+        err.to_string().contains("Timed out after 300s"),
+        "the timeout must still be reported, got: {err}"
+    );
+    assert_eq!(
+        emitter.usage,
+        Some(serde_json::json!({"input_tokens": 1234, "output_tokens": 7})),
+        "a completed turn's usage must survive the cap"
+    );
+    assert!(
+        matches!(emitter.structured_output, Some(Ok(ref v)) if *v == serde_json::json!({"answer": "42"})),
+        "a completed turn's structured output must survive the cap, got: {:?}",
+        emitter.structured_output
+    );
+}
+
+/// A cap that fires with no completed turn behind it reports only the timeout.
+#[test]
+fn the_hard_cap_reports_a_turn_that_never_completed() {
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, true);
+    let err = super::finish_turn(
+        &mut emitter,
+        None,
+        true,
+        Some(std::time::Duration::from_secs(300)),
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect_err("a capped run must exit non-zero");
+    assert!(err.to_string().contains("Timed out after 300s"));
+    assert!(
+        emitter.usage.is_none() && emitter.structured_output.is_none(),
+        "nothing completed, so there is nothing to report"
+    );
+}
+
+/// `fuigo -p --memory-flush --timeout N` must not wait forever if the backend wedges during the
+/// flush: `flush_fut` is a bare `acp_send` and the ACP arm alone never ends a wedged flush.
+#[tokio::test]
+async fn the_memory_flush_is_bounded_by_the_run_deadline() {
+    let (_client_tx, mut acp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::run_headless_memory_flush(
+            &acp_tx,
+            &mut acp_rx,
+            &acp::SessionId::new("sess-1"),
+            &mut emitter,
+            false,
+            super::RunDeadline::start(Some(std::time::Duration::from_millis(200))),
+        ),
+    )
+    .await
+    .expect("the memory flush ignored the run deadline and blocked forever")
+    .expect_err("an unanswered flush must fail, not hang");
+    assert!(
+        err.to_string().contains("memory flush"),
+        "the error must name the step, got: {err}"
+    );
+}
+
+/// A stdout seam so a test can assert on the bytes a machine consumer actually reads.
+#[derive(Clone, Default)]
+struct CapturedOut(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedOut {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().expect("capture lock").clone()).expect("utf8 output")
+    }
+}
+
+/// Drive `finish_turn` through the hard cap with a turn that already answered, capturing stdout.
+fn capped_run_output(format: super::OutputFormat) -> String {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(format, true, Box::new(captured.clone()));
+    emitter.on_text_chunk("the answer");
+    let err = super::finish_turn(
+        &mut emitter,
+        Some(Ok(completed_prompt_response())),
+        true,
+        Some(std::time::Duration::from_secs(300)),
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect_err("a capped run must still exit non-zero");
+    assert!(
+        err.to_string().contains("Timed out after 300s"),
+        "the timeout must still be reported, got: {err}"
+    );
+    captured.text()
+}
+
+/// `--output-format json` must stay ONE parseable document. Reporting the cap as a second
+/// document after the completed turn's result breaks `json.loads` / `JSON.parse` outright ("Extra
+/// data"), in the mode `--timeout` is documented for.
+#[test]
+fn the_hard_cap_emits_one_json_document_carrying_both_the_result_and_the_timeout() {
+    let out = capped_run_output(super::OutputFormat::Json);
+    let doc: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("stdout must parse as exactly one JSON document ({e}): {out}"));
+    assert_eq!(
+        doc["stopReason"], "cancelled",
+        "the cap must be visible on the one terminal document: {doc}"
+    );
+    assert_eq!(
+        doc["error"], "Timed out after 300s waiting for the turn to end",
+        "the timeout message must ride on that document: {doc}"
+    );
+    assert_eq!(
+        doc["text"], "the answer",
+        "the completed turn's answer must survive: {doc}"
+    );
+    assert!(
+        doc["usage"].is_object(),
+        "the completed turn's spend record must ride on the same document: {doc}"
+    );
+    assert_eq!(
+        doc["structuredOutput"],
+        serde_json::json!({"answer": "42"}),
+        "the completed turn's structured output must survive: {doc}"
+    );
+}
+
+/// `--output-format stream-json` must carry exactly one `result` line: a consumer that stops at the
+/// first terminal line would otherwise report SUCCESS for a run that timed out and exited 1, and
+/// one that reads to EOF would double-count `usage`.
+#[test]
+fn the_hard_cap_emits_one_stream_json_result_line() {
+    let out = capped_run_output(super::OutputFormat::StreamingMessagesJson);
+    let results: Vec<serde_json::Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("each line is JSON"))
+        .filter(|v| v["type"] == "result")
+        .collect();
+    assert_eq!(
+        results.len(),
+        1,
+        "exactly one terminal result line, got {}: {out}",
+        results.len()
+    );
+    let result = &results[0];
+    assert_eq!(result["is_error"], true, "the run failed: {result}");
+    assert_eq!(
+        result["errors"],
+        serde_json::json!(["Timed out after 300s waiting for the turn to end"]),
+        "the one result line must name the cap: {result}"
+    );
+    assert_eq!(
+        result["result"], "the answer",
+        "the answer the turn already paid for must ride on it: {result}"
+    );
+    assert_eq!(
+        result["structured_output"],
+        serde_json::json!({"answer": "42"}),
+        "so must its structured output: {result}"
+    );
+}
+
+/// Same contract for the native `streaming-json` reducer: one terminal line, not `end` then `error`.
+#[test]
+fn the_hard_cap_emits_one_streaming_json_terminal_line() {
+    let out = capped_run_output(super::OutputFormat::StreamingJson);
+    let terminal: Vec<serde_json::Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("each line is JSON"))
+        .filter(|v| v["type"] == "end" || v["type"] == "error")
+        .collect();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "exactly one terminal line, got {}: {out}",
+        terminal.len()
+    );
+    assert_eq!(terminal[0]["type"], "end");
+    assert_eq!(terminal[0]["stopReason"], "cancelled");
+    assert_eq!(
+        terminal[0]["error"],
+        "Timed out after 300s waiting for the turn to end"
+    );
+    assert_eq!(
+        terminal[0]["structuredOutput"],
+        serde_json::json!({"answer": "42"}),
+        "the completed turn's structured output must ride on it: {}",
+        terminal[0]
+    );
+}
+
+/// A turn that completed with no cap in play keeps its normal single success document.
+#[test]
+fn a_normal_turn_still_emits_one_success_document() {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Json,
+        true,
+        Box::new(captured.clone()),
+    );
+    super::finish_turn(
+        &mut emitter,
+        Some(Ok(completed_prompt_response())),
+        false,
+        None,
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect("an uncapped completed turn succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&captured.text()).expect("one JSON document");
+    assert_eq!(doc["stopReason"], "end_turn");
+    assert!(
+        doc.get("error").is_none(),
+        "no cap fired, so no error field: {doc}"
+    );
+}
+
+/// A `session/load` that runs out of run budget must say so. Reporting "Session does not exist"
+/// sends the operator to the wrong remedy — re-running without `--resume`, losing the conversation.
+#[tokio::test]
+async fn a_session_load_that_hits_the_run_cap_reports_the_timeout() {
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let tmp = tempfile::tempdir().expect("tmp cwd");
+    let msg = match super::open_session(
+        &acp_tx,
+        tmp.path(),
+        Some("sess-resume-1"),
+        None,
+        super::RunDeadline::start(Some(std::time::Duration::from_millis(50))),
+    )
+    .await
+    {
+        Ok(_) => panic!("an unanswered session/load must fail"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("timed out") && msg.contains("session/load"),
+        "a run-cap timeout must be reported as one, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Session does not exist"),
+        "a timeout is not a missing session, got: {msg}"
+    );
+}
+
+/// The 120s lifecycle cap applies even to runs that asked for no `--timeout`, so it needs a way out:
+/// a cold `FUIGO_HOME` on a network mount can legitimately take longer to answer `initialize`, and
+/// that run worked in 1.0.16. `0` disables it; anything malformed keeps the default.
+#[test]
+fn the_lifecycle_cap_has_an_escape_hatch() {
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(None),
+        Some(super::DEFAULT_LIFECYCLE_SEND_TIMEOUT),
+        "unset keeps the default cap"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("  ")),
+        Some(super::DEFAULT_LIFECYCLE_SEND_TIMEOUT),
+        "empty keeps the default cap"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("soon")),
+        Some(super::DEFAULT_LIFECYCLE_SEND_TIMEOUT),
+        "garbage keeps the default cap rather than breaking startup"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("600")),
+        Some(std::time::Duration::from_secs(600)),
+        "a slow host can raise it"
+    );
+    assert_eq!(
+        super::parse_lifecycle_timeout_env(Some("0")),
+        None,
+        "0 restores the unbounded 1.0.16 startup sends"
+    );
+    assert_eq!(
+        super::RunDeadline::start(None).budget(super::parse_lifecycle_timeout_env(Some("0"))),
+        None,
+        "with the hatch open and no --timeout, the startup sends are unbounded again"
+    );
+}

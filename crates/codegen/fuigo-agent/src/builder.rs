@@ -131,6 +131,8 @@ pub struct AgentBuilder {
     /// Folder-trust verdict for `working_directory`: gates project AGENTS.md/rules and project skills.
     /// Defaults to untrusted, so every host that builds an agent must pass its verdict explicitly.
     project_trusted: bool,
+    /// Cap on the session-start skills scan; `None` uses `skill_discovery_timeout()`.
+    skill_discovery_timeout: Option<std::time::Duration>,
 }
 /// Ensure plan mode tools (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`) are present in the tool config.
 ///
@@ -260,6 +262,7 @@ impl AgentBuilder {
             persisted_announced_skill_names: None,
             preloaded_skills: None,
             project_trusted: false,
+            skill_discovery_timeout: None,
         }
     }
     /// Set the folder-trust verdict for `working_directory`; untrusted omits project instructions and project skills.
@@ -274,6 +277,12 @@ impl AgentBuilder {
         names: std::collections::HashSet<String>,
     ) -> Self {
         self.persisted_announced_skill_names = Some(names);
+        self
+    }
+    /// Cap the session-start skills scan at `limit` instead of the configured default.
+    /// A scan that overruns builds the agent with no discovered skills; the reload path backfills.
+    pub fn with_skill_discovery_timeout(mut self, limit: std::time::Duration) -> Self {
+        self.skill_discovery_timeout = Some(limit);
         self
     }
     /// Supply pre-discovered skills from a parent session instead of running filesystem discovery.
@@ -660,7 +669,13 @@ impl AgentBuilder {
         let skill_info = if let Some(preloaded) = self.preloaded_skills.take() {
             preloaded
         } else if definition.discover_skills {
-            crate::prompt::skills::list_skills_with_plugins(
+            // Session start pays this scan; it must not be able to wedge the session on a slow
+            // filesystem, and later sessions in the same process should not repay it.
+            let limit = self
+                .skill_discovery_timeout
+                .unwrap_or_else(crate::prompt::skills::skill_discovery_timeout);
+            crate::prompt::skills::list_skills_with_plugins_within(
+                limit,
                 Some(&working_dir_str),
                 &self.skills_config,
                 self.plugin_registry.as_deref(),
@@ -2852,6 +2867,41 @@ mod tests {
                     options: Some(x_search),
                 }),
             "definition tool_overrides must be applied to HostedTool options"
+        );
+    }
+}
+
+/// `session/new` builds an agent, and the build discovers skills. A slow skills directory must
+/// cost the session its cap, not the whole walk.
+#[cfg(test)]
+mod skill_discovery_budget_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn a_slow_skills_directory_cannot_wedge_the_agent_build() {
+        use fuigo_tools::computer::local::LocalTerminalBackend;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".fuigo").join("skills")).unwrap();
+        let cwd = tmp.path().to_str().unwrap().to_string();
+        crate::prompt::skills::test_hooks::set_delay(&cwd, Duration::from_secs(5));
+
+        let started = Instant::now();
+        let agent = AgentBuilder::new(
+            tmp.path().to_path_buf(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .with_project_trusted(true)
+        .with_skill_discovery_timeout(Duration::from_millis(200))
+        .build()
+        .await
+        .expect("the agent must still build when skill discovery overruns");
+        let elapsed = started.elapsed();
+        drop(agent);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "agent build waited {elapsed:?} on skill discovery instead of capping it"
         );
     }
 }
