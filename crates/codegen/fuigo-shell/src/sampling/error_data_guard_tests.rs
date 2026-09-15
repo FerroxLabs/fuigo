@@ -683,6 +683,66 @@ fn h(e: &acp::Error, d: &str) -> String { match Some(d) { Some(detail) if detail
     assert_eq!(lines, ["x.rs:2", "x.rs:5", "x.rs:5"], "{found:#?}");
 }
 
+/// The `?`-boundary conversions also changed a JSON-RPC class on the wire: a failure to serialize the
+/// agent's OWN data used to reach the client as `-32602 invalid params` through the schema crate's
+/// `From<serde_json::Error>`, and now answers `-32603 internal`. 15-agent-mode.md publishes a code table
+/// for third-party client authors, so every file that flipped has to be named there. An incomplete record
+/// of a wire change is the same class of defect as an error reply a client cannot read.
+#[test]
+fn every_serialization_code_flip_is_named_in_the_agent_mode_guide() {
+    const NEEDLE: &str = "map_err(crate::acp_error::internal_from)";
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_sources(&root, &root, &mut files);
+    let mut flipped: Vec<String> = Vec::new();
+    for (rel, path) in files {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut code = code_only(&src);
+        strip_cfg_test_items(&mut code);
+        let mut from = 0;
+        while let Some(pos) = find(&code, NEEDLE, from) {
+            from = pos + NEEDLE.len();
+            // Only a serialization (`serde_json::`) conversion flipped the class; an `anyhow` one was
+            // already `-32603` through `into_internal_error`.
+            let stmt: String = code[pos.saturating_sub(200)..pos].iter().collect();
+            if stmt
+                .rsplit(';')
+                .next()
+                .unwrap_or_default()
+                .contains("serde_json::")
+            {
+                flipped.push(format!("{rel}:{}", line_of(&code, pos)));
+            }
+        }
+    }
+    assert!(
+        flipped.len() >= 5,
+        "the scan lost sight of the conversions it checks: {flipped:?}"
+    );
+    let doc = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fuigo-pager/docs/user-guide/15-agent-mode.md");
+    let guide = std::fs::read_to_string(&doc).expect("read 15-agent-mode.md");
+    let missing: Vec<&String> = flipped
+        .iter()
+        .filter(|site| {
+            let file = site.split(':').next().unwrap_or_default();
+            !guide.contains(file)
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} site(s) changed their JSON-RPC class but 15-agent-mode.md does not name the file:\n{}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 /// The exemption is by file, so the typed constructors themselves may wrap the bare schema ones.
 #[test]
 fn the_no_data_scan_exempts_the_typed_constructor_module() {
