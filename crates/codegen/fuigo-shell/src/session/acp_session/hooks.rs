@@ -519,7 +519,9 @@ impl SessionActor {
         timeout: Duration,
     ) -> ReverseOutcome {
         let Some(params) = dispatch_params(dispatch) else {
-            return ReverseOutcome::Transport(acp::Error::internal_error());
+            return ReverseOutcome::Transport(crate::acp_error::internal_error(
+                "could not build the client hook request",
+            ));
         };
         let ext_request = acp::ExtRequest::new(HOOK_RUN_METHOD, params);
         match tokio::time::timeout(timeout, self.notifications.gateway.ext_method(ext_request))

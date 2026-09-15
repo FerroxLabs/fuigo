@@ -14,6 +14,13 @@
 //! `.context(..)`). A `?` on a crate-local helper that returns `anyhow::Result` names nothing, so those were
 //! enumerated once by compiling the tree against a schema crate with `impl From<anyhow::Error> for acp::Error`
 //! deleted; keep new helpers of that shape out of `acp::Error`-returning functions.
+//!
+//! A third way to reach a client with nothing readable is to build an error and give it NO `data` at all:
+//! `acp::Error::method_not_found()` answers `data: null`, which a client that renders only object-shaped `data`
+//! shows as a blank. Mutating `err.message` in place has the same effect and hides from both scans above,
+//! because no `.data(` is ever written. The third scan rejects both: in non-test shell source an
+//! `acp::Error::<ctor>(..)` must continue into `.data(..)` (or merely read `.code`), and `message` is never
+//! assigned in place. Build the error with a `crate::acp_error` constructor instead.
 
 use std::path::{Path, PathBuf};
 
@@ -444,10 +451,12 @@ fn offenders(rel: &str, src: &str) -> Vec<String> {
             found.push(site(pos, "`.data(..)` argument is not a typed helper"));
         }
     }
+    let mut banned_sites = Vec::new();
     for banned in ["into_internal_error(", "resource_not_found(Some"] {
         let mut from = 0;
         while let Some(pos) = find(&code, banned, from) {
             from = pos + banned.len();
+            banned_sites.push(pos);
             found.push(site(pos, "schema constructor builds untyped `data`"));
         }
     }
@@ -472,6 +481,82 @@ fn offenders(rel: &str, src: &str) -> Vec<String> {
                     &format!("`?` converts {source} implicitly into a bare-string `data`"),
                 ));
             }
+        }
+    }
+    // Third scan: an `acp::Error` that is built and never given `data`. Every `crate::acp_error`
+    // constructor takes the message and builds the typed object, so a bare schema-crate constructor
+    // here means the reply goes out as `data: null` — nothing for a JSON client to render.
+    // `acp_error.rs` is where the typed constructors wrap the bare ones, so it is the one exemption.
+    if !rel.ends_with("acp_error.rs") {
+        let ctor = "acp::Error::";
+        let mut from = 0;
+        while let Some(pos) = find(&code, ctor, from) {
+            from = pos + ctor.len();
+            let mut j = from;
+            while j < code.len() && is_ident(code[j]) {
+                j += 1;
+            }
+            // Only a call builds an error; a bare path (a `use`, an associated constant) does not
+            if code.get(j) != Some(&'(') {
+                continue;
+            }
+            let mut depth = 0i32;
+            while j < code.len() {
+                match code[j] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            while j < code.len() && code[j].is_whitespace() {
+                j += 1;
+            }
+            let tail: String = code[j..code.len().min(j + ".data(".len())].iter().collect();
+            // `.data(..)` is the first scan's business; `.code` only reads the JSON-RPC class back
+            if tail.starts_with(".data(") || tail.starts_with(".code") {
+                continue;
+            }
+            // Already named by the banned-constructor scan above; one site, one reason
+            if banned_sites.contains(&from) {
+                continue;
+            }
+            // `crate::acp_error::typed(acp::Error::x(), ..)` hands the bare error straight to a typed helper
+            let mut k = pos;
+            while k > 0 && code[k - 1].is_whitespace() {
+                k -= 1;
+            }
+            let typed_call = "typed(";
+            if k >= typed_call.len()
+                && code[k - typed_call.len()..k].iter().collect::<String>() == typed_call
+            {
+                continue;
+            }
+            found.push(site(pos, "`acp::Error` built with no typed `data`"));
+        }
+    }
+    // `err.message = ..` sets the message in place, so the error keeps `data: null` and neither scan
+    // above has a `.data(` to look at. (`fuigo-shell` has no other type with a writable `message`.)
+    let mut from = 0;
+    while let Some(pos) = find(&code, ".message", from) {
+        from = pos + ".message".len();
+        let mut j = from;
+        while j < code.len() && code[j].is_whitespace() {
+            j += 1;
+        }
+        // `=` alone is the assignment; `==` is a comparison and `=>` is a match arm after one
+        let next = code.get(j + 1);
+        if code.get(j) == Some(&'=') && next != Some(&'=') && next != Some(&'>') {
+            found.push(site(
+                pos,
+                "`message` assigned in place, so the error keeps untyped `data`",
+            ));
         }
     }
     found.extend(implicit);
@@ -573,4 +658,39 @@ mod tests { fn t() { let _ = acp::Error::internal_error().data("test only"); } }
         .map(|f| f.split(": ").next().unwrap())
         .collect();
     assert_eq!(lines, ["x.rs:2", "x.rs:7", "x.rs:8"], "{found:#?}");
+}
+
+/// An `acp::Error` with no `data` at all reaches a client as `data: null`, which is exactly as blank as
+/// a bare string — the class this release exists to kill. The scanner must see a constructor that never
+/// continues into `.data(..)`, and the in-place `err.message = ..` shape that writes no `.data(` anywhere.
+#[test]
+fn the_scanner_flags_errors_built_without_any_data() {
+    let src = r##"
+fn a() -> Result<(), acp::Error> { Err(acp::Error::method_not_found()) }
+fn b() -> Result<(), acp::Error> { Err(crate::acp_error::method_not_found("no such method")) }
+fn c() -> Result<(), acp::Error> { Err(acp::Error::internal_error().data(crate::acp_error::error_data(K, "ok"))) }
+fn d(e: &E) -> acp::Error { let mut err = acp::Error::auth_required(); err.message = e.to_string(); err }
+fn f(e: &acp::Error) -> bool { e.code == acp::Error::method_not_found().code }
+fn g() -> acp::Error { crate::acp_error::typed(acp::Error::internal_error(), K, "ok") }
+fn h(e: &acp::Error, d: &str) -> String { match Some(d) { Some(detail) if detail == e.message => detail.into(), _ => String::new() } }
+"##;
+    let found = offenders("x.rs", src);
+    let lines: Vec<&str> = found
+        .iter()
+        .map(|f| f.split(": ").next().unwrap())
+        .collect();
+    // line 2: the bare constructor; line 5 twice: the constructor and the in-place message write
+    assert_eq!(lines, ["x.rs:2", "x.rs:5", "x.rs:5"], "{found:#?}");
+}
+
+/// The exemption is by file, so the typed constructors themselves may wrap the bare schema ones.
+#[test]
+fn the_no_data_scan_exempts_the_typed_constructor_module() {
+    let src = "pub fn method_not_found(m: impl Into<String>) -> acp::Error { typed(acp::Error::method_not_found(), K, m) }\n";
+    assert!(offenders("acp_error.rs", src).is_empty());
+    assert_eq!(
+        offenders("extensions/x.rs", src).len(),
+        0,
+        "the `typed(..)` argument is exempt everywhere"
+    );
 }
