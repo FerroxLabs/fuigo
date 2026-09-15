@@ -478,6 +478,8 @@ async fn apply_retry_decision(
     } else {
         retry_policy.rate_limit_retry_threshold
     };
+    // Empty responses run on a lower cap; applying it here keeps `Retrying` events and the exhaustion span honest about the real budget
+    let max_retries = retry_mod::effective_max_retries(err, max_retries);
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
 
     // Connection-reset / broken-pipe on body upload often means nginx rejected an oversized payload before responding 413

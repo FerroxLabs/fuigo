@@ -456,6 +456,7 @@ impl SamplingError {
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
+            // Retryable on a low cap the sampler applies (`fuigo_sampler::effective_max_retries`): one resend when reasoning-only, two when fully empty, 2 s apart
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
