@@ -3,8 +3,10 @@
 //! Windows has no kernel parent-death signal, so the binding is a watcher:
 //! find the parent's pid ([`CreateToolhelp32Snapshot`]), open a waitable
 //! handle to it, and park a thread on that handle. When the parent exits the
-//! thread reaps [`crate::global_process_scope`] (what fuigo's own SIGTERM
-//! handler does first on Linux) and terminates this process with
+//! thread runs the hook registered with [`crate::set_parent_death_hook`] for
+//! at most [`crate::PARENT_DEATH_HOOK_BOUND`] (the binary's log line and
+//! telemetry flush), reaps [`crate::global_process_scope`] (what fuigo's own
+//! SIGTERM handler does on Linux) and terminates this process with
 //! [`PARENT_DEATH_EXIT_CODE`]. Termination closes every handle the process
 //! holds, so each [`crate::ProcessGroup`] Job Object
 //! (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) takes its child tree down with it.
@@ -83,6 +85,8 @@ fn watch(parent: OwnedHandle) {
         // WAIT_FAILED: the binding is lost; stdin EOF remains the cleanup.
         return;
     }
+    // Record and flush first (bounded), then reap owned trees and exit.
+    crate::run_parent_death_hook();
     crate::global_process_scope().kill_all();
     // SAFETY: terminating the current process; the handle needs no closing.
     let _ = unsafe { TerminateProcess(GetCurrentProcess(), PARENT_DEATH_EXIT_CODE) };
