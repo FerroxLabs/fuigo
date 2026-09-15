@@ -13,19 +13,66 @@ jobs:
       matrix:
         runner: [windows-latest, windows-11-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # A cold fuigo-shell debug test build dominates; the tty-utils suite runs first.
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel; this only guarantees rustup exists.
       - uses: dtolnay/rust-toolchain@stable
-      - name: Existing native attached-child termination test
+      - name: Show the pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain
+      # aws-lc-rs (a fuigo-shell dependency) builds C with cmake.
+      - name: Assert cmake
+        shell: bash
+        run: |
+          command -v cmake || {
+            echo "::error::cmake missing on ${{ matrix.runner }} -- the image changed; add an install step"; exit 1; }
+          cmake --version | head -1
+      # fuigo-tools-api's build.rs needs protoc; same pin and digest as release.yml.
+      - name: Install protoc 29.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=29.3
+          sha=57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383
+          curl -fsSL -o protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v$V/protoc-$V-win64.zip"
+          echo "$sha  protoc.zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/protoc"
+          powershell -NoProfile -Command \
+            "Expand-Archive -Path protoc.zip -DestinationPath '$RUNNER_TEMP/protoc' -Force"
+          rm -f protoc.zip
+          echo "PROTOC=$(cygpath -w "$RUNNER_TEMP/protoc/bin/protoc.exe")" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/protoc/bin/protoc.exe" --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-process-check-${{ matrix.runner }}
+          cache-on-failure: true
+      # The whole tty-utils lib suite: attached-child termination, the
+      # parent-death watcher (early-fire guard, hook, hung-hook bound) and the
+      # creation-flag values.
+      - name: fuigo-tty-utils lib suite
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p process-receipts
-          cargo test --locked -p fuigo-tty-utils --lib process_group_kill_terminates_attached_child -- --nocapture 2>&1 | tee process-receipts/result.log
-          grep -F '1 passed; 0 failed' process-receipts/result.log
+          cargo test --locked -p fuigo-tty-utils --lib 2>&1 | tee process-receipts/tty-utils.log
+          grep -E '^test result: ok\. [0-9]+ passed; 0 failed' process-receipts/tty-utils.log
+      # The leader spawn tests (creation flags, and a probe spawned through the
+      # real leader spawn path that must get its own windowless console) plus
+      # the named-pipe transport tests.
+      - name: fuigo-shell leader spawn and transport tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p process-receipts
+          cargo test --locked -p fuigo-shell --lib -- leader::tests::leader_spawn leader::transport:: 2>&1 | tee process-receipts/fuigo-shell-leader.log
+          grep -E '^test result: ok\. [0-9]+ passed; 0 failed' process-receipts/fuigo-shell-leader.log
+          grep -F 'leader::tests::leader_spawn_gets_its_own_windowless_console ... ok' process-receipts/fuigo-shell-leader.log
+          grep -F 'leader::tests::leader_spawn_flags_match_the_windows_crate ... ok' process-receipts/fuigo-shell-leader.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
