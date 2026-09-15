@@ -533,7 +533,17 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
 /// **Opt-in.** Only call from entrypoints that are useless without the
 /// process that spawned them (e.g. stdio transports over inherited pipes).
 /// Never from daemons designed to outlive their spawner.
+///
+/// **Escape hatch.** [`PARENT_DEATH_DISABLE_ENV`] turns the binding off on
+/// both armed platforms; the call then arms nothing and returns `Ok(())`.
 pub fn kill_current_process_on_parent_death() -> io::Result<()> {
+    #[cfg(any(target_os = "linux", windows))]
+    if parent_death_watch_disabled() {
+        // Opted out: leave the process on its previous lifetime semantics
+        // (stdin EOF), exactly as on macOS. Not an error — the caller asked
+        // for it — so callers do not log it as a failed arm.
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     {
         // SAFETY: prctl(PR_SET_PDEATHSIG, …) only sets the calling process's
@@ -545,6 +555,40 @@ pub fn kill_current_process_on_parent_death() -> io::Result<()> {
     #[cfg(windows)]
     parent_death_windows::arm()?;
     Ok(())
+}
+
+/// Env var that turns the parent-death binding armed by
+/// [`kill_current_process_on_parent_death`] off, on every platform that has
+/// one (Linux `PR_SET_PDEATHSIG`, the Windows watcher). Follows the repo's
+/// `FUIGO_DISABLE_*` convention: any value except the falsy spellings (`0`,
+/// `false`, `off`, `no`, empty) disables the binding; unset leaves it on.
+///
+/// The escape hatch exists because the binding kills this process the moment
+/// its spawner exits. That is what fuigo wants for a stdio agent whose client
+/// is gone, but a wrapper that launches the agent and returns straight away is
+/// a legitimate topology where the agent should survive on stdin-EOF cleanup
+/// instead, and there is otherwise no way back short of downgrading.
+pub const PARENT_DEATH_DISABLE_ENV: &str = "FUIGO_DISABLE_PARENT_DEATH_WATCH";
+
+/// Whether [`PARENT_DEATH_DISABLE_ENV`] is set to a value that disables the
+/// parent-death binding.
+#[cfg(any(target_os = "linux", windows))]
+fn parent_death_watch_disabled() -> bool {
+    parent_death_watch_disabled_by(std::env::var_os(PARENT_DEATH_DISABLE_ENV).as_deref())
+}
+
+/// The [`PARENT_DEATH_DISABLE_ENV`] decision for one raw value, split out so it
+/// is testable without mutating this process's environment.
+#[cfg(any(target_os = "linux", windows, test))]
+fn parent_death_watch_disabled_by(value: Option<&std::ffi::OsStr>) -> bool {
+    // Same truthiness as every other FUIGO_DISABLE_* flag: everything except
+    // the common falsy spellings turns the flag on.
+    value.is_some_and(|value| {
+        !matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        )
+    })
 }
 
 /// Upper bound on how long the hook registered with [`set_parent_death_hook`]
@@ -2105,6 +2149,29 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(30));
     }
 
+    /// The escape hatch reads like every other `FUIGO_DISABLE_*` flag: unset or
+    /// a falsy spelling leaves the parent-death binding armed.
+    #[test]
+    fn the_parent_death_escape_hatch_follows_the_fuigo_env_convention() {
+        use std::ffi::OsStr;
+        assert!(
+            !parent_death_watch_disabled_by(None),
+            "{PARENT_DEATH_DISABLE_ENV} unset must leave the binding armed"
+        );
+        for off in ["", " ", "0", "false", "off", "no", "  FALSE  "] {
+            assert!(
+                !parent_death_watch_disabled_by(Some(OsStr::new(off))),
+                "{PARENT_DEATH_DISABLE_ENV}={off:?} must leave the binding armed"
+            );
+        }
+        for on in ["1", "true", "yes", "on", "enabled"] {
+            assert!(
+                parent_death_watch_disabled_by(Some(OsStr::new(on))),
+                "{PARENT_DEATH_DISABLE_ENV}={on:?} must disable the binding"
+            );
+        }
+    }
+
     #[test]
     fn a_parent_death_hook_that_returns_runs_to_completion() {
         assert!(
@@ -2188,7 +2255,7 @@ mod tests {
     }
 
     /// Re-exec this test binary as a run of exactly the test `name`.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn reexec_single_test(name: &str, env: &str, value: &std::ffi::OsStr) -> std::process::Command {
         let exe = std::env::current_exe().expect("current_exe");
         let mut cmd = std::process::Command::new(exe);
@@ -2286,7 +2353,7 @@ mod tests {
     /// plus [`PARENT_DEATH_HOOK_BOUND`] when `hook` names one, so no early fire
     /// can hide behind the time the hook is allowed to take.
     #[cfg(windows)]
-    fn run_parent_death_scenario(hook: Option<&str>) -> ParentDeathOutcome {
+    fn run_parent_death_scenario(hook: Option<&str>, disable_watch: bool) -> ParentDeathOutcome {
         use std::io::BufRead as _;
         use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
         use windows::Win32::System::Threading::{
@@ -2311,6 +2378,12 @@ mod tests {
         match hook {
             Some(hook) => cmd.env(PARENT_DEATH_HOOK_ENV, hook),
             None => cmd.env_remove(PARENT_DEATH_HOOK_ENV),
+        };
+        // Inherited by the grandchild the intermediate spawns, which is the
+        // process that arms; the driver's own environment is never touched.
+        match disable_watch {
+            true => cmd.env(PARENT_DEATH_DISABLE_ENV, "1"),
+            false => cmd.env_remove(PARENT_DEATH_DISABLE_ENV),
         };
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -2415,7 +2488,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn current_process_dies_when_its_parent_exits_on_windows() {
-        let outcome = run_parent_death_scenario(None);
+        let outcome = run_parent_death_scenario(None, false);
         let code = outcome.exit_code.unwrap_or_else(|| {
             panic!(
                 "grandchild was still running 20 s after its parent exited: the current \
@@ -2433,7 +2506,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn parent_death_hook_runs_before_termination_on_windows() {
-        let outcome = run_parent_death_scenario(Some("record"));
+        let outcome = run_parent_death_scenario(Some("record"), false);
         assert_eq!(
             outcome.hook_marker.as_deref(),
             Some("hook ran"),
@@ -2447,7 +2520,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_hung_parent_death_hook_cannot_block_termination_on_windows() {
-        let outcome = run_parent_death_scenario(Some("hang"));
+        let outcome = run_parent_death_scenario(Some("hang"), false);
         assert_eq!(
             outcome.hook_marker.as_deref(),
             Some("hook hung"),
@@ -2466,6 +2539,23 @@ mod tests {
             "termination took {:?} after the parent exited, past the {PARENT_DEATH_HOOK_BOUND:?} \
              hook bound (+{slack:?} slack)",
             outcome.after_parent_exit
+        );
+    }
+
+    /// The escape hatch: with [`PARENT_DEATH_DISABLE_ENV`] set, an armed
+    /// process keeps running after its parent exits — the pre-1.0.18 Windows
+    /// behaviour, for spawners that legitimately return before their agent is
+    /// done (stdin EOF stays the cleanup).
+    #[cfg(windows)]
+    #[test]
+    fn a_disabled_parent_death_watch_leaves_the_process_alive_on_windows() {
+        let outcome = run_parent_death_scenario(None, true);
+        assert_eq!(
+            outcome.exit_code, None,
+            "with {PARENT_DEATH_DISABLE_ENV} set the process was still torn down \
+             when its parent exited (exit code {:?}); the escape hatch is the only \
+             way back to the pre-watcher behaviour short of downgrading",
+            outcome.exit_code
         );
     }
 
@@ -2704,6 +2794,95 @@ mod tests {
             outcome.arm.starts_with("err:"),
             "arming under a gone parent pid returned {:?}, not an error",
             outcome.arm
+        );
+    }
+
+    // ── the parent-death escape hatch (Linux) ─────────────────────
+    //
+    // The Linux half of the same switch: with PARENT_DEATH_DISABLE_ENV set,
+    // `kill_current_process_on_parent_death` must arm no `PR_SET_PDEATHSIG`.
+    // It runs in a re-exec'd child so the driver neither arms a parent-death
+    // signal on itself nor mutates its own environment.
+
+    /// Env marker (value: the report path) for the escape-hatch child.
+    #[cfg(target_os = "linux")]
+    const DISABLE_WATCH_CHILD_ENV: &str = "__FUIGO_TTY_UTILS_DISABLE_WATCH_CHILD";
+
+    /// Child: arm the binding, then report what `PR_GET_PDEATHSIG` shows.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disable_watch_child_entry() {
+        let Some(report) = std::env::var_os(DISABLE_WATCH_CHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd child
+        };
+        let armed = match kill_current_process_on_parent_death() {
+            Ok(()) => "ok".to_owned(),
+            Err(error) => format!("err: {error}"),
+        };
+        let mut signal: libc::c_int = -1;
+        // SAFETY: PR_GET_PDEATHSIG writes one c_int through the pointer given.
+        let rc = unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &raw mut signal) };
+        std::fs::write(report, format!("arm={armed} rc={rc} pdeathsig={signal}"))
+            .expect("write the pdeathsig report");
+    }
+
+    /// Run the escape-hatch child with [`PARENT_DEATH_DISABLE_ENV`] set or
+    /// unset, and return what it reported.
+    #[cfg(target_os = "linux")]
+    fn run_disable_watch_scenario(disable_watch: bool) -> String {
+        let report = std::env::temp_dir().join(format!(
+            "fuigo-disable-watch-{}-{disable_watch}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut cmd = reexec_single_test(
+            "tests::disable_watch_child_entry",
+            DISABLE_WATCH_CHILD_ENV,
+            report.as_os_str(),
+        );
+        match disable_watch {
+            true => cmd.env(PARENT_DEATH_DISABLE_ENV, "1"),
+            false => cmd.env_remove(PARENT_DEATH_DISABLE_ENV),
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let status = cmd.status().expect("run the escape-hatch child");
+        assert!(status.success(), "escape-hatch child failed: {status}");
+        let reported = std::fs::read_to_string(&report).expect("read the pdeathsig report");
+        let _ = std::fs::remove_file(&report);
+        reported
+    }
+
+    /// Default: the binding arms, so the kernel reports SIGTERM as this
+    /// process's parent-death signal.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_parent_death_watch_is_armed_by_default_on_linux() {
+        let report = run_disable_watch_scenario(false);
+        assert!(
+            report.ends_with(&format!("pdeathsig={}", libc::SIGTERM)),
+            "with {PARENT_DEATH_DISABLE_ENV} unset the binding did not arm SIGTERM: {report:?}"
+        );
+    }
+
+    /// The escape hatch: nothing is armed, and the call still succeeds so the
+    /// caller does not log an opted-out binding as a failure.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_disabled_parent_death_watch_arms_nothing_on_linux() {
+        let report = run_disable_watch_scenario(true);
+        assert!(
+            report.starts_with("arm=ok"),
+            "opting out must not be reported as a failed arm: {report:?}"
+        );
+        assert!(
+            report.ends_with("pdeathsig=0"),
+            "with {PARENT_DEATH_DISABLE_ENV} set the binding still armed a \
+             parent-death signal: {report:?}"
         );
     }
 }

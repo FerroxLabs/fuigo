@@ -609,6 +609,7 @@ Key environment variables that affect headless mode:
 | `FUIGO_HEADLESS_LIFECYCLE_TIMEOUT_SECS` | Cap on the `initialize`/`authenticate` handshakes, in whole seconds (default `120`). `0` removes the cap; empty or unparsable keeps the default. Headless only. See [Run timeout](#run-timeout) |
 | `FUIGO_HOME`                    | Override config directory (default: `~/.fuigo`)                |
 | `FUIGO_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
+| `FUIGO_DISABLE_PARENT_DEATH_WATCH` | Disable the Linux/Windows binding that ends a stdio agent when the process that started it exits. See [Parent-Process Binding](#parent-process-binding) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
 
 For CI environments without browser access, set `FUIGO_API_KEY` with an API key from [console.x.ai](https://console.x.ai):
@@ -627,7 +628,7 @@ fuigo -p "Run the test suite" --yolo
 | `0`  | Success. The prompt completed normally |
 | `1`  | Error. Authentication failure, network error, or runtime error |
 | `130` | Interrupted by SIGINT (Ctrl+C)                                   |
-| `143` | Terminated by SIGTERM                                            |
+| `143` | Terminated by SIGTERM, or torn down because the process that started Fuigo exited (see [Parent-Process Binding](#parent-process-binding)) |
 
 ---
 
@@ -745,6 +746,36 @@ On SIGINT/SIGTERM:
 - Session state saved up to the last completed tool call
 - File modifications by tools are **not rolled back**
 - Exit code is **130** for SIGINT (`128 + 2`) and **143** for SIGTERM (`128 + 15`); CI pipelines can distinguish these from a normal error (exit code `1`)
+- **143 has a second cause**: the process that started `fuigo agent … stdio` exited, so the
+  agent was torn down with it. See [Parent-Process Binding](#parent-process-binding) below,
+  including the environment variable that turns that off.
 - Resume: `fuigo -p "continue" --resume "<id>"` or `fuigo -p "continue" --continue`
+
+---
+
+## Parent-Process Binding
+
+A `fuigo agent … stdio` process binds its own lifetime to whatever started it, so an agent
+cannot outlive a crashed or killed client and pile up on a shared host:
+
+- **Linux**: `PR_SET_PDEATHSIG(SIGTERM)` — the kernel signals the agent when its parent dies.
+- **Windows**: a watcher thread on a handle to the parent; when the parent exits, the agent
+  flushes telemetry, terminates its own child processes and exits.
+- **macOS**: no binding (the platform has no equivalent); stdin EOF is the only cleanup.
+
+Either way the agent exits **143**, the same code as SIGTERM, and logs
+`parent process exited; terminating`. A parent that was already gone before the agent started
+does not trigger it: the binding refuses to arm, and stdin EOF remains the cleanup.
+
+**Turning it off.** Set `FUIGO_DISABLE_PARENT_DEATH_WATCH=1` to disable the binding on both
+Linux and Windows; the agent then lives until stdin closes, as it did before the Windows
+watcher existed. Use it when a launcher deliberately starts the agent and returns straight
+away, so the agent has no lasting parent. Any value except a falsy spelling (`0`, `false`,
+`off`, `no`, or empty, any case) disables it; unset leaves the binding on.
+
+```bash
+# Launcher exits immediately; the agent must survive on stdin instead.
+FUIGO_DISABLE_PARENT_DEATH_WATCH=1 fuigo agent stdio
+```
 
 See [Session Management in Headless Mode](#session-management-in-headless-mode) for details on named sessions and the `-s`/`-r`/`-c` flags.
