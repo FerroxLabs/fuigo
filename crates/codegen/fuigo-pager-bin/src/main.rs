@@ -1088,11 +1088,28 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
     // Match TUI teardown. process::exit skips Drop; detached terminal children
     // otherwise survive SIGTERM/HUP. Reap before a telemetry drain can stall.
     fuigo_tty_utils::global_process_scope().kill_all();
+    flush_telemetry();
+    std::process::exit(exit_code);
+}
+/// Drain every observability sink: Sentry, OTel, the debug firehose and the
+/// span profile.
+fn flush_telemetry() {
     fuigo_telemetry::sentry::flush_on_shutdown();
     fuigo_telemetry::otel_layer::shutdown_otel();
     fuigo_telemetry::debug_log::flush();
     finalize_span_profile();
-    std::process::exit(exit_code);
+}
+/// Unified-log line recorded when an agent's parent process exits.
+const PARENT_DEATH_LOG_LINE: &str = "parent process exited; terminating";
+/// Parent-death hook ([`fuigo_tty_utils::set_parent_death_hook`]): the Windows
+/// counterpart of the SIGTERM path above. The kernel sends no SIGTERM there, so
+/// the parent-death watcher runs this — for at most
+/// [`fuigo_tty_utils::PARENT_DEATH_HOOK_BOUND`] — before it reaps owned child
+/// trees and terminates the process.
+fn record_parent_death_and_flush_telemetry() {
+    fuigo_telemetry::unified_log::info(PARENT_DEATH_LOG_LINE, None, None);
+    tracing::info!("{PARENT_DEATH_LOG_LINE}");
+    flush_telemetry();
 }
 fn finalize_span_profile() {
     if let Some(path) = fuigo_telemetry::span_profile::finalize() {
@@ -1151,6 +1168,7 @@ async fn run_agent_command(
         }
         agent_args.no_leader = true;
     }
+    fuigo_tty_utils::set_parent_death_hook(record_parent_death_and_flush_telemetry);
     let _signal_flush = tokio::spawn(async {
         #[cfg(unix)]
         {
@@ -2725,6 +2743,20 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// On Windows the parent-death hook is the only record that an agent was
+    /// torn down because its parent exited.
+    #[test]
+    fn parent_death_hook_records_the_exit_in_the_unified_log() {
+        fuigo_telemetry::unified_log::redirect_to_temp_for_tests();
+        record_parent_death_and_flush_telemetry();
+        let log = fuigo_telemetry::unified_log::snapshot_log()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        assert!(
+            log.lines().any(|line| line.contains(PARENT_DEATH_LOG_LINE)),
+            "the parent-death hook wrote no {PARENT_DEATH_LOG_LINE:?} line; unified log: {log:?}"
+        );
+    }
     #[test]
     fn embedded_agent_commands_heal_managed_policy_before_sandboxing() {
         for args in [
