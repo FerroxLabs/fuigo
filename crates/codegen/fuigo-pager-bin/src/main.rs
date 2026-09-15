@@ -1111,6 +1111,17 @@ fn record_parent_death_and_flush_telemetry() {
     tracing::info!("{PARENT_DEATH_LOG_LINE}");
     flush_telemetry();
 }
+/// Install [`record_parent_death_and_flush_telemetry`] as this process's
+/// parent-death hook. Called from [`run_agent_command`], the only entrypoint
+/// that arms the parent-death binding.
+///
+/// Its own function so a test can pin the registration: off Windows nothing
+/// runs the hook, so deleting the call changed no other test's outcome while
+/// silently costing every Windows agent its shutdown log line and telemetry
+/// flush.
+fn install_agent_parent_death_hook() {
+    fuigo_tty_utils::set_parent_death_hook(record_parent_death_and_flush_telemetry);
+}
 fn finalize_span_profile() {
     if let Some(path) = fuigo_telemetry::span_profile::finalize() {
         eprintln!("fuigo: span profile written to {}", path.display());
@@ -1168,7 +1179,7 @@ async fn run_agent_command(
         }
         agent_args.no_leader = true;
     }
-    fuigo_tty_utils::set_parent_death_hook(record_parent_death_and_flush_telemetry);
+    install_agent_parent_death_hook();
     let _signal_flush = tokio::spawn(async {
         #[cfg(unix)]
         {
@@ -2755,6 +2766,41 @@ mod tests {
         assert!(
             log.lines().any(|line| line.contains(PARENT_DEATH_LOG_LINE)),
             "the parent-death hook wrote no {PARENT_DEATH_LOG_LINE:?} line; unified log: {log:?}"
+        );
+    }
+
+    /// Agent startup must register the parent-death hook: on Windows the
+    /// watcher runs it in place of the SIGTERM handler Linux gets, and nothing
+    /// else registers one.
+    #[test]
+    fn agent_startup_registers_the_parent_death_hook() {
+        install_agent_parent_death_hook();
+        let registered = fuigo_tty_utils::registered_parent_death_hook()
+            .expect("agent startup registered no parent-death hook");
+        assert!(
+            std::ptr::fn_addr_eq(registered, record_parent_death_and_flush_telemetry as fn()),
+            "agent startup registered some other parent-death hook, so a Windows agent \
+             would not record its parent's exit or flush telemetry"
+        );
+    }
+
+    /// …and the agent entrypoint must actually call that registration: the hook
+    /// is process-global state no other test can observe it setting.
+    #[test]
+    fn run_agent_command_installs_the_parent_death_hook() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split("async fn run_agent_command(")
+            .nth(1)
+            .expect("run_agent_command is defined in main.rs");
+        let body = body
+            .split("\n}\n")
+            .next()
+            .expect("run_agent_command's body");
+        assert!(
+            body.contains("install_agent_parent_death_hook();"),
+            "run_agent_command no longer installs the parent-death hook: a Windows agent \
+             would be terminated by the watcher with no log line and no telemetry flush"
         );
     }
     #[test]
