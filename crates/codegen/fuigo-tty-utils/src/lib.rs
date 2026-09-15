@@ -64,6 +64,11 @@ pub use process_resources::{
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};
 
+#[cfg(windows)]
+mod parent_death_windows;
+#[cfg(windows)]
+pub use parent_death_windows::PARENT_DEATH_EXIT_CODE;
+
 /// How long a shell gets to forward a hangup to its jobs before it is killed.
 pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -478,9 +483,17 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
     }
 }
 
-/// Bind the *current* process's lifetime to its parent: on Linux, arm
-/// `PR_SET_PDEATHSIG(SIGTERM)` so this process is terminated when the
-/// process that spawned it dies. No-op elsewhere.
+/// Bind the *current* process's lifetime to its parent, so this process is
+/// terminated when the process that spawned it dies. No-op on macOS.
+///
+/// - Linux: arms `PR_SET_PDEATHSIG(SIGTERM)`.
+/// - Windows (no kernel equivalent): a watcher thread waits on a handle to
+///   the parent; when the parent exits it reaps [`global_process_scope`] and
+///   terminates this process with `PARENT_DEATH_EXIT_CODE` (143, the code
+///   fuigo's SIGTERM handler exits with). Termination closes every
+///   [`ProcessGroup`] Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), so
+///   owned child trees die too. The binding does not join this process to a
+///   process-wide Job Object; see `parent_death_windows` for why.
 ///
 /// This is the child-side variant of [`kill_on_parent_death_std`] for protocol
 /// servers whose parents are not spawned from this workspace (IDE clients,
@@ -503,11 +516,13 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
 ///
 /// # Errors
 ///
-/// Returns the `prctl` errno on Linux when the arm fails; the process then
-/// keeps its previous lifetime semantics (stdin-EOF only), so callers
-/// should log the failure. This crate stays logging-free by design —
-/// surfacing the result is the observable seam. Always `Ok(())` on
-/// non-Linux platforms (no-op).
+/// Returns the `prctl` errno on Linux, or on Windows the reason the parent
+/// could not be watched (not found, not openable, already exited — its pid
+/// now names a newer process — or the watcher thread failed to start), when
+/// the arm fails; the process then keeps its previous lifetime semantics
+/// (stdin-EOF only), so callers should log the failure. This crate stays
+/// logging-free by design — surfacing the result is the observable seam.
+/// Always `Ok(())` on macOS (no-op). Idempotent on both armed platforms.
 ///
 /// **Opt-in.** Only call from entrypoints that are useless without the
 /// process that spawned them (e.g. stdio transports over inherited pipes).
@@ -521,6 +536,8 @@ pub fn kill_current_process_on_parent_death() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
+    #[cfg(windows)]
+    parent_death_windows::arm()?;
     Ok(())
 }
 
@@ -1996,5 +2013,182 @@ mod tests {
         );
         assert_eq!(win32_creation_flags::CREATE_NO_WINDOW, CREATE_NO_WINDOW.0);
         assert_eq!(win32_creation_flags::DETACHED_PROCESS, DETACHED_PROCESS.0);
+    }
+
+    // ── parent-death binding integration test (Windows) ─────────
+    //
+    // Same shape as the Linux pdeathsig tests: the test binary re-execs
+    // itself. The driver spawns `parent_death_intermediate_entry`, which
+    // spawns `parent_death_grandchild_entry`; the grandchild arms
+    // `kill_current_process_on_parent_death` on itself and sleeps. The driver
+    // lets the intermediate exit and asserts the grandchild follows it.
+
+    /// Env marker (value: the "armed" marker path) for the intermediate.
+    #[cfg(windows)]
+    const PARENT_DEATH_INTERMEDIATE_ENV: &str = "__FUIGO_TTY_UTILS_PARENT_DEATH_INTERMEDIATE";
+    /// Env marker (value: the "armed" marker path) for the grandchild.
+    #[cfg(windows)]
+    const PARENT_DEATH_GRANDCHILD_ENV: &str = "__FUIGO_TTY_UTILS_PARENT_DEATH_GRANDCHILD";
+
+    /// Re-exec this test binary as a run of exactly the test `name`.
+    #[cfg(windows)]
+    fn reexec_single_test(name: &str, env: &str, value: &std::ffi::OsStr) -> std::process::Command {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg(name)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(env, value)
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY");
+        cmd
+    }
+
+    /// Grandchild: bind to the intermediate's lifetime, record that the
+    /// binding is armed, then sleep far past any test deadline — only the
+    /// binding can end it early.
+    #[cfg(windows)]
+    #[test]
+    fn parent_death_grandchild_entry() {
+        let Some(marker) = std::env::var_os(PARENT_DEATH_GRANDCHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd grandchild
+        };
+        kill_current_process_on_parent_death().expect("arm the parent-death binding");
+        std::fs::write(&marker, b"armed").expect("write the armed marker");
+        std::thread::sleep(std::time::Duration::from_secs(300));
+    }
+
+    /// Intermediate parent: spawn the grandchild, wait until it is armed,
+    /// report its pid, then exit once the driver closes our stdin (the driver
+    /// opens the grandchild's handle first, so its pid cannot be recycled).
+    #[cfg(windows)]
+    #[test]
+    fn parent_death_intermediate_entry() {
+        use std::io::{Read as _, Write as _};
+        let Some(marker) = std::env::var_os(PARENT_DEATH_INTERMEDIATE_ENV) else {
+            return; // skip when not invoked as the re-exec'd intermediate
+        };
+        let mut cmd = reexec_single_test(
+            "tests::parent_death_grandchild_entry",
+            PARENT_DEATH_GRANDCHILD_ENV,
+            &marker,
+        );
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; the driver kills it
+        let child = cmd.spawn().expect("spawn grandchild");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !std::path::Path::new(&marker).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild never armed its parent-death binding"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        println!("grandchild:{}", child.id());
+        std::io::stdout().flush().expect("flush stdout");
+        // Do not reap: the grandchild must die only via its binding.
+        std::mem::forget(child);
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    }
+
+    /// A process that armed [`kill_current_process_on_parent_death`] must not
+    /// outlive its parent on Windows either: it exits with
+    /// `PARENT_DEATH_EXIT_CODE` (143) once the parent is gone.
+    #[cfg(windows)]
+    #[test]
+    fn current_process_dies_when_its_parent_exits_on_windows() {
+        use std::io::BufRead as _;
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        };
+
+        let marker = std::env::temp_dir().join(format!(
+            "fuigo-parent-death-{}-{}.armed",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut cmd = reexec_single_test(
+            "tests::parent_death_intermediate_entry",
+            PARENT_DEATH_INTERMEDIATE_ENV,
+            marker.as_os_str(),
+        );
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; reaped below
+        let mut intermediate = cmd.spawn().expect("spawn intermediate test process");
+
+        // Substring match: with `--nocapture` libtest prints the test header
+        // without a trailing newline, so the pid shares its line.
+        let stdout = intermediate.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut seen: Vec<String> = Vec::new();
+        let grandchild_pid: u32 = loop {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .expect("read intermediate stdout");
+            assert_ne!(
+                n, 0,
+                "intermediate exited without reporting a grandchild; stdout seen: {seen:?}"
+            );
+            if let Some(idx) = line.find("grandchild:") {
+                let digits: String = line[idx + "grandchild:".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                break digits.parse().expect("grandchild pid");
+            }
+            seen.push(line);
+        };
+
+        // SAFETY: plain FFI call; the handle is closed below.
+        let grandchild = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                grandchild_pid,
+            )
+        }
+        .expect("open the grandchild while its parent is still alive");
+
+        drop(intermediate.stdin.take()); // let the intermediate exit
+        let status = intermediate.wait().expect("reap intermediate");
+        let _ = std::fs::remove_file(&marker);
+        assert!(status.success(), "intermediate failed: {status}");
+
+        // SAFETY: `grandchild` is a valid handle opened with SYNCHRONIZE.
+        let waited = unsafe { WaitForSingleObject(grandchild, 20_000) };
+        if waited != WAIT_OBJECT_0 {
+            // SAFETY: valid handle with PROCESS_TERMINATE; closed once.
+            unsafe {
+                let _ = TerminateProcess(grandchild, 1);
+                let _ = CloseHandle(grandchild);
+            }
+            panic!(
+                "grandchild {grandchild_pid} was still running 20 s after its parent exited: \
+                 the current process is not bound to its parent's lifetime on Windows"
+            );
+        }
+        let mut code = 0u32;
+        // SAFETY: valid handle with query access; `code` is a live out-pointer.
+        let queried = unsafe { GetExitCodeProcess(grandchild, &mut code) };
+        // SAFETY: closed exactly once.
+        let _ = unsafe { CloseHandle(grandchild) };
+        queried.expect("GetExitCodeProcess");
+        assert_eq!(
+            code, PARENT_DEATH_EXIT_CODE,
+            "grandchild exited with {code}, not the parent-death exit code (128 + SIGTERM)"
+        );
     }
 }

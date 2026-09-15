@@ -233,6 +233,11 @@ pub async fn run_stdio_agent(
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
+    // Linux: PR_SET_PDEATHSIG. Windows: a parent-handle watcher that reaps the
+    // global process scope and terminates us, which also closes every owned
+    // kill-on-close Job Object (MCP/LSP servers, hooks, terminals). No
+    // process-wide Job Object: it would kill children meant to outlive the
+    // agent (the background `fuigo update` download). macOS: stdin EOF only.
     if let Err(error) = fuigo_tty_utils::kill_current_process_on_parent_death() {
         tracing::warn!(
             %error,
