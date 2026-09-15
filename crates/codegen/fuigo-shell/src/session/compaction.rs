@@ -2188,14 +2188,14 @@ impl SessionActor {
                 let span = tracing::Span::current();
                 span.record("success", false);
                 span.record("error", crate::sampling::error::acp_error_text(&e).as_str());
+                // Every compaction error carries object `data` with the typed `kind` discriminator
+                // (`compact_error_data`), so the discriminator above is the whole test. The old
+                // text match on a bare-string `data` had nothing left to read.
                 let cancelled = self.compaction.cancel.is_cancelled()
                     || matches!(
                         crate::session::helpers::session_compact::compact_error_kind(&e),
                         Some(crate::session::helpers::session_compact::CompactErrorKind::Cancelled)
-                    )
-                    || e.data.as_ref().and_then(|d| d.as_str()).is_some_and(|s| {
-                        s.contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
-                    });
+                    );
                 if !cancelled && !self.compaction.is_suppressed() {
                     self.send_fuigo_notification(FuigoSessionUpdate::AutoCompactFailed {
                         error: Self::failure_with_retry_guidance(
@@ -2244,13 +2244,7 @@ impl SessionActor {
         } else {
             "detailed"
         };
-        let error_str = error.map(|e| {
-            e.data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or("<no error data>")
-                .to_owned()
-        });
+        let error_str = error.map(compaction_artifact_error_text);
         let artifact = CompactionRequestFile {
             schema_version: 2,
             request_id,
@@ -2340,6 +2334,53 @@ impl SessionActor {
         Ok(())
     }
 }
+/// The failure text stored in a compaction request artifact.
+/// The artifact used to copy `data` verbatim, which only ever worked while `data` was a bare string;
+/// every compaction error now carries the object, so it reads the object's `message` like the rest of
+/// the shell does (`acp_error_text`) instead of recording `<no error data>` for every failure.
+fn compaction_artifact_error_text(error: &acp::Error) -> String {
+    crate::sampling::error::acp_error_message(error)
+}
+
+#[cfg(test)]
+mod artifact_error_text_tests {
+    use super::compaction_artifact_error_text;
+    use crate::session::helpers::session_compact::{
+        COMPACT_CANCELLED_MSG, CompactErrorKind, compact_error_data, compact_error_kind,
+    };
+    use agent_client_protocol as acp;
+
+    /// The offline artifact is the only record of why a compaction failed, so it must carry the reason.
+    #[test]
+    fn the_artifact_records_the_failure_message_not_a_placeholder() {
+        let err = acp::Error::internal_error().data(compact_error_data(
+            CompactErrorKind::Failed,
+            "upstream refused the summary request",
+        ));
+        assert_eq!(
+            compaction_artifact_error_text(&err),
+            "upstream refused the summary request"
+        );
+    }
+
+    /// The auto-compaction cancel check reads the typed discriminator alone. Its old third arm matched
+    /// the cancel phrase inside a bare-string `data`, a shape no compaction error has any more.
+    #[test]
+    fn a_cancelled_compaction_is_recognised_from_typed_data_alone() {
+        let err = crate::session::helpers::session_compact::CompactFailure::cancelled_error();
+        assert!(
+            err.data.as_ref().is_some_and(|d| d.is_object()),
+            "compaction `data` is an object, so a string match on it is dead: {err:?}"
+        );
+        assert_eq!(
+            compact_error_kind(&err),
+            Some(CompactErrorKind::Cancelled),
+            "{err:?}"
+        );
+        assert_eq!(compaction_artifact_error_text(&err), COMPACT_CANCELLED_MSG);
+    }
+}
+
 #[cfg(test)]
 #[path = "compaction_inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;

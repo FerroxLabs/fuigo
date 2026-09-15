@@ -790,12 +790,8 @@ impl SessionActor {
                 }
             }
             Err(e) => {
-                let detail = e
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("memory flush failed");
-                tracing::warn!(error = detail, "memory flush failed, skipping");
+                let detail = memory_flush_error_detail(&e);
+                tracing::warn!(error = %detail, "memory flush failed, skipping");
                 (format!("skipped: {detail}"), 0, 0, false, None)
             }
         };
@@ -935,5 +931,37 @@ impl SessionActor {
                 Err(format!("rewrite inference failed: {e}"))
             }
         }
+    }
+}
+
+/// Why a memory flush failed, for the warn record and the flush outcome.
+/// It used to read `data` as a string, which is a shape no shell error has carried since 1.0.18 typed
+/// every `data` as an object -- so every failure recorded the bare fallback instead of its reason.
+fn memory_flush_error_detail(err: &acp::Error) -> String {
+    crate::sampling::error::acp_error_message(err)
+}
+
+#[cfg(test)]
+mod memory_flush_error_detail_tests {
+    use super::memory_flush_error_detail;
+    use agent_client_protocol as acp;
+
+    /// The skip record is the only trace a dropped flush leaves, so it has to name the failure.
+    #[test]
+    fn a_failed_flush_records_why_not_a_placeholder() {
+        let err = crate::acp_error::internal_error("empty response from model (reasoning_only)");
+        assert_eq!(
+            memory_flush_error_detail(&err),
+            "empty response from model (reasoning_only)"
+        );
+    }
+
+    /// An error with no `data` at all still reads as words, never as an empty string.
+    #[test]
+    fn an_error_without_data_falls_back_to_its_json_rpc_message() {
+        assert_eq!(
+            memory_flush_error_detail(&acp::Error::internal_error()),
+            "Internal error"
+        );
     }
 }
