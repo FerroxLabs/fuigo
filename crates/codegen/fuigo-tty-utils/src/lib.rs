@@ -573,6 +573,21 @@ pub fn set_parent_death_hook(hook: fn()) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
 }
 
+/// The hook currently registered with [`set_parent_death_hook`], if any.
+///
+/// Test-only introspection, so a binary's own tests can pin that its
+/// production startup path registered its parent-death hook — a registration
+/// that is otherwise invisible to every test, since deleting it changes no
+/// observable behaviour off Windows. It is `pub` rather than `cfg(test)`
+/// because those tests live in other crates, which link this one without
+/// `cfg(test)`. Not part of the supported surface.
+#[doc(hidden)]
+pub fn registered_parent_death_hook() -> Option<fn()> {
+    *PARENT_DEATH_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Run the hook registered with [`set_parent_death_hook`], waiting at most
 /// [`PARENT_DEATH_HOOK_BOUND`] for it. No-op when none is registered.
 #[cfg(windows)]
