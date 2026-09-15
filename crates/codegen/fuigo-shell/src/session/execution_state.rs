@@ -825,14 +825,17 @@ impl ExecutionAdmission for Execution {
             if let Some(parent) = &self.parent_grant {
                 parent.parent.abandon(attempt_id.clone()).await?;
             }
+            // Arm the sweep the next submission runs BEFORE the durable round trip, not after:
+            // armed after, the in-process flag lags the durable `abandoned` set for the whole
+            // round trip (and stays wrong forever if the write fails), so a resubmit that
+            // sweeps inside that window skips it and leaves the attempt pending. Arming first
+            // costs at most one `Change::Read` on a sweep that turns out to have nothing to do.
+            self.abandoned_attempts
+                .store(true, std::sync::atomic::Ordering::Release);
             self.change(Change::Abandon { attempt_id })
                 .await
                 .map(|_| ())
-                .map_err(|_| -> String { "execution settlement not durable".into() })?;
-            // Arm the sweep the next submission runs; until then the attempt stays pending.
-            self.abandoned_attempts
-                .store(true, std::sync::atomic::Ordering::Release);
-            Ok(())
+                .map_err(|_| -> String { "execution settlement not durable".into() })
         })
     }
 }
@@ -1077,6 +1080,90 @@ mod tests {
             reads(&seen),
             settled,
             "the sweep is quiet again once nothing is abandoned"
+        );
+        execution.release(&session);
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// `abandon` arms the sweep BEFORE its durable round trip, not after.
+    ///
+    /// The in-process flag is what [`Execution::supersede_pending_attempts`] consults to skip
+    /// the no-op sweep. Armed only after the acknowledgment returns, it lags the durable
+    /// `abandoned` set for the whole round trip: a resubmit that sweeps inside that window
+    /// reads it disarmed, skips the sweep, and leaves the attempt pending -- the partial
+    /// receipt (and its `-32603`) the sweep exists to prevent. Nothing reaches that window
+    /// today only because every shell resubmit path happens to sleep, compact or refresh
+    /// credentials first, which is a property of four call sites, not an invariant.
+    /// Arming first costs at most one `Change::Read` on a sweep that turns out to be a no-op.
+    #[tokio::test]
+    async fn abandon_arms_the_sweep_before_its_durable_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_owned();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (in_flight_tx, in_flight_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        // A persistence actor that holds the abandon's acknowledgment until the test releases it.
+        let actor = tokio::spawn(async move {
+            let mut in_flight = Some(in_flight_tx);
+            let mut release = Some(release_rx);
+            while let Some(message) = rx.recv().await {
+                let PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } = message
+                else {
+                    panic!("unexpected fixture message");
+                };
+                if matches!(mutation.change, Change::Abandon { .. }) {
+                    if let Some(tx) = in_flight.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = release.take() {
+                        let _ = rx.await;
+                    }
+                }
+                let _ = respond_to.send(apply(&path, mutation).await);
+            }
+        });
+        let session = uuid::Uuid::new_v4().to_string();
+        let execution = Execution::open(
+            &tx,
+            &session,
+            "abandon-race",
+            "turn1",
+            9,
+            None,
+            Some(9),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        execution
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+
+        let mut abandoning = ExecutionAdmission::abandon(execution.as_ref(), attempt.clone());
+        tokio::select! {
+            biased;
+            _ = &mut abandoning => panic!("the fixture holds the acknowledgment; abandon cannot have returned"),
+            _ = in_flight_rx => {}
+        }
+        assert!(
+            execution
+                .abandoned_attempts
+                .load(std::sync::atomic::Ordering::Acquire),
+            "the sweep must be armed while the abandon's round trip is still in flight"
+        );
+        let _ = release_tx.send(());
+        abandoning.await.expect("the abandon is durable");
+        execution.supersede_pending_attempts().await.unwrap();
+        assert!(
+            execution.snapshot().await.unwrap().pending.is_empty(),
+            "the sweep still takes the abandoned attempt over"
         );
         execution.release(&session);
         drop(tx);
