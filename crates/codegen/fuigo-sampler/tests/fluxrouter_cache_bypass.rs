@@ -333,43 +333,165 @@ fn the_child_environment_keeps_the_platform_variables_a_spawn_needs() {
     );
 }
 
-/// The bypass is only as good as the run that proves it. Pin the CI line that runs this file, so
-/// deleting it fails here instead of silently leaving the regression uncovered.
+/// The cargo invocation that runs this file in CI.
+const CI_CALL: &str = "-p fuigo-sampler --test fluxrouter_cache_bypass";
+/// What a CI call site must say about itself, on the line directly above the run.
+const CI_GATE_MARK: &str = "# fluxrouter cache bypass gate:";
+
+/// The bypass is only as good as the run that proves it, and a run is only as good as the gate it sits
+/// behind. Pin both: the call site, so deleting it fails here instead of silently leaving the regression
+/// uncovered, and a comment directly above it naming WHICH gate that call site is, so the coverage a
+/// reader assumes is the coverage that exists.
+///
+/// Today there is exactly one call site and it is the RELEASE gate: `release.yml` runs on a `v*` tag push
+/// and on `workflow_dispatch`, so this file proves the bypass at release time, not on a pull request.
+/// There is no PR-level call site to pin because no PR-level workflow runs fuigo-sampler tests at all --
+/// `dispatch-policy.yml` is this repo's only `pull_request` workflow and it runs fuigo-extra-ca,
+/// ptyctl-cli, gcloud-auth, gcloud-metadata and fuigo-file-utils tests. When a PR-level run is added,
+/// this test makes it label its own gate the same way.
 #[test]
-fn ci_runs_this_integration_test() {
-    let path = repo_root().join(".github/workflows/release.yml");
-    let workflow =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+fn ci_runs_this_integration_test_and_every_call_site_names_its_gate() {
+    let dir = repo_root().join(".github/workflows");
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("workflow directory entry").path())
+        // GitHub only reads workflows sitting directly in this directory; anything else is not one.
+        .filter(|path| path.is_file())
+        .collect();
+    entries.sort();
+    let mut sites: Vec<String> = Vec::new();
+    for path in entries {
+        let workflow = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let lines: Vec<&str> = workflow.lines().collect();
+        for (at, line) in lines.iter().enumerate() {
+            if !line.contains(CI_CALL) {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            // The comment block directly above the run, innermost line first.
+            let above: Vec<&str> = lines[..at]
+                .iter()
+                .rev()
+                .map(|line| line.trim())
+                .take_while(|line| line.starts_with('#'))
+                .collect();
+            assert!(
+                above.iter().any(|line| line.starts_with(CI_GATE_MARK)),
+                "{name}:{} runs this test but no comment above it begins {CI_GATE_MARK:?}, so nothing \
+                 says which gate this run is; the comment block reads {above:?}",
+                at + 1
+            );
+            sites.push(name.into_owned());
+        }
+    }
     assert!(
-        workflow.contains("-p fuigo-sampler --test fluxrouter_cache_bypass"),
-        "no CI job runs `cargo test -p fuigo-sampler --test fluxrouter_cache_bypass`, so nothing \
-         proves the FluxRouter cache bypass is still sent"
+        sites.iter().any(|name| name == "release.yml"),
+        "no release-gate job runs `cargo test {CI_CALL}`, so nothing proves the FluxRouter cache bypass \
+         is still sent at release time; call sites found: {sites:?}"
     );
 }
 
-/// Flux Router honours the body `cache` field on Chat Completions only: its Responses and Anthropic
-/// Messages surfaces rebuild the upstream request from a fixed field list and drop it. The user guide
-/// has to say that, not promise an opt-out everywhere.
-#[test]
-fn the_user_guide_states_the_bypass_surface_by_surface() {
+/// The cache opt-out paragraph of the user guide, as the single Markdown line it is written on.
+fn cache_paragraph() -> String {
     let path = repo_root().join("crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md");
     let guide =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let paragraph = guide
+    guide
         .lines()
         .find(|line| line.contains(r#""cache": {"no-cache": true, "no-store": true}"#))
-        .expect("the user guide describes the cache opt-out");
-    for claim in [
-        "/v1/chat/completions",
-        "honours",
-        "/v1/responses",
-        "/anthropic/v1/messages",
-        "drop",
+        .expect("the user guide describes the cache opt-out")
+        .to_owned()
+}
+
+/// Sentences of the paragraph. A surface and the verdict it is given have to share one.
+fn sentences(paragraph: &str) -> Vec<&str> {
+    paragraph.split(". ").collect()
+}
+
+/// Does `text` name `surface` as a path in its own right? `/v1/messages` also occurs inside
+/// `/anthropic/v1/messages`, and those are two different mounts with two different names.
+fn names_surface(text: &str, surface: &str) -> bool {
+    text.match_indices(surface).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|previous| !previous.is_ascii_alphanumeric() && previous != '/')
+    })
+}
+
+/// Flux Router honours the body `cache` field on Chat Completions only: its Responses surface and both of
+/// its Anthropic Messages mounts -- the bare `/v1/messages` that the default base URL reaches with
+/// `api_backend = "messages"`, and the prefixed `/anthropic/v1/messages` -- rebuild the upstream request
+/// from a fixed field list and drop it. The guide has to pair each surface with ITS OWN verdict: asserting
+/// that the words appear somewhere in the paragraph would pass just as happily on a rewrite that swapped
+/// which surface honours the field, which is the one error a reader could not detect.
+#[test]
+fn the_user_guide_pairs_each_flux_router_surface_with_its_own_verdict() {
+    let paragraph = cache_paragraph();
+    let sentences = sentences(&paragraph);
+    for (surface, verdict, contrary) in [
+        ("/v1/chat/completions", "honour", "drop"),
+        ("/v1/responses", "drop", "honour"),
+        ("/v1/messages", "drop", "honour"),
+        ("/anthropic/v1/messages", "drop", "honour"),
     ] {
+        let naming: Vec<&&str> = sentences
+            .iter()
+            .filter(|sentence| names_surface(sentence, surface))
+            .collect();
         assert!(
-            paragraph.contains(claim),
-            "the cache opt-out paragraph never says {claim:?}, so it does not state what is true \
-             per Flux Router surface:\n{paragraph}"
+            !naming.is_empty(),
+            "the cache opt-out paragraph never names the {surface} surface:\n{paragraph}"
+        );
+        for sentence in naming {
+            assert!(
+                sentence.contains(verdict),
+                "the sentence naming {surface} never says what Flux Router does with the field there \
+                 ({verdict:?}):\n{sentence}"
+            );
+            assert!(
+                !sentence.contains(contrary),
+                "the sentence naming {surface} gives it the opposite verdict ({contrary:?}):\n{sentence}"
+            );
+        }
+    }
+}
+
+/// `api.fluxrouter.ai` keeping agent traffic out of its own cache is a property of a DEPLOYMENT, not of
+/// the protocol: it becomes true when the router fix ships, which is why that deploy happens before Fuigo
+/// 1.0.18 publishes, and it is never a promise about a Flux Router the reader runs themselves. This guide
+/// ships inside the binary and is read long after today, so the sentence has to be pinned in time and
+/// scoped to that host rather than written as a standing present-tense fact.
+#[test]
+fn the_user_guide_pins_the_router_cache_claim_to_a_deployment() {
+    let paragraph = cache_paragraph();
+    let claim = sentences(&paragraph)
+        .into_iter()
+        .find(|sentence| sentence.contains("agent traffic"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the paragraph never says why the opt-out is safe on the surfaces that drop the \
+                 field:\n{paragraph}"
+            )
+        });
+    assert!(
+        claim.contains("api.fluxrouter.ai"),
+        "the router-cache claim does not say which Flux Router it is about, so it reads as a promise \
+         about every router a user might point at:\n{claim}"
+    );
+    assert!(
+        ["deployment", "deployed", "release"]
+            .iter()
+            .any(|when| claim.contains(when)),
+        "the router-cache claim is stated as a standing fact instead of being tied to the router release \
+         that makes it true:\n{claim}"
+    );
+    for scope in ["self-hosted", "older"] {
+        assert!(
+            paragraph.contains(scope),
+            "the paragraph never says {scope:?}, so it does not tell the reader that another Flux Router \
+             may still replay a retry:\n{paragraph}"
         );
     }
 }
