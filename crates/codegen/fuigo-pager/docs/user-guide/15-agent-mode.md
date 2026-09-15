@@ -166,7 +166,7 @@ New values can be added in later releases, so treat an unknown `error_kind` as a
 
 Two notes on the class:
 
-- A `fuigo/*` extension method this build does not implement answers `-32601` with the object above, naming the method in `data.message`. A request whose method the protocol layer itself rejects before the agent sees it -- an unknown top-level JSON-RPC method, one that is not an extension call -- still comes back as `-32601 Method not found` with no `data`, because no part of the agent runs.
+- A `fuigo/*` extension method this build does not implement answers `-32601` with the object above, naming the method in `data.message` exactly as you sent it, `_` prefix included (`unknown ACP extension method: _fuigo/skills/whatever`), so you can match it against your own request string. Before 1.0.18 the name came back without the `_`. A request whose method the protocol layer itself rejects before the agent sees it -- an unknown top-level JSON-RPC method, one that is not an extension call -- still comes back as `-32601 Method not found` with no `data`, because no part of the agent runs.
 - Since 1.0.18 a failure to serialize the agent's OWN data answers `-32603` (`internal`) where it used to answer `-32602` (`invalid params`). The parameters the client sent were fine; the fault was inside the agent, so the class now says so. Five replies changed class, in two files: the agent's tool input while a prompt is running (`fuigo-shell` `session/acp_session_impl/tool_calls.rs`, two sites) and the `fuigo/commands/list` response (`fuigo-shell` `extensions/session_admin.rs`, three sites). Nothing the client sends can reach them; a malformed request still answers `-32602`.
 
 A prompt that failed on an empty model response:
