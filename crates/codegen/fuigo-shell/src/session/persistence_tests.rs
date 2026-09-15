@@ -2106,7 +2106,8 @@ async fn disk_full_failure_is_mirrored_on_the_standard_rail() {
     assert_eq!(update["sessionUpdate"], "agent_thought_chunk");
     assert_eq!(
         update["content"]["text"],
-        format!("The model request failed: {DISK_FULL_USER_MESSAGE}\n\n")
+        format!("Fuigo could not save this session: {DISK_FULL_USER_MESSAGE}\n\n"),
+        "the one failure on this rail that is not the model's names its own subject"
     );
     assert_eq!(
         update["_meta"][RETRY_STATUS_META_KEY],

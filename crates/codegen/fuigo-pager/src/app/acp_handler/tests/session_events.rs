@@ -160,6 +160,7 @@
                 attempts: 3,
                 reason: "rate limited".into(),
                 is_rate_limited: true,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -177,6 +178,7 @@
             attempts: 3,
             reason: "".into(),
             is_rate_limited: true,
+            error_type: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -199,6 +201,7 @@
             attempts: 3,
             reason: reason.clone(),
             is_rate_limited: true,
+            error_type: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -225,6 +228,7 @@
                      https://grok.com/supergrok"
                 .into(),
             is_rate_limited: true,
+            error_type: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -249,6 +253,7 @@
                 attempts: 3,
                 reason: "server error".into(),
                 is_rate_limited: false,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -279,6 +284,7 @@
                          subscription:free-usage-exhausted: You have used all your free usage."
                     .into(),
                 is_rate_limited: true,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -339,6 +345,7 @@
                 attempts: 3,
                 reason: "status 403: run out of credits".into(),
                 is_rate_limited: false,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);

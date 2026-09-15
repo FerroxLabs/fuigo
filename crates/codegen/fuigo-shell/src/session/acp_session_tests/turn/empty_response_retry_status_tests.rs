@@ -185,9 +185,13 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                 reason: reason.to_string(),
                 error_type: Some("empty_response".to_string()),
             };
-            let failed = RetryState::Failed {
-                error_type: "empty_response".to_string(),
-                message: reason.to_string(),
+            // Spending the cap is an exhaustion, like the rate-limit path: the user watched
+            // "(1/3)" and "(2/3)" climb, so the closing line names the attempts it took.
+            let exhausted = RetryState::Exhausted {
+                attempts: 3,
+                reason: reason.to_string(),
+                is_rate_limited: false,
+                error_type: Some("empty_response".to_string()),
             };
             assert_eq!(
                 frames,
@@ -202,13 +206,13 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                         "\n\nRetrying the model (2/3): empty response from model (reasoning_only)\n\n",
                         &retrying(2),
                     ),
-                    Frame::Fuigo(failed.clone()),
+                    Frame::Fuigo(exhausted.clone()),
                     mirror(
-                        "\n\nThe model request failed: empty response from model (reasoning_only)\n\n",
-                        &failed,
+                        "\n\nThe model request failed after 3 attempts: empty response from model (reasoning_only)\n\n",
+                        &exhausted,
                     ),
                 ],
-                "both resends on both rails, then one failure on both rails, each mirror an agent_thought_chunk \
+                "both resends on both rails, then one exhaustion on both rails, each mirror an agent_thought_chunk \
                  opening its own paragraph after the model's streamed reasoning \
                  ({submissions} provider submissions, {elapsed:?} virtual)"
             );
@@ -564,12 +568,16 @@ async fn open_execution_scope(
     .expect("execution scope is durable")
 }
 
-/// The execution-scope tests must leave the registry slot every other test actor shares free.
+/// The execution-scope tests of THIS file must leave the registry slot every other test actor shares free.
 ///
 /// `Execution::current(session_id)` is how a side call (a title, a recap) finds the live
 /// execution, and every test actor answers to `test-actor`: an execution registered under
 /// that id is visible to the ~12 recap and summary tests for as long as it lives. A mutex
 /// held by the execution tests serialises them against each other and against nothing else.
+///
+/// The assertion is scoped to this file's own fixture rather than to the slot being empty:
+/// a process-global absence would turn some future test's legitimate registration under
+/// `test-actor` into a failure here instead of in the test that made it.
 #[test]
 fn an_execution_scope_test_keeps_the_shared_session_slot_free() {
     on_session_stack(|| {
@@ -588,10 +596,14 @@ fn an_execution_scope_test_keeps_the_shared_session_slot_free() {
             .await;
             let session = actor.session_info.id.to_string();
             let execution = open_execution(&actor, "req-exec-scope-isolation").await;
-            assert!(
-                crate::session::execution_state::Execution::current("test-actor").is_none(),
-                "an execution test must not claim the registry slot every other test actor shares"
-            );
+            if let Some(shared) = crate::session::execution_state::Execution::current("test-actor")
+            {
+                assert!(
+                    !Arc::ptr_eq(&shared, &execution),
+                    "this file's execution-scope fixture claimed the registry slot every other \
+                     test actor shares (`test-actor`); it must open under a session id of its own"
+                );
+            }
             assert!(
                 crate::session::execution_state::Execution::current(&session).is_some(),
                 "it registers under a session id of its own instead"
@@ -895,7 +907,7 @@ fn a_mirror_after_reasoning_starts_its_own_paragraph() {
             assert_eq!(
                 thoughts,
                 format!(
-                    "{reasoning}{}{reasoning}{}{reasoning}\n\nThe model request failed: empty response from model (reasoning_only)\n\n",
+                    "{reasoning}{}{reasoning}{}{reasoning}\n\nThe model request failed after 3 attempts: empty response from model (reasoning_only)\n\n",
                     retry(1),
                     retry(2),
                 ),
