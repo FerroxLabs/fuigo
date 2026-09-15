@@ -338,17 +338,6 @@ const CI_CALL: &str = "-p fuigo-sampler --test fluxrouter_cache_bypass";
 /// What a CI call site must say about itself, on the line directly above the run.
 const CI_GATE_MARK: &str = "# fluxrouter cache bypass gate:";
 
-/// The bypass is only as good as the run that proves it, and a run is only as good as the gate it sits
-/// behind. Pin both: the call site, so deleting it fails here instead of silently leaving the regression
-/// uncovered, and a comment directly above it naming WHICH gate that call site is, so the coverage a
-/// reader assumes is the coverage that exists.
-///
-/// Today there is exactly one call site and it is the RELEASE gate: `release.yml` runs on a `v*` tag push
-/// and on `workflow_dispatch`, so this file proves the bypass at release time, not on a pull request.
-/// There is no PR-level call site to pin because no PR-level workflow runs fuigo-sampler tests at all --
-/// `dispatch-policy.yml` is this repo's only `pull_request` workflow and it runs fuigo-extra-ca,
-/// ptyctl-cli, gcloud-auth, gcloud-metadata and fuigo-file-utils tests. When a PR-level run is added,
-/// this test makes it label its own gate the same way.
 /// The line indices of the workflow's LIVE call sites for this test file. A YAML comment runs nothing,
 /// so a commented-out line is not a call site -- and commenting a step out is the usual way one gets
 /// disabled.
@@ -361,6 +350,19 @@ fn call_sites(workflow: &str) -> Vec<usize> {
         .collect()
 }
 
+/// The bypass is only as good as the run that proves it, and a run is only as good as the gate it sits
+/// behind. Pin both: the call site, so deleting it fails here instead of silently leaving the regression
+/// uncovered, and a comment directly above it naming WHICH gate that call site is, so the coverage a
+/// reader assumes is the coverage that exists.
+///
+/// Today there is exactly one call site and it is the RELEASE gate: `release.yml` runs on a `v*` tag push
+/// and on `workflow_dispatch`, so this FILE proves the bypass at release time, not on a pull request.
+/// There is no PR-level call site to pin because no PR-level workflow runs fuigo-sampler tests at all --
+/// `dispatch-policy.yml` is this repo's only `pull_request` workflow and it runs fuigo-extra-ca,
+/// ptyctl-cli, gcloud-auth, gcloud-metadata and fuigo-file-utils tests. The host gate this file exercises
+/// at the wire level IS covered on pull requests by the `fuigo_extra_ca::fluxrouter` unit tests, which
+/// that dispatch-policy run includes. When a PR-level run of this file is added, this test makes it label
+/// its own gate the same way.
 #[test]
 fn ci_runs_this_integration_test_and_every_call_site_names_its_gate() {
     let dir = repo_root().join(".github/workflows");
@@ -440,16 +442,23 @@ const CACHE_FIELD: &str = r#""cache": {"no-cache": true, "no-store": true}"#;
 /// the cache field, with its lines rejoined. Every paragraph in the guide is one long line today, but a
 /// hard wrap is an ordinary edit that changes nothing a reader sees and must not break the assertions
 /// below, which read whole sentences.
+///
+/// Every block is rejoined BEFORE the field is looked for, because the wrap can land inside the
+/// backticked literal itself -- Markdown gives a code span no protection from a reflow. Searching the
+/// raw block first would miss that paragraph entirely and report a reflow as a missing opt-out.
 fn cache_paragraph_of(markdown: &str) -> String {
     markdown
         .split("\n\n")
+        .map(|block| {
+            block
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<&str>>()
+                .join(" ")
+        })
         .find(|block| block.contains(CACHE_FIELD))
         .expect("the user guide describes the cache opt-out")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<&str>>()
-        .join(" ")
 }
 
 /// The cache opt-out paragraph of the user guide.
@@ -478,6 +487,21 @@ fn the_cache_paragraph_survives_a_hard_wrapped_guide() {
          `/v1/chat/completions`, where it is what stops a retried\nturn being answered with a stored \
          copy. Its `/v1/responses` surface drops it.\n\nList all available models:\n"
     );
+    // A wrap can land INSIDE the backticked literal too: Markdown gives a code span no protection from a
+    // reflow, and the paragraph is then invisible to an extraction that looks for the literal before
+    // rejoining the lines -- three tests panic at once on "the user guide describes the cache opt-out",
+    // which is the least informative way a reflow can be reported.
+    let split_literal = wrapped.replace(CACHE_FIELD, &CACHE_FIELD.replacen("true, ", "true,\n", 1));
+    assert!(
+        !split_literal.contains(CACHE_FIELD),
+        "the fixture did not actually wrap the literal"
+    );
+    let across_the_literal = cache_paragraph_of(&split_literal);
+    assert!(
+        across_the_literal.contains("/v1/responses"),
+        "a wrap inside the cache literal hid the paragraph from the extraction:\n{across_the_literal}"
+    );
+
     let paragraph = cache_paragraph_of(&wrapped);
     assert!(
         paragraph.contains("/v1/responses"),
@@ -563,13 +587,81 @@ const NON_TURN_PATHS: [&str; 4] = [
     "/audio/transcriptions",
 ];
 
+/// The side calls that ride the opt-out for free because they are built on `SamplingClient`, whose
+/// `body()` is where the field is appended. Titles come from `session/acp_session_impl/title_refresh.rs`
+/// and `session/helpers/session_summary.rs`, recaps from `acp_session_impl/recap.rs` and
+/// `turn_summary.rs`, compaction from `session/helpers/session_compact.rs` -- every one of them reaches
+/// the wire through `crate::sampling::Client`, which `fuigo-shell/src/sampling/mod.rs` re-exports as
+/// `fuigo_sampler::SamplingClient`.
+///
+/// Web search is NOT one of them: `WebSearchClient` (fuigo-tools) owns its own `reqwest::Client` and
+/// carries the field only because it applies the same host gate itself. Listing it here tells a reader
+/// the opt-out reaches it by a route it does not take.
+const SHARED_CLIENT_SIDE_CALLS: [&str; 3] = ["titles", "recaps", "compaction"];
+
+/// Words that deny something, matched as WHOLE words: "another", "note" and "piano " each contain the
+/// letters of one, and a substring test reads all three as denials.
+const NEGATIONS: [&str; 5] = ["not", "never", "no", "nor", "cannot"];
+/// What the denial has to be about for it to be a denial that the field is sent.
+const DENIED_SUBJECTS: [&str; 5] = ["carry", "carries", "carrying", "field", "body"];
+/// How far past the negation its subject may sit, in characters.
+const DENIAL_SPAN: usize = 48;
+
+/// Does `sentence` genuinely say the cache field is absent? A substring search for "not"/"no " is
+/// satisfied by "another Flux Router path" and "no matter which model you configure", so a rewrite that
+/// dropped the denial entirely could still pass the test that uses this.
+fn denies_the_field(sentence: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    NEGATIONS.iter().any(|negation| {
+        lower.match_indices(negation).any(|(at, word)| {
+            let end = at + word.len();
+            let whole_word = (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
+                && bytes.get(end).is_none_or(|b| !b.is_ascii_alphanumeric());
+            // Characters, not bytes: this paragraph uses em dashes.
+            let subject: String = lower[end..].chars().take(DENIAL_SPAN).collect();
+            whole_word && DENIED_SUBJECTS.iter().any(|term| subject.contains(term))
+        })
+    })
+}
+
+/// The guard below is only as strong as this check: it is what stops the paragraph naming a non-turn
+/// path without saying the field is absent there. Pin both directions, because the cheap substring
+/// version passed on prose that denies nothing at all.
+#[test]
+fn the_non_turn_negation_check_needs_a_real_negation() {
+    for denial in [
+        "Fuigo's remaining Flux Router calls are not model turns and do not carry it either.",
+        "`/v1/audio/transcriptions` goes as multipart form data, which has no JSON body to put a field in.",
+        "Those paths never carry the field.",
+        "A multipart upload cannot carry a JSON field at all.",
+    ] {
+        assert!(
+            denies_the_field(denial),
+            "a plain denial that the field is sent is not recognised as one:\n{denial}"
+        );
+    }
+    for no_denial in [
+        "`/imagine` posts `/v1/images/generations`, another Flux Router path.",
+        "Fuigo also posts `/v1/videos/generations`; note the different base path.",
+        "`/v1/audio/transcriptions` goes to the same host, no matter which model you configure.",
+        "`/v1/images/edits` carries the field on every request.",
+    ] {
+        assert!(
+            !denies_the_field(no_denial),
+            "a sentence that denies nothing about the field satisfied the check, so the guard below \
+             would accept a paragraph that names a non-turn path and says nothing about it:\n{no_denial}"
+        );
+    }
+}
+
 /// The opt-out covers the three inference wire formats and the side calls built on the same sampling
 /// client -- not literally every request addressed to `api.fluxrouter.ai`. A guide that claims the wider
 /// thing is wrong on a DEFAULT install, where `/imagine`, video generation and speech-to-text all go to
-/// that host without the field. This test pins the narrower claim from both sides: the paragraph has to
-/// say what does carry the field in terms of the wire formats and shared-client side calls, and it has to
-/// name at least one non-turn path as not carrying it. Widening the sentence again means deleting that
-/// naming, which fails here.
+/// that host without the field. This test pins the narrower claim from three sides: the paragraph has to
+/// say what does carry the field in terms of the wire formats and shared-client side calls, it has to
+/// name those side calls correctly, and it has to name at least one non-turn path as not carrying it.
+/// Widening the sentence again means deleting that naming, which fails here.
 #[test]
 fn the_user_guide_scopes_the_bypass_to_the_calls_that_carry_it() {
     let paragraph = cache_paragraph();
@@ -585,6 +677,19 @@ fn the_user_guide_scopes_the_bypass_to_the_calls_that_carry_it() {
              claim about every request Fuigo sends to Flux Router:\n{carrying}"
         );
     }
+    for side_call in SHARED_CLIENT_SIDE_CALLS {
+        assert!(
+            carrying.contains(side_call),
+            "the sentence that says what carries the opt-out never names {side_call:?}, one of the \
+             side calls that actually goes through `SamplingClient`:\n{carrying}"
+        );
+    }
+    assert!(
+        !carrying.contains("web search"),
+        "the sentence that says what carries the opt-out lists web search among the side calls built \
+         on the same sampling client. It is not one: `WebSearchClient` owns its own `reqwest::Client` \
+         and carries the field only because it applies the host gate itself:\n{carrying}"
+    );
 
     let naming: Vec<&&str> = sentences
         .iter()
@@ -598,9 +703,7 @@ fn the_user_guide_scopes_the_bypass_to_the_calls_that_carry_it() {
     );
     for sentence in naming {
         assert!(
-            ["not", "never", "no "]
-                .iter()
-                .any(|negation| sentence.contains(negation)),
+            denies_the_field(sentence),
             "the sentence naming a non-turn Flux Router path does not say the field is absent \
              there:\n{sentence}"
         );
