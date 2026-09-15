@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use fuigo_sampling_types::{EmptyReason, SamplingError, is_retryable_api_status};
+use fuigo_sampling_types::{SamplingError, is_retryable_api_status};
 
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 
@@ -16,28 +16,44 @@ pub const TRANSPORT_REBUILD_BACKOFF: Duration = Duration::from_millis(200);
 /// An empty response is a completed stream, not a transport fault: the doubling ladder only buys minutes of silence and repeated prompt billing.
 pub const EMPTY_RESPONSE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Attempt cap (the original plus resends) for an empty response that carried reasoning (`EmptyReason::ReasoningOnly`): one resend.
-pub const REASONING_ONLY_MAX_ATTEMPTS: u32 = 2;
-
-/// Attempt cap for a fully empty response (no text, no tool call, no reasoning): at most two resends.
+/// Attempt cap (the original plus resends) for the empty replies of one request: at most
+/// two resends, whether a reply carried reasoning or was fully empty, and whether or not
+/// the kinds are mixed. One budget for every empty reply keeps the announced denominator
+/// stable across a request; splitting it announced "(1/2)" and then "(2/3)".
 pub const EMPTY_RESPONSE_MAX_ATTEMPTS: u32 = 3;
 
 /// The attempt budget [`classify_error`] applies to `err`.
-/// It is the configured `max_retries`, lowered to the empty-response caps for `SamplingError::EmptyResponse`.
+/// It is the configured `max_retries`, lowered to [`EMPTY_RESPONSE_MAX_ATTEMPTS`] for `SamplingError::EmptyResponse`.
 /// Like `max_retries` it counts attempts including the original, so `Retrying` events report `attempt/effective`.
-/// A lower configured budget (`FUIGO_MAX_RETRIES`, `max_retries`) always wins; the caps never raise it.
+/// A lower configured budget (`FUIGO_MAX_RETRIES`, `max_retries`) always wins; the cap never raises it.
 pub fn effective_max_retries(err: &SamplingError, max_retries: u32) -> u32 {
     match err {
-        SamplingError::EmptyResponse { context } => {
-            let cap = if context.had_reasoning || context.reason == EmptyReason::ReasoningOnly {
-                REASONING_ONLY_MAX_ATTEMPTS
-            } else {
-                EMPTY_RESPONSE_MAX_ATTEMPTS
-            };
-            max_retries.min(cap)
-        }
+        SamplingError::EmptyResponse { .. } => max_retries.min(EMPTY_RESPONSE_MAX_ATTEMPTS),
         _ => max_retries,
     }
+}
+
+/// The denominator an empty-response `Retrying` event announces, given the resends
+/// already recorded (this one included).
+///
+/// It is [`EMPTY_RESPONSE_MAX_ATTEMPTS`], lowered to what the configured budget can still
+/// fund: every resend of the request, of any kind, spends that shared budget, and an empty
+/// reply is only resent while `total_resends + 1 < configured_max_retries`. Announcing the
+/// bare cap after an earlier 503 retry, or under a lowered `FUIGO_MAX_RETRIES`, promises
+/// attempts that cannot happen.
+pub fn empty_response_announced_attempts(
+    empty_resends_used: u32,
+    total_resends_used: u32,
+    configured_max_retries: u32,
+) -> u32 {
+    let fundable = configured_max_retries
+        .saturating_sub(1)
+        .saturating_sub(total_resends_used);
+    EMPTY_RESPONSE_MAX_ATTEMPTS.min(
+        empty_resends_used
+            .saturating_add(1)
+            .saturating_add(fundable),
+    )
 }
 
 pub(crate) fn resolve_max_retries_with_env(
@@ -1156,30 +1172,20 @@ mod tests {
     }
 
     /// The field "-32603 after five minutes": a reasoning-only reply was resent 14 more times over ~5 min on the default budget.
+    /// Every empty reply, reasoning-only or fully empty, shares one budget of at most two resends 2 s apart.
     #[test]
-    fn reasoning_only_empty_response_is_resent_once_after_two_seconds() {
-        let err = empty_response(fuigo_sampling_types::EmptyReason::ReasoningOnly);
-        let backoffs = retry_ladder(&err, DEFAULT_MAX_RETRIES);
-        assert_eq!(
-            backoffs,
-            vec![Duration::from_secs(2)],
-            "one resend after a fixed 2 s; got {} resends sleeping {:?} in total",
-            backoffs.len(),
-            backoffs.iter().sum::<Duration>()
-        );
-    }
-
-    #[test]
-    fn fully_empty_response_is_resent_at_most_twice_with_a_fixed_backoff() {
-        let err = empty_response(fuigo_sampling_types::EmptyReason::NoVisibleContent);
-        let backoffs = retry_ladder(&err, DEFAULT_MAX_RETRIES);
-        assert_eq!(
-            backoffs,
-            vec![Duration::from_secs(2); 2],
-            "two resends 2 s apart; got {} resends sleeping {:?} in total",
-            backoffs.len(),
-            backoffs.iter().sum::<Duration>()
-        );
+    fn every_empty_response_shape_is_resent_at_most_twice_after_two_seconds() {
+        use fuigo_sampling_types::EmptyReason::{NoVisibleContent, ReasoningOnly};
+        for reason in [ReasoningOnly, NoVisibleContent] {
+            let backoffs = retry_ladder(&empty_response(reason), DEFAULT_MAX_RETRIES);
+            assert_eq!(
+                backoffs,
+                vec![Duration::from_secs(2); 2],
+                "{reason}: two resends 2 s apart; got {} resends sleeping {:?} in total",
+                backoffs.len(),
+                backoffs.iter().sum::<Duration>()
+            );
+        }
     }
 
     /// The empty-response cap is a ceiling: a lower configured budget still wins, a higher one never raises it.
@@ -1192,12 +1198,38 @@ mod tests {
                 retry_ladder(&err, 1).is_empty(),
                 "{reason}: budget 1 never resends"
             );
+            assert_eq!(retry_ladder(&err, 2).len(), 1, "{reason}: budget 2");
+            assert_eq!(retry_ladder(&err, 100).len(), 2, "{reason}: the cap wins");
         }
-        assert_eq!(retry_ladder(&empty_response(NoVisibleContent), 2).len(), 1);
-        assert_eq!(retry_ladder(&empty_response(ReasoningOnly), 100).len(), 1);
+    }
+
+    /// The announced denominator never promises a resend the shared configured budget cannot fund.
+    #[test]
+    fn the_announced_empty_response_cap_never_promises_unfundable_resends() {
+        // The default budget funds every resend the cap allows.
         assert_eq!(
-            retry_ladder(&empty_response(NoVisibleContent), 100).len(),
-            2
+            empty_response_announced_attempts(1, 1, DEFAULT_MAX_RETRIES),
+            3
+        );
+        assert_eq!(
+            empty_response_announced_attempts(2, 2, DEFAULT_MAX_RETRIES),
+            3
+        );
+        // An earlier retry of another kind spends the same budget: after a 503 resend the
+        // cap is still fundable on the default budget, but not on a lowered one.
+        assert_eq!(
+            empty_response_announced_attempts(1, 2, DEFAULT_MAX_RETRIES),
+            3
+        );
+        assert_eq!(
+            empty_response_announced_attempts(1, 2, 3),
+            2,
+            "one 503 resend then one empty resend spends a budget of 3: no second empty resend"
+        );
+        assert_eq!(
+            empty_response_announced_attempts(1, 1, 2),
+            2,
+            "FUIGO_MAX_RETRIES=2 funds exactly this resend"
         );
     }
 

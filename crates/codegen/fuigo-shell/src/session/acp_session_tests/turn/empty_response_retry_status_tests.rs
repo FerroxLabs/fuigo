@@ -112,6 +112,7 @@ async fn drive_turn(
     actor: Arc<SessionActor>,
     frames: Frames,
     server: &MockInferenceServer,
+    req_id: &str,
 ) -> (
     Result<TurnOutcome, agent_client_protocol::Error>,
     Vec<Frame>,
@@ -123,7 +124,7 @@ async fn drive_turn(
     let outcome = tokio::time::timeout(
         Duration::from_secs(900),
         actor.process_conversation_turn_with_recovery(
-            "req-empty-response-status-test",
+            req_id,
             None,
             None,
             None,
@@ -151,7 +152,7 @@ async fn run_turn(
     let (actor, frames) =
         actor_under_test_with_gateway(server, SessionKind::Main, retry_policy, true, drain_frames)
             .await;
-    drive_turn(actor, frames, server).await
+    drive_turn(actor, frames, server, "req-empty-response-status-test").await
 }
 
 #[test]
@@ -178,9 +179,9 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
             let (outcome, frames, elapsed, submissions) = run_turn(&server, policy).await;
 
             let reason = "empty response from model (reasoning_only)";
-            let retrying = RetryState::Retrying {
-                attempt: 1,
-                max_retries: 2,
+            let retrying = |attempt| RetryState::Retrying {
+                attempt,
+                max_retries: 3,
                 reason: reason.to_string(),
                 error_type: Some("empty_response".to_string()),
             };
@@ -191,22 +192,28 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
             assert_eq!(
                 frames,
                 vec![
-                    Frame::Fuigo(retrying.clone()),
+                    Frame::Fuigo(retrying(1)),
                     mirror(
-                        "Retrying the model (1/2): empty response from model (reasoning_only)\n\n",
-                        &retrying,
+                        "\n\nRetrying the model (1/3): empty response from model (reasoning_only)\n\n",
+                        &retrying(1),
+                    ),
+                    Frame::Fuigo(retrying(2)),
+                    mirror(
+                        "\n\nRetrying the model (2/3): empty response from model (reasoning_only)\n\n",
+                        &retrying(2),
                     ),
                     Frame::Fuigo(failed.clone()),
                     mirror(
-                        "The model request failed: empty response from model (reasoning_only)\n\n",
+                        "\n\nThe model request failed: empty response from model (reasoning_only)\n\n",
                         &failed,
                     ),
                 ],
-                "one resend on both rails, then one failure on both rails, each mirror an agent_thought_chunk \
+                "both resends on both rails, then one failure on both rails, each mirror an agent_thought_chunk \
+                 opening its own paragraph after the model's streamed reasoning \
                  ({submissions} provider submissions, {elapsed:?} virtual)"
             );
             assert!(outcome.is_err(), "the turn fails once the cap is spent");
-            assert_eq!(submissions, 2, "the original request plus one resend");
+            assert_eq!(submissions, 3, "the original request plus two resends");
             assert!(
                 elapsed < Duration::from_secs(10),
                 "fails in seconds, not minutes: {elapsed:?}"
@@ -299,7 +306,8 @@ fn a_retried_turn_answers_with_the_model_text_only() {
             )
             .await;
 
-            let (outcome, frames, _elapsed, submissions) = drive_turn(actor, frames, &server).await;
+            let (outcome, frames, _elapsed, submissions) =
+                drive_turn(actor, frames, &server, "req-empty-response-status-test").await;
 
             assert!(
                 outcome.is_ok(),
@@ -507,4 +515,215 @@ async fn a_retry_mirror_never_overtakes_answer_text_already_generated() {
             );
         })
         .await;
+}
+
+/// Every test actor shares the session id `test-actor`, and the live-execution registry has
+/// one slot per session: the execution tests hold this while theirs is registered.
+/// Their prompt ids are their own, so a concurrent turn under another prompt id finds nothing.
+static EXECUTION_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A durable execution scope for the turn `drive_turn` runs under `req_id`, as `handle_turn_input` opens one.
+async fn open_execution(
+    actor: &Arc<SessionActor>,
+    req_id: &str,
+) -> Arc<crate::session::execution_state::Execution> {
+    crate::session::execution_state::Execution::open(
+        &actor.notifications.persistence_tx,
+        &actor.session_info.id.to_string(),
+        req_id,
+        req_id,
+        9,
+        None,
+        Some(9),
+        Default::default(),
+        None,
+    )
+    .await
+    .expect("execution scope is durable")
+}
+
+/// A turn its retry rescued must not report unresolved work.
+///
+/// The failed attempt's durable admission was never settled, so the terminal receipt came
+/// back `partial` with the superseded attempt in `pending_attempts`, and a turn that had
+/// answered was returned to the client as JSON-RPC `-32603`. Reproduced on the real binary
+/// (1.0.11 through 1.0.18) by the `503_then_text` probe scenario.
+#[test]
+fn a_retry_that_answers_leaves_no_unresolved_attempt() {
+    const ANSWER: &str = "Hello there, this answer came after one retry.";
+    const REQ_ID: &str = "req-retry-receipt-rescued";
+    let _slot = EXECUTION_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::text(503, "upstream overloaded"),
+            );
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(sse::responses_api_script_exact(ANSWER, "test")),
+            );
+            let policy = fuigo_sampler::RetryPolicy {
+                max_retries: 3,
+                ..Default::default()
+            };
+            let (actor, frames) = actor_under_test_with_gateway(
+                &server,
+                SessionKind::Main,
+                policy,
+                true,
+                drain_frames,
+            )
+            .await;
+            let execution = open_execution(&actor, REQ_ID).await;
+
+            let (outcome, _frames, _elapsed, submissions) =
+                drive_turn(actor.clone(), frames, &server, REQ_ID).await;
+
+            assert!(
+                outcome.is_ok(),
+                "the retried request answers: {:?}",
+                outcome.as_ref().err()
+            );
+            assert_eq!(submissions, 2, "the 503 and its successful resend");
+            let state = execution.snapshot().await.expect("execution snapshot");
+            // An optional side call (a title) may hold its own admission; only required work counts.
+            let unresolved: Vec<&String> =
+                state.pending.difference(&state.optional_attempts).collect();
+            assert!(
+                unresolved.is_empty(),
+                "the resend took the 503 attempt over: {unresolved:?}"
+            );
+            assert!(
+                state.calls >= 2,
+                "both attempts keep their debit: {state:?}"
+            );
+            let receipt = execution.terminal(true).await.expect("terminal receipt");
+            assert!(
+                !receipt.partial,
+                "a turn its retry rescued is not partial: {receipt:?}"
+            );
+            execution.release(&actor.session_info.id.to_string());
+        })
+    });
+}
+
+/// A turn that really failed still reports its unresolved attempt: the fix for the retry
+/// path must not turn every failure into a clean receipt.
+#[test]
+fn a_turn_that_never_recovers_still_reports_its_attempt() {
+    const REQ_ID: &str = "req-retry-receipt-failed";
+    let _slot = EXECUTION_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            for _ in 0..8 {
+                server.enqueue_response(
+                    "/v1/responses",
+                    ScriptedResponse::sse(sse::responses_api_reasoning_only_events(
+                        "Let me think about this carefully",
+                        "test",
+                    )),
+                );
+            }
+            let policy = fuigo_sampler::RetryPolicy {
+                max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
+                ..Default::default()
+            };
+            let (actor, frames) = actor_under_test_with_gateway(
+                &server,
+                SessionKind::Main,
+                policy,
+                false,
+                drain_frames,
+            )
+            .await;
+            let execution = open_execution(&actor, REQ_ID).await;
+
+            let (outcome, _frames, _elapsed, submissions) =
+                drive_turn(actor.clone(), frames, &server, REQ_ID).await;
+
+            assert!(outcome.is_err(), "the empty-response budget is spent");
+            assert_eq!(submissions, 3, "the original request plus two resends");
+            let receipt = execution.terminal(false).await.expect("terminal receipt");
+            assert!(
+                receipt.partial
+                    && receipt
+                        .pending_attempts
+                        .iter()
+                        .any(|id| !receipt.optional_pending_attempts.contains(id)),
+                "the last attempt, which nothing took over, is still unresolved work: {receipt:?}"
+            );
+            execution.release(&actor.session_info.id.to_string());
+        })
+    });
+}
+
+/// Clients concatenate thought chunks: the mirror must not run into the model's last
+/// reasoning sentence. It opens its own paragraph after streamed reasoning, and never
+/// opens with a stray blank line when it is the turn's first thought text.
+#[test]
+fn a_mirror_after_reasoning_starts_its_own_paragraph() {
+    const REASONING: &str = "Let me think about this carefully";
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            for _ in 0..8 {
+                server.enqueue_response(
+                    "/v1/responses",
+                    ScriptedResponse::sse(sse::responses_api_reasoning_only_events(
+                        REASONING, "test",
+                    )),
+                );
+            }
+            let policy = fuigo_sampler::RetryPolicy {
+                max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
+                ..Default::default()
+            };
+            let (actor, frames) = actor_under_test_with_event_pump(
+                &server,
+                SessionKind::Main,
+                policy,
+                false,
+                drain_frames,
+            )
+            .await;
+
+            let (_outcome, frames, _elapsed, _submissions) =
+                drive_turn(actor, frames, &server, "req-empty-response-status-test").await;
+
+            // What a client that appends every thought chunk ends up showing.
+            let thoughts: String = frames
+                .iter()
+                .filter_map(|f| match f {
+                    Frame::Standard { kind, text, .. } if kind == AGENT_THOUGHT => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let reasoning = format!("{REASONING} ");
+            let retry = |n| {
+                format!(
+                    "\n\nRetrying the model ({n}/3): empty response from model (reasoning_only)\n\n"
+                )
+            };
+            assert_eq!(
+                thoughts,
+                format!(
+                    "{reasoning}{}{reasoning}{}{reasoning}\n\nThe model request failed: empty response from model (reasoning_only)\n\n",
+                    retry(1),
+                    retry(2),
+                ),
+                "every mirror opens its own paragraph after the reasoning it follows: {frames:#?}"
+            );
+        })
+    });
 }

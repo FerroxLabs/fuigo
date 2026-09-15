@@ -1856,6 +1856,9 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
+        // A new turn's first retry-status mirror has no reasoning in front of it.
+        self.turn_thought_text_emitted
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             crate::session::compaction_config::SUPPRESS_TURN,
             crate::session::compaction_config::SUPPRESS_NONE,
@@ -2730,6 +2733,19 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            // This submission takes over every attempt the sampler abandoned on this turn:
+            // a shell-level resubmit (transient retry, auth refresh, rate-limit wait) continues
+            // the same logical call, so those attempts are finished work, not unresolved work.
+            // Without this the terminal receipt is partial and a recovered turn fails with -32603.
+            if let Some(execution) = execution.as_ref()
+                && execution.supersede_pending_attempts().await.is_err()
+            {
+                fuigo_telemetry::unified_log::warn(
+                    "shell.turn.superseded_attempts_not_durable",
+                    Some(self.session_info.id.0.as_ref()),
+                    None,
+                );
+            }
             request.execution_admission = execution.clone().map(|e| e as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
             if finalize_response { request.purpose = fuigo_sampling_types::RequestPurpose::Completion; }
             request.x_fuigo_session_id = Some(self.session_info.id.to_string());

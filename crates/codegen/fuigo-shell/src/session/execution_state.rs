@@ -59,6 +59,10 @@ pub struct Snapshot {
     pub(crate) pending: BTreeSet<String>,
     pub(crate) optional_attempts: BTreeSet<String>,
     pub(crate) admitted: BTreeSet<String>,
+    /// Finished attempts no resend has taken over yet. Still pending (still unresolved
+    /// work) until a resubmit of the same logical call supersedes them.
+    #[serde(default)]
+    pub(crate) abandoned: BTreeSet<String>,
     pub(crate) terminal: Option<TerminalReceipt>,
     #[serde(default)]
     known_session_edited_paths: Vec<String>,
@@ -118,6 +122,15 @@ pub(crate) enum Change {
         attempt_id: String,
         usage: Option<fuigo_sampling_types::TokenUsage>,
     },
+    /// Settle an attempt its own resend took over.
+    Supersede {
+        attempt_id: String,
+        usage: Option<fuigo_sampling_types::TokenUsage>,
+    },
+    /// Mark a finished attempt no resend has taken over (it stays pending).
+    Abandon {
+        attempt_id: String,
+    },
     Tools {
         ids: Vec<String>,
     },
@@ -155,6 +168,10 @@ fn denied(message: &'static str) -> io::Error {
     io::Error::other(message)
 }
 
+fn denied_owned(message: String) -> io::Error {
+    io::Error::other(message)
+}
+
 pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result<Snapshot> {
     // The key is a fixed-length hash minted locally, never a client-provided path.
     if mutation.key.len() != 64 || !mutation.key.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -182,6 +199,7 @@ pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result
                 phase: Phase::Working,
                 max_calls: *max_calls,
                 calls: 0,
+                abandoned: BTreeSet::new(),
                 completion_admitted: false,
                 recall_finalization: false,
                 deadline_ms: *deadline_ms,
@@ -271,6 +289,33 @@ fn admit_attempt(
     Ok(())
 }
 
+/// Release an attempt whose resend took over the same logical call.
+///
+/// The resend carries the liability forward, so the attempt stops counting as
+/// unresolved work on the terminal receipt. Its call debit is never refunded, and
+/// usage it reported is still charged. Unlike [`Change::Settle`], a superseded
+/// attempt with no reported usage does not poison the token limits with
+/// `unknown_usage`: a retry storm would otherwise deny every later admission under a
+/// token budget, and today such an attempt is never settled at all, so nothing is
+/// charged for it either way.
+fn supersede_attempt(
+    state: &mut Snapshot,
+    attempt_id: &str,
+    usage: Option<fuigo_sampling_types::TokenUsage>,
+) {
+    state.abandoned.remove(attempt_id);
+    if state.pending.remove(attempt_id)
+        && let Some(usage) = usage
+    {
+        state.total_tokens = state
+            .total_tokens
+            .saturating_add(u64::from(usage.total_tokens));
+        state.output_tokens = state
+            .output_tokens
+            .saturating_add(u64::from(usage.completion_tokens));
+    }
+}
+
 fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<()> {
     match change {
         Change::Read | Change::Open { .. } => {}
@@ -318,6 +363,20 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                 } else {
                     state.unknown_usage = true;
                 }
+            }
+        }
+        Change::Supersede { attempt_id, usage } => {
+            if !state.admitted.contains(&attempt_id) {
+                return Err(denied("unknown execution admission"));
+            }
+            supersede_attempt(state, &attempt_id, usage);
+        }
+        Change::Abandon { attempt_id } => {
+            if !state.admitted.contains(&attempt_id) {
+                return Err(denied("unknown execution admission"));
+            }
+            if state.pending.contains(&attempt_id) {
+                state.abandoned.insert(attempt_id);
             }
         }
         Change::Tools { ids } => {
@@ -614,6 +673,20 @@ impl Execution {
         }
         self.change(Change::ToolsSettled { ids }).await.map(|_| ())
     }
+    /// Supersede every attempt the sampler marked abandoned, because this caller is
+    /// resubmitting the logical call they belong to (the shell's transient-retry, auth
+    /// and rate-limit resubmits). In-flight attempts and attempts of other logical calls
+    /// are untouched: only a finished, unsuperseded attempt is ever marked.
+    pub(crate) async fn supersede_pending_attempts(&self) -> io::Result<()> {
+        for attempt_id in self.snapshot().await?.abandoned {
+            // `supersede` carries the same settlement to a parent grant.
+            ExecutionAdmission::supersede(self, attempt_id, None)
+                .await
+                .map_err(denied_owned)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn terminal(&self, succeeded: bool) -> io::Result<TerminalReceipt> {
         let receipt = self
             .change(Change::Terminal { succeeded })
@@ -685,6 +758,35 @@ impl ExecutionAdmission for Execution {
                     .await?;
             }
             self.change(Change::Settle { attempt_id, usage })
+                .await
+                .map(|_| ())
+                .map_err(|_| "execution settlement not durable".into())
+        })
+    }
+    fn supersede(
+        &self,
+        attempt_id: String,
+        usage: Option<fuigo_sampling_types::TokenUsage>,
+    ) -> AdmissionFuture<'_> {
+        Box::pin(async move {
+            if let Some(parent) = &self.parent_grant {
+                parent
+                    .parent
+                    .supersede(attempt_id.clone(), usage.clone())
+                    .await?;
+            }
+            self.change(Change::Supersede { attempt_id, usage })
+                .await
+                .map(|_| ())
+                .map_err(|_| "execution settlement not durable".into())
+        })
+    }
+    fn abandon(&self, attempt_id: String) -> AdmissionFuture<'_> {
+        Box::pin(async move {
+            if let Some(parent) = &self.parent_grant {
+                parent.parent.abandon(attempt_id.clone()).await?;
+            }
+            self.change(Change::Abandon { attempt_id })
                 .await
                 .map(|_| ())
                 .map_err(|_| "execution settlement not durable".into())
@@ -852,6 +954,130 @@ mod tests {
         let repeated = next.terminal(false).await.unwrap();
         assert_eq!(serde_json::to_value(&receipt).unwrap(), serde_json::to_value(&repeated).unwrap());
         next.release(&session);
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// A resend takes its attempt over: the superseded attempt stops counting as
+    /// unresolved work, its debit stays, and it never poisons the token budget with
+    /// unknown usage (a retry would otherwise deny every later admission under a limit).
+    /// An attempt no resend takes over stays unresolved until a resubmit supersedes it,
+    /// so a turn that really failed still issues a partial receipt.
+    #[tokio::test]
+    async fn a_resent_attempt_settles_while_an_abandoned_one_stays_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, actor) = fixture_actor(dir.path().to_owned());
+        let session = uuid::Uuid::new_v4().to_string();
+        let limits = TokenLimits {
+            total: Some(100_000),
+            initial_total: 0,
+            output: None,
+        };
+        let recovered = Execution::open(
+            &tx,
+            &session,
+            "resent",
+            "turn1",
+            9,
+            None,
+            Some(9),
+            limits.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let first = uuid::Uuid::new_v4().to_string();
+        recovered
+            .admit(RequestPurpose::Work, first.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::supersede(recovered.as_ref(), first.clone(), None)
+            .await
+            .unwrap();
+        assert!(
+            recovered.snapshot().await.unwrap().pending.is_empty(),
+            "the resend takes the failed attempt over"
+        );
+        let second = uuid::Uuid::new_v4().to_string();
+        recovered
+            .admit(RequestPurpose::Work, second.clone())
+            .await
+            .expect("a superseded attempt with no usage must not poison the token budget");
+        recovered
+            .settle(second, Some(fuigo_sampling_types::TokenUsage::default()))
+            .await
+            .unwrap();
+        let state = recovered.snapshot().await.unwrap();
+        assert!(state.pending.is_empty());
+        assert_eq!(state.calls, 2, "both attempts keep their debit");
+        let receipt = recovered.terminal(true).await.unwrap();
+        assert!(
+            !receipt.partial,
+            "a turn its retry rescued is not partial: {receipt:?}"
+        );
+        recovered.release(&session);
+
+        let abandoned = Execution::open(
+            &tx,
+            &session,
+            "abandoned",
+            "turn2",
+            9,
+            None,
+            Some(9),
+            limits,
+            None,
+        )
+        .await
+        .unwrap();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        abandoned
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::abandon(abandoned.as_ref(), attempt.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            abandoned.snapshot().await.unwrap().pending,
+            BTreeSet::from([attempt.clone()]),
+            "nothing has taken the attempt over yet"
+        );
+        abandoned.supersede_pending_attempts().await.unwrap();
+        let state = abandoned.snapshot().await.unwrap();
+        assert!(
+            state.pending.is_empty() && state.abandoned.is_empty(),
+            "the resubmit takes it over: {state:?}"
+        );
+        assert!(!abandoned.terminal(true).await.unwrap().partial);
+        abandoned.release(&session);
+
+        let stranded = Execution::open(
+            &tx,
+            &session,
+            "stranded",
+            "turn3",
+            9,
+            None,
+            Some(9),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        stranded
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::abandon(stranded.as_ref(), attempt)
+            .await
+            .unwrap();
+        assert!(
+            stranded.terminal(true).await.unwrap().partial,
+            "an attempt no resubmit took over is still unresolved work"
+        );
+        stranded.release(&session);
         drop(tx);
         actor.await.unwrap();
     }

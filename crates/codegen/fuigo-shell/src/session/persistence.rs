@@ -1576,11 +1576,13 @@ impl SessionPersistence {
         }
         // The standard-rail mirror every `retry_state` gets, so stock ACP clients see why the turn failed
         // Nothing streams through this actor, so there is no buffered answer text for the mirror to overtake
+        // and no turn-scoped thought text it could run into, so it needs no leading paragraph break
         gateway.forward_fire_and_forget(
             crate::extensions::notification::retry_status_notification(
                 self.info.id.clone(),
                 &state,
                 None,
+                /*after_thought_text*/ false,
             ),
         );
     }

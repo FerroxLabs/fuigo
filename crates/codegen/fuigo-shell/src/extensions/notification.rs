@@ -1158,33 +1158,40 @@ pub enum RetryState {
 pub const RETRY_STATUS_META_KEY: &str = "fuigo/retryStatus";
 
 /// Progress line for the standard-rail mirror of `state`.
-/// Ends with a blank line so an answer that follows starts its own paragraph in clients that concatenate chunks.
-pub fn retry_status_text(state: &RetryState) -> String {
+///
+/// Ends with a blank line so reasoning that follows starts its own paragraph in clients
+/// that concatenate thought chunks. `after_thought_text` opens with one for the same
+/// reason when streamed reasoning came first: without it the line is glued to the end of
+/// the model's last reasoning sentence.
+pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String {
+    let separator = if after_thought_text { "\n\n" } else { "" };
     match state {
         RetryState::Retrying {
             attempt,
             max_retries,
             reason,
             ..
-        } => format!("Retrying the model ({attempt}/{max_retries}): {reason}\n\n"),
+        } => format!("{separator}Retrying the model ({attempt}/{max_retries}): {reason}\n\n"),
         RetryState::Exhausted {
             attempts, reason, ..
-        } => format!("The model request failed after {attempts} attempts: {reason}\n\n"),
+        } => {
+            format!("{separator}The model request failed after {attempts} attempts: {reason}\n\n")
+        }
         RetryState::Failed { message, .. } => {
-            format!("The model request failed: {message}\n\n")
+            format!("{separator}The model request failed: {message}\n\n")
         }
     }
 }
 
 /// The standard `agent_thought_chunk` that mirrors `state`, tagged with [`RETRY_STATUS_META_KEY`].
-pub fn retry_status_update(state: &RetryState) -> acp::SessionUpdate {
+pub fn retry_status_update(state: &RetryState, after_thought_text: bool) -> acp::SessionUpdate {
     let mut meta = serde_json::Map::new();
     if let Ok(value) = serde_json::to_value(state) {
         meta.insert(RETRY_STATUS_META_KEY.to_string(), value);
     }
     acp::SessionUpdate::AgentThoughtChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
-            retry_status_text(state),
+            retry_status_text(state, after_thought_text),
         )))
         .meta(Some(meta)),
     )
@@ -1196,6 +1203,7 @@ pub fn retry_status_notification(
     session_id: acp::SessionId,
     state: &RetryState,
     prompt_id: Option<String>,
+    after_thought_text: bool,
 ) -> acp::SessionNotification {
     let mut meta = serde_json::Map::new();
     meta.insert(
@@ -1205,7 +1213,8 @@ pub fn retry_status_notification(
     if let Some(prompt_id) = prompt_id {
         meta.insert("promptId".to_string(), prompt_id.into());
     }
-    acp::SessionNotification::new(session_id, retry_status_update(state)).meta(Some(meta))
+    acp::SessionNotification::new(session_id, retry_status_update(state, after_thought_text))
+        .meta(Some(meta))
 }
 
 /// Whether `update` is a retry-status mirror (see [`RETRY_STATUS_META_KEY`]).
@@ -1517,7 +1526,7 @@ mod tests {
             ),
         ];
         for (state, text) in cases {
-            let update = retry_status_update(&state);
+            let update = retry_status_update(&state, false);
             assert!(is_retry_status_update(&update), "{state:?}: tagged");
             let wire = serde_json::to_value(&update).expect("update serializes");
             assert_eq!(
@@ -1537,6 +1546,30 @@ mod tests {
         assert!(
             !is_retry_status_update(&untagged),
             "real reasoning is not a mirror"
+        );
+    }
+
+    /// Clients concatenate thought chunks, so a mirror that follows streamed reasoning
+    /// opens its own paragraph instead of running into the model's last sentence.
+    #[test]
+    fn a_mirror_after_reasoning_opens_its_own_paragraph() {
+        let state = RetryState::Retrying {
+            attempt: 1,
+            max_retries: 3,
+            reason: "Server error; retrying request".into(),
+            error_type: Some("api".into()),
+        };
+        assert_eq!(
+            format!(
+                "The model is thinking.{}",
+                retry_status_text(&state, /*after_thought_text*/ true)
+            ),
+            "The model is thinking.\n\nRetrying the model (1/3): Server error; retrying request\n\n"
+        );
+        assert_eq!(
+            retry_status_text(&state, false),
+            "Retrying the model (1/3): Server error; retrying request\n\n",
+            "the turn's first thought text needs no leading blank line"
         );
     }
 
