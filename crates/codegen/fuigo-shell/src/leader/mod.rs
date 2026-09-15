@@ -1690,6 +1690,21 @@ fn path_is_under(path: &Path, dir: &Path) -> bool {
     let dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     path.starts_with(&dir)
 }
+/// Win32 creation flags for the leader daemon, which outlives the client that
+/// spawns it.
+///
+/// - `CREATE_NO_WINDOW`: the leader owns no console. Without it the leader
+///   inherits the client's console and is terminated with
+///   `DBG_TERMINATE_PROCESS` (exit 0x40010004 = 1073807364) when that console
+///   closes — matching every other Windows spawn (`fuigo_tty_utils::detach_command`).
+/// - `CREATE_NEW_PROCESS_GROUP`: a Ctrl+C / Ctrl+Break in the client's group
+///   does not reach the leader.
+/// - Never `DETACHED_PROCESS`: it breaks stdio inheritance for grandchildren.
+#[cfg(any(windows, test))]
+fn leader_creation_flags() -> u32 {
+    use fuigo_tty_utils::win32_creation_flags::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+}
 fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
     let exe = resolve_exe_for_spawn()?;
     let mut cmd = Command::new(exe);
@@ -1736,8 +1751,7 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP.0);
+        cmd.creation_flags(leader_creation_flags());
     }
     #[allow(clippy::disallowed_methods)]
     let mut child = cmd
@@ -2686,5 +2700,43 @@ mod tests {
                 .is_ok()
         );
         handle.cancel.cancel();
+    }
+    /// The leader is a daemon that outlives the client that spawned it, so on
+    /// Windows it must own no console: a console-attached leader is terminated
+    /// with `DBG_TERMINATE_PROCESS` (exit 0x40010004 = 1073807364) when that
+    /// console closes. It keeps its own process group, and never uses
+    /// `DETACHED_PROCESS`.
+    #[test]
+    fn leader_spawn_flags_own_no_console_and_lead_a_new_group() {
+        use fuigo_tty_utils::win32_creation_flags::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        };
+        let flags = leader_creation_flags();
+        assert_eq!(
+            flags & CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW,
+            "leader creation flags {flags:#010x} lack CREATE_NO_WINDOW: the leader shares \
+             the client's console and is killed when that console closes"
+        );
+        assert_eq!(
+            flags & CREATE_NEW_PROCESS_GROUP,
+            CREATE_NEW_PROCESS_GROUP,
+            "leader creation flags {flags:#010x} lack CREATE_NEW_PROCESS_GROUP"
+        );
+        assert_eq!(
+            flags & DETACHED_PROCESS,
+            0,
+            "DETACHED_PROCESS breaks stdio inheritance for the leader's grandchildren"
+        );
+        assert_eq!(flags, CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn leader_spawn_flags_match_the_windows_crate() {
+        use windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        assert_eq!(
+            leader_creation_flags(),
+            (CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW).0
+        );
     }
 }
