@@ -125,6 +125,33 @@ pub(super) async fn actor_under_test_with_gateway<T>(
         retry_policy,
         transient_retry_enabled,
         drain,
+        None,
+    )
+    .await;
+    (actor, captured)
+}
+
+/// [`actor_under_test_with_gateway`] under a session id of the caller's choosing.
+///
+/// Every other test actor answers to `test-actor`, and the live-execution registry has one
+/// slot per session id: a test that registers an `Execution` under the shared id is visible
+/// to every test that resolves a side call through `Execution::current`. Its own id removes
+/// the collision instead of serialising against part of it.
+pub(super) async fn actor_under_test_for_session<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+    session_id: &str,
+) -> (Arc<SessionActor>, T) {
+    let (actor, captured, _event_rx) = build_actor_under_test(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain,
+        Some(session_id),
     )
     .await;
     (actor, captured)
@@ -145,6 +172,7 @@ pub(super) async fn actor_under_test_with_event_pump<T>(
         retry_policy,
         transient_retry_enabled,
         drain,
+        None,
     )
     .await;
     let pump = actor.clone();
@@ -172,6 +200,7 @@ async fn build_actor_under_test<T>(
     retry_policy: fuigo_sampler::RetryPolicy,
     transient_retry_enabled: bool,
     drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+    session_id: Option<&str>,
 ) -> (
     Arc<SessionActor>,
     T,
@@ -200,6 +229,9 @@ async fn build_actor_under_test<T>(
     let (mut actor, event_rx) =
         create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.sampler_handle = sampler_handle;
+    if let Some(session_id) = session_id {
+        actor.session_info.id = agent_client_protocol::SessionId::new(session_id);
+    }
     actor.startup_hints.is_subagent = matches!(session, SessionKind::Subagent);
     actor.transient_retry_enabled = transient_retry_enabled;
     // The per-turn config push carries the shell's max_retries; mirror the policy.

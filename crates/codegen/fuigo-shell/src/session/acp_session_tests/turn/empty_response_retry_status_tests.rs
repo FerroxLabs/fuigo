@@ -4,9 +4,9 @@
 //! The reasoning-only empty-response storm is capped at one resend.
 
 use super::rate_limit_backoff_tests::{
-    SessionKind, actor_under_test_with_event_pump, actor_under_test_with_gateway,
-    conversation_request, drain_persistence, pump_local_tasks, rate_limited_reply,
-    sampler_surfaces_429,
+    SessionKind, actor_under_test_for_session, actor_under_test_with_event_pump,
+    actor_under_test_with_gateway, conversation_request, drain_persistence, pump_local_tasks,
+    rate_limited_reply, sampler_surfaces_429,
 };
 use super::support::*;
 use super::transient_retry_loop_tests::{on_session_stack, run_paused};
@@ -517,15 +517,37 @@ async fn a_retry_mirror_never_overtakes_answer_text_already_generated() {
         .await;
 }
 
-/// Every test actor shares the session id `test-actor`, and the live-execution registry has
-/// one slot per session: the execution tests hold this while theirs is registered.
-/// Their prompt ids are their own, so a concurrent turn under another prompt id finds nothing.
-static EXECUTION_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// A durable execution scope for the turn `drive_turn` runs under `req_id`, as `handle_turn_input` opens one.
 async fn open_execution(
     actor: &Arc<SessionActor>,
     req_id: &str,
+) -> Arc<crate::session::execution_state::Execution> {
+    open_execution_scope(actor, req_id, Default::default()).await
+}
+
+/// [`open_execution`] under a total-token budget, as a goal-bounded turn opens one.
+/// A token limit is what makes `unknown_usage` deny later admissions at all.
+async fn open_execution_with_budget(
+    actor: &Arc<SessionActor>,
+    req_id: &str,
+    total_tokens: u64,
+) -> Arc<crate::session::execution_state::Execution> {
+    open_execution_scope(
+        actor,
+        req_id,
+        crate::session::execution_state::TokenLimits {
+            total: Some(total_tokens),
+            output: None,
+            initial_total: 0,
+        },
+    )
+    .await
+}
+
+async fn open_execution_scope(
+    actor: &Arc<SessionActor>,
+    req_id: &str,
+    limits: crate::session::execution_state::TokenLimits,
 ) -> Arc<crate::session::execution_state::Execution> {
     crate::session::execution_state::Execution::open(
         &actor.notifications.persistence_tx,
@@ -535,11 +557,166 @@ async fn open_execution(
         9,
         None,
         Some(9),
-        Default::default(),
+        limits,
         None,
     )
     .await
     .expect("execution scope is durable")
+}
+
+/// The execution-scope tests must leave the registry slot every other test actor shares free.
+///
+/// `Execution::current(session_id)` is how a side call (a title, a recap) finds the live
+/// execution, and every test actor answers to `test-actor`: an execution registered under
+/// that id is visible to the ~12 recap and summary tests for as long as it lives. A mutex
+/// held by the execution tests serialises them against each other and against nothing else.
+#[test]
+fn an_execution_scope_test_keeps_the_shared_session_slot_free() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            let (actor, _frames) = actor_under_test_for_session(
+                &server,
+                SessionKind::Main,
+                fuigo_sampler::RetryPolicy::default(),
+                true,
+                drain_frames,
+                "session-exec-scope-isolation",
+            )
+            .await;
+            let session = actor.session_info.id.to_string();
+            let execution = open_execution(&actor, "req-exec-scope-isolation").await;
+            assert!(
+                crate::session::execution_state::Execution::current("test-actor").is_none(),
+                "an execution test must not claim the registry slot every other test actor shares"
+            );
+            assert!(
+                crate::session::execution_state::Execution::current(&session).is_some(),
+                "it registers under a session id of its own instead"
+            );
+            execution.release(&session);
+        })
+    });
+}
+
+/// [`sse::responses_api_reasoning_only_events`] with no usage reported at all.
+///
+/// A provider that reports usage on an empty reply charges it either way; the shape that
+/// distinguishes a settlement from a supersede is the one with no usage, because only
+/// `Change::Settle` turns that into `unknown_usage`.
+fn reasoning_only_without_usage(reasoning: &str) -> Vec<fuigo_test_support::SseEvent> {
+    sse::responses_api_reasoning_only_events(reasoning, "test")
+        .into_iter()
+        .map(|event| {
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+                return event;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("response.completed")
+                && let Some(response) = value.get_mut("response").and_then(|r| r.as_object_mut())
+            {
+                response.remove("usage");
+            }
+            fuigo_test_support::SseEvent::data(value.to_string())
+        })
+        .collect()
+}
+
+/// Empty replies must leave the execution's token budget usable.
+///
+/// `Change::Settle` with no reported usage sets `unknown_usage`, and that flag denies every
+/// later admission under a token limit (`admit_attempt`) and finalizes the turn
+/// (`turn.rs`'s `finalizing`). The empty-response path never settles: an attempt its own
+/// resend takes over is handed off with `Change::Supersede`, which charges whatever usage
+/// the provider did report and never sets the flag, and the last empty attempt, which
+/// nothing takes over, is `Change::Abandon`ed and stays pending.
+///
+/// Pinned at one, two and three empty replies -- two in a row is the exact customer
+/// scenario this release exists to fix -- and with the provider both reporting usage and
+/// reporting none. The usage-less shape is the discriminating one: it is the only way a
+/// settlement and a supersede differ, so a test that never sees it proves nothing.
+#[test]
+fn empty_replies_leave_the_execution_token_budget_usable() {
+    const ANSWER: &str = "Here is the answer the resend produced.";
+    const REASONING: &str = "Let me think about this carefully";
+    for (budgeted, reports_usage) in [(true, true), (true, false), (false, true), (false, false)] {
+        for empties in 1..=fuigo_sampler::EMPTY_RESPONSE_MAX_ATTEMPTS {
+            // A runtime of its own per case: nothing carries over between them.
+            on_session_stack(move || {
+                run_paused(|| async move {
+                    let server =
+                        MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                            .await
+                            .expect("mock inference server");
+                    for _ in 0..empties {
+                        let events = if reports_usage {
+                            sse::responses_api_reasoning_only_events(REASONING, "test")
+                        } else {
+                            reasoning_only_without_usage(REASONING)
+                        };
+                        server.enqueue_response("/v1/responses", ScriptedResponse::sse(events));
+                    }
+                    server.enqueue_response(
+                        "/v1/responses",
+                        ScriptedResponse::sse(sse::responses_api_script_exact(ANSWER, "test")),
+                    );
+                    let policy = fuigo_sampler::RetryPolicy {
+                        max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
+                        ..Default::default()
+                    };
+                    let (actor, frames) = actor_under_test_for_session(
+                        &server,
+                        SessionKind::Main,
+                        policy,
+                        false,
+                        drain_frames,
+                        "session-empty-budget",
+                    )
+                    .await;
+                    let session = actor.session_info.id.to_string();
+                    let req_id = "req-empty-budget";
+                    let execution = if budgeted {
+                        open_execution_with_budget(&actor, req_id, 1_000_000).await
+                    } else {
+                        open_execution(&actor, req_id).await
+                    };
+
+                    let (outcome, seen, _elapsed, submissions) =
+                        drive_turn(actor.clone(), frames, &server, req_id).await;
+
+                    let case = format!(
+                        "{empties} empty replies, usage {reports_usage}, budget {budgeted}"
+                    );
+                    let state = execution.snapshot().await.expect("execution snapshot");
+                    assert!(
+                        !state.unknown_usage,
+                        "{case}: the execution's usage must not become unknown: {state:?}"
+                    );
+                    assert!(
+                        submissions
+                            == empties
+                                + u32::from(empties < fuigo_sampler::EMPTY_RESPONSE_MAX_ATTEMPTS)
+                            && state.calls == u64::from(submissions),
+                        "{case}: every empty attempt runs under the execution \
+                         ({submissions} submissions, outcome {:?}, frames {seen:?}): {state:?}",
+                        outcome.as_ref().err()
+                    );
+                    let later = uuid::Uuid::new_v4().to_string();
+                    fuigo_sampling_types::ExecutionAdmission::admit(
+                        execution.as_ref(),
+                        fuigo_sampling_types::RequestPurpose::Work,
+                        later,
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{case}: the work after them is still admissible: {error} {state:?}")
+                    });
+                    execution.release(&session);
+                })
+            });
+        }
+    }
 }
 
 /// A turn its retry rescued must not report unresolved work.
@@ -552,7 +729,6 @@ async fn open_execution(
 fn a_retry_that_answers_leaves_no_unresolved_attempt() {
     const ANSWER: &str = "Hello there, this answer came after one retry.";
     const REQ_ID: &str = "req-retry-receipt-rescued";
-    let _slot = EXECUTION_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     on_session_stack(|| {
         run_paused(|| async {
             let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
@@ -570,12 +746,13 @@ fn a_retry_that_answers_leaves_no_unresolved_attempt() {
                 max_retries: 3,
                 ..Default::default()
             };
-            let (actor, frames) = actor_under_test_with_gateway(
+            let (actor, frames) = actor_under_test_for_session(
                 &server,
                 SessionKind::Main,
                 policy,
                 true,
                 drain_frames,
+                "session-retry-receipt-rescued",
             )
             .await;
             let execution = open_execution(&actor, REQ_ID).await;
@@ -616,7 +793,6 @@ fn a_retry_that_answers_leaves_no_unresolved_attempt() {
 #[test]
 fn a_turn_that_never_recovers_still_reports_its_attempt() {
     const REQ_ID: &str = "req-retry-receipt-failed";
-    let _slot = EXECUTION_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     on_session_stack(|| {
         run_paused(|| async {
             let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
@@ -635,12 +811,13 @@ fn a_turn_that_never_recovers_still_reports_its_attempt() {
                 max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
                 ..Default::default()
             };
-            let (actor, frames) = actor_under_test_with_gateway(
+            let (actor, frames) = actor_under_test_for_session(
                 &server,
                 SessionKind::Main,
                 policy,
                 false,
                 drain_frames,
+                "session-retry-receipt-failed",
             )
             .await;
             let execution = open_execution(&actor, REQ_ID).await;
