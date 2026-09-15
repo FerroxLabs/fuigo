@@ -1693,10 +1693,14 @@ fn path_is_under(path: &Path, dir: &Path) -> bool {
 /// Win32 creation flags for the leader daemon, which outlives the client that
 /// spawns it.
 ///
-/// - `CREATE_NO_WINDOW`: the leader owns no console. Without it the leader
-///   inherits the client's console and is terminated with
-///   `DBG_TERMINATE_PROCESS` (exit 0x40010004 = 1073807364) when that console
-///   closes — matching every other Windows spawn (`fuigo_tty_utils::detach_command`).
+/// - `CREATE_NO_WINDOW`: the leader does not attach to the spawning client's
+///   console; it gets its own console with no window. Without it the leader
+///   shares the client's console and is terminated along with every other
+///   process on it when that console closes (the terminal window is closed, or
+///   its console host exits). Matches every other Windows spawn
+///   (`fuigo_tty_utils::detach_command`). It does not shield the leader from
+///   an explicit process-tree kill of the client (`taskkill /PID <client> /T
+///   /F`), which follows parent/child links, not consoles.
 /// - `CREATE_NEW_PROCESS_GROUP`: a Ctrl+C / Ctrl+Break in the client's group
 ///   does not reach the leader.
 /// - Never `DETACHED_PROCESS`: it breaks stdio inheritance for grandchildren.
@@ -1704,6 +1708,28 @@ fn path_is_under(path: &Path, dir: &Path) -> bool {
 fn leader_creation_flags() -> u32 {
     use fuigo_tty_utils::win32_creation_flags::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+}
+/// Create the leader process from `cmd` (program, arguments, environment and
+/// stdio already set), detached from the client: its own process group on
+/// Unix, [`leader_creation_flags`] on Windows.
+///
+/// The one place the leader process is created, so the `leader_spawn_*` tests
+/// that spawn through it pin what the real spawn does.
+fn spawn_leader_process(mut cmd: Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(leader_creation_flags());
+    }
+    // The leader is a daemon that deliberately outlives the client; the caller
+    // reaps it on a waiter thread.
+    #[allow(clippy::disallowed_methods)]
+    cmd.spawn()
 }
 fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
     let exe = resolve_exe_for_spawn()?;
@@ -1743,20 +1769,8 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
         .or_else(|_| std::env::var("RUST_LOG"))
         .unwrap_or_else(|_| "fuigo_shell=info,fuigo_acp_lib=warn,fuigo_mcp=warn".into());
     cmd.env("RUST_LOG", leader_log);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(leader_creation_flags());
-    }
-    #[allow(clippy::disallowed_methods)]
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ConnectionError::SpawnFailed(e.to_string()))?;
+    let mut child =
+        spawn_leader_process(cmd).map_err(|e| ConnectionError::SpawnFailed(e.to_string()))?;
     let pid = child.id();
     info!(pid, "Spawned leader subprocess");
     std::thread::spawn(move || {
@@ -2702,12 +2716,11 @@ mod tests {
         handle.cancel.cancel();
     }
     /// The leader is a daemon that outlives the client that spawned it, so on
-    /// Windows it must own no console: a console-attached leader is terminated
-    /// with `DBG_TERMINATE_PROCESS` (exit 0x40010004 = 1073807364) when that
-    /// console closes. It keeps its own process group, and never uses
-    /// `DETACHED_PROCESS`.
+    /// Windows it must not attach to that client's console (closing the
+    /// console would terminate it): it requests no console window, keeps its
+    /// own process group, and never uses `DETACHED_PROCESS`.
     #[test]
-    fn leader_spawn_flags_own_no_console_and_lead_a_new_group() {
+    fn leader_spawn_flags_request_no_console_window_and_a_new_group() {
         use fuigo_tty_utils::win32_creation_flags::{
             CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
         };
@@ -2715,8 +2728,8 @@ mod tests {
         assert_eq!(
             flags & CREATE_NO_WINDOW,
             CREATE_NO_WINDOW,
-            "leader creation flags {flags:#010x} lack CREATE_NO_WINDOW: the leader shares \
-             the client's console and is killed when that console closes"
+            "leader creation flags {flags:#010x} lack CREATE_NO_WINDOW: the leader attaches \
+             to the client's console and is terminated when that console closes"
         );
         assert_eq!(
             flags & CREATE_NEW_PROCESS_GROUP,
@@ -2737,6 +2750,101 @@ mod tests {
         assert_eq!(
             leader_creation_flags(),
             (CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW).0
+        );
+    }
+
+    /// Env marker for [`leader_spawn_console_probe_entry`].
+    #[cfg(windows)]
+    const LEADER_CONSOLE_PROBE_ENV: &str = "__FUIGO_SHELL_LEADER_CONSOLE_PROBE";
+
+    /// Probe process for [`leader_spawn_gets_its_own_windowless_console`]:
+    /// reports whether it has a console window and which processes share its
+    /// console.
+    #[cfg(windows)]
+    #[test]
+    fn leader_spawn_console_probe_entry() {
+        use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+        if std::env::var_os(LEADER_CONSOLE_PROBE_ENV).is_none() {
+            return; // skip when not spawned as the probe
+        }
+        let mut pids = [0u32; 64];
+        // SAFETY: plain FFI calls; `pids` is a live buffer of the length passed.
+        let (attached, window) = unsafe { (GetConsoleProcessList(&mut pids), GetConsoleWindow()) };
+        // A count above the buffer length leaves it unfilled; report the count.
+        let processes = match pids.get(..attached as usize) {
+            Some(listed) => listed
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            None => format!("more-than-{}", pids.len()),
+        };
+        println!(
+            "leader-console-probe window={} console-processes={processes} end",
+            !window.0.is_null()
+        );
+    }
+
+    /// Spawned through the real leader spawn path, a process must get its own
+    /// console with no window: attached to no other process's console (that
+    /// console closing would terminate it) and showing no window. With the
+    /// pre-fix flags (`CREATE_NEW_PROCESS_GROUP` alone) it shares the
+    /// spawner's console on Windows; under Wine, which never reports a console
+    /// window, it has no console at all. Both fail the process-list assertion.
+    #[cfg(windows)]
+    #[test]
+    fn leader_spawn_gets_its_own_windowless_console() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = Command::new(exe);
+        cmd.args([
+            "--exact",
+            "leader::tests::leader_spawn_console_probe_entry",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(LEADER_CONSOLE_PROBE_ENV, "1")
+        .env_remove("TEST_SHARD_INDEX")
+        .env_remove("TEST_TOTAL_SHARDS")
+        .env_remove("TEST_SHARD_STATUS_FILE")
+        .env_remove("TESTBRIDGE_TEST_ONLY")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+        let child =
+            spawn_leader_process(cmd).expect("spawn the probe through the leader spawn path");
+        let pid = child.id();
+        let output = child
+            .wait_with_output()
+            .expect("wait for the console probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "console probe failed ({}); stdout: {stdout}",
+            output.status
+        );
+        let report = stdout
+            .split("leader-console-probe ")
+            .nth(1)
+            .and_then(|rest| rest.split(" end").next())
+            .unwrap_or_else(|| panic!("no console probe report; stdout: {stdout}"));
+        let field = |key: &str| {
+            report
+                .split_whitespace()
+                .find_map(|pair| pair.strip_prefix(key))
+                .unwrap_or_else(|| panic!("probe report lacks {key}: {report}"))
+                .to_owned()
+        };
+        assert_eq!(
+            field("console-processes="),
+            pid.to_string(),
+            "the leader (pid {pid}) is not alone on a console of its own (console processes: \
+             {report}; empty = no console): a leader on its client's console is terminated \
+             when that console closes"
+        );
+        assert_eq!(
+            field("window="),
+            "false",
+            "the leader's console has a window ({report})"
         );
     }
 }
