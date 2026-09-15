@@ -1172,6 +1172,10 @@ pub const RETRY_STATUS_META_KEY: &str = "fuigo/retryStatus";
 ///
 /// A disk-full failure is the one `retry_state` on this rail that is not about the model,
 /// so it gets its own subject instead of "The model request failed".
+///
+/// An exhaustion counts its attempts in the singular when there was only one: an
+/// empty-response budget that the configured retry budget cannot fund gives up after the
+/// first reply.
 pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String {
     let separator = if after_thought_text { "\n\n" } else { "" };
     if let RetryState::Failed {
@@ -1192,7 +1196,14 @@ pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String
         RetryState::Exhausted {
             attempts, reason, ..
         } => {
-            format!("{separator}The model request failed after {attempts} attempts: {reason}\n\n")
+            // A budget that leaves no resend gives up after one attempt, so the count is not
+            // always plural.
+            let plural = if *attempts == 1 {
+                "attempt"
+            } else {
+                "attempts"
+            };
+            format!("{separator}The model request failed after {attempts} {plural}: {reason}\n\n")
         }
         RetryState::Failed { message, .. } => {
             format!("{separator}The model request failed: {message}\n\n")
@@ -1593,6 +1604,34 @@ mod tests {
             ),
             "The model request failed: upstream exploded\n\n",
             "every other failure keeps the model-request wording"
+        );
+    }
+
+    /// B-R5-2 made `attempts == 1` reachable on this line: an empty-response budget whose
+    /// configured retry budget leaves no resend gives up after its single attempt, and the
+    /// exhaustion still has to name the count. "after 1 attempts" is the wrong sentence.
+    #[test]
+    fn a_single_attempt_exhaustion_counts_in_the_singular() {
+        let one = RetryState::Exhausted {
+            attempts: 1,
+            reason: "empty response from model (reasoning_only)".into(),
+            is_rate_limited: false,
+            error_type: Some("empty_response".into()),
+        };
+        assert_eq!(
+            retry_status_text(&one, false),
+            "The model request failed after 1 attempt: empty response from model (reasoning_only)\n\n"
+        );
+        let two = RetryState::Exhausted {
+            attempts: 2,
+            reason: "empty response from model (reasoning_only)".into(),
+            is_rate_limited: false,
+            error_type: Some("empty_response".into()),
+        };
+        assert_eq!(
+            retry_status_text(&two, false),
+            "The model request failed after 2 attempts: empty response from model (reasoning_only)\n\n",
+            "every other count stays plural"
         );
     }
 

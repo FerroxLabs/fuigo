@@ -42,6 +42,8 @@ fn test_actor_inner(
 ) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
     let (disk_full_tx, disk_full_rx) = tokio::sync::watch::channel(false);
+    let retry_status_mirror: crate::session::persistence::RetryStatusMirrorSlot =
+        Default::default();
     let sampling_client = OaiCompatClient::new(fuigo_sampler::SamplerConfig::default()).unwrap();
     let mut summary =
         crate::session::summary::SummaryGenerator::new(crate::session::summary::SummaryConfig {
@@ -70,6 +72,7 @@ fn test_actor_inner(
             search_index: crate::session::storage::search::SharedSearchIndex::never_indexed(),
             disk_full_tx,
             disk_full_notified: false,
+            retry_status_mirror: retry_status_mirror.clone(),
             dirty_files: Default::default(),
             pending_write_error: None,
             last_usage_live: None,
@@ -79,7 +82,11 @@ fn test_actor_inner(
         .run(),
     );
     ActorGuard {
-        handle: PersistenceHandle::from_parts_for_test(tx, disk_full_rx),
+        handle: PersistenceHandle::from_parts_for_test_with_mirror(
+            tx,
+            disk_full_rx,
+            retry_status_mirror,
+        ),
         task,
     }
 }
@@ -2117,6 +2124,77 @@ async fn disk_full_failure_is_mirrored_on_the_standard_rail() {
         standard_rail[0]["_meta"].get("eventId").is_none(),
         "live-only: no replay cursor"
     );
+}
+
+/// With a session queue installed, the disk-full mirror rides it instead of going straight to the
+/// gateway.
+///
+/// This actor is the one mirror producer outside the session, and the write it fails on happens
+/// while that session is streaming: sent directly, the mirror can reach the client ahead of answer
+/// text still held in the replay buffer's merge window, and it carries neither the paragraph
+/// separator nor the prompt id, which are session state this task cannot read.
+/// The `_fuigo` rail is unchanged -- only the standard-rail mirror moves.
+#[tokio::test]
+async fn disk_full_mirror_takes_the_session_queue_when_one_is_installed() {
+    use crate::extensions::notification::{
+        DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE, RetryState,
+    };
+    use crate::session::replay_events::SessionEvent;
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("disk-full-queued-mirror"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_update_append_probe(
+        dir.path().to_path_buf(),
+        |_| Err(io::Error::from(io::ErrorKind::StorageFull)),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let actor = test_actor_with_gateway(info.clone(), storage, GatewaySender::new(gateway_tx));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    actor.handle.install_retry_status_mirror(event_tx);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "chunk")))
+        .unwrap();
+    assert!(flush_ack(&actor.handle).await.is_err());
+    assert!(actor.handle.is_disk_full());
+    actor.stop().await;
+
+    let mut fuigo_rail = 0;
+    let mut standard_rail = 0;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        match msg {
+            fuigo_acp_lib::AcpClientMessage::ExtNotification(_) => fuigo_rail += 1,
+            fuigo_acp_lib::AcpClientMessage::SessionNotification(_) => standard_rail += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(fuigo_rail, 1, "the _fuigo rail is unchanged");
+    assert_eq!(
+        standard_rail, 0,
+        "the mirror does not go straight to the gateway when a session queue is installed"
+    );
+
+    let mut queued = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        queued.push(event);
+    }
+    match queued.as_slice() {
+        [SessionEvent::RetryStatusMirror(state)] => assert_eq!(
+            **state,
+            RetryState::Failed {
+                error_type: DISK_FULL_ERROR_TYPE.to_string(),
+                message: DISK_FULL_USER_MESSAGE.to_string(),
+            }
+        ),
+        other => panic!("expected one queued mirror, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -417,6 +417,12 @@ impl SessionActor {
                 }
                 self.emit_transient_notification(*notification);
             }
+            SessionEvent::RetryStatusMirror(state) => {
+                if let Some(pending) = replay_buffer.flush() {
+                    self.emit_buffered(pending).await;
+                }
+                self.emit_transient_notification(self.retry_status_mirror_notification(&state));
+            }
         }
     }
     /// Tracing log for buffered Ferrox Labs notifications emerging from emit_buffered.
@@ -519,18 +525,7 @@ impl SessionActor {
     /// Sent through the event queue (`SessionEvent::Transient`), not straight to the gateway.
     /// Answer text rides that queue and the replay buffer's merge window, so a direct send could reach the client ahead of text generated before the retry.
     fn emit_retry_status_mirror(&self, state: &crate::extensions::notification::RetryState) {
-        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
-        // Open a paragraph of its own after streamed reasoning; the line ends with a blank
-        // line of its own, so the mirror after a mirror needs no second separator.
-        let after_thought_text = self
-            .turn_thought_text_emitted
-            .swap(false, std::sync::atomic::Ordering::Relaxed);
-        let notification = crate::extensions::notification::retry_status_notification(
-            self.session_info.id.clone(),
-            state,
-            prompt_id,
-            after_thought_text,
-        );
+        let notification = self.retry_status_mirror_notification(state);
         if let Err(unsent) = self
             .event_tx
             .send(SessionEvent::Transient(Box::new(notification)))
@@ -540,6 +535,28 @@ impl SessionActor {
                 self.emit_transient_notification(*notification);
             }
         }
+    }
+    /// The mirror notification for `state`, stamped with the turn state only the session actor holds.
+    ///
+    /// Built at send time for [`Self::emit_retry_status_mirror`] and at handling time for
+    /// [`SessionEvent::RetryStatusMirror`], so a mirror queued by another actor still opens its own
+    /// paragraph after streamed reasoning and still carries the running turn's prompt id.
+    pub(crate) fn retry_status_mirror_notification(
+        &self,
+        state: &crate::extensions::notification::RetryState,
+    ) -> acp::SessionNotification {
+        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+        // Open a paragraph of its own after streamed reasoning; the line ends with a blank
+        // line of its own, so the mirror after a mirror needs no second separator.
+        let after_thought_text = self
+            .turn_thought_text_emitted
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        crate::extensions::notification::retry_status_notification(
+            self.session_info.id.clone(),
+            state,
+            prompt_id,
+            after_thought_text,
+        )
     }
     /// [`Self::send_fuigo_notification`] minus persistence, for updates whose durable copy lives elsewhere (e.g. `LastTurnSummary` in `summary.json`).
     /// Skips the rewind-window close and notification hooks.

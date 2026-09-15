@@ -100,6 +100,14 @@ pub(crate) enum SessionEvent {
     /// A live-only notification (never persisted, no `eventId`) that must reach the client in queue order.
     /// The loop flushes the replay buffer before sending it, so it never overtakes chunks queued or held ahead of it.
     Transient(Box<acp::SessionNotification>),
+    /// A [`RetryState`](crate::extensions::notification::RetryState) to mirror onto the standard rail,
+    /// for producers that live outside the session actor (the persistence actor's disk-full notice).
+    ///
+    /// The notification is built when the loop handles this, not when it is queued: the paragraph
+    /// separator and the prompt id are session state (`turn_thought_text_emitted`,
+    /// `current_prompt_id`) that a `Send` actor on another task cannot read, and the session actor
+    /// is `!Send`. Handled exactly like [`Self::Transient`] once built.
+    RetryStatusMirror(Box<crate::extensions::notification::RetryState>),
 }
 
 impl SessionEvent {

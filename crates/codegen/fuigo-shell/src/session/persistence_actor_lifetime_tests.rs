@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn dropping_the_session_handle_closes_the_actor_channel() {
-    let (handle, mut rx, summary_tx, _disk_full_tx) = actor_channel();
+    let (handle, mut rx, summary_tx, _disk_full_tx, _mirror) = actor_channel();
 
     drop(handle);
 

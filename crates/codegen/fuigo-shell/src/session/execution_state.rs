@@ -825,11 +825,20 @@ impl ExecutionAdmission for Execution {
             if let Some(parent) = &self.parent_grant {
                 parent.parent.abandon(attempt_id.clone()).await?;
             }
-            // Arm the sweep the next submission runs BEFORE the durable round trip, not after:
-            // armed after, the in-process flag lags the durable `abandoned` set for the whole
-            // round trip (and stays wrong forever if the write fails), so a resubmit that
-            // sweeps inside that window skips it and leaves the attempt pending. Arming first
-            // costs at most one `Change::Read` on a sweep that turns out to have nothing to do.
+            // Arm the sweep the next submission runs BEFORE the durable round trip, not after.
+            //
+            // What this guarantees: the in-process flag is never behind the durable `abandoned`
+            // set, so no sweep can read it disarmed for an abandon that has already been ordered
+            // -- including forever, which is what an armed-after flag did when the write failed.
+            //
+            // What it does NOT guarantee: that a sweep inside the round trip finds anything. The
+            // snapshot it reads still lists the attempt as pending until the `Change::Abandon`
+            // write lands, so a resubmit in that window still supersedes nothing and can still
+            // leave a partial receipt. The window is narrowed, not closed; it stays unreachable
+            // only because every shell resubmit path sleeps, compacts or refreshes credentials
+            // first, which is a property of four call sites, not an invariant.
+            //
+            // Arming first costs at most one `Change::Read` on a sweep that has nothing to do.
             self.abandoned_attempts
                 .store(true, std::sync::atomic::Ordering::Release);
             self.change(Change::Abandon { attempt_id })
@@ -1090,11 +1099,18 @@ mod tests {
     ///
     /// The in-process flag is what [`Execution::supersede_pending_attempts`] consults to skip
     /// the no-op sweep. Armed only after the acknowledgment returns, it lags the durable
-    /// `abandoned` set for the whole round trip: a resubmit that sweeps inside that window
-    /// reads it disarmed, skips the sweep, and leaves the attempt pending -- the partial
-    /// receipt (and its `-32603`) the sweep exists to prevent. Nothing reaches that window
-    /// today only because every shell resubmit path happens to sleep, compact or refresh
-    /// credentials first, which is a property of four call sites, not an invariant.
+    /// `abandoned` set for the whole round trip -- and stays disarmed forever if the write
+    /// fails -- so a resubmit that sweeps inside that window reads it disarmed, skips the
+    /// sweep, and leaves the attempt pending: the partial receipt (and its `-32603`) the
+    /// sweep exists to prevent.
+    ///
+    /// Arming first removes that disagreement; it does not close the window. Until the
+    /// `Change::Abandon` write lands, the snapshot a sweep reads still lists the attempt as
+    /// pending, so a resubmit inside the round trip supersedes nothing either way. What is
+    /// pinned here is the flag's ordering, which is what the optimisation in
+    /// `supersede_pending_attempts` reads. Nothing reaches that window today only because
+    /// every shell resubmit path happens to sleep, compact or refresh credentials first,
+    /// which is a property of four call sites, not an invariant.
     /// Arming first costs at most one `Change::Read` on a sweep that turns out to be a no-op.
     #[tokio::test]
     async fn abandon_arms_the_sweep_before_its_durable_round_trip() {
