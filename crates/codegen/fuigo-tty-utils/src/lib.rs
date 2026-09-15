@@ -2267,7 +2267,9 @@ mod tests {
     ///
     /// Panics when the armed grandchild exits while its parent is still
     /// alive: a watcher that fires early (without waiting for the parent) must
-    /// not pass as a working binding.
+    /// not pass as a working binding. That guard lasts [`PARENT_ALIVE_GUARD`],
+    /// plus [`PARENT_DEATH_HOOK_BOUND`] when `hook` names one, so no early fire
+    /// can hide behind the time the hook is allowed to take.
     #[cfg(windows)]
     fn run_parent_death_scenario(hook: Option<&str>) -> ParentDeathOutcome {
         use std::io::BufRead as _;
@@ -2336,8 +2338,15 @@ mod tests {
         .expect("open the grandchild while its parent is still alive");
 
         // Early-fire guard: armed, with its parent alive, the grandchild must
-        // keep running.
-        let guard_ms = u32::try_from(PARENT_ALIVE_GUARD.as_millis()).expect("guard fits u32");
+        // keep running. A registered hook delays the watcher's termination by
+        // up to PARENT_DEATH_HOOK_BOUND, so the guard grows by that bound too:
+        // otherwise a watcher that fires early and then spends the bound in the
+        // hook lands just past a PARENT_ALIVE_GUARD-long guard and hides.
+        let guard = match hook {
+            Some(_) => PARENT_ALIVE_GUARD + PARENT_DEATH_HOOK_BOUND,
+            None => PARENT_ALIVE_GUARD,
+        };
+        let guard_ms = u32::try_from(guard.as_millis()).expect("guard fits u32");
         // SAFETY: `grandchild` is a valid handle opened with SYNCHRONIZE.
         let while_parent_alive = unsafe { WaitForSingleObject(grandchild, guard_ms) };
         if while_parent_alive != WAIT_TIMEOUT {
@@ -2349,7 +2358,7 @@ mod tests {
             let _ = unsafe { CloseHandle(grandchild) };
             panic!(
                 "grandchild {grandchild_pid} ended while its parent was still alive \
-                 (wait result {while_parent_alive:?} within {PARENT_ALIVE_GUARD:?}): the \
+                 (wait result {while_parent_alive:?} within {guard:?}): the \
                  parent-death binding fired before the parent exited"
             );
         }
