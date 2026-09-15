@@ -2054,6 +2054,9 @@ mod parallel_dispatch_tests;
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
+mod empty_response_retry_status_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn/rate_limit_backoff_tests.rs"]
 mod rate_limit_backoff_tests;
 #[cfg(test)]

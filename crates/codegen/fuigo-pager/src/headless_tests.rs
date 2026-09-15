@@ -1088,3 +1088,48 @@ fn the_lifecycle_cap_has_an_escape_hatch() {
         "with the hatch open and no --timeout, the startup sends are unbounded again"
     );
 }
+
+/// A retry-status mirror chunk (`_meta["fuigo/retryStatus"]`) is progress for stock ACP clients, never part of the headless answer.
+#[test]
+fn retry_status_mirror_chunk_is_not_part_of_the_answer() {
+    use agent_client_protocol as acp;
+    let chunk = |text: &str, meta: Option<serde_json::Map<String, serde_json::Value>>| {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        fuigo_acp_lib::AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(
+                acp::SessionId::new("s"),
+                acp::SessionUpdate::AgentMessageChunk(
+                    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                        text.to_string(),
+                    )))
+                    .meta(meta),
+                ),
+            ),
+            response_tx: tx,
+        })
+    };
+    let mut tagged = serde_json::Map::new();
+    tagged.insert(
+        "fuigo/retryStatus".into(),
+        serde_json::json!({"type": "failed", "error_type": "empty_response", "message": "x"}),
+    );
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let mut pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut ttf_logged = false;
+    for msg in [
+        chunk("Retrying the model (1/2): x\n\n", Some(tagged)),
+        chunk("Hello", None),
+    ] {
+        super::handle_headless_acp_message(
+            msg.boxed(),
+            &mut emitter,
+            std::time::Instant::now(),
+            &mut ttf_logged,
+            false,
+            &mut pending,
+            &mut completed,
+        );
+    }
+    assert_eq!(emitter.text_buffer, "Hello");
+}

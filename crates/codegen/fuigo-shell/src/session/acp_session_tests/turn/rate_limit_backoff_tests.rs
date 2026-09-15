@@ -85,6 +85,24 @@ pub(super) async fn actor_under_test(
     retry_policy: fuigo_sampler::RetryPolicy,
     transient_retry_enabled: bool,
 ) -> (Arc<SessionActor>, CapturedRetries) {
+    actor_under_test_with_gateway(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain_gateway,
+    )
+    .await
+}
+
+/// [`actor_under_test`] with a caller-supplied consumer for the client gateway, for tests that assert on more than `RetryState`.
+pub(super) async fn actor_under_test_with_gateway<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+) -> (Arc<SessionActor>, T) {
     let sampler_max_retries = retry_policy.max_retries;
     let sampling_cfg = fuigo_sampler::SamplerConfig {
         base_url: server.url(),
@@ -101,7 +119,7 @@ pub(super) async fn actor_under_test(
         fuigo_sampler::SamplerActor::spawn(sampling_cfg, retry_policy, sampler_event_tx);
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-    let captured_retries = drain_gateway(gateway_rx);
+    let captured = drain(gateway_rx);
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     drain_persistence(persistence_rx);
 
@@ -133,7 +151,7 @@ pub(super) async fn actor_under_test(
             }
         });
     }
-    (actor, captured_retries)
+    (actor, captured)
 }
 
 pub(super) async fn conversation_request(actor: &Arc<SessionActor>) -> ConversationRequest {

@@ -1151,6 +1151,56 @@ pub enum RetryState {
     },
 }
 
+/// Chunk `_meta` key tagging the standard-rail mirror of a [`RetryState`]; its value is the `RetryState` object as `retry_state` carries it (`type` tag, snake_case fields).
+/// The shell sends every `retry_state` twice: on `_fuigo/session_notification` for Fuigo clients, and as a live-only `session/update` `agent_message_chunk` that stock ACP clients render.
+/// Fuigo clients (the pager, headless mode) render retries from `retry_state` and skip chunks carrying this key.
+pub const RETRY_STATUS_META_KEY: &str = "fuigo/retryStatus";
+
+/// Progress line for the standard-rail mirror of `state`.
+/// Ends with a blank line so an answer that follows starts its own paragraph in clients that concatenate chunks.
+pub fn retry_status_text(state: &RetryState) -> String {
+    match state {
+        RetryState::Retrying {
+            attempt,
+            max_retries,
+            reason,
+            ..
+        } => format!("Retrying the model ({attempt}/{max_retries}): {reason}\n\n"),
+        RetryState::Exhausted {
+            attempts, reason, ..
+        } => format!("The model request failed after {attempts} attempts: {reason}\n\n"),
+        RetryState::Failed { message, .. } => {
+            format!("The model request failed: {message}\n\n")
+        }
+    }
+}
+
+/// The standard `agent_message_chunk` that mirrors `state`, tagged with [`RETRY_STATUS_META_KEY`].
+pub fn retry_status_update(state: &RetryState) -> acp::SessionUpdate {
+    let mut meta = serde_json::Map::new();
+    if let Ok(value) = serde_json::to_value(state) {
+        meta.insert(RETRY_STATUS_META_KEY.to_string(), value);
+    }
+    acp::SessionUpdate::AgentMessageChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            retry_status_text(state),
+        )))
+        .meta(Some(meta)),
+    )
+}
+
+/// Whether `update` is a retry-status mirror (see [`RETRY_STATUS_META_KEY`]).
+pub fn is_retry_status_update(update: &acp::SessionUpdate) -> bool {
+    matches!(
+        update,
+        acp::SessionUpdate::AgentMessageChunk(chunk)
+            if chunk
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.contains_key(RETRY_STATUS_META_KEY))
+    )
+}
+
 /// Whether a terminal retry failure is a recoverable authentication error (expired/invalid credentials, 401).
 /// The user can fix those by signing in again; this drives the actionable re-auth banner.
 ///
