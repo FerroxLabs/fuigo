@@ -1121,7 +1121,7 @@ async fn handle_call(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .await
         }
     }
-    .map_err(|e| crate::acp_error::internal_error(e))?;
+    .map_err(crate::acp_error::internal_error)?;
 
     to_ext_response(Ok(result))
 }
@@ -1144,7 +1144,7 @@ async fn handle_read_resource(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         ensure_agent_pool_initialized(&mcp_state).await;
         read_mcp_resource(&mcp_state, &req.server, &req.uri).await
     }
-    .map_err(|e| crate::acp_error::internal_error(e))?;
+    .map_err(crate::acp_error::internal_error)?;
 
     to_ext_response(Ok(result))
 }

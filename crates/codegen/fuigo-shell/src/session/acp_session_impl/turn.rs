@@ -702,7 +702,7 @@ impl SessionActor {
         // Bind the existing logical goal, or this explicit prompt, before title
         // generation or normal inference can consume its completion capacity.
         let budget = fuigo_sampler::execution_budget::process_budget()
-            .map_err(|message| crate::acp_error::internal_error(message))?;
+            .map_err(crate::acp_error::internal_error)?;
         let active_goal = self.goal_tracker.lock().status()
             == Some(crate::session::goal_tracker::GoalStatus::Active);
         let _execution = if crate::session::execution_state::should_track_execution(
@@ -1515,7 +1515,7 @@ impl SessionActor {
                 .await;
             }
             Err(err) => {
-                let message = crate::sampling::error::acp_error_text(&err);
+                let message = crate::sampling::error::acp_error_text(err);
                 let input = fuigo_agent_lifecycle::TurnErrorInput { message: &message };
                 for contributor in self.extension_registry.turn_lifecycle_contributors() {
                     contributor.on_turn_error(&input).await;
@@ -2779,7 +2779,7 @@ impl SessionActor {
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
-                .map_err(|message| crate::acp_error::internal_error(message))?;
+                .map_err(crate::acp_error::internal_error)?;
             if let Some(execution) = &execution {
                 let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution token state unavailable"))?;
                 if let Some(limit) = state.limits.output {

@@ -2462,7 +2462,7 @@ async fn handle_synthetic_turn_trace(
                 input_tokens: None,
                 cached_input_tokens: None,
                 output_tokens: None,
-                error: Some(crate::sampling::error::acp_error_text(&e)),
+                error: Some(crate::sampling::error::acp_error_text(e)),
                 finished_at: chrono::Utc::now().to_rfc3339(),
                 signals: None,
                 turn_delta: None,

@@ -675,7 +675,7 @@ impl SessionActor {
                 .map_err(|e| {
                     crate::acp_error::internal_error(format!("flush stream task panicked: {e}"))
                 })?
-                .map_err(|e| crate::acp_error::internal_error(e))
+                .map_err(crate::acp_error::internal_error)
         }
         .await;
 
