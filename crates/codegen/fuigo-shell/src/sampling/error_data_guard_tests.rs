@@ -873,6 +873,32 @@ fn every_serialization_code_flip_is_named_in_the_agent_mode_guide() {
     );
 }
 
+/// The two `-32601 data: null` replies the branch deliberately leaves alone are explained in the guide,
+/// and the round-5 wire probe found the explanation incomplete: `session/cancel` is a notification-only
+/// method, so sending it as a REQUEST also answers `-32601` with no `data`, and it is neither an unknown
+/// method nor an extension call. A client author reading the old sentence would conclude their `-32601`
+/// could not have come from a method we implement.
+#[test]
+fn the_guide_explains_every_reply_that_still_comes_back_without_data() {
+    let doc = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fuigo-pager/docs/user-guide/15-agent-mode.md");
+    let guide = std::fs::read_to_string(&doc).expect("read 15-agent-mode.md");
+    let para = guide
+        .split("\n\n")
+        .find(|p| p.contains("`-32601 Method not found` with no `data`"))
+        .expect("the guide explains the data-less -32601 replies");
+    for expected in [
+        "unknown top-level JSON-RPC method",
+        "`session/cancel`",
+        "notification",
+    ] {
+        assert!(
+            para.contains(expected),
+            "the data-less `-32601` explanation does not cover {expected}:\n{para}"
+        );
+    }
+}
+
 /// The login-failure reply is the whole reason the third scan exists (A-R4-2), and the test that pins it
 /// (`a_failed_login_answers_with_typed_data_not_a_bare_message`) pins the HELPER: re-inlining the pre-fix
 /// `let mut err = acp::Error::auth_required(); err.message = e.to_string(); err` at the `authenticate`
