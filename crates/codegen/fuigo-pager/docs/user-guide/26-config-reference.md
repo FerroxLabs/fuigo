@@ -367,7 +367,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `model.<id>.hidden` | `boolean` | `yes` | `user` | Hide this model from the picker. Still usable via `-m`. |
 | `model.<id>.inference_idle_timeout_secs` | `number` | `yes` | `user` | Idle timeout for streaming inference on this model. |
 | `model.<id>.max_completion_tokens` | `number` | `yes` | `user` | Per-model max completion tokens. |
-| `model.<id>.max_retries` | `number` | `yes` | `user` | Inference retries for this model (attempts, counting the first). `FUIGO_MAX_RETRIES` overrides it. Empty responses are capped lower whatever this says: a reasoning-only reply (reasoning tokens, no text, no tool call) is resent once and a fully empty reply at most twice, 2 s apart; a lower value still wins. |
+| `model.<id>.max_retries` | `number` | `yes` | `user` | Inference retries for this model (attempts, counting the first). `FUIGO_MAX_RETRIES` overrides it. Empty responses are capped lower whatever this says: a reasoning-only reply (reasoning tokens, no text, no tool call) is resent once and a fully empty reply at most twice, 2 s apart, however many retries of other errors came first; a lower value still wins. |
 | `model.<id>.model` | `string` | `yes` | `user` | Model id sent to the API. |
 | `model.<id>.model_family` | `string` | `yes` | `user` | Family id used for compaction and capability grouping. |
 | `model.<id>.model_provider` | `string` | `yes` | `user` | Named `[model_providers.<name>]` provider id for this model. |

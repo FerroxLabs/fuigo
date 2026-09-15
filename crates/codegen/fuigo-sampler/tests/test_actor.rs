@@ -1492,6 +1492,80 @@ async fn responses_reasoning_only_stream_fails_fast_after_one_resend() {
     );
 }
 
+/// A 503 retry followed by a reasoning-only reply: the reasoning-only reply still gets its one resend.
+/// It used to be checked against the shared retry count, so it failed with zero resends after announcing a retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_reasoning_only_after_a_503_is_still_resent_once() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": { "message": "overloaded" } }).to_string(),
+                    ));
+                }
+                let events = sse_events_to_axum(sse::responses_api_reasoning_only_events(
+                    "Let me think about this carefully",
+                    "test-model",
+                ));
+                Ok(Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                )))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let mut cfg = responses_config(server.base_url(), None);
+    cfg.max_retries = Some(fuigo_sampler::DEFAULT_MAX_RETRIES);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let started = std::time::Instant::now();
+    handle.submit(
+        RequestId::from("req-503-then-reasoning-only"),
+        user_request("Say hello in one word."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    let elapsed = started.elapsed();
+    server.shutdown();
+
+    let retrying: Vec<(u32, u32, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying {
+                attempt,
+                max_retries,
+                kind,
+                ..
+            } => Some((*attempt, *max_retries, kind.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retrying,
+        vec![(1, 15, "api"), (1, 2, "empty_response")],
+        "the 503 retry, then one reasoning-only resend announced against its own cap"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => assert_eq!(error.kind.as_str(), "empty_response"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        3,
+        "the 503, the reasoning-only reply, and its one resend"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "fails in seconds: {elapsed:?}"
+    );
+}
+
 /// Drain the event channel until a terminal event (`Completed` or `Failed`) is received, or until `deadline` elapses.
 async fn drain_until_terminal(
     rx: &mut mpsc::UnboundedReceiver<SamplingEvent>,
