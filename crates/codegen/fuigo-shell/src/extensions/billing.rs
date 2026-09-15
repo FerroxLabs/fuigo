@@ -221,7 +221,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
                 None,
                 Some(serde_json::json!({ "error": e.to_string() })),
             );
-            acp::Error::internal_error().data(format!("Failed to fetch billing data: {e}"))
+            crate::acp_error::internal_error(format!("Failed to fetch billing data: {e}"))
         })?;
 
     if !credits_resp.status().is_success() {
@@ -243,7 +243,9 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             })),
         );
 
-        return Err(acp::Error::internal_error().data(format!("Billing service error: {detail}")));
+        return Err(crate::acp_error::internal_error(format!(
+            "Billing service error: {detail}"
+        )));
     }
 
     let mut billing: BillingConfigResponse = credits_resp.json().await.map_err(|e| {
@@ -253,7 +255,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             None,
             Some(serde_json::json!({ "error": e.to_string() })),
         );
-        acp::Error::internal_error().data(format!("Failed to parse billing data: {e}"))
+        crate::acp_error::internal_error(format!("Failed to parse billing data: {e}"))
     })?;
 
     // Enrich with fields from remote settings.
@@ -306,7 +308,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "auto-topup: upstream request failed");
-            acp::Error::internal_error().data(format!("Failed to fetch auto top-up rule: {e}"))
+            crate::acp_error::internal_error(format!("Failed to fetch auto top-up rule: {e}"))
         })?;
 
     if !response.status().is_success() {
@@ -319,9 +321,9 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
             .unwrap_or_else(|| format!("HTTP {status}"));
 
-        return Err(
-            acp::Error::internal_error().data(format!("Auto top-up service error: {detail}"))
-        );
+        return Err(crate::acp_error::internal_error(format!(
+            "Auto top-up service error: {detail}"
+        )));
     }
 
     // Return the upstream response body verbatim (as a JSON value) so `/usage` can print the exact data from this request unformatted

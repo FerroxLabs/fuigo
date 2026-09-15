@@ -597,11 +597,7 @@ async fn stalled_compaction_stream_times_out_as_transient() {
 
     match result {
         Err(CompactFailure::Transient(err)) => {
-            let data = err
-                .data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or_default();
+            let data = crate::sampling::error::acp_error_message(&err);
             assert!(
                 data.contains("idle timeout"),
                 "expected an idle-timeout transient failure, got: {data}"
@@ -683,11 +679,7 @@ async fn completed_then_stalled_stream_errors_no_salvage() {
 
     match result {
         Err(CompactFailure::Transient(err)) => {
-            let data = err
-                .data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or_default();
+            let data = crate::sampling::error::acp_error_message(&err);
             assert!(
                 data.contains("idle timeout"),
                 "expected an idle-timeout transient failure, got: {data}"
@@ -771,11 +763,7 @@ async fn substantial_partial_errors_no_salvage() {
 
     match result {
         Err(CompactFailure::Transient(err)) => {
-            let data = err
-                .data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or_default();
+            let data = crate::sampling::error::acp_error_message(&err);
             assert!(
                 data.contains("idle timeout"),
                 "expected an idle-timeout transient failure, got: {data}"

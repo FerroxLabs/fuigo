@@ -132,9 +132,9 @@ Communication follows the JSON-RPC 2.0 format. A typical session lifecycle:
 
 ### Errors
 
-A failed request gets a JSON-RPC error reply. `code` is the error class and `message` is only the class name (for example `Internal error`), so never show `message` on its own. The detail is in `data`.
+A failed request gets a JSON-RPC error reply. `code` is the error class and `message` is usually only the class name (for example `Internal error`), so never show `message` on its own. The detail is in `data`.
 
-When a prompt fails because the model request failed, or because the agent could not reach the session, `data` is always an object:
+Every error reply from the agent carries `data` as an object:
 
 | `data` field  | Present                         | Meaning                                                                                  |
 | ------------- | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -142,10 +142,27 @@ When a prompt fails because the model request failed, or because the agent could
 | `error_kind`  | always                          | Stable machine tag for the failure (see below).                                          |
 | `http_status` | when the provider returned one  | Upstream HTTP status, for example `503`.                                                 |
 | `promptUsage` | when usage was recorded         | Tokens and spend the failed prompt still consumed.                                       |
+| `code`        | on some failures                | A finer machine code a client can match on, for example `local_workspace_chat_only` or `FS_DISK_QUOTA_EXCEEDED`. |
 
-`error_kind` values: `empty_response` (the model returned no visible output, for example reasoning only), `idle_timeout` (the model stopped streaming), `http` (transport failure), `api` (the provider rejected the request), `auth`, `rate_limited`, `serialization`, `max_tokens_truncation`, `doom_loop_detected`, `cancelled` (the request was cancelled before it produced a result), and `session_unavailable` (the agent could not hand the prompt to its session, or the session never answered). New values can be added in later releases, so treat an unknown `error_kind` as a generic failure.
+Some failures add more structured fields next to these, for example the execution receipt (`partial`, `reason`, `pending_tool_calls`, ...) when a budgeted execution ends early.
 
-`code` stays the JSON-RPC class: `-32603` internal error, `-32000` authentication required, `-32602` invalid params, `-32002` resource not found, `-32003` rate limited.
+`error_kind` values for a failed model request: `empty_response` (the model returned no visible output, for example reasoning only), `idle_timeout` (the model stopped streaming), `http` (transport failure), `api` (the provider rejected the request), `auth`, `rate_limited`, `serialization`, `max_tokens_truncation`, `doom_loop_detected`, and `cancelled` (the request was cancelled before it produced a result).
+
+`error_kind` values for failures inside the agent:
+
+| `error_kind`           | Meaning                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `session_unavailable`  | The agent could not hand the request to its session, or the session never answered.            |
+| `invalid_request`      | The request itself is wrong: bad or missing parameters, an unknown session or method, an unsupported operation. |
+| `not_found`            | The named resource, for example a session, does not exist.                                       |
+| `session_storage`      | Reading or writing the session's files failed (session directory, history, durable execution state). |
+| `compaction`           | Context compaction failed.                                                                       |
+| `execution_incomplete` | A budgeted execution (a workflow child, a goal) stopped before its work finished.                |
+| `internal`             | Any other failure inside the agent.                                                              |
+
+New values can be added in later releases, so treat an unknown `error_kind` as a generic failure.
+
+`code` stays the JSON-RPC class: `-32603` internal error, `-32000` authentication required, `-32602` invalid params, `-32600` invalid request, `-32601` method not found, `-32002` resource not found, `-32003` rate limited, `-32800` request cancelled.
 
 A prompt that failed on an empty model response:
 
@@ -164,7 +181,7 @@ A prompt that failed on an empty model response:
 }
 ```
 
-Before 1.0.18 most of these failures sent `data` as a bare string, and a few rarer internal failures still do. A client should read `data.message` when `data` is an object and show `data` itself when it is a string.
+Before 1.0.18 most of these failures sent `data` as a bare string. A client that also talks to older agents should read `data.message` when `data` is an object and show `data` itself when it is a string.
 
 ### Architecture
 

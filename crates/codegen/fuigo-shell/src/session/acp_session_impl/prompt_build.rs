@@ -942,12 +942,13 @@ impl SessionActor {
             },
         )
         .map_err(|e| {
-            acp::Error::internal_error().data(format!("failed to create session dir: {e}"))
+            crate::acp_error::session_storage(format!("failed to create session dir: {e}"))
         })?;
         let persisted = crate::session::image_describe::persist_user_images(&session_dir, images)
             .map_err(|e| {
-            acp::Error::internal_error()
-                .data(format!("failed to save user images to assets dir: {e}"))
+            crate::acp_error::session_storage(format!(
+                "failed to save user images to assets dir: {e}"
+            ))
         })?;
         let image_paths: Vec<String> = persisted
             .iter()
@@ -968,7 +969,7 @@ impl SessionActor {
                 Some(self.max_retries),
             );
         let client = fuigo_sampler::SamplingClient::new(sampler_config).map_err(|e| {
-            acp::Error::internal_error().data(format!(
+            crate::acp_error::internal_error(format!(
                 "failed to build image-describe sampling client: {e}"
             ))
         })?;
@@ -1002,8 +1003,7 @@ impl SessionActor {
                     )
                     .await
                     .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("image transcription failed: {e}"))
+                        crate::acp_error::internal_error(format!("image transcription failed: {e}"))
                     })?
             };
             if persisted.len() > 1 {

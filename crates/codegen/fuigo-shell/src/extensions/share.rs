@@ -41,26 +41,27 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         .and_then(|rs| rs.sharing_enabled)
         .unwrap_or(false);
     if !sharing_enabled {
-        return Err(
-            acp::Error::invalid_params().data("Session sharing is not available for your account.")
-        );
+        return Err(crate::acp_error::invalid_params(
+            "Session sharing is not available for your account.",
+        ));
     }
 
     // Only block for ZDR teams (hard data-retention policy), not for coding-data-retention opt-out; sharing is user-initiated
     if auth.is_zdr_team() {
-        return Err(acp::Error::invalid_params()
-            .data("Session sharing is disabled for your team's data retention policy"));
+        return Err(crate::acp_error::invalid_params(
+            "Session sharing is disabled for your team's data retention policy",
+        ));
     }
 
     // Find session info by searching through summaries
-    let summaries = list_summaries(None).await.map_err(|e| {
-        acp::Error::internal_error().data(format!("Failed to list sessions: {}", e))
-    })?;
+    let summaries = list_summaries(None)
+        .await
+        .map_err(|e| crate::acp_error::internal_error(format!("Failed to list sessions: {}", e)))?;
 
     let summary = summaries
         .iter()
         .find(|s| s.info.id.0.as_ref() == request.session_id.as_str())
-        .ok_or_else(|| acp::Error::resource_not_found(Some("Session not found".into())))?;
+        .ok_or_else(|| crate::acp_error::resource_not_found("Session not found"))?;
 
     // Get turn number from the summary we already loaded
     let current_turn = summary.next_trace_turn.saturating_sub(1);
@@ -72,10 +73,10 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     let exported = ExportedSession::from_local_session(&info)
         .await
-        .map_err(|e| acp::Error::internal_error().data(format!("Failed to load session: {}", e)))?;
+        .map_err(|e| crate::acp_error::internal_error(format!("Failed to load session: {}", e)))?;
 
     if exported.messages.is_empty() {
-        return Err(acp::Error::invalid_params().data("No messages to share yet"));
+        return Err(crate::acp_error::invalid_params("No messages to share yet"));
     }
 
     // Obtain trace context once; used for the signed URL upload and then moved into the spawned metadata task
@@ -101,7 +102,7 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to share session with backend");
-            acp::Error::internal_error().data(format!("Failed to share session: {}", e))
+            crate::acp_error::internal_error(format!("Failed to share session: {}", e))
         })?;
 
     // Upload share metadata to cloud storage (best-effort, fire-and-forget).
@@ -260,13 +261,20 @@ mod tests {
             "non-Ferrox Labs accounts (API key, External, enterprise IdP) must be rejected",
         );
 
-        // Test the *exact* actionable data string for the non-Ferrox Labs path (distinct from the generic "Authentication required to share session" path)
+        // Test the *exact* actionable data message for the non-Ferrox Labs path (distinct from the generic "Authentication required to share session" path)
         let serialized =
             serde_json::to_value(&err).expect("acp::Error serializes to JSON-RPC shape");
-        let data = serialized
+        let data_obj = serialized
             .get("data")
+            .expect("auth_required error carries data");
+        assert_eq!(
+            data_obj.get("error_kind").and_then(|v| v.as_str()),
+            Some("auth")
+        );
+        let data = data_obj
+            .get("message")
             .and_then(|v| v.as_str())
-            .expect("auth_required error carries a data string");
+            .expect("typed data carries the message");
 
         assert_eq!(
             data,

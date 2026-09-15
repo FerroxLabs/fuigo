@@ -177,7 +177,7 @@ pub async fn handle(
     match args.method.as_ref() {
         "fuigo/code/goto-definition" => {
             let req: GotoRequest = serde_json::from_str(args.params.get())
-                .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+                .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
             let cwd = resolve_cwd(agent, req.cwd.clone(), req.session_id.as_ref())?;
             let was_newly_started =
                 ensure_eligible_and_started(agent, req.session_id.as_ref(), &cwd)?;
@@ -193,7 +193,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
+                .map_err(|e| crate::acp_error::internal_error(format!("code nav error: {e}")))?;
             log_code_nav_telemetry(
                 "goto-definition",
                 req.session_id.as_ref(),
@@ -205,7 +205,7 @@ pub async fn handle(
         }
         "fuigo/code/goto-references" => {
             let req: GotoRequest = serde_json::from_str(args.params.get())
-                .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+                .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
             let cwd = resolve_cwd(agent, req.cwd.clone(), req.session_id.as_ref())?;
             let was_newly_started =
                 ensure_eligible_and_started(agent, req.session_id.as_ref(), &cwd)?;
@@ -222,7 +222,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
+                .map_err(|e| crate::acp_error::internal_error(format!("code nav error: {e}")))?;
             log_code_nav_telemetry(
                 "goto-references",
                 req.session_id.as_ref(),
@@ -234,7 +234,7 @@ pub async fn handle(
         }
         "fuigo/code/find-definitions" => {
             let req: FindSymbolRequest = serde_json::from_str(args.params.get())
-                .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+                .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
             let cwd = resolve_cwd(agent, req.cwd.clone(), req.session_id.as_ref())?;
             let was_newly_started =
                 ensure_eligible_and_started(agent, req.session_id.as_ref(), &cwd)?;
@@ -252,7 +252,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
+                .map_err(|e| crate::acp_error::internal_error(format!("code nav error: {e}")))?;
             log_code_nav_telemetry(
                 "find-definitions",
                 req.session_id.as_ref(),
@@ -264,7 +264,7 @@ pub async fn handle(
         }
         "fuigo/code/find-references" => {
             let req: FindSymbolRequest = serde_json::from_str(args.params.get())
-                .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+                .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
             let cwd = resolve_cwd(agent, req.cwd.clone(), req.session_id.as_ref())?;
             let was_newly_started =
                 ensure_eligible_and_started(agent, req.session_id.as_ref(), &cwd)?;
@@ -282,7 +282,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(format!("code nav error: {e}")))?;
+                .map_err(|e| crate::acp_error::internal_error(format!("code nav error: {e}")))?;
             log_code_nav_telemetry(
                 "find-references",
                 req.session_id.as_ref(),
@@ -294,7 +294,7 @@ pub async fn handle(
         }
         "fuigo/code/status" => {
             let req: StatusRequest = serde_json::from_str(args.params.get())
-                .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+                .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
             let cwd = resolve_cwd(agent, req.cwd.clone(), req.session_id.as_ref())?;
 
             // Check eligibility for the status response.
@@ -311,7 +311,7 @@ pub async fn handle(
                         )
                         .await
                         .map_err(|e| {
-                            acp::Error::internal_error().data(format!("code nav error: {e}"))
+                            crate::acp_error::internal_error(format!("code nav error: {e}"))
                         })?;
                     if result.active {
                         (true, IndexStatusReason::Active, true, result.file_count)
@@ -407,7 +407,9 @@ fn resolve_cwd(
         return Ok(session_cwd);
     }
 
-    Err(acp::Error::invalid_params().data("either cwd or valid sessionId must be provided"))
+    Err(crate::acp_error::invalid_params(
+        "either cwd or valid sessionId must be provided",
+    ))
 }
 
 /// Map a `CodeNavEligibility` error to a human-readable ACP error.
@@ -427,5 +429,5 @@ fn eligibility_error(reason: CodeNavEligibility) -> acp::Error {
             "sessionId is required for code navigation and must refer to a valid active session"
         }
     };
-    acp::Error::invalid_params().data(msg)
+    crate::acp_error::invalid_params(msg)
 }

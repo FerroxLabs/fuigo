@@ -536,7 +536,7 @@ impl acp::Agent for MvpAgent {
                     None,
                     Some("preferred_method_mismatch"),
                 );
-                return Err(acp::Error::auth_required().data(msg));
+                return Err(crate::acp_error::auth_required(msg));
             }
         }
         match arguments.method_id.0.as_ref() {
@@ -544,8 +544,7 @@ impl acp::Agent for MvpAgent {
                 if self.cfg.borrow().fuigo_com_config.api_key_auth_disabled() {
                     emit_login_span(false, "api_key", None, Some("disabled_by_admin"));
                     return Err(
-                        acp::Error::auth_required()
-                            .data("API-key auth is disabled by your administrator."),
+                        crate::acp_error::auth_required("API-key auth is disabled by your administrator."),
                     );
                 }
                 let mut sampling_config = self.sampling_config.borrow_mut();
@@ -571,8 +570,7 @@ impl acp::Agent for MvpAgent {
                     {
                         emit_login_span(false, "api_key", None, Some("no_credentials"));
                         return Err(
-                            acp::Error::auth_required()
-                                .data(
+                            crate::acp_error::auth_required(
                                     "Set FUIGO_API_KEY or add api_key/env_key to config.toml.",
                                 ),
                         );
@@ -894,8 +892,7 @@ impl acp::Agent for MvpAgent {
             }
             _ => {
                 Err(
-                    acp::Error::invalid_params()
-                        .data(
+                    crate::acp_error::invalid_params(
                             format!(
                 "unsupported auth method: {}",
                 arguments.method_id.0
@@ -946,9 +943,9 @@ impl acp::Agent for MvpAgent {
         mut arguments: acp::PromptRequest,
     ) -> Result<acp::PromptResponse, acp::Error> {
         let budget = fuigo_sampler::execution_budget::process_budget()
-            .map_err(|message| acp::Error::invalid_params().data(message))?;
+            .map_err(|message| crate::acp_error::invalid_params(message))?;
         if budget.is_some_and(|budget| budget.expired()) {
-            return Err(acp::Error::invalid_params().data(fuigo_sampler::execution_budget::WALL_LIMIT));
+            return Err(crate::acp_error::invalid_params(fuigo_sampler::execution_budget::WALL_LIMIT));
         }
         use crate::session::plan_mode::PromptMode;
         if let Some(meta) = arguments.meta.as_ref() {
@@ -970,7 +967,7 @@ impl acp::Agent for MvpAgent {
         let handle = self
             .session_handle_waiting_for_load(&arguments.session_id)
             .await
-            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
         if self.models_manager.allowlist_excludes_all() {
             self.send_model_auto_switched(
                     &arguments.session_id,
@@ -1255,8 +1252,7 @@ impl acp::Agent for MvpAgent {
             .cloned();
         if json_schema.as_ref().is_some_and(|schema| !schema.is_object()) {
             return Err(
-                acp::Error::invalid_params()
-                    .data("outputSchema must be a JSON object describing a JSON Schema"),
+                crate::acp_error::invalid_params("outputSchema must be a JSON object describing a JSON Schema"),
             );
         }
         let tool_overrides_update = match arguments
@@ -1270,8 +1266,7 @@ impl acp::Agent for MvpAgent {
                     Ok(update) => Some(update),
                     Err(reason) => {
                         return Err(
-                            acp::Error::invalid_params()
-                                .data(format!("toolOverrides: {reason}")),
+                            crate::acp_error::invalid_params(format!("toolOverrides: {reason}")),
                         );
                     }
                 }
@@ -2192,7 +2187,7 @@ impl acp::Agent for MvpAgent {
         let _ = rx
             .await
             .map_err(|_| {
-                acp::Error::internal_error().data("response to set session failed")
+                crate::acp_error::session_unavailable("response to set session failed")
             })?;
         Ok(acp::SetSessionModeResponse::new())
     }
@@ -2289,12 +2284,12 @@ impl acp::Agent for MvpAgent {
                     "Run `fuigo login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::invalid_params(e.to_string()))?;
                 let sandbox_id = params
                     .get("sandbox_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        acp::Error::invalid_params().data("missing sandbox_id")
+                        crate::acp_error::invalid_params("missing sandbox_id")
                     })?;
                 let sandbox_client = crate::remote::SandboxClient::new(
                     self.cli_chat_proxy_base_url(),
@@ -2309,8 +2304,7 @@ impl acp::Agent for MvpAgent {
                     )
                     .await
                     .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to terminate sandbox: {e}"))
+                        crate::acp_error::internal_error(format!("Failed to terminate sandbox: {e}"))
                     })?;
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
@@ -2330,8 +2324,7 @@ impl acp::Agent for MvpAgent {
                     )
                     .await
                     .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to list environments: {e}"))
+                        crate::acp_error::internal_error(format!("Failed to list environments: {e}"))
                     })?;
                 crate::extensions::to_raw_response(
                     &serde_json::json!({
@@ -2346,7 +2339,7 @@ impl acp::Agent for MvpAgent {
                     "Run `fuigo login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::invalid_params(e.to_string()))?;
                 let sandbox_client = crate::remote::SandboxClient::new(
                     self.cli_chat_proxy_base_url(),
                     self.auth_manager.clone(),
@@ -2387,8 +2380,7 @@ impl acp::Agent for MvpAgent {
                     )
                     .await
                     .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to create environment: {e}"))
+                        crate::acp_error::internal_error(format!("Failed to create environment: {e}"))
                     })?;
                 crate::extensions::to_raw_response(
                     &serde_json::json!({
@@ -2403,12 +2395,12 @@ impl acp::Agent for MvpAgent {
                     "Run `fuigo login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::invalid_params(e.to_string()))?;
                 let environment_id = params
                     .get("environment_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        acp::Error::invalid_params().data("missing environment_id")
+                        crate::acp_error::invalid_params("missing environment_id")
                     })?;
                 let sandbox_client = crate::remote::SandboxClient::new(
                     self.cli_chat_proxy_base_url(),
@@ -2447,8 +2439,7 @@ impl acp::Agent for MvpAgent {
                     )
                     .await
                     .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to update environment: {e}"))
+                        crate::acp_error::internal_error(format!("Failed to update environment: {e}"))
                     })?;
                 crate::extensions::to_raw_response(
                     &serde_json::json!({
@@ -2463,12 +2454,12 @@ impl acp::Agent for MvpAgent {
                     "Run `fuigo login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::invalid_params(e.to_string()))?;
                 let environment_id = params
                     .get("environment_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        acp::Error::invalid_params().data("missing environment_id")
+                        crate::acp_error::invalid_params("missing environment_id")
                     })?;
                 let sandbox_client = crate::remote::SandboxClient::new(
                     self.cli_chat_proxy_base_url(),
@@ -2478,8 +2469,7 @@ impl acp::Agent for MvpAgent {
                     .delete_environment(environment_id)
                     .await
                     .map_err(|e| {
-                        acp::Error::internal_error()
-                            .data(format!("Failed to delete environment: {e}"))
+                        crate::acp_error::internal_error(format!("Failed to delete environment: {e}"))
                     })?;
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
@@ -2584,8 +2574,7 @@ impl acp::Agent for MvpAgent {
             }
             other => {
                 Err(
-                    acp::Error::method_not_found()
-                        .data(format!("unknown ACP extension method: {other}")),
+                    crate::acp_error::method_not_found(format!("unknown ACP extension method: {other}")),
                 )
             }
         };
@@ -2973,8 +2962,7 @@ impl MvpAgent {
         };
         if !model.info.user_selectable {
             return Err(
-                acp::Error::invalid_params()
-                    .data("This model isn't allowed by your allowed_models setting."),
+                crate::acp_error::invalid_params("This model isn't allowed by your allowed_models setting."),
             );
         }
         let session_id = args.session_id.clone();

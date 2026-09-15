@@ -7036,10 +7036,11 @@ mod direct_hub_cloud_removed {
     fn assert_direct_hub_error(err: agent_client_protocol::Error) {
         assert_eq!(
             err.data.as_ref(),
-            Some(&serde_json::Value::String(
-                DIRECT_HUB_CLOUD_REMOVED_MSG.to_string()
-            )),
-            "error data must be the exact D8 message, got: {err:?}"
+            Some(&serde_json::json!({
+                "message": DIRECT_HUB_CLOUD_REMOVED_MSG,
+                "error_kind": "invalid_request",
+            })),
+            "error data must be the exact D8 message, typed, got: {err:?}"
         );
         assert_eq!(
             err.code,

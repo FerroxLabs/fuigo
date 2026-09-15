@@ -130,13 +130,13 @@ pub struct ReleaseTerminalResponse {}
 
 fn parse<T: serde::de::DeserializeOwned>(args: &acp::ExtRequest) -> Result<T, acp::Error> {
     serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))
 }
 
 fn respond<T: Serialize>(result: Result<T, impl std::fmt::Display>) -> ExtResult {
     ExtMethodResult::from_result(result)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 /// Like `respond`, but converts `TerminalExtError` into a structured `{ code, message, data }` error instead of stringifying it.
@@ -147,7 +147,7 @@ fn respond_pty<T: Serialize>(result: Result<T, terminal::TerminalExtError>) -> E
     };
     ext_result
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 const ERR_TERMINAL_NOT_FOUND: &str = "terminal not found";
@@ -270,7 +270,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             terminal::release_terminal(&req.session_id, &req.terminal_id).await;
             ExtMethodResult::success(ReleaseTerminalResponse {})
                 .to_ext_response()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))
         }
 
         "fuigo/terminal/background" => {
@@ -285,7 +285,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             terminal::background_terminal(&req.session_id, &req.terminal_id).await;
             ExtMethodResult::success(ReleaseTerminalResponse {})
                 .to_ext_response()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))
         }
 
         "fuigo/terminal/pty/create" => {

@@ -67,8 +67,7 @@ async fn handle_prompt_history(args: &acp::ExtRequest) -> ExtResult {
             )
             .await
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to load prompt history: {e}"))
+                    crate::acp_error::session_storage(format!("failed to load prompt history: {e}"))
                 })
         } else if request.session_id.is_some() {
             // Slow path: load from session storage for per-session queries
@@ -78,8 +77,7 @@ async fn handle_prompt_history(args: &acp::ExtRequest) -> ExtResult {
             prompt_history::load_prompts_async(request.cwd.clone())
                 .await
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to load prompt history: {e}"))
+                    crate::acp_error::session_storage(format!("failed to load prompt history: {e}"))
                 })
         }
     })?;
@@ -103,7 +101,7 @@ async fn load_session_prompts(
 ) -> Result<Vec<String>, acp::Error> {
     // Load session summaries: either all for the cwd or just the specific session
     let mut summaries = list_summaries(Some(cwd)).await.map_err(|e| {
-        acp::Error::internal_error().data(format!("failed to load session history: {e}"))
+        crate::acp_error::session_storage(format!("failed to load session history: {e}"))
     })?;
 
     if let Some(target_session_id) = session_id {

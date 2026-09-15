@@ -2160,7 +2160,7 @@ pub(crate) async fn spawn_session_actor(
                                         )),
                                     }
                                 }
-                                Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
+                                Err(e) => Err(UserQuestionError::TransportError(crate::sampling::error::acp_error_text(&e))),
                             }
                         }
                     }
@@ -2607,19 +2607,19 @@ pub(crate) async fn spawn_session_on_thread(
                 error = %e,
                 "failed to spawn session thread (thread/PID limit or memory pressure?)"
             );
-            return Err(
-                acp::Error::internal_error().data(format!("failed to spawn session thread: {e}"))
-            );
+            return Err(crate::acp_error::internal_error(format!(
+                "failed to spawn session thread: {e}"
+            )));
         }
     };
     let init = init_rx
         .await
         .map_err(|_| {
             tracing::error!("Session thread panicked during initialization");
-            acp::Error::internal_error().data("session thread panicked during initialization")
+            crate::acp_error::internal_error("session thread panicked during initialization")
         })?
         .map_err(|e| {
-            acp::Error::internal_error().data(format!("session initialization failed: {e}"))
+            crate::acp_error::internal_error(format!("session initialization failed: {e}"))
         })?;
     Ok((
         init.handle,

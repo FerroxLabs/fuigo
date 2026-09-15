@@ -2524,12 +2524,16 @@ pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
             }
         }
     };
-    acp::Error::new(acp::ErrorCode::InternalError.into(), message.to_string()).data(Some(
-        serde_json::json!({
-            "code": code,
-            "detail": e.to_string(),
-        }),
-    ))
+    acp::Error::new(acp::ErrorCode::InternalError.into(), message.to_string()).data(
+        crate::acp_error::error_data_with_fields(
+            crate::acp_error::AcpErrorKind::SessionStorage,
+            message,
+            serde_json::json!({
+                "code": code,
+                "detail": e.to_string(),
+            }),
+        ),
+    )
 }
 
 #[cfg(test)]

@@ -102,30 +102,31 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     let mut req: SessionRenameRequest = parse_params(args)?;
     if req.reset_to_auto {
         if req.kind == SessionKind::Chat {
-            return Err(acp::Error::invalid_request()
-                .data("chat conversations have no auto-title to restore"));
+            return Err(crate::acp_error::invalid_request(
+                "chat conversations have no auto-title to restore",
+            ));
         }
         // Mixed-version: a new pager sends `{title:"", resetToAuto:true}`
         // An old shell (unknown field ignored) then hits the blank-title rejection instead of silently renaming
         // Non-empty here is a client bug
         if !sanitize_rename_title(&req.title).is_empty() {
-            return Err(
-                acp::Error::invalid_request().data("title must be empty when resetToAuto is set")
-            );
+            return Err(crate::acp_error::invalid_request(
+                "title must be empty when resetToAuto is set",
+            ));
         }
         return reset_session_title_to_auto(agent, &req.session_id, req.cwd.as_deref()).await;
     }
     // Manual titles must be non-blank: `Summary.title_is_manual` binds to a real `generated_title`, so reject whitespace-only input at the boundary
     // Strip C0/C1 controls here (single authority) so a `/rename` OSC/CSI payload cannot persist on RemoteSync
     if req.title.len() > MAX_TITLE_BYTES {
-        return Err(acp::Error::invalid_request().data("title too large"));
+        return Err(crate::acp_error::invalid_request("title too large"));
     }
     req.title = sanitize_rename_title(&req.title).into_owned();
     if req.title.is_empty() {
-        return Err(acp::Error::invalid_request().data("title must not be blank"));
+        return Err(crate::acp_error::invalid_request("title must not be blank"));
     }
     if req.title.chars().count() > MAX_TITLE_SCALARS {
-        return Err(acp::Error::invalid_request().data(format!(
+        return Err(crate::acp_error::invalid_request(format!(
             "title too long (max {MAX_TITLE_SCALARS} characters after removing control characters)"
         )));
     }
@@ -139,13 +140,13 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     // Find the session info, scoping to cwd if provided
     let summaries = list_summaries(req.cwd.as_deref())
         .await
-        .map_err(|e| acp::Error::internal_error().data(format!("failed to list sessions: {e}")))?;
+        .map_err(|e| crate::acp_error::session_storage(format!("failed to list sessions: {e}")))?;
 
     let summary = summaries
         .iter()
         .find(|s| s.info.id == session_id)
         .ok_or_else(|| {
-            acp::Error::invalid_request().data(format!("session not found: {}", req.session_id))
+            crate::acp_error::invalid_request(format!("session not found: {}", req.session_id))
         })?;
 
     let info = summary.info.clone();
@@ -156,7 +157,7 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         .update_session_title(&info, req.title.clone())
         .await
         .map_err(|e| {
-            acp::Error::internal_error().data(format!("failed to update session title: {e}"))
+            crate::acp_error::session_storage(format!("failed to update session title: {e}"))
         })?;
 
     // Resident sessions own RemoteSync inside the persistence actor
@@ -232,20 +233,20 @@ async fn reset_session_title_to_auto(
 
     let summaries = list_summaries(cwd)
         .await
-        .map_err(|e| acp::Error::internal_error().data(format!("failed to list sessions: {e}")))?;
+        .map_err(|e| crate::acp_error::session_storage(format!("failed to list sessions: {e}")))?;
 
     let summary = summaries
         .iter()
         .find(|s| s.info.id == session_id_acp)
         .ok_or_else(|| {
-            acp::Error::invalid_request().data(format!("session not found: {session_id}"))
+            crate::acp_error::invalid_request(format!("session not found: {session_id}"))
         })?;
 
     let info = summary.info.clone();
 
     let storage = JsonlStorageAdapter::default();
     let cleared = storage.reset_title_to_auto(&info).await.map_err(|e| {
-        acp::Error::internal_error().data(format!("failed to reset session title: {e}"))
+        crate::acp_error::session_storage(format!("failed to reset session title: {e}"))
     })?;
 
     if cleared {
@@ -401,8 +402,9 @@ async fn rename_chat_conversation(
     use crate::remote::{ConvError, UpdateConversationBody};
 
     let Some(client) = agent.conversations_client() else {
-        return Err(acp::Error::invalid_request()
-            .data("chat session rename requires the conversations lane (OIDC + chat feature)"));
+        return Err(crate::acp_error::invalid_request(
+            "chat session rename requires the conversations lane (OIDC + chat feature)",
+        ));
     };
 
     let body = UpdateConversationBody {
@@ -413,12 +415,15 @@ async fn rename_chat_conversation(
         .update_conversation(conversation_id, &body)
         .await
         .map_err(|e| match e {
-            ConvError::NoOauth => acp::Error::invalid_request()
-                .data("chat session rename requires Ferrox Labs OAuth credentials"),
-            ConvError::Http { status: 404 } => acp::Error::invalid_request()
-                .data(format!("conversation not found: {conversation_id}")),
-            other => acp::Error::internal_error()
-                .data(format!("chat conversation rename failed: {other}")),
+            ConvError::NoOauth => crate::acp_error::invalid_request(
+                "chat session rename requires Ferrox Labs OAuth credentials",
+            ),
+            ConvError::Http { status: 404 } => crate::acp_error::invalid_request(format!(
+                "conversation not found: {conversation_id}"
+            )),
+            other => crate::acp_error::internal_error(format!(
+                "chat conversation rename failed: {other}"
+            )),
         })?;
 
     // If this conversation is open live, notify clients of the new title.
@@ -481,7 +486,7 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         if let crate::session::persistence::DeleteSessionError::Remote(_) = &e {
             tracing::warn!(?e, session_id = %req.session_id, "failed to delete remote session data");
         }
-        acp::Error::internal_error().data(e.to_string())
+        crate::acp_error::internal_error(e.to_string())
     })?;
 
     tracing::info!(session_id = %req.session_id, "Session deleted");
@@ -493,18 +498,21 @@ async fn soft_delete_chat_conversation(agent: &MvpAgent, conversation_id: &str) 
     use crate::remote::ConvError;
 
     let Some(client) = agent.conversations_client() else {
-        return Err(acp::Error::invalid_request()
-            .data("chat session delete requires the conversations lane (OIDC + chat feature)"));
+        return Err(crate::acp_error::invalid_request(
+            "chat session delete requires the conversations lane (OIDC + chat feature)",
+        ));
     };
 
     client
         .soft_delete_conversation(conversation_id)
         .await
         .map_err(|e| match e {
-            ConvError::NoOauth => acp::Error::invalid_request()
-                .data("chat session delete requires Ferrox Labs OAuth credentials"),
-            other => acp::Error::internal_error()
-                .data(format!("chat conversation soft-delete failed: {other}")),
+            ConvError::NoOauth => crate::acp_error::invalid_request(
+                "chat session delete requires Ferrox Labs OAuth credentials",
+            ),
+            other => crate::acp_error::internal_error(format!(
+                "chat conversation soft-delete failed: {other}"
+            )),
         })?;
 
     let session_id = acp::SessionId::new(Arc::from(conversation_id));
@@ -533,7 +541,7 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     let (handle, cwd) = {
         let h = agent
             .resident_handle(&params.session_id)
-            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
         let cwd = std::path::PathBuf::from(&h.info.cwd);
         (h, cwd)
     };
@@ -555,12 +563,14 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
             mcp_servers: merged,
             respond_to: tx,
         })
-        .map_err(|_| acp::Error::internal_error().data("session closed"))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session closed"))?;
 
     // Wait for the session actor to finish MCP re-initialization.
     rx.await
-        .map_err(|_| acp::Error::internal_error().data("session closed"))?
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session closed"))?
+        .map_err(|e| {
+            crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+        })?;
 
     // Store the admitted (not raw) client set: hot-reloads re-merge from this seed
     // A raw list would re-spawn a previously rejected vendor server once on-disk attribution vanishes
@@ -570,7 +580,7 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
 
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 // session/add_local_workspace (add-only; local-workspace feature)
@@ -589,15 +599,15 @@ async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) ->
     let cwd = {
         let h = agent
             .resident_handle(&params.session_id)
-            .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
         std::path::PathBuf::from(&h.info.cwd)
     };
     // Gate on actual chat kind, not `requires_gateway` (true for non-chat GatewayAttach; false for unknown ids)
     if !agent.is_chat_kind_session(&params.session_id) {
-        return Err(acp::Error::invalid_params().data(serde_json::json!({
-            "code": "local_workspace_chat_only",
-            "message": "fuigo/session/add_local_workspace is only available on chat-kind sessions",
-        })));
+        return Err(crate::acp_error::invalid_params_with_code(
+            "local_workspace_chat_only",
+            "fuigo/session/add_local_workspace is only available on chat-kind sessions",
+        ));
     }
 
     let result = agent
@@ -605,7 +615,7 @@ async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) ->
         .await?;
     ExtMethodResult::success(result)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 // internal/reload_skills
@@ -615,14 +625,14 @@ fn handle_reload_skills(agent: &MvpAgent) -> ExtResult {
     let reloaded = agent.reload_skills_all_sessions();
     ExtMethodResult::success(serde_json::json!({ "reloaded": reloaded }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn handle_reload_workflows(agent: &MvpAgent) -> ExtResult {
     let reloaded = agent.advertise_commands_all_sessions();
     ExtMethodResult::success(serde_json::json!({ "reloaded": reloaded }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 // internal/reload_all_mcp_servers
@@ -635,7 +645,7 @@ async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
     if session_ids.is_empty() {
         return ExtMethodResult::success(serde_json::json!({ "updated": 0 }))
             .to_ext_response()
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()));
     }
 
     let mut updated = 0u32;
@@ -667,7 +677,7 @@ async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
     );
     ExtMethodResult::success(serde_json::json!({ "updated": updated }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 // internal/reload_project_mcp_servers
@@ -699,7 +709,7 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
     if session_ids.is_empty() {
         return ExtMethodResult::success(serde_json::json!({ "updated": 0 }))
             .to_ext_response()
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()));
     }
 
     let mut updated = 0u32;
@@ -737,7 +747,7 @@ async fn handle_reload_project_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequ
     );
     ExtMethodResult::success(serde_json::json!({ "updated": updated }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 /// Returns `true` iff `session_cwd` equals `target_cwd` or sits beneath it (so a `<repo>/` edit reloads `<repo>/subdir/` sessions too).
@@ -758,10 +768,10 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// Prefetched (API) and default models are NOT re-fetched; only BYOK entries from config are updated.
 fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let disk_config = crate::config::load_effective_config()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
-        .map_err(|e| acp::Error::internal_error().data(e))?;
+        .map_err(|e| crate::acp_error::internal_error(e))?;
 
     // Merge TOML-derived model fields into the agent's in-memory config
     // Runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI flags) are preserved; only model-related TOML fields are refreshed
@@ -797,7 +807,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     tracing::info!(count, "model list reloaded from config.toml");
     ExtMethodResult::success(serde_json::json!({ "models": count }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 // internal/reload_models_cache
@@ -814,14 +824,14 @@ fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
     agent.sync_process_static_api_key(None);
     ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {
     agent.disable_managed_gateway_tools_and_refresh_sessions();
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 // plugins/reload
@@ -884,9 +894,10 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     if let Some(session_id) = req.session_id.as_ref() {
         let Some(handle) = agent.session_handle_waiting_for_load(session_id).await else {
-            return Err(
-                acp::Error::invalid_request().data(format!("unknown session id: {}", session_id.0))
-            );
+            return Err(crate::acp_error::invalid_request(format!(
+                "unknown session id: {}",
+                session_id.0
+            )));
         };
         let response = handle.list_available_commands().await;
         return Ok(acp::ExtResponse::new(Arc::from(
@@ -953,7 +964,7 @@ async fn handle_session_fork(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
     let agent_id = agent_id();
     let response = fork_session(request, &agent_id, Some(agent.auth_manager.clone()))
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     to_raw_response(&response)
 }

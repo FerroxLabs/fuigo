@@ -1890,10 +1890,10 @@ impl SessionActor {
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
-                        tracing::debug!(%err, "exit_plan_mode: no client wired; executing tool");
+                        tracing::debug!(error = %crate::sampling::error::acp_error_text(&err), "exit_plan_mode: no client wired; executing tool");
                     } else {
                         tracing::info!(
-                            %err,
+                            error = %crate::sampling::error::acp_error_text(&err),
                             "exit_plan_mode: client disconnected mid-approval; plan mode stays active"
                         );
                         let message = "Plan approval could not be completed because the \
@@ -2063,7 +2063,7 @@ impl SessionActor {
         {
             Ok(parsed) => parsed,
             Err(err) => {
-                tracing::debug!(%err, "resume exit_plan_mode reverse-request failed");
+                tracing::debug!(error = %crate::sampling::error::acp_error_text(&err), "resume exit_plan_mode reverse-request failed");
                 return;
             }
         };

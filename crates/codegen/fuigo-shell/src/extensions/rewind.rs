@@ -40,14 +40,13 @@ impl RewindSessionRequest {
             return Ok(idx);
         }
         if response_id_from_req(self).is_some() {
-            return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        "targetResponseId rewind requires a chat/bridge session (use targetPromptIndex for local)",
-                    ),
-            );
+            return Err(crate::acp_error::invalid_params(
+                "targetResponseId rewind requires a chat/bridge session (use targetPromptIndex for local)",
+            ));
         }
-        Err(acp::Error::invalid_params().data("targetPromptIndex or targetResponseId is required"))
+        Err(crate::acp_error::invalid_params(
+            "targetPromptIndex or targetResponseId is required",
+        ))
     }
 }
 #[derive(Deserialize)]
@@ -59,7 +58,7 @@ struct RewindPointsRequest {
 fn lookup_session(agent: &MvpAgent, session_id: String) -> Result<SessionHandle, acp::Error> {
     agent
         .resident_handle(&acp::SessionId::new(session_id))
-        .ok_or_else(|| acp::Error::resource_not_found(Some("session not found".into())))
+        .ok_or_else(|| crate::acp_error::resource_not_found("session not found"))
 }
 async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let request: RewindSessionRequest = parse_params(args)?;
@@ -76,11 +75,11 @@ async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             },
             respond_to: tx,
         })
-        .map_err(|_| acp::Error::internal_error().data("failed to send rewind command"))?;
+        .map_err(|_| crate::acp_error::session_unavailable("failed to send rewind command"))?;
     let result = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
-        .map_err(|e| acp::Error::internal_error().data(format!("Rewind failed: {:?}", e)))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
+        .map_err(|e| crate::acp_error::internal_error(format!("Rewind failed: {:?}", e)))?;
     to_raw_response(&result)
 }
 async fn handle_points(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -90,10 +89,10 @@ async fn handle_points(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     handle
         .cmd_tx
         .send(SessionCommand::GetRewindPoints { respond_to: tx })
-        .map_err(|_| acp::Error::internal_error().data("failed to send command"))?;
+        .map_err(|_| crate::acp_error::session_unavailable("failed to send command"))?;
     let result = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?;
     to_raw_response(&result)
 }
 fn response_id_from_req(req: &RewindSessionRequest) -> Option<&str> {

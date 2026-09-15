@@ -31,8 +31,9 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Checked before the POST so a logged-out caller is told to log in instead of getting a 401.
     agent.auth_manager.auth().await.map_err(|e| {
         tracing::warn!(error = %e, "consent: auth resolution failed");
-        acp::Error::auth_required()
-            .data("Authentication required. Run `fuigo login` to re-authenticate.")
+        crate::acp_error::auth_required(
+            "Authentication required. Run `fuigo login` to re-authenticate.",
+        )
     })?;
 
     let proxy_url = agent.cfg.borrow().endpoints.proxy_url();
@@ -68,7 +69,7 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }))
         .send()
         .await
-        .map_err(|e| acp::Error::internal_error().data(format!("HTTP request failed: {e}")))?;
+        .map_err(|e| crate::acp_error::internal_error(format!("HTTP request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -84,7 +85,7 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .unwrap_or_else(|| format!("server returned HTTP {status}"));
         tracing::warn!(status, notice_id = %params.notice_id, %message, "consent record rejected");
 
-        return Err(acp::Error::internal_error().data(message));
+        return Err(crate::acp_error::internal_error(message));
     }
 
     to_raw_response(&serde_json::json!({

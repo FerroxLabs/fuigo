@@ -1294,7 +1294,8 @@ impl SessionActor {
                     }),
                 );
             }
-            return Err(acp::Error::internal_error().data(data));
+            return Err(acp::Error::internal_error()
+                .data(crate::acp_error::typed_error_data(Some(data), "")));
         }
 
         if self.tool_context.task_output_token_budget.is_some() {
