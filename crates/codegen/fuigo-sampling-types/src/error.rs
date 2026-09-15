@@ -58,6 +58,13 @@ pub struct EmptyResponseContext {
     pub model: String,
     /// Whether at least one `choice` was seen in the stream.
     pub first_choice_seen: bool,
+    /// Attempts (the original plus every resend) this request's shared empty-response budget
+    /// had spent when the retry loop gave up on it. Stamped only on the terminal error, so it
+    /// is `None` on the per-attempt context every empty reply builds, and `None` from a peer
+    /// that predates the field. The shell reports it as `RetryState::Exhausted { attempts }`,
+    /// so the user who watched "(1/3)" and "(2/3)" climb is told the cap was reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
 }
 
 impl EmptyResponseContext {

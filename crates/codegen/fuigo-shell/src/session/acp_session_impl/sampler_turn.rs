@@ -1385,6 +1385,7 @@ impl SessionActor {
                     attempts: rate_limit_waits,
                     reason: detailed_message.clone(),
                     is_rate_limited: true,
+                    error_type: Some(SamplingErrorKind::RateLimited.as_str().to_string()),
                 },
             ))
             .await;
@@ -1702,13 +1703,30 @@ impl SessionActor {
             _ => (error_type, detailed_message),
         };
         self.log_terminal_failure(error_type, error.status_code, &detailed_message);
-        self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
-            crate::extensions::notification::RetryState::Failed {
+        // A spent empty-response budget is an exhaustion, like the rate-limit path above: the
+        // user watched "(1/3)" and "(2/3)" climb, so the closing line names the attempts it took
+        // instead of a bare failure that never mentions the cap. The sampler stamps the count on
+        // the error's context; a peer that sent none still made one attempt.
+        let terminal_state = match error.kind {
+            SamplingErrorKind::EmptyResponse => {
+                crate::extensions::notification::RetryState::Exhausted {
+                    attempts: error
+                        .empty_response_context
+                        .as_ref()
+                        .and_then(|context| context.attempts)
+                        .unwrap_or(1),
+                    reason: detailed_message.clone(),
+                    is_rate_limited: false,
+                    error_type: Some(error_type.to_string()),
+                }
+            }
+            _ => crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_string(),
                 message: detailed_message.clone(),
             },
-        ))
-        .await;
+        };
+        self.send_fuigo_notification(FuigoSessionUpdate::RetryState(terminal_state))
+            .await;
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,

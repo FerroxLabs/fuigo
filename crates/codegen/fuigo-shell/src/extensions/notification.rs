@@ -1141,6 +1141,12 @@ pub enum RetryState {
         /// Clients use this to show a user-friendly upgrade message instead of the raw `reason` string.
         #[serde(default)]
         is_rate_limited: bool,
+        /// Sampler error kind that ran out of budget (`SamplingErrorKind::as_str()`), when known.
+        /// Same vocabulary as `Retrying.error_type` and `Failed.error_type`; absent on older shells.
+        /// Without it an exhaustion the pager renders loses the kind it would have classified
+        /// (an empty-response exhaustion reads "Request failed" instead of "Empty response").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_type: Option<String>,
     },
     /// A non-retryable error occurred (e.g., auth error, invalid params)
     Failed {
@@ -1163,8 +1169,19 @@ pub const RETRY_STATUS_META_KEY: &str = "fuigo/retryStatus";
 /// that concatenate thought chunks. `after_thought_text` opens with one for the same
 /// reason when streamed reasoning came first: without it the line is glued to the end of
 /// the model's last reasoning sentence.
+///
+/// A disk-full failure is the one `retry_state` on this rail that is not about the model,
+/// so it gets its own subject instead of "The model request failed".
 pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String {
     let separator = if after_thought_text { "\n\n" } else { "" };
+    if let RetryState::Failed {
+        error_type,
+        message,
+    } = state
+        && error_type == DISK_FULL_ERROR_TYPE
+    {
+        return format!("{separator}Fuigo could not save this session: {message}\n\n");
+    }
     match state {
         RetryState::Retrying {
             attempt,
@@ -1514,6 +1531,7 @@ mod tests {
                     attempts: 3,
                     reason: "429 Too Many Requests".into(),
                     is_rate_limited: true,
+                    error_type: None,
                 },
                 "The model request failed after 3 attempts: 429 Too Many Requests\n\n",
             ),
@@ -1546,6 +1564,35 @@ mod tests {
         assert!(
             !is_retry_status_update(&untagged),
             "real reasoning is not a mirror"
+        );
+    }
+
+    /// The disk-full `retry_state` is the one failure on this rail that has nothing to do with
+    /// the model, so its mirror does not tell the user the model request failed.
+    #[test]
+    fn the_disk_full_mirror_names_the_disk_not_the_model() {
+        let state = RetryState::Failed {
+            error_type: DISK_FULL_ERROR_TYPE.to_string(),
+            message: DISK_FULL_USER_MESSAGE.to_string(),
+        };
+        assert_eq!(
+            retry_status_text(&state, false),
+            "Fuigo could not save this session: Out of disk space. Free some space and try again.\n\n"
+        );
+        assert_eq!(
+            retry_status_text(&state, true),
+            "\n\nFuigo could not save this session: Out of disk space. Free some space and try again.\n\n"
+        );
+        assert_eq!(
+            retry_status_text(
+                &RetryState::Failed {
+                    error_type: "api".to_string(),
+                    message: "upstream exploded".to_string(),
+                },
+                false
+            ),
+            "The model request failed: upstream exploded\n\n",
+            "every other failure keeps the model-request wording"
         );
     }
 

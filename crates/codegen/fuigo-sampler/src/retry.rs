@@ -732,6 +732,7 @@ mod tests {
                     prompt_tokens: Some(10),
                     model: "m".into(),
                     first_choice_seen: true,
+                    attempts: None,
                 },
             },
         ] {
@@ -1147,6 +1148,7 @@ mod tests {
                 prompt_tokens: Some(5000),
                 model: "m".into(),
                 first_choice_seen: true,
+                attempts: None,
             },
         }
     }

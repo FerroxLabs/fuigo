@@ -732,7 +732,7 @@ async fn apply_retry_decision(
             send_completion(completion, Err(emitted_err), terminal_event_queued);
             false
         }
-        RetryDecision::Fatal(fatal_err) => {
+        RetryDecision::Fatal(mut fatal_err) => {
             // Emit only on true budget exhaustion (hit the retry / rate-limit cap), mirroring `classify_error`'s Fatal conditions
             // A server `x-should-retry: false` or a non-retryable error is also Fatal but is not "exhausted"
             let next_attempt = retry_counts.total + 1;
@@ -763,6 +763,13 @@ async fn apply_retry_decision(
                     exhausted_span.record("status_code", status as i64);
                 }
                 exhausted_span.in_scope(|| {});
+            }
+            // Stamp what the shared empty-response budget spent (the original plus its resends).
+            // The shell reports the give-up as an exhaustion that names the attempts, like the
+            // rate-limit path, instead of a bare failure that never mentions the cap the user
+            // just watched climb. Only the retry loop knows the count, so it travels with the error.
+            if let SamplingError::EmptyResponse { context } = &mut fatal_err {
+                context.attempts = Some(retry_counts.empty_response + 1);
             }
             let terminal_event_queued = emit_failed(event_tx, request_id, &fatal_err);
             send_completion(completion, Err(fatal_err), terminal_event_queued);
@@ -1172,6 +1179,8 @@ fn build_empty_context(
         prompt_tokens,
         model,
         first_choice_seen,
+        // Per-attempt context: only the terminal classification knows what the budget spent.
+        attempts: None,
     }
 }
 
@@ -1951,6 +1960,7 @@ mod tests {
                 prompt_tokens: Some(5000),
                 model: "test-model".into(),
                 first_choice_seen: true,
+                attempts: None,
             },
         }
     }
@@ -1974,6 +1984,8 @@ mod tests {
         /// Provider calls: the original attempt plus every resend the decisions allowed.
         calls: usize,
         failed_kind: Option<String>,
+        /// `empty_response_context.attempts` of the terminal `Failed` event, when it carried one.
+        failed_empty_attempts: Option<u32>,
     }
 
     /// Drive `apply_retry_decision` the way the request loop does: attempt `n` (0-based) fails with `error_for(n)`, and each "continue" makes one more attempt.
@@ -2021,6 +2033,7 @@ mod tests {
             slept,
             calls,
             failed_kind: None,
+            failed_empty_attempts: None,
         };
         while let Ok(event) = event_rx.try_recv() {
             match event {
@@ -2034,6 +2047,10 @@ mod tests {
                     .push((attempt, max_retries, kind.as_str().to_string())),
                 SamplingEvent::Failed { error, .. } => {
                     ladder.failed_kind = Some(error.kind.as_str().to_string());
+                    ladder.failed_empty_attempts = error
+                        .empty_response_context
+                        .as_ref()
+                        .and_then(|context| context.attempts);
                 }
                 _ => {}
             }
@@ -2043,6 +2060,38 @@ mod tests {
 
     fn retrying(attempt: u32, max_retries: u32, kind: &str) -> (u32, u32, String) {
         (attempt, max_retries, kind.to_string())
+    }
+
+    /// An exhausted empty-response budget tells the shell how many attempts it spent, so the
+    /// turn's terminal reaches the client as an exhaustion that names them ("failed after 3
+    /// attempts") instead of a bare failure that never mentions the cap the user watched climb.
+    #[tokio::test(start_paused = true)]
+    async fn an_exhausted_empty_response_budget_reports_the_attempts_it_spent() {
+        use fuigo_sampling_types::EmptyReason::{NoVisibleContent, ReasoningOnly};
+        // The customer's shape: reasoning-only, then cached fully-empty replies on one budget.
+        let ladder = retry_ladder(
+            |n| {
+                empty_response_err(if n == 0 {
+                    ReasoningOnly
+                } else {
+                    NoVisibleContent
+                })
+            },
+            retry_mod::DEFAULT_MAX_RETRIES,
+        )
+        .await;
+        assert_eq!(ladder.calls, 3, "the original reply plus its two resends");
+        assert_eq!(ladder.failed_kind.as_deref(), Some("empty_response"));
+        assert_eq!(
+            ladder.failed_empty_attempts,
+            Some(3),
+            "the attempts the shared empty-response budget spent"
+        );
+
+        // A configured budget that funds no resend at all still reports its single attempt.
+        let unfunded = retry_ladder(|_| empty_response_err(ReasoningOnly), 1).await;
+        assert_eq!(unfunded.calls, 1);
+        assert_eq!(unfunded.failed_empty_attempts, Some(1));
     }
 
     /// A 503 retry must not spend the empty-response budget: it counts empty replies only.
