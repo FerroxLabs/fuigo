@@ -312,6 +312,29 @@ mod tests {
         );
     }
 
+    /// `send_tool_call_start` used to let `?` convert a `serde_json::Error` through the schema crate:
+    /// `-32602 invalid_params`, with a bare string in `data`. Failing to serialize the AGENT's own tool
+    /// input is not the client's bad parameters, so it goes out as `internal_from` instead. The JSON-RPC
+    /// code changed with it, deliberately; this pins both halves and 15-agent-mode.md records the change.
+    #[test]
+    fn internal_from_answers_a_serialization_failure_as_internal_not_invalid_params() {
+        let schema_conversion: acp::Error = serde_json::from_str::<u8>("{}")
+            .expect_err("not a u8")
+            .into();
+        assert_eq!(i32::from(schema_conversion.code), -32602);
+        assert!(
+            schema_conversion
+                .data
+                .as_ref()
+                .is_some_and(serde_json::Value::is_string),
+            "the schema crate's `From` is what put a bare string on the wire"
+        );
+
+        let typed = internal_from(serde_json::from_str::<u8>("{}").expect_err("not a u8"));
+        assert_eq!(i32::from(typed.code), -32603);
+        assert_eq!(kind_and_message(&typed).0, "internal");
+    }
+
     #[test]
     fn error_data_with_fields_keeps_structured_fields_and_the_typed_keys_win() {
         let data = error_data_with_fields(
