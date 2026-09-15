@@ -476,7 +476,7 @@ fn sentences(paragraph: &str) -> Vec<&str> {
 
 /// The cache opt-out paragraph, pinned verbatim.
 ///
-/// Five consecutive review rounds each corrected a different false claim in this one paragraph, and
+/// Seven consecutive review rounds each corrected a different false claim in this one paragraph, and
 /// every heuristic guard written to stop the next one was gamed, misfired, or both. The round-5
 /// negation check accepted "... and batch speech-to-text posts `/v1/audio/transcriptions`, with no
 /// JSON body field left out" -- prose asserting the exact opposite of what the guard existed to
@@ -485,18 +485,116 @@ fn sentences(paragraph: &str) -> Vec<&str> {
 ///
 /// So the paragraph is pinned as golden text. Being brittle to every edit is the POINT: it stops
 /// prose drifting past a clever matcher and forces a human to re-read the source instead.
-const CACHE_PARAGRAPH: &str = r#"Fuigo opts its Flux Router traffic out of Flux Router's response cache with the body field `"cache": {"no-cache": true, "no-store": true}`. Which requests carry it is a rule, not a roster: a request carries the field when it is built on the session's sampling client and the resolved base URL is a Flux Router host (`api.fluxrouter.ai`), and it carries nothing extra otherwise. That covers every model turn on all three wire formats and, by the same mechanism, any side call that rebuilds the session's sampling configuration — session titles and conversation compaction are examples of those, not the whole set. The web search tool posts through its own HTTP client rather than that one and applies the same host rule itself, so its searches carry the field too. A subscription transport and every other provider receive nothing extra, because a strict provider rejects an unknown body field with a 400. Fuigo's media and audio paths are built by different clients that never add the field, so `/v1/images/generations`, `/v1/images/edits`, `/v1/videos/generations` and `/v1/audio/transcriptions` go without it even on a default install, where they address that same Flux Router host; batch speech-to-text posts multipart form data, which has no JSON body to put a field in at all. Flux Router honours the field on `/v1/chat/completions`, where it is what stops a retried turn being answered with a stored copy of an earlier reply. Its `/v1/responses` surface and both of its Anthropic Messages mounts — the bare `/v1/messages`, which is the path the default base URL reaches with `api_backend = "messages"`, and the prefixed `/anthropic/v1/messages` — rebuild each upstream request from a fixed field list, so the field never reaches the cache and they drop it. What protects a retry on those surfaces is the router's own cache instead: the `api.fluxrouter.ai` deployment released ahead of this version of Fuigo stops storing agent traffic at all. That is a property of that deployment rather than of the wire formats, so a self-hosted or older Flux Router may still replay a retry; Fuigo sends the field on every surface regardless, and the explicit opt-out takes effect the moment a surface honours it."#;
+const CACHE_PARAGRAPH: &str = r#"Fuigo opts its Flux Router chat and search requests — not everything it sends to Flux Router — out of Flux Router's response cache with the body field `"cache": {"no-cache": true, "no-store": true}`. Which requests carry it is a rule, not a roster: a request carries the field when it is built on the session's sampling client and the resolved base URL is a Flux Router host (`api.fluxrouter.ai`). That covers every model turn on all three wire formats and, by the same mechanism, any side call that rebuilds the session's sampling configuration — session titles and conversation compaction are examples of those, not the whole set. The web search tool posts through its own HTTP client rather than that one and applies the same host rule itself, so its searches carry the field too. A subscription transport and every other provider receive nothing extra, because a strict provider rejects an unknown body field with a 400. Fuigo's media and audio paths are built by different clients that never add the field, so `/v1/images/generations`, `/v1/images/edits`, `/v1/videos/generations` and `/v1/audio/transcriptions` go without it even on a default install, where they address that same Flux Router host; batch speech-to-text posts multipart form data, which has no JSON body to put a field in at all. Flux Router honours the field on `/v1/chat/completions`, where it is what stops a retried turn being answered with a stored copy of an earlier reply. Its `/v1/responses` surface and both of its Anthropic Messages mounts — the bare `/v1/messages`, which is the path the default base URL reaches with `api_backend = "messages"`, and the prefixed `/anthropic/v1/messages` — rebuild each upstream request from a fixed field list, so the field never reaches the cache and they drop it. What protects a retry on those surfaces is the router's own cache instead: the `api.fluxrouter.ai` deployment released ahead of this version of Fuigo stops storing agent traffic at all. That is a property of that deployment rather than of the wire formats, so a self-hosted or older Flux Router may still replay a retry; Fuigo sends the field on every surface regardless, and the explicit opt-out takes effect the moment a surface honours it."#;
+
+/// How much of each side to show either way of the first difference.
+const DIFFERENCE_CONTEXT: usize = 40;
+
+/// Where `actual` first differs from `expected` -- line, column, and that spot on both sides -- or the
+/// empty string when they are identical.
+///
+/// [`the_user_guide_cache_paragraph_is_pinned_verbatim`] asserts two ~2 KB paragraphs are equal, and
+/// `assert_eq!` prints both in full with no pointer to the delta. The pin exists to summon a human
+/// reviewer, so it has to show that reviewer what moved rather than hand them two walls of prose.
+fn first_difference(actual: &str, expected: &str) -> String {
+    let actual: Vec<char> = actual.chars().collect();
+    let expected: Vec<char> = expected.chars().collect();
+    let Some(at) =
+        (0..actual.len().max(expected.len())).find(|&at| actual.get(at) != expected.get(at))
+    else {
+        return String::new();
+    };
+    let (mut line, mut column) = (1usize, 1usize);
+    for character in &actual[..at.min(actual.len())] {
+        if *character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    format!(
+        "first difference at line {line}, column {column}\n  guide : {}\n  pinned: {}",
+        difference_excerpt(&actual, at),
+        difference_excerpt(&expected, at),
+    )
+}
+
+/// `text` around `at`, with the character at `at` bracketed and the surroundings bounded, so a difference
+/// deep inside a long line is still readable on one screen.
+fn difference_excerpt(text: &[char], at: usize) -> String {
+    let start = at.saturating_sub(DIFFERENCE_CONTEXT);
+    let mut excerpt = String::new();
+    if start > 0 {
+        excerpt.push('\u{2026}');
+    }
+    excerpt.extend(&text[start..at.min(text.len())]);
+    match text.get(at) {
+        // A bare newline inside the brackets would break the report's own line; name it instead.
+        Some('\n') => excerpt.push_str("[newline]"),
+        Some(character) => {
+            excerpt.push('[');
+            excerpt.push(*character);
+            excerpt.push(']');
+        }
+        None => excerpt.push_str("[end of text]"),
+    }
+    let tail = (at + 1).min(text.len());
+    let end = (at + 1 + DIFFERENCE_CONTEXT).min(text.len());
+    excerpt.extend(&text[tail..end]);
+    if end < text.len() {
+        excerpt.push('\u{2026}');
+    }
+    excerpt
+}
+
+/// The golden pin only works if the human it summons can see WHAT changed. `assert_eq!` on a 2 KB
+/// paragraph prints the whole thing twice and leaves the reader to diff two walls of prose by eye, which
+/// is how a one-word edit gets waved through. The report has to name the first differing line and column
+/// and show that spot on both sides.
+#[test]
+fn the_golden_pin_failure_points_at_the_first_difference() {
+    let report = first_difference("alpha bets gamma", "alpha beta gamma");
+    assert!(
+        report.contains("line 1, column 10"),
+        "the report does not locate the first difference:\n{report}"
+    );
+    assert!(
+        report.contains("bet[s] gamma") && report.contains("bet[a] gamma"),
+        "the report does not show the differing character on both sides:\n{report}"
+    );
+
+    let multiline = first_difference("first line\nsecond LINE", "first line\nsecond line");
+    assert!(
+        multiline.contains("line 2, column 8"),
+        "a difference on a later line is mislocated:\n{multiline}"
+    );
+
+    // One side running out is a difference too, and the side that ended has no character to bracket.
+    let longer = first_difference("abcdef", "abc");
+    assert!(
+        longer.contains("line 1, column 4") && longer.contains("end of text"),
+        "a text that only got longer is not reported as a difference:\n{longer}"
+    );
+
+    assert!(
+        first_difference("same", "same").is_empty(),
+        "identical texts must report no difference"
+    );
+}
 
 /// Golden-text guard. See [`CACHE_PARAGRAPH`] for why this is an equality assertion and not a set of
 /// vocabulary checks.
 #[test]
 fn the_user_guide_cache_paragraph_is_pinned_verbatim() {
-    assert_eq!(
-        cache_paragraph(),
-        CACHE_PARAGRAPH,
+    let paragraph = cache_paragraph();
+    if paragraph == CACHE_PARAGRAPH {
+        return;
+    }
+    panic!(
         "the Flux Router cache opt-out paragraph in \
          crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md no longer matches the \
-         constant that pins it.\n\nTHIS PARAGRAPH'S CLAIMS MUST BE RE-VERIFIED AGAINST THE SOURCE \
+         constant that pins it.\n\n{}\n\nTHIS PARAGRAPH'S CLAIMS MUST BE RE-VERIFIED AGAINST THE SOURCE \
          BEFORE THIS CONSTANT IS UPDATED. The rule it encodes: a request carries the body `cache` \
          field when it is built on the session's sampling client (`SamplingClient::body`, gated on \
          `fuigo_extra_ca::fluxrouter::is_fluxrouter_url` and off for a subscription transport) and \
@@ -506,8 +604,9 @@ fn the_user_guide_cache_paragraph_is_pinned_verbatim() {
          closed list. Web search carries it through its own `reqwest::Client` by applying the same \
          host rule itself. The media and audio paths (`/images/generations`, `/images/edits`, \
          `/videos/generations`, `/audio/transcriptions`) are built by different clients that never \
-         add it. Five rounds of review each found a different false claim in this paragraph, so \
-         update the constant only after re-reading that code."
+         add it. Seven rounds of review each found a different false claim in this paragraph, so \
+         update the constant only after re-reading that code.\n\nThe guide now reads:\n{paragraph}",
+        first_difference(&paragraph, CACHE_PARAGRAPH)
     );
 }
 
