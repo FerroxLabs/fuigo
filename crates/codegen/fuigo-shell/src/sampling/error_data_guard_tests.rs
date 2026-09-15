@@ -743,6 +743,43 @@ fn every_serialization_code_flip_is_named_in_the_agent_mode_guide() {
     );
 }
 
+/// The login-failure reply is the whole reason the third scan exists (A-R4-2), and the test that pins it
+/// (`a_failed_login_answers_with_typed_data_not_a_bare_message`) pins the HELPER: re-inlining the pre-fix
+/// `let mut err = acp::Error::auth_required(); err.message = e.to_string(); err` at the `authenticate`
+/// call site would leave that test green. The guard is what has to bite there, so assert that it does --
+/// on the real file, at the real call site, by putting the pre-fix shape back and running the scan.
+#[test]
+fn the_guard_bites_when_the_authenticate_call_site_re_inlines_its_error() {
+    const CALL_SITE: &str = "auth_flow_error(&e)";
+    let rel = "agent/mvp_agent/acp_agent.rs";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(rel);
+    let src = std::fs::read_to_string(&path).expect("read acp_agent.rs");
+    assert_eq!(
+        src.matches(CALL_SITE).count(),
+        1,
+        "`authenticate` must build its login failure through the typed helper, at one call site"
+    );
+    assert!(
+        offenders(rel, &src).is_empty(),
+        "the shipped file is clean before the mutation"
+    );
+    let re_inlined = src.replace(
+        CALL_SITE,
+        "{ let mut err = acp::Error::auth_required(); err.message = e.to_string(); err }",
+    );
+    let found = offenders(rel, &re_inlined);
+    assert!(
+        found
+            .iter()
+            .any(|f| f.contains("`acp::Error` built with no typed `data`")),
+        "the guard must see the untyped constructor at the call site: {found:#?}"
+    );
+    assert!(
+        found.iter().any(|f| f.contains("`message` assigned in place")),
+        "the guard must see the in-place message write at the call site: {found:#?}"
+    );
+}
+
 /// The exemption is by file, so the typed constructors themselves may wrap the bare schema ones.
 #[test]
 fn the_no_data_scan_exempts_the_typed_constructor_module() {

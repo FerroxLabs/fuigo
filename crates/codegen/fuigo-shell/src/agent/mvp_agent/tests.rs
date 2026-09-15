@@ -7697,6 +7697,33 @@ fn stock_no_subagents_profile_strips_spawn_from_replacing_harness() {
     }
 }
 
+/// The same contract through the REAL `authenticate` entry point, not just the helper.
+/// The api-key kill switch is the one refused login reachable without a browser or a network, so it is
+/// what pins that the method itself answers with the typed object instead of `data: null`.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn authenticate_answers_a_refused_login_with_typed_object_data() {
+    use crate::agent::auth_method::FUIGO_API_KEY_METHOD_ID;
+    use acp::Agent as _;
+    let agent = build_agent_with_api_key_auth_disabled();
+    let err = agent
+        .authenticate(acp::AuthenticateRequest::new(FUIGO_API_KEY_METHOD_ID))
+        .await
+        .expect_err("api-key auth is disabled by the kill switch");
+    assert_eq!(i32::from(err.code), -32000, "{err:?}");
+    let data = err
+        .data
+        .as_ref()
+        .expect("authenticate answered a refused login with no `data` at all");
+    assert_eq!(data["error_kind"], "auth", "{data}");
+    assert!(
+        data["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("disabled by your administrator")),
+        "the reply must say why the login was refused, got {data}"
+    );
+}
+
 /// A failed or cancelled login must answer with typed object `data`, like every other error the agent
 /// sends. `authenticate` is the one method every embedding client calls on connect, and a client that
 /// renders only object-shaped `data` shows the user NOTHING for `{ "message": "...", "data": null }`.
