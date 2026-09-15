@@ -970,7 +970,10 @@ async fn legacy_auth_hint_on_404_model_not_found() {
                 Ok(_) => panic!("expected Err from handle_sampling_failure"),
             };
             let data = err.data.unwrap();
-            let msg = data.as_str().unwrap();
+            let msg = data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .expect("terminal error data is an object with a message");
             assert!(
                 msg.contains("deprecated authentication method"),
                 "404 with WebLogin must include deprecation message, got: {msg}"
@@ -1055,7 +1058,10 @@ async fn legacy_auth_hint_on_401_unauthorized() {
                 Ok(_) => panic!("expected Err from handle_sampling_failure"),
             };
             let data = err.data.unwrap();
-            let msg = data.as_str().unwrap();
+            let msg = data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .expect("terminal error data is an object with a message");
             assert!(
                 msg.contains("deprecated authentication method"),
                 "401 with WebLogin must include deprecation message, got: {msg}"

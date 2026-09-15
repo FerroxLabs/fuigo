@@ -1459,7 +1459,8 @@ fn finish_turn(
                     is_api_key_auth,
                 ))
             } else {
-                err.to_string()
+                // `Display` would print an object `data` as raw JSON; people read its `message`
+                fuigo_shell::sampling::error::acp_error_text(&err)
             };
             if let Some(usage) = fuigo_shell::sampling::error::prompt_usage_from_error(&err) {
                 match serde_json::to_value(&usage) {

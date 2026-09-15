@@ -1304,8 +1304,9 @@ impl acp::Agent for MvpAgent {
                     parsed_prompt_tx,
                 })
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to dispatch prompt to session: {e}"))
+                    crate::sampling::error::session_unavailable_error(format!(
+                        "failed to dispatch prompt to session: {e}"
+                    ))
                 })
         } else {
             let envelope = fuigo_message_delivery_core::DeliveryEnvelope::from_human(
@@ -1337,10 +1338,9 @@ impl acp::Agent for MvpAgent {
                     crate::session::message_delivery::HumanDeliveryError::ChannelClosed(
                         error,
                     ) => {
-                        acp::Error::internal_error()
-                            .data(
-                                format!("failed to dispatch prompt to session: {error}"),
-                            )
+                        crate::sampling::error::session_unavailable_error(format!(
+                            "failed to dispatch prompt to session: {error}"
+                        ))
                     }
                     crate::session::message_delivery::HumanDeliveryError::Rejected
                     | crate::session::message_delivery::HumanDeliveryError::Unsupported => {
@@ -1359,7 +1359,7 @@ impl acp::Agent for MvpAgent {
         let stop_result = rx
             .await
             .map_err(|_| {
-                acp::Error::internal_error().data("session failed to respond")
+                crate::sampling::error::session_unavailable_error("session failed to respond")
             })?;
         await_turn_span.close();
         let finalize_span = region!("prompt.finalize", Parent::Inherit);
