@@ -152,7 +152,7 @@ Some failures add more structured fields next to these, for example the executio
 
 | `error_kind`           | Meaning                                                                                          |
 | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `session_unavailable`  | The agent could not hand the request to its session, or the session never answered.            |
+| `session_unavailable`  | The agent could not hand the request to its session or to the peer, or it never answered.      |
 | `invalid_request`      | The request itself is wrong: bad or missing parameters, an unknown session or method, an unsupported operation. |
 | `not_found`            | The named resource, for example a session, does not exist.                                       |
 | `session_storage`      | Reading or writing the session's files failed (session directory, history, durable execution state). |

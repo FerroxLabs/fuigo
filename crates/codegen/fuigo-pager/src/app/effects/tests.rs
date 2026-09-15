@@ -67,6 +67,27 @@ fn session_setup_failure_renders_the_data_message_not_raw_json() {
     assert_eq!(text, "Internal error: http client init failed: invalid proxy url");
     assert!(!text.contains('{') && !text.contains('\n'), "{text:?}");
 }
+/// The agent process dying mid-prompt is the first failure most users ever see.
+/// `fuigo_acp_lib::acp_send` tags that error's `data` with its channel-failure discriminant, and the
+/// TUI renders it through `acp_error_user_text` — which must print words, never the `data` object.
+#[tokio::test]
+async fn dead_agent_channel_failure_renders_one_line_not_raw_json() {
+    use fuigo_acp_lib::{AcpAgentMessage, AcpChannelFailure, acp_channel_failure, acp_send};
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
+    let request = acp::ExtRequest::new(
+        "session/prompt",
+        serde_json::value::to_raw_value(&serde_json::json!({})).expect("raw params").into(),
+    );
+    // The peer takes the request and goes away without answering: the real `recv_failed` shape.
+    let (err, ()) = tokio::join!(
+        async { acp_send(request, &tx).await.expect_err("the peer never answers") },
+        async { drop(rx.recv().await); },
+    );
+    assert_eq!(acp_channel_failure(&err), Some(AcpChannelFailure::RecvFailed));
+    let text = acp_error_user_text(&err);
+    assert!(!text.contains('{') && !text.contains('\n'), "raw JSON reached the TUI: {text:?}");
+    assert!(text.contains("channel closed"), "{text:?}");
+}
 /// /btw renders its failure through `format_acp_error`.
 /// A status-less `api` error (a 403 content-safety block reaches the pager without `http_status`) must keep the provider's words.
 #[test]
