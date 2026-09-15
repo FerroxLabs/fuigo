@@ -336,7 +336,10 @@ mod tests {
     /// somehow holds the wire spelling does not get `__`.
     #[test]
     fn unknown_ext_method_restores_the_wire_prefix_exactly_once() {
-        for name in ["fuigo/not_a_namespace/at_all", "_fuigo/not_a_namespace/at_all"] {
+        for name in [
+            "fuigo/not_a_namespace/at_all",
+            "_fuigo/not_a_namespace/at_all",
+        ] {
             assert_eq!(
                 kind_and_message(&unknown_ext_method(name)).1,
                 "unknown ACP extension method: _fuigo/not_a_namespace/at_all",

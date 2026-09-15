@@ -775,7 +775,9 @@ fn the_guard_bites_when_the_authenticate_call_site_re_inlines_its_error() {
         "the guard must see the untyped constructor at the call site: {found:#?}"
     );
     assert!(
-        found.iter().any(|f| f.contains("`message` assigned in place")),
+        found
+            .iter()
+            .any(|f| f.contains("`message` assigned in place")),
         "the guard must see the in-place message write at the call site: {found:#?}"
     );
 }
