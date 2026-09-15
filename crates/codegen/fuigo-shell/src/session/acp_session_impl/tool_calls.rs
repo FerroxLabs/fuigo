@@ -2121,8 +2121,10 @@ impl SessionActor {
     ) -> Result<(String, acp::ToolKind, serde_json::Value), acp::Error> {
         #[allow(unused_mut)]
         let mut raw_input = match &tool_call_input {
-            ToolInput::SendSubagentMessage(message) => serde_json::to_value(message)?,
-            _ => serde_json::to_value(&tool_call_input)?,
+            ToolInput::SendSubagentMessage(message) => {
+                serde_json::to_value(message).map_err(crate::acp_error::internal_from)?
+            }
+            _ => serde_json::to_value(&tool_call_input).map_err(crate::acp_error::internal_from)?,
         };
         let canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
         let (title, kind, locations, content) = match tool_call_input {

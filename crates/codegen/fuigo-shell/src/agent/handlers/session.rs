@@ -169,7 +169,7 @@ async fn handle_session_summaries(
 ) -> Result<acp::ExtResponse, acp::Error> {
     match args.method.as_ref() {
         "fuigo/session_summaries/session_list" => {
-            let req = serde_json::from_str::<SessionListRequest>(args.params.get())?;
+            let req = crate::extensions::parse_params_str::<SessionListRequest>(args.params.get())?;
             let cwd = req.workspace_directory.to_string_lossy().to_string();
 
             let _timer = crate::instrumentation_timer!("session.list_sessions_for_workspace");
@@ -192,7 +192,9 @@ async fn handle_session_summaries(
         }
         "fuigo/session_summaries/workspace_list" => {
             tracing::debug!("fuigo/session_summaries/workspace_list is working");
-            let _req = serde_json::from_str::<AllSessionOverviewRequest>(args.params.get())?;
+            let _req = crate::extensions::parse_params_str::<AllSessionOverviewRequest>(
+                args.params.get(),
+            )?;
 
             let _timer = crate::instrumentation_timer!("session.list_sessions_for_load");
 
@@ -203,7 +205,8 @@ async fn handle_session_summaries(
             summaries_to_overview_response(summaries)
         }
         "fuigo/session_summaries/workspace_list_recent" => {
-            let req = serde_json::from_str::<RecentSessionsRequest>(args.params.get())?;
+            let req =
+                crate::extensions::parse_params_str::<RecentSessionsRequest>(args.params.get())?;
 
             let _timer = crate::instrumentation_timer!("session.list_sessions_recent");
 
