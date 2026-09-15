@@ -167,6 +167,7 @@ New values can be added in later releases, so treat an unknown `error_kind` as a
 Two notes on the class:
 
 - A `fuigo/*` extension method this build does not implement answers `-32601` with the object above, naming the method in `data.message`. A request whose method the protocol layer itself rejects before the agent sees it -- an unknown top-level JSON-RPC method, one that is not an extension call -- still comes back as `-32601 Method not found` with no `data`, because no part of the agent runs.
+- Since 1.0.18 a failure to serialize the agent's own tool input answers `-32603` (`internal`) where it used to answer `-32602` (`invalid params`). The parameters the client sent were fine; the fault was inside the agent, so the class now says so.
 
 A prompt that failed on an empty model response:
 
