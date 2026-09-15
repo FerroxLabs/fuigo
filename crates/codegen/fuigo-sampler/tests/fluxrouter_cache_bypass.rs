@@ -474,6 +474,43 @@ fn sentences(paragraph: &str) -> Vec<&str> {
     paragraph.split(". ").collect()
 }
 
+/// The cache opt-out paragraph, pinned verbatim.
+///
+/// Five consecutive review rounds each corrected a different false claim in this one paragraph, and
+/// every heuristic guard written to stop the next one was gamed, misfired, or both. The round-5
+/// negation check accepted "... and batch speech-to-text posts `/v1/audio/transcriptions`, with no
+/// JSON body field left out" -- prose asserting the exact opposite of what the guard existed to
+/// allow -- while rejecting ordinary true denials such as "those paths are excluded". A matcher can
+/// test vocabulary; it cannot tell a true claim from a false one. Only a reader can.
+///
+/// So the paragraph is pinned as golden text. Being brittle to every edit is the POINT: it stops
+/// prose drifting past a clever matcher and forces a human to re-read the source instead.
+const CACHE_PARAGRAPH: &str = r#"Fuigo opts its Flux Router traffic out of Flux Router's response cache with the body field `"cache": {"no-cache": true, "no-store": true}`. Which requests carry it is a rule, not a roster: a request carries the field when it is built on the session's sampling client and the resolved base URL is a Flux Router host (`api.fluxrouter.ai`), and it carries nothing extra otherwise. That covers every model turn on all three wire formats and, by the same mechanism, any side call that rebuilds the session's sampling configuration — session titles and conversation compaction are examples of those, not the whole set. The web search tool posts through its own HTTP client rather than that one and applies the same host rule itself, so its searches carry the field too. A subscription transport and every other provider receive nothing extra, because a strict provider rejects an unknown body field with a 400. Fuigo's media and audio paths are built by different clients that never add the field, so `/v1/images/generations`, `/v1/images/edits`, `/v1/videos/generations` and `/v1/audio/transcriptions` go without it even on a default install, where they address that same Flux Router host; batch speech-to-text posts multipart form data, which has no JSON body to put a field in at all. Flux Router honours the field on `/v1/chat/completions`, where it is what stops a retried turn being answered with a stored copy of an earlier reply. Its `/v1/responses` surface and both of its Anthropic Messages mounts — the bare `/v1/messages`, which is the path the default base URL reaches with `api_backend = "messages"`, and the prefixed `/anthropic/v1/messages` — rebuild each upstream request from a fixed field list, so the field never reaches the cache and they drop it. What protects a retry on those surfaces is the router's own cache instead: the `api.fluxrouter.ai` deployment released ahead of this version of Fuigo stops storing agent traffic at all. That is a property of that deployment rather than of the wire formats, so a self-hosted or older Flux Router may still replay a retry; Fuigo sends the field on every surface regardless, and the explicit opt-out takes effect the moment a surface honours it."#;
+
+/// Golden-text guard. See [`CACHE_PARAGRAPH`] for why this is an equality assertion and not a set of
+/// vocabulary checks.
+#[test]
+fn the_user_guide_cache_paragraph_is_pinned_verbatim() {
+    assert_eq!(
+        cache_paragraph(),
+        CACHE_PARAGRAPH,
+        "the Flux Router cache opt-out paragraph in \
+         crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md no longer matches the \
+         constant that pins it.\n\nTHIS PARAGRAPH'S CLAIMS MUST BE RE-VERIFIED AGAINST THE SOURCE \
+         BEFORE THIS CONSTANT IS UPDATED. The rule it encodes: a request carries the body `cache` \
+         field when it is built on the session's sampling client (`SamplingClient::body`, gated on \
+         `fuigo_extra_ca::fluxrouter::is_fluxrouter_url` and off for a subscription transport) and \
+         the resolved base URL is a Flux Router host -- that is every model turn on all three wire \
+         formats plus every side call that rebuilds the session's sampling config through \
+         `prepare_chat_completion`, which is an open-ended set and must never be written down as a \
+         closed list. Web search carries it through its own `reqwest::Client` by applying the same \
+         host rule itself. The media and audio paths (`/images/generations`, `/images/edits`, \
+         `/videos/generations`, `/audio/transcriptions`) are built by different clients that never \
+         add it. Five rounds of review each found a different false claim in this paragraph, so \
+         update the constant only after re-reading that code."
+    );
+}
+
 /// Every paragraph in `11-custom-models.md` is one long line today, but hard-wrapping a Markdown file is
 /// an ordinary edit that changes nothing a reader sees. The tests below read sentences, so the extraction
 /// has to rebuild the paragraph from all of its lines: taking only the line the cache literal sits on
@@ -572,141 +609,6 @@ fn the_user_guide_pairs_each_flux_router_surface_with_its_own_verdict() {
                 "the sentence naming {surface} gives it the opposite verdict ({contrary:?}):\n{sentence}"
             );
         }
-    }
-}
-
-/// Flux Router paths Fuigo posts to that are NOT model turns and carry no `cache` field. On a default
-/// install these are the same host as the inference route: `agent/config.rs` defaults
-/// `fuigo_api_base_url` to `https://api.fluxrouter.ai/v1`, and `agent_ops.rs` hands that same base to
-/// `ImageGenConfig` and `VideoGenConfig`, while fuigo-voice posts batch speech to it as multipart, which
-/// has no JSON body to put a field in at all.
-const NON_TURN_PATHS: [&str; 4] = [
-    "/images/generations",
-    "/images/edits",
-    "/videos/generations",
-    "/audio/transcriptions",
-];
-
-/// The side calls that ride the opt-out for free because they are built on `SamplingClient`, whose
-/// `body()` is where the field is appended. Titles come from `session/acp_session_impl/title_refresh.rs`
-/// and `session/helpers/session_summary.rs`, recaps from `acp_session_impl/recap.rs` and
-/// `turn_summary.rs`, compaction from `session/helpers/session_compact.rs` -- every one of them reaches
-/// the wire through `crate::sampling::Client`, which `fuigo-shell/src/sampling/mod.rs` re-exports as
-/// `fuigo_sampler::SamplingClient`.
-///
-/// Web search is NOT one of them: `WebSearchClient` (fuigo-tools) owns its own `reqwest::Client` and
-/// carries the field only because it applies the same host gate itself. Listing it here tells a reader
-/// the opt-out reaches it by a route it does not take.
-const SHARED_CLIENT_SIDE_CALLS: [&str; 3] = ["titles", "recaps", "compaction"];
-
-/// Words that deny something, matched as WHOLE words: "another", "note" and "piano " each contain the
-/// letters of one, and a substring test reads all three as denials.
-const NEGATIONS: [&str; 5] = ["not", "never", "no", "nor", "cannot"];
-/// What the denial has to be about for it to be a denial that the field is sent.
-const DENIED_SUBJECTS: [&str; 5] = ["carry", "carries", "carrying", "field", "body"];
-/// How far past the negation its subject may sit, in characters.
-const DENIAL_SPAN: usize = 48;
-
-/// Does `sentence` genuinely say the cache field is absent? A substring search for "not"/"no " is
-/// satisfied by "another Flux Router path" and "no matter which model you configure", so a rewrite that
-/// dropped the denial entirely could still pass the test that uses this.
-fn denies_the_field(sentence: &str) -> bool {
-    let lower = sentence.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    NEGATIONS.iter().any(|negation| {
-        lower.match_indices(negation).any(|(at, word)| {
-            let end = at + word.len();
-            let whole_word = (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
-                && bytes.get(end).is_none_or(|b| !b.is_ascii_alphanumeric());
-            // Characters, not bytes: this paragraph uses em dashes.
-            let subject: String = lower[end..].chars().take(DENIAL_SPAN).collect();
-            whole_word && DENIED_SUBJECTS.iter().any(|term| subject.contains(term))
-        })
-    })
-}
-
-/// The guard below is only as strong as this check: it is what stops the paragraph naming a non-turn
-/// path without saying the field is absent there. Pin both directions, because the cheap substring
-/// version passed on prose that denies nothing at all.
-#[test]
-fn the_non_turn_negation_check_needs_a_real_negation() {
-    for denial in [
-        "Fuigo's remaining Flux Router calls are not model turns and do not carry it either.",
-        "`/v1/audio/transcriptions` goes as multipart form data, which has no JSON body to put a field in.",
-        "Those paths never carry the field.",
-        "A multipart upload cannot carry a JSON field at all.",
-    ] {
-        assert!(
-            denies_the_field(denial),
-            "a plain denial that the field is sent is not recognised as one:\n{denial}"
-        );
-    }
-    for no_denial in [
-        "`/imagine` posts `/v1/images/generations`, another Flux Router path.",
-        "Fuigo also posts `/v1/videos/generations`; note the different base path.",
-        "`/v1/audio/transcriptions` goes to the same host, no matter which model you configure.",
-        "`/v1/images/edits` carries the field on every request.",
-    ] {
-        assert!(
-            !denies_the_field(no_denial),
-            "a sentence that denies nothing about the field satisfied the check, so the guard below \
-             would accept a paragraph that names a non-turn path and says nothing about it:\n{no_denial}"
-        );
-    }
-}
-
-/// The opt-out covers the three inference wire formats and the side calls built on the same sampling
-/// client -- not literally every request addressed to `api.fluxrouter.ai`. A guide that claims the wider
-/// thing is wrong on a DEFAULT install, where `/imagine`, video generation and speech-to-text all go to
-/// that host without the field. This test pins the narrower claim from three sides: the paragraph has to
-/// say what does carry the field in terms of the wire formats and shared-client side calls, it has to
-/// name those side calls correctly, and it has to name at least one non-turn path as not carrying it.
-/// Widening the sentence again means deleting that naming, which fails here.
-#[test]
-fn the_user_guide_scopes_the_bypass_to_the_calls_that_carry_it() {
-    let paragraph = cache_paragraph();
-    let sentences = sentences(&paragraph);
-    let carrying = sentences
-        .iter()
-        .find(|sentence| sentence.contains(CACHE_FIELD))
-        .unwrap_or_else(|| panic!("the paragraph never quotes the cache field:\n{paragraph}"));
-    for scope in ["wire format", "side call"] {
-        assert!(
-            carrying.contains(scope),
-            "the sentence that says what carries the opt-out never says {scope:?}, so it reads as a \
-             claim about every request Fuigo sends to Flux Router:\n{carrying}"
-        );
-    }
-    for side_call in SHARED_CLIENT_SIDE_CALLS {
-        assert!(
-            carrying.contains(side_call),
-            "the sentence that says what carries the opt-out never names {side_call:?}, one of the \
-             side calls that actually goes through `SamplingClient`:\n{carrying}"
-        );
-    }
-    assert!(
-        !carrying.contains("web search"),
-        "the sentence that says what carries the opt-out lists web search among the side calls built \
-         on the same sampling client. It is not one: `WebSearchClient` owns its own `reqwest::Client` \
-         and carries the field only because it applies the host gate itself:\n{carrying}"
-    );
-
-    let naming: Vec<&&str> = sentences
-        .iter()
-        .filter(|sentence| NON_TURN_PATHS.iter().any(|path| sentence.contains(path)))
-        .collect();
-    assert!(
-        !naming.is_empty(),
-        "the paragraph never names one of the Flux Router paths that do NOT carry the field \
-         ({NON_TURN_PATHS:?}), so nothing stops the claim widening back to every request to that \
-         host -- which is false on a default install:\n{paragraph}"
-    );
-    for sentence in naming {
-        assert!(
-            denies_the_field(sentence),
-            "the sentence naming a non-turn Flux Router path does not say the field is absent \
-             there:\n{sentence}"
-        );
     }
 }
 
