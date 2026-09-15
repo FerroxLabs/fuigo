@@ -2006,6 +2006,9 @@ mod chat_history_integrity_tests;
 #[path = "acp_session_tests/turn/disk_full_tests.rs"]
 mod disk_full_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
+mod empty_response_retry_status_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;
 #[cfg(test)]
@@ -2053,9 +2056,6 @@ mod parallel_dispatch_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
-mod empty_response_retry_status_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/rate_limit_backoff_tests.rs"]
 mod rate_limit_backoff_tests;

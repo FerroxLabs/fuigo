@@ -1152,7 +1152,8 @@ pub enum RetryState {
 }
 
 /// Chunk `_meta` key tagging the standard-rail mirror of a [`RetryState`]; its value is the `RetryState` object as `retry_state` carries it (`type` tag, snake_case fields).
-/// The shell sends every `retry_state` twice: on `_fuigo/session_notification` for Fuigo clients, and as a live-only `session/update` `agent_message_chunk` that stock ACP clients render.
+/// The shell sends every `retry_state` twice: on `_fuigo/session_notification` for Fuigo clients, and as a live-only `session/update` `agent_thought_chunk` that stock ACP clients render.
+/// A thought, never an `agent_message_chunk`: clients such as Murage fold message chunks into the stored, forwarded answer, but show thought chunks only in the thinking area.
 /// Fuigo clients (the pager, headless mode) render retries from `retry_state` and skip chunks carrying this key.
 pub const RETRY_STATUS_META_KEY: &str = "fuigo/retryStatus";
 
@@ -1175,13 +1176,13 @@ pub fn retry_status_text(state: &RetryState) -> String {
     }
 }
 
-/// The standard `agent_message_chunk` that mirrors `state`, tagged with [`RETRY_STATUS_META_KEY`].
+/// The standard `agent_thought_chunk` that mirrors `state`, tagged with [`RETRY_STATUS_META_KEY`].
 pub fn retry_status_update(state: &RetryState) -> acp::SessionUpdate {
     let mut meta = serde_json::Map::new();
     if let Ok(value) = serde_json::to_value(state) {
         meta.insert(RETRY_STATUS_META_KEY.to_string(), value);
     }
-    acp::SessionUpdate::AgentMessageChunk(
+    acp::SessionUpdate::AgentThoughtChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
             retry_status_text(state),
         )))
@@ -1189,16 +1190,36 @@ pub fn retry_status_update(state: &RetryState) -> acp::SessionUpdate {
     )
 }
 
+/// The live-only `session/update` notification mirroring `state` for `session_id`: [`retry_status_update`] plus timestamp meta and `promptId` when known.
+/// Never an `eventId`: the mirror is not persisted, and a reconnect cursor must never point at an unpersisted line.
+pub fn retry_status_notification(
+    session_id: acp::SessionId,
+    state: &RetryState,
+    prompt_id: Option<String>,
+) -> acp::SessionNotification {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "agentTimestampMs".to_string(),
+        chrono::Utc::now().timestamp_millis().into(),
+    );
+    if let Some(prompt_id) = prompt_id {
+        meta.insert("promptId".to_string(), prompt_id.into());
+    }
+    acp::SessionNotification::new(session_id, retry_status_update(state)).meta(Some(meta))
+}
+
 /// Whether `update` is a retry-status mirror (see [`RETRY_STATUS_META_KEY`]).
+/// Matches a tagged chunk of either text kind, so a client never renders a mirror as reasoning or as answer text.
 pub fn is_retry_status_update(update: &acp::SessionUpdate) -> bool {
-    matches!(
-        update,
-        acp::SessionUpdate::AgentMessageChunk(chunk)
-            if chunk
-                .meta
-                .as_ref()
-                .is_some_and(|meta| meta.contains_key(RETRY_STATUS_META_KEY))
-    )
+    let (acp::SessionUpdate::AgentThoughtChunk(chunk)
+    | acp::SessionUpdate::AgentMessageChunk(chunk)) = update
+    else {
+        return false;
+    };
+    chunk
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.contains_key(RETRY_STATUS_META_KEY))
 }
 
 /// Whether a terminal retry failure is a recoverable authentication error (expired/invalid credentials, 401).
@@ -1464,6 +1485,60 @@ pub struct RecapRequestFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every retry state mirrors onto a live `agent_thought_chunk` tagged `fuigo/retryStatus`, never onto `agent_message_chunk`.
+    /// Stock ACP clients (Murage) fold message chunks into the answer and show thought chunks only in the thinking area.
+    #[test]
+    fn retry_status_update_is_a_tagged_thought_for_every_state() {
+        let cases = [
+            (
+                RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 2,
+                    reason: "empty response from model (reasoning_only)".into(),
+                    error_type: Some("empty_response".into()),
+                },
+                "Retrying the model (1/2): empty response from model (reasoning_only)\n\n",
+            ),
+            (
+                RetryState::Exhausted {
+                    attempts: 3,
+                    reason: "429 Too Many Requests".into(),
+                    is_rate_limited: true,
+                },
+                "The model request failed after 3 attempts: 429 Too Many Requests\n\n",
+            ),
+            (
+                RetryState::Failed {
+                    error_type: "empty_response".into(),
+                    message: "empty response from model (reasoning_only)".into(),
+                },
+                "The model request failed: empty response from model (reasoning_only)\n\n",
+            ),
+        ];
+        for (state, text) in cases {
+            let update = retry_status_update(&state);
+            assert!(is_retry_status_update(&update), "{state:?}: tagged");
+            let wire = serde_json::to_value(&update).expect("update serializes");
+            assert_eq!(
+                wire["sessionUpdate"], "agent_thought_chunk",
+                "{state:?}: a thought, never answer text"
+            );
+            assert_eq!(wire["content"]["text"], text, "{state:?}: text");
+            assert_eq!(
+                wire["_meta"][RETRY_STATUS_META_KEY],
+                serde_json::to_value(&state).unwrap(),
+                "{state:?}: structured state in the chunk meta"
+            );
+        }
+        let untagged = acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new("model reasoning".to_string())),
+        ));
+        assert!(
+            !is_retry_status_update(&untagged),
+            "real reasoning is not a mirror"
+        );
+    }
 
     #[test]
     fn http_401_needle_is_contained_in_unauthorized_needle() {

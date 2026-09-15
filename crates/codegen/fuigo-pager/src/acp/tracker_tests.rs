@@ -4716,8 +4716,8 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
         block.output
     );
 }
-/// The shell mirrors each `RetryState` onto a live-only `agent_message_chunk` tagged `fuigo/retryStatus` for stock ACP clients.
-/// The pager renders retries from `retry_state` itself, so the mirror must neither print nor clear the retry indicator.
+/// The shell mirrors each `RetryState` onto a live-only `agent_thought_chunk` tagged `fuigo/retryStatus` for stock ACP clients.
+/// The pager renders retries from `retry_state` itself, so the mirror must neither render as model reasoning nor clear the retry indicator.
 #[test]
 fn retry_status_mirror_chunk_is_not_rendered_and_keeps_retry_activity() {
     let mut sb = ScrollbackState::new();
@@ -4740,7 +4740,7 @@ fn retry_status_mirror_chunk_is_not_rendered_and_keeps_retry_activity() {
             "error_type": "empty_response",
         }),
     );
-    let mirror = acp::SessionUpdate::AgentMessageChunk(
+    let mirror = acp::SessionUpdate::AgentThoughtChunk(
         acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
             "Retrying the model (1/2): empty response from model (reasoning_only)\n\n".to_string(),
         )))
@@ -4751,6 +4751,10 @@ fn retry_status_mirror_chunk_is_not_rendered_and_keeps_retry_activity() {
         "the mirror chunk must not change the view"
     );
     assert_eq!(sb.len(), 0, "nothing printed to scrollback");
+    assert!(
+        tracker.current_thinking.is_none(),
+        "no thinking block opened"
+    );
     assert!(tracker.current_agent_msg.is_none());
     assert_eq!(tracker.agent_output_epoch, 0);
     assert_eq!(tracker.activity(), Some(retrying), "retry indicator kept");

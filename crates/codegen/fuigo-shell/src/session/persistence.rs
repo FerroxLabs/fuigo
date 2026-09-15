@@ -1559,12 +1559,13 @@ impl SessionPersistence {
         let Some(gateway) = &self.gateway else {
             return;
         };
+        let state = RetryState::Failed {
+            error_type: DISK_FULL_ERROR_TYPE.to_string(),
+            message: DISK_FULL_USER_MESSAGE.to_string(),
+        };
         let notification = FuigoSessionNotification {
             session_id: self.info.id.clone(),
-            update: FuigoSessionUpdate::RetryState(RetryState::Failed {
-                error_type: DISK_FULL_ERROR_TYPE.to_string(),
-                message: DISK_FULL_USER_MESSAGE.to_string(),
-            }),
+            update: FuigoSessionUpdate::RetryState(state.clone()),
             meta: None,
         };
         if let Ok(params) = serde_json::value::to_raw_value(&notification) {
@@ -1573,6 +1574,15 @@ impl SessionPersistence {
                 params.into(),
             ));
         }
+        // The standard-rail mirror every `retry_state` gets, so stock ACP clients see why the turn failed
+        // Nothing streams through this actor, so there is no buffered answer text for the mirror to overtake
+        gateway.forward_fire_and_forget(
+            crate::extensions::notification::retry_status_notification(
+                self.info.id.clone(),
+                &state,
+                None,
+            ),
+        );
     }
 
     async fn probe_writable(&self) -> io::Result<()> {

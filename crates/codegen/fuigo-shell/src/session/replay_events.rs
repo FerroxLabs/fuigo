@@ -97,6 +97,9 @@ pub(crate) enum SessionEvent {
     FlushReplay {
         respond_to: Option<oneshot::Sender<()>>,
     },
+    /// A live-only notification (never persisted, no `eventId`) that must reach the client in queue order.
+    /// The loop flushes the replay buffer before sending it, so it never overtakes chunks queued or held ahead of it.
+    Transient(Box<acp::SessionNotification>),
 }
 
 impl SessionEvent {
