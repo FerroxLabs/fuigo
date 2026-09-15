@@ -22,7 +22,15 @@ fn test_actor_with_remote_sync(
     storage: Arc<dyn StorageAdapter>,
     remote_sync: Option<RemoteSync>,
 ) -> ActorGuard {
-    test_actor_inner(info, storage, remote_sync, false)
+    test_actor_inner(info, storage, remote_sync, false, None)
+}
+
+fn test_actor_with_gateway(
+    info: Info,
+    storage: Arc<dyn StorageAdapter>,
+    gateway: GatewaySender,
+) -> ActorGuard {
+    test_actor_inner(info, storage, None, false, Some(gateway))
 }
 
 fn test_actor_inner(
@@ -30,6 +38,7 @@ fn test_actor_inner(
     storage: Arc<dyn StorageAdapter>,
     remote_sync: Option<RemoteSync>,
     mark_summary_done: bool,
+    gateway: Option<GatewaySender>,
 ) -> ActorGuard {
     let (tx, rx) = mpsc::unbounded_channel();
     let (disk_full_tx, disk_full_rx) = tokio::sync::watch::channel(false);
@@ -57,7 +66,7 @@ fn test_actor_inner(
             relay_sync: None,
             summary,
             registry_title_sync: None,
-            gateway: None,
+            gateway,
             search_index: crate::session::storage::search::SharedSearchIndex::never_indexed(),
             disk_full_tx,
             disk_full_notified: false,
@@ -1675,6 +1684,7 @@ async fn reset_title_to_auto_then_generated_title_is_adopted() {
         storage.clone(),
         Some(remote_sync),
         true, /* mark_summary_done: production load after a titled session */
+        None,
     );
 
     let pre_reset_chunk = PersistenceContentChunk::new(vec![acp::ContentBlock::Text(
@@ -1845,7 +1855,7 @@ async fn reset_title_to_auto_adopts_in_flight_generation_as_auto() {
         .await
         .unwrap();
 
-    let actor = test_actor_inner(info.clone(), storage.clone(), None, false);
+    let actor = test_actor_inner(info.clone(), storage.clone(), None, false, None);
 
     actor
         .handle
@@ -1928,7 +1938,7 @@ async fn non_resident_reset_then_load_regenerates() {
         "production load would mark_done() if display_title stayed set"
     );
 
-    let actor = test_actor_inner(info.clone(), storage, None, has_title);
+    let actor = test_actor_inner(info.clone(), storage, None, has_title, None);
     actor
         .handle
         .tx
@@ -2029,6 +2039,83 @@ async fn successful_append_clears_disk_full_latch() {
     assert!(flush_ack(&actor.handle).await.is_ok());
     assert!(!actor.handle.is_disk_full());
     actor.stop().await;
+}
+
+/// The disk-full `RetryState::Failed` is mirrored onto the standard rail like every other retry state.
+/// Stock ACP clients drop `_fuigo/session_notification`, so without the mirror they see no reason for the failure.
+#[tokio::test]
+async fn disk_full_failure_is_mirrored_on_the_standard_rail() {
+    use crate::extensions::notification::{
+        DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE, RETRY_STATUS_META_KEY, RetryState,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("disk-full-mirror"),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_update_append_probe(
+        dir.path().to_path_buf(),
+        |_| Err(io::Error::from(io::ErrorKind::StorageFull)),
+    ));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let actor = test_actor_with_gateway(info.clone(), storage, GatewaySender::new(gateway_tx));
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "chunk")))
+        .unwrap();
+    assert!(flush_ack(&actor.handle).await.is_err());
+    assert!(actor.handle.is_disk_full());
+    actor.stop().await;
+
+    let failed = RetryState::Failed {
+        error_type: DISK_FULL_ERROR_TYPE.to_string(),
+        message: DISK_FULL_USER_MESSAGE.to_string(),
+    };
+    let mut fuigo_rail = Vec::new();
+    let mut standard_rail = Vec::new();
+    while let Ok(msg) = gateway_rx.try_recv() {
+        match msg {
+            fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => fuigo_rail.push((
+                args.request.method.to_string(),
+                serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap(),
+            )),
+            fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                standard_rail.push(serde_json::to_value(&args.request).unwrap());
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        fuigo_rail.len(),
+        1,
+        "one retry_state on the _fuigo rail: {fuigo_rail:?}"
+    );
+    assert_eq!(fuigo_rail[0].0, "fuigo/session_notification");
+    assert_eq!(fuigo_rail[0].1["update"]["type"], "failed");
+    assert_eq!(
+        standard_rail.len(),
+        1,
+        "one mirror on session/update: {standard_rail:?}"
+    );
+    let update = &standard_rail[0]["update"];
+    assert_eq!(update["sessionUpdate"], "agent_thought_chunk");
+    assert_eq!(
+        update["content"]["text"],
+        format!("The model request failed: {DISK_FULL_USER_MESSAGE}\n\n")
+    );
+    assert_eq!(
+        update["_meta"][RETRY_STATUS_META_KEY],
+        serde_json::to_value(&failed).unwrap()
+    );
+    assert!(
+        standard_rail[0]["_meta"].get("eventId").is_none(),
+        "live-only: no replay cursor"
+    );
 }
 
 #[tokio::test]

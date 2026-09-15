@@ -386,6 +386,39 @@ impl SessionActor {
             }
         }
     }
+    /// Handle one event from the actor's FIFO event queue, exactly as `run_session` does.
+    /// Notifications go through `replay_buffer` (merge and debounce, then `emit_buffered`); a flush request drains it and always acks.
+    pub(crate) async fn handle_session_event(
+        &self,
+        event: SessionEvent,
+        replay_buffer: &mut crate::agent::update_chunk_merge::ReplayBuffer,
+    ) {
+        match event {
+            SessionEvent::Notification(notification) => {
+                if let Some((first, second)) = replay_buffer.consume_chunk(notification) {
+                    self.emit_buffered(first).await;
+                    if let Some(second) = second {
+                        self.emit_buffered(second).await;
+                    }
+                }
+            }
+            SessionEvent::FlushReplay { respond_to } => {
+                if let Some(notification) = replay_buffer.flush() {
+                    self.emit_buffered(notification).await;
+                }
+                // Always ack (independent of whether anything was buffered).
+                if let Some(tx) = respond_to {
+                    let _ = tx.send(());
+                }
+            }
+            SessionEvent::Transient(notification) => {
+                if let Some(pending) = replay_buffer.flush() {
+                    self.emit_buffered(pending).await;
+                }
+                self.emit_transient_notification(*notification);
+            }
+        }
+    }
     /// Tracing log for buffered Ferrox Labs notifications emerging from emit_buffered.
     /// Mirrors `log_outbound_notification` for ACP.
     /// Visible with `RUST_LOG=acp_event=info`.
@@ -477,25 +510,30 @@ impl SessionActor {
                 .forward_fire_and_forget(notification);
         }
     }
-    /// Mirror a `RetryState` onto the standard ACP rail as a live-only `agent_message_chunk` (see [`crate::extensions::notification::RETRY_STATUS_META_KEY`]).
+    /// Mirror a `RetryState` onto the standard ACP rail as a live-only `agent_thought_chunk` (see [`crate::extensions::notification::RETRY_STATUS_META_KEY`]).
     /// Stock ACP clients drop the `_fuigo` rail, so without it a retry storm reads as silence and a terminal failure as a bare error code.
+    /// A thought, not answer text: clients fold `agent_message_chunk` into the reply they store and forward.
     /// Never persisted: a replayed "Retrying" line is stale, and persisted agent text feeds `chat.jsonl` and the search index.
     /// So no `eventId` either: a reconnect cursor must never point at an unpersisted line.
+    ///
+    /// Sent through the event queue (`SessionEvent::Transient`), not straight to the gateway.
+    /// Answer text rides that queue and the replay buffer's merge window, so a direct send could reach the client ahead of text generated before the retry.
     fn emit_retry_status_mirror(&self, state: &crate::extensions::notification::RetryState) {
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            "agentTimestampMs".to_string(),
-            chrono::Utc::now().timestamp_millis().into(),
-        );
-        if let Some(pid) = self.current_prompt_id.lock().ok().and_then(|g| g.clone()) {
-            meta.insert("promptId".to_string(), pid.into());
-        }
-        let notification = acp::SessionNotification::new(
+        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+        let notification = crate::extensions::notification::retry_status_notification(
             self.session_info.id.clone(),
-            crate::extensions::notification::retry_status_update(state),
-        )
-        .meta(Some(meta));
-        self.emit_transient_notification(notification);
+            state,
+            prompt_id,
+        );
+        if let Err(unsent) = self
+            .event_tx
+            .send(SessionEvent::Transient(Box::new(notification)))
+        {
+            // The session loop is gone, so nothing queued can precede the mirror: deliver it directly
+            if let SessionEvent::Transient(notification) = unsent.0 {
+                self.emit_transient_notification(*notification);
+            }
+        }
     }
     /// [`Self::send_fuigo_notification`] minus persistence, for updates whose durable copy lives elsewhere (e.g. `LastTurnSummary` in `summary.json`).
     /// Skips the rewind-window close and notification hooks.

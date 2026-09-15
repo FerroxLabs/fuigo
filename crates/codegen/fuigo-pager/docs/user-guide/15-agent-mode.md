@@ -164,7 +164,7 @@ ACP streams structured events. Each `session/update` notification carries a `ses
 
 Each update names its type, so a client can render distinct panels for reasoning, tool calls, and response text.
 
-**Retry progress.** While a model request is being retried, and once when it finally fails, the agent also sends a live-only `agent_message_chunk` such as `Retrying the model (1/2): empty response from model (reasoning_only)` or `The model request failed: ...`. Clients that render only the standard updates therefore show progress instead of silence. The chunk's `_meta["fuigo/retryStatus"]` holds the structured retry state (the same object as the `retry_state` session notification). A client that already renders `fuigo/session_notification` retry state should skip chunks carrying that key. These chunks are never persisted, so they do not replay on `session/load`.
+**Retry progress.** While a model request is being retried, and once when it finally fails, the agent also sends a live-only `agent_thought_chunk` such as `Retrying the model (1/2): empty response from model (reasoning_only)` or `The model request failed: ...`. Clients that render only the standard updates therefore show progress in their thinking area instead of silence, and the text never becomes part of the answer: retry progress is never sent as `agent_message_chunk`. It arrives in order with the rest of the stream, after any answer text generated before the retry. The chunk's `_meta["fuigo/retryStatus"]` holds the structured retry state (the same object as the `retry_state` session notification). A client that already renders `fuigo/session_notification` retry state should skip chunks carrying that key. These chunks are never persisted, so they do not replay on `session/load`.
 
 ---
 

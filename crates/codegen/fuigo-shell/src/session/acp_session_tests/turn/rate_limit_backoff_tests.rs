@@ -12,7 +12,7 @@ pub(super) enum SessionKind {
     Subagent,
 }
 
-fn rate_limited_reply(retry_after_secs: u64) -> ScriptedResponse {
+pub(super) fn rate_limited_reply(retry_after_secs: u64) -> ScriptedResponse {
     let mut reply = ScriptedResponse::text(429, "concurrent sampling cap exceeded");
     reply
         .headers
@@ -96,6 +96,7 @@ pub(super) async fn actor_under_test(
 }
 
 /// [`actor_under_test`] with a caller-supplied consumer for the client gateway, for tests that assert on more than `RetryState`.
+/// The session event queue is not drained, so buffered updates (the model's answer chunks) never reach the gateway.
 pub(super) async fn actor_under_test_with_gateway<T>(
     server: &MockInferenceServer,
     session: SessionKind,
@@ -103,6 +104,64 @@ pub(super) async fn actor_under_test_with_gateway<T>(
     transient_retry_enabled: bool,
     drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
 ) -> (Arc<SessionActor>, T) {
+    let (actor, captured, _event_rx) = build_actor_under_test(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain,
+    )
+    .await;
+    (actor, captured)
+}
+
+/// [`actor_under_test_with_gateway`] whose session event queue is drained through [`SessionActor::handle_session_event`], as `run_session` does.
+/// Answer chunks and every other queued update reach the gateway in the order the client would see them.
+pub(super) async fn actor_under_test_with_event_pump<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+) -> (Arc<SessionActor>, T) {
+    let (actor, captured, mut event_rx) = build_actor_under_test(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain,
+    )
+    .await;
+    let pump = actor.clone();
+    tokio::task::spawn_local(async move {
+        let mut replay_buffer =
+            crate::agent::update_chunk_merge::ReplayBuffer::new(pump.buffering_settings.clone());
+        while let Some(event) = event_rx.recv().await {
+            pump.handle_session_event(event, &mut replay_buffer).await;
+            if event_rx.is_empty() {
+                // The loop's periodic flush, so nothing stays held once the queue is idle
+                pump.handle_session_event(
+                    SessionEvent::FlushReplay { respond_to: None },
+                    &mut replay_buffer,
+                )
+                .await;
+            }
+        }
+    });
+    (actor, captured)
+}
+
+async fn build_actor_under_test<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+) -> (
+    Arc<SessionActor>,
+    T,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let sampler_max_retries = retry_policy.max_retries;
     let sampling_cfg = fuigo_sampler::SamplerConfig {
         base_url: server.url(),
@@ -123,7 +182,8 @@ pub(super) async fn actor_under_test_with_gateway<T>(
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     drain_persistence(persistence_rx);
 
-    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, event_rx) =
+        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.sampler_handle = sampler_handle;
     actor.startup_hints.is_subagent = matches!(session, SessionKind::Subagent);
     actor.transient_retry_enabled = transient_retry_enabled;
@@ -151,7 +211,7 @@ pub(super) async fn actor_under_test_with_gateway<T>(
             }
         });
     }
-    (actor, captured)
+    (actor, captured, event_rx)
 }
 
 pub(super) async fn conversation_request(actor: &Arc<SessionActor>) -> ConversationRequest {
