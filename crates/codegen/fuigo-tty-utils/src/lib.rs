@@ -69,6 +69,22 @@ pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(2
 
 pub mod runtime;
 
+/// Win32 `CreateProcess` creation-flag values, spelled out so a spawn policy can
+/// be computed and pinned by tests on every host (the `windows` crate only
+/// builds for Windows). `win32_creation_flag_values_match_the_windows_crate`
+/// pins them to the `windows` crate on Windows.
+pub mod win32_creation_flags {
+    /// `CREATE_NEW_PROCESS_GROUP`: the child leads a new console process group,
+    /// so a Ctrl+C / Ctrl+Break aimed at the spawner's group does not reach it.
+    pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    /// `CREATE_NO_WINDOW`: the child owns no console, so it neither flashes a
+    /// window nor dies with the console of the process that spawned it.
+    pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// `DETACHED_PROCESS`: named only so policies can assert its absence — it
+    /// breaks stdio pipe inheritance for grandchildren (see [`crate::detach_command`]).
+    pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+}
+
 // ---------------------------------------------------------------------------
 // TTY detach — pre_exec building block
 // ---------------------------------------------------------------------------
@@ -1964,5 +1980,21 @@ mod tests {
         let foreign = if own == 2 { 3 } else { 2 };
         let id = ProcessGroupId::new(foreign).expect("foreign pgid should be accepted");
         assert_eq!(id.get(), foreign);
+    }
+
+    /// The portable flag values spawn policies are computed from are the
+    /// real Win32 values.
+    #[cfg(windows)]
+    #[test]
+    fn win32_creation_flag_values_match_the_windows_crate() {
+        use windows::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        };
+        assert_eq!(
+            win32_creation_flags::CREATE_NEW_PROCESS_GROUP,
+            CREATE_NEW_PROCESS_GROUP.0
+        );
+        assert_eq!(win32_creation_flags::CREATE_NO_WINDOW, CREATE_NO_WINDOW.0);
+        assert_eq!(win32_creation_flags::DETACHED_PROCESS, DETACHED_PROCESS.0);
     }
 }
