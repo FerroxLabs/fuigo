@@ -75,7 +75,16 @@ jobs:
           set -euo pipefail
           mkdir -p process-receipts
           cargo test --locked -p fuigo-tty-utils --lib 2>&1 | tee process-receipts/tty-utils.log
-          grep -E '^test result: ok\. [0-9]+ passed; 0 failed' process-receipts/tty-utils.log
+          # A non-zero count: `[0-9]+ passed` also matches `0 passed; 0 failed`,
+          # so a filter, harness or feature change that ran no test at all would
+          # keep this gate green and lose the Windows-only coverage invisibly.
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/tty-utils.log
+          # …and the Windows-only tests themselves, pinned by name: a count alone
+          # cannot tell that the cfg(windows) ones were compiled in and run.
+          grep -F 'tests::arming_refuses_a_parent_that_exited_before_the_arm_on_windows ... ok' process-receipts/tty-utils.log
+          grep -F 'tests::current_process_dies_when_its_parent_exits_on_windows ... ok' process-receipts/tty-utils.log
+          grep -F 'tests::parent_death_hook_runs_before_termination_on_windows ... ok' process-receipts/tty-utils.log
+          grep -F 'tests::a_disabled_parent_death_watch_leaves_the_process_alive_on_windows ... ok' process-receipts/tty-utils.log
       # The leader spawn tests (creation flags, and a probe spawned through the
       # real leader spawn path that must get its own windowless console) plus
       # the named-pipe transport tests.
@@ -85,7 +94,7 @@ jobs:
           set -euo pipefail
           mkdir -p process-receipts
           cargo test --locked -p fuigo-shell --lib -- leader::tests::leader_spawn leader::transport:: 2>&1 | tee process-receipts/fuigo-shell-leader.log
-          grep -E '^test result: ok\. [0-9]+ passed; 0 failed' process-receipts/fuigo-shell-leader.log
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fuigo-shell-leader.log
           grep -F 'leader::tests::leader_spawn_gets_its_own_windowless_console ... ok' process-receipts/fuigo-shell-leader.log
           grep -F 'leader::tests::leader_spawn_flags_match_the_windows_crate ... ok' process-receipts/fuigo-shell-leader.log
       - uses: actions/upload-artifact@v4
