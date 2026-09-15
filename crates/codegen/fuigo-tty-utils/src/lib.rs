@@ -506,9 +506,12 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
 ///
 /// Unlike the spawn-time helper there is no ppid race check: a direct
 /// parent at pid 1 is legitimate here (containers where the client is PID
-/// 1), so an already-dead parent is indistinguishable from that case. The
-/// caller's stdin-EOF handling covers the parent-died-before-arm race —
-/// dead parent means closed pipes.
+/// 1). Windows does refuse a parent that died before the arm — a gone or
+/// recycled pid, or a process object that is already signalled because
+/// someone else still holds its handle — rather than fire instantly and
+/// terminate this process at startup. Either way the caller's stdin-EOF
+/// handling covers the parent-died-before-arm race: dead parent means
+/// closed pipes.
 ///
 /// The binding keys off the death of the **parent's thread that spawned
 /// this process** — a property of the spawner that the child can neither
@@ -2439,6 +2442,244 @@ mod tests {
             "termination took {:?} after the parent exited, past the {PARENT_DEATH_HOOK_BOUND:?} \
              hook bound (+{slack:?} slack)",
             outcome.after_parent_exit
+        );
+    }
+
+    // ── a parent that exited before the arm (Windows) ─────────────
+    //
+    // A pid stays reserved while any handle to its process object is open, so
+    // a client that keeps the `Child` it spawned keeps that process's pid
+    // resolvable long after it exited. A grandchild arming under such a dead
+    // parent must not be torn down at startup: on Linux `PR_SET_PDEATHSIG`
+    // never fires for a parent that is already dead, and the topology works.
+
+    /// Env marker (value: the arm-result marker path) for the intermediate.
+    #[cfg(windows)]
+    const PRE_EXITED_INTERMEDIATE_ENV: &str = "__FUIGO_TTY_UTILS_PRE_EXITED_INTERMEDIATE";
+    /// Env marker (value: the arm-result marker path) for the grandchild.
+    #[cfg(windows)]
+    const PRE_EXITED_GRANDCHILD_ENV: &str = "__FUIGO_TTY_UTILS_PRE_EXITED_GRANDCHILD";
+    /// How long the grandchild waits before arming, so its parent is already
+    /// gone when it does.
+    #[cfg(windows)]
+    const PRE_EXITED_ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    /// How long the grandchild must keep running after arming under a parent
+    /// that already exited.
+    #[cfg(windows)]
+    const PRE_EXITED_SURVIVAL: std::time::Duration = std::time::Duration::from_secs(8);
+
+    /// Grandchild: let its parent exit, arm, record what arming returned, then
+    /// live out [`PRE_EXITED_SURVIVAL`] and record that too.
+    #[cfg(windows)]
+    #[test]
+    fn pre_exited_parent_grandchild_entry() {
+        let Some(marker) = std::env::var_os(PRE_EXITED_GRANDCHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd grandchild
+        };
+        let marker = std::path::PathBuf::from(marker);
+        std::thread::sleep(PRE_EXITED_ARM_DELAY);
+        let armed = match kill_current_process_on_parent_death() {
+            Ok(()) => "ok".to_owned(),
+            Err(error) => format!("err: {error}"),
+        };
+        std::fs::write(&marker, armed).expect("write the arm marker");
+        std::thread::sleep(PRE_EXITED_SURVIVAL);
+        std::fs::write(marker.with_extension("survived"), b"survived")
+            .expect("write the survived marker");
+    }
+
+    /// Intermediate parent: spawn the grandchild, report its pid, exit at once
+    /// — the grandchild is still sleeping towards its arm.
+    #[cfg(windows)]
+    #[test]
+    fn pre_exited_parent_intermediate_entry() {
+        use std::io::Write as _;
+        let Some(marker) = std::env::var_os(PRE_EXITED_INTERMEDIATE_ENV) else {
+            return; // skip when not invoked as the re-exec'd intermediate
+        };
+        let mut cmd = reexec_single_test(
+            "tests::pre_exited_parent_grandchild_entry",
+            PRE_EXITED_GRANDCHILD_ENV,
+            &marker,
+        );
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; the driver reaps it
+        let child = cmd.spawn().expect("spawn grandchild");
+        println!("grandchild:{}", child.id());
+        std::io::stdout().flush().expect("flush stdout");
+        // The grandchild must outlive us: it arms only after we are gone.
+        std::mem::forget(child);
+    }
+
+    /// What the driver saw of a grandchild that armed under a dead parent.
+    #[cfg(windows)]
+    struct PreExitedOutcome {
+        /// What `kill_current_process_on_parent_death` returned: `ok` or `err: …`.
+        arm: String,
+        /// Whether the grandchild lived out [`PRE_EXITED_SURVIVAL`].
+        survived: bool,
+        /// Its exit code; `None` when it was still running at the deadline.
+        exit_code: Option<u32>,
+    }
+
+    /// Run the pre-exited-parent scenario. `hold_parent_handle` keeps the dead
+    /// intermediate's `Child` — and so its process handle, and so its pid —
+    /// alive, which is what a real spawning client does; dropping it instead
+    /// releases the pid.
+    #[cfg(windows)]
+    fn run_pre_exited_parent_scenario(hold_parent_handle: bool) -> PreExitedOutcome {
+        use std::io::BufRead as _;
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        };
+
+        let marker = std::env::temp_dir().join(format!(
+            "fuigo-pre-exited-{}-{hold_parent_handle}-{}.arm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let survived_marker = marker.with_extension("survived");
+        let mut cmd = reexec_single_test(
+            "tests::pre_exited_parent_intermediate_entry",
+            PRE_EXITED_INTERMEDIATE_ENV,
+            marker.as_os_str(),
+        );
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; reaped below
+        let mut intermediate = cmd.spawn().expect("spawn intermediate test process");
+
+        // Substring match: with `--nocapture` libtest prints the test header
+        // without a trailing newline, so the pid shares its line.
+        let stdout = intermediate.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut seen: Vec<String> = Vec::new();
+        let grandchild_pid: u32 = loop {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .expect("read intermediate stdout");
+            assert_ne!(
+                n, 0,
+                "intermediate exited without reporting a grandchild; stdout seen: {seen:?}"
+            );
+            if let Some(idx) = line.find("grandchild:") {
+                let digits: String = line[idx + "grandchild:".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                break digits.parse().expect("grandchild pid");
+            }
+            seen.push(line);
+        };
+
+        // Opened while the grandchild is certainly alive, so its own pid
+        // cannot be recycled under the driver.
+        // SAFETY: plain FFI call; the handle is closed below.
+        let grandchild = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                grandchild_pid,
+            )
+        }
+        .expect("open the grandchild");
+        let status = intermediate.wait().expect("reap intermediate");
+        assert!(status.success(), "intermediate failed: {status}");
+        // Kept (or released) before the grandchild arms.
+        let parent_handle = hold_parent_handle.then_some(intermediate);
+
+        let deadline =
+            PRE_EXITED_ARM_DELAY + PRE_EXITED_SURVIVAL + std::time::Duration::from_secs(10);
+        let deadline_ms = u32::try_from(deadline.as_millis()).expect("deadline fits u32");
+        // SAFETY: `grandchild` is a valid handle opened with SYNCHRONIZE.
+        let waited = unsafe { WaitForSingleObject(grandchild, deadline_ms) };
+        let exit_code = if waited == WAIT_OBJECT_0 {
+            let mut code = 0u32;
+            // SAFETY: valid handle with query access; `code` is a live out-pointer.
+            unsafe { GetExitCodeProcess(grandchild, &mut code) }.expect("GetExitCodeProcess");
+            Some(code)
+        } else {
+            // SAFETY: valid handle with PROCESS_TERMINATE.
+            let _ = unsafe { TerminateProcess(grandchild, 1) };
+            None
+        };
+        // SAFETY: closed exactly once.
+        let _ = unsafe { CloseHandle(grandchild) };
+        drop(parent_handle);
+        let arm = std::fs::read_to_string(&marker).unwrap_or_else(|_| "<never armed>".to_owned());
+        let survived = survived_marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(&survived_marker);
+        PreExitedOutcome {
+            arm,
+            survived,
+            exit_code,
+        }
+    }
+
+    /// The real topology: the client that spawned this process's parent still
+    /// holds that parent's handle, so its pid resolves and opens even though it
+    /// exited. Arming must refuse instead of firing at once — otherwise the
+    /// agent terminates itself with 143 at startup, on a topology that works on
+    /// Linux and worked before the watcher existed.
+    #[cfg(windows)]
+    #[test]
+    fn arming_refuses_a_parent_that_exited_before_the_arm_on_windows() {
+        let outcome = run_pre_exited_parent_scenario(true);
+        assert_ne!(
+            outcome.exit_code,
+            Some(PARENT_DEATH_EXIT_CODE),
+            "a process whose parent exited before it armed was terminated by its own \
+             parent-death watcher (arm returned {:?}); on Linux PR_SET_PDEATHSIG never \
+             fires for a parent that is already dead",
+            outcome.arm
+        );
+        assert!(
+            outcome.survived,
+            "the process did not outlive {PRE_EXITED_SURVIVAL:?} after arming under a \
+             dead parent (arm returned {:?}, exit code {:?})",
+            outcome.arm, outcome.exit_code
+        );
+        assert!(
+            outcome.arm.starts_with("err:"),
+            "arming under an already-exited parent returned {:?}: it must fail like a \
+             gone pid, so the caller logs it and falls back to stdin-EOF cleanup",
+            outcome.arm
+        );
+    }
+
+    /// The same topology with the dead parent's handle released, so its pid is
+    /// gone: the arm already refuses that, and both must stay one error class.
+    #[cfg(windows)]
+    #[test]
+    fn arming_refuses_a_parent_whose_pid_is_gone_on_windows() {
+        let outcome = run_pre_exited_parent_scenario(false);
+        assert_ne!(
+            outcome.exit_code,
+            Some(PARENT_DEATH_EXIT_CODE),
+            "a process whose parent's pid was already gone was terminated by its own \
+             parent-death watcher (arm returned {:?})",
+            outcome.arm
+        );
+        assert!(
+            outcome.survived,
+            "the process did not outlive {PRE_EXITED_SURVIVAL:?} after arming under a \
+             gone parent pid (arm returned {:?}, exit code {:?})",
+            outcome.arm, outcome.exit_code
+        );
+        assert!(
+            outcome.arm.starts_with("err:"),
+            "arming under a gone parent pid returned {:?}, not an error",
+            outcome.arm
         );
     }
 }
