@@ -114,17 +114,22 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             OVERLOADED_USER_MESSAGE,
         );
     }
+    // Every arm below carries object `data` with this kind (see `terminal_error_data`); `http_status` only where a status was always sent
+    let kind = fuigo_sampler::SamplingErrorInfo::from(&err).kind;
+    let data = |message: String| terminal_error_data(message, None, kind);
     match err {
-        SamplingError::Auth { message, .. } => acp::Error::auth_required().data(message),
-        SamplingError::InvalidConfiguration(msg) => acp::Error::invalid_params().data(msg),
-        SamplingError::Http(e) => {
-            acp::Error::internal_error().data(format!("http client init failed: {e}"))
+        SamplingError::Auth { message, .. } => acp::Error::auth_required().data(data(message)),
+        SamplingError::InvalidConfiguration(msg) => {
+            acp::Error::invalid_params().data(data(msg.to_owned()))
         }
-        SamplingError::Serialization(_) => acp::Error::invalid_params().data(err.to_string()),
+        SamplingError::Http(e) => {
+            acp::Error::internal_error().data(data(format!("http client init failed: {e}")))
+        }
+        SamplingError::Serialization(_) => acp::Error::invalid_params().data(data(err.to_string())),
         SamplingError::Api {
             status, message, ..
         } => match status {
-            StatusCode::UNAUTHORIZED => acp::Error::auth_required().data(message),
+            StatusCode::UNAUTHORIZED => acp::Error::auth_required().data(data(message)),
             // 403 Forbidden is not an auth error: the request was authenticated, but the action is not permitted
             // Examples: content-safety blocks, ZDR-gated operations, remote-settings-blocked users
             // Passing the proxy's message via internal_error keeps the explanation visible without triggering the client's re-auth flow on -32000
@@ -141,62 +146,104 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
                     message
                 };
                 // 403 is content-safety, never auth: on this setup path it stays `internal_error`, which maps to `server_error`
-                acp::Error::internal_error().data(message)
+                acp::Error::internal_error().data(data(message))
             }
-            StatusCode::BAD_REQUEST => acp::Error::invalid_params().data(message),
-            StatusCode::NOT_FOUND => acp::Error::resource_not_found(None).data(message),
-            StatusCode::PAYLOAD_TOO_LARGE => acp::Error::invalid_params().data(message),
+            StatusCode::BAD_REQUEST => acp::Error::invalid_params().data(data(message)),
+            StatusCode::NOT_FOUND => acp::Error::resource_not_found(None).data(data(message)),
+            StatusCode::PAYLOAD_TOO_LARGE => acp::Error::invalid_params().data(data(message)),
             StatusCode::TOO_MANY_REQUESTS => {
-                acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited".to_string()).data(message)
+                acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited".to_string())
+                    .data(data(message))
             }
             // Preserve the HTTP status in data so the classifier folds capacity errors (503/529) into `rate_limit`
-            _ => acp::Error::internal_error()
-                .data(error_data_with_status(message, Some(status.as_u16()))),
+            _ => acp::Error::internal_error().data(terminal_error_data(
+                message,
+                Some(status.as_u16()),
+                kind,
+            )),
         },
-        SamplingError::EventStreamError(message) => acp::Error::internal_error().data(message),
+        SamplingError::EventStreamError(message) => {
+            acp::Error::internal_error().data(data(message))
+        }
         SamplingError::StreamError {
             error_type,
             message,
             ..
-        } => acp::Error::internal_error().data(format!("{error_type}: {message}")),
-        SamplingError::EmptyResponse { context } => acp::Error::internal_error().data(format!(
-            "empty response from model ({}): model={}, had_reasoning={}, finish_reason={}",
-            context.reason,
-            context.model,
-            context.had_reasoning,
-            context.finish_reason_str(),
-        )),
-        SamplingError::MaxTokensTruncation => {
-            acp::Error::internal_error().data(terminal_error_data(
-                err.to_string(),
-                None,
-                fuigo_sampler::SamplingErrorKind::MaxTokensTruncation,
-            ))
+        } => acp::Error::internal_error().data(data(format!("{error_type}: {message}"))),
+        SamplingError::EmptyResponse { context } => {
+            acp::Error::internal_error().data(data(format!(
+                "empty response from model ({}): model={}, had_reasoning={}, finish_reason={}",
+                context.reason,
+                context.model,
+                context.had_reasoning,
+                context.finish_reason_str(),
+            )))
         }
-        SamplingError::IdleTimeout { elapsed_secs } => acp::Error::internal_error().data(format!(
-            "No response from model for {elapsed_secs}s — the model may be stuck"
+        SamplingError::MaxTokensTruncation => {
+            acp::Error::internal_error().data(data(err.to_string()))
+        }
+        SamplingError::IdleTimeout { elapsed_secs } => acp::Error::internal_error().data(data(
+            format!("No response from model for {elapsed_secs}s — the model may be stuck"),
         )),
         // Recovery consumes these inside the sampler's retry loop; a stray terminal one still renders its labels
         SamplingError::DoomLoopDetected { .. } => {
-            acp::Error::internal_error().data(err.to_string())
+            acp::Error::internal_error().data(data(err.to_string()))
         }
     }
 }
 
+/// `acp::Error.data` for a caller with no typed kind: `{"message"}` plus `"http_status"` when known.
+/// Always an object, like [`terminal_error_data`], which adds the kind; prefer that whenever a kind is known.
 pub(crate) fn error_data_with_status(
     message: String,
     http_status: Option<u16>,
 ) -> serde_json::Value {
-    match http_status {
-        Some(sc) => serde_json::json!({ "message": message, "http_status": sc }),
-        None => serde_json::Value::String(message),
+    let mut data = serde_json::json!({ "message": message });
+    if let Some(sc) = http_status {
+        data["http_status"] = serde_json::json!(sc);
     }
+    data
 }
 
-/// `acp::Error.data` key of the typed terminal-error kind marker (stamped by [`terminal_error_data`]).
+/// `acp::Error.data` key of the typed terminal-error kind marker (stamped by [`terminal_error_data`] and [`session_unavailable_error`]).
 /// Snake_case like its shipped `data` siblings (`http_status`); frozen wire format.
+/// Values are the `SamplingErrorKind::as_str` tags plus [`ERROR_KIND_SESSION_UNAVAILABLE`]; clients must treat an unknown value as generic.
 /// The notification paths carry the kind under their own keys/fields (see `extensions::notification::PROMPT_COMPLETE_ERROR_KIND_KEY`).
 const ERROR_KIND_DATA_KEY: &str = "error_kind";
+
+/// `error_kind` of a prompt the agent could not hand to, or hear back from, its session actor (dispatch failed, or the actor dropped the reply).
+/// Not a model failure, so it is deliberately outside the `SamplingErrorKind` vocabulary; clients that parse kinds map it to their generic class.
+/// Frozen wire format.
+pub const ERROR_KIND_SESSION_UNAVAILABLE: &str = "session_unavailable";
+
+/// `acp::Error` for a prompt whose session actor could not be reached or never replied.
+pub fn session_unavailable_error(message: impl Into<String>) -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "message": message.into(),
+        ERROR_KIND_DATA_KEY: ERROR_KIND_SESSION_UNAVAILABLE,
+    }))
+}
+
+/// Human text for an `acp::Error`: the JSON-RPC message plus the `data` detail ([`error_detail_from_data`]: `data.message` or a bare string).
+/// `acp::Error`'s `Display` pretty-prints `data` as JSON, which is wrong for a person once `data` is an object.
+/// `data` with no readable detail falls back to `Display`, so nothing is hidden.
+pub fn acp_error_text(err: &acp::Error) -> String {
+    let Some(data) = err.data.as_ref() else {
+        return err.to_string();
+    };
+    match error_detail_from_data(data) {
+        Some(detail) if detail.is_empty() => {
+            if err.message.is_empty() {
+                i32::from(err.code).to_string()
+            } else {
+                err.message.clone()
+            }
+        }
+        Some(detail) if err.message.is_empty() => detail,
+        Some(detail) => format!("{}: {detail}", err.message),
+        None => err.to_string(),
+    }
+}
 
 /// `salvage_cause` values stamped on mid-salvage terminal errors and forwarded onto the `shell.turn.length_empty_continuation` event.
 /// EMPTY covers every continuation that cannot be salvaged at the cap: nothing visible, or a truncated tool-call tail.
@@ -205,22 +252,17 @@ pub(crate) const SALVAGE_CAUSE_KEY: &str = "salvage_cause";
 pub(crate) const SALVAGE_CAUSE_EMPTY: &str = "empty_continuation";
 pub(crate) const SALVAGE_CAUSE_OVERFLOW: &str = "context_overflow";
 
-/// Terminal-failure `acp::Error.data`.
-/// Only max-tokens truncation opts into the object shape with an `error_kind` marker.
-/// Every other kind keeps the legacy string/status shape because old clients render `data` via `Display` and would show the raw JSON object.
+/// Terminal-failure `acp::Error.data`: always the object `{"message", "error_kind", "http_status"?}`.
+/// Until 1.0.18 only max-tokens truncation got this shape and every status-less kind went out as a bare string.
+/// JSON clients read `data.error_kind` / `data.http_status` and drop a string, so a turn that died on an empty response showed only "Internal error".
+/// People must never see the object itself: text readers take `data.message` ([`error_detail_from_data`], [`acp_error_text`]).
 pub(crate) fn terminal_error_data(
     message: String,
     http_status: Option<u16>,
     kind: SamplingErrorKind,
 ) -> serde_json::Value {
-    if kind != SamplingErrorKind::MaxTokensTruncation {
-        return error_data_with_status(message, http_status);
-    }
-    let mut data = serde_json::json!({ "message": message });
+    let mut data = error_data_with_status(message, http_status);
     data[ERROR_KIND_DATA_KEY] = serde_json::json!(kind.as_str());
-    if let Some(sc) = http_status {
-        data["http_status"] = serde_json::json!(sc);
-    }
     data
 }
 
@@ -503,6 +545,223 @@ mod tests {
         assert!(!err.data.as_ref().unwrap().is_string());
     }
 
+    /// Every terminal kind reaches the client as an object: `message` and `error_kind` always, `http_status` when known.
+    /// A string `data` is dropped by JSON clients that read `data.error_kind` / `data.http_status`, leaving a bare "Internal error".
+    #[test]
+    fn terminal_error_data_is_an_object_for_every_kind() {
+        use SamplingErrorKind as K;
+        let all = [
+            K::Auth,
+            K::Http,
+            K::Api,
+            K::Serialization,
+            K::IdleTimeout,
+            K::RateLimited,
+            K::EmptyResponse,
+            K::MaxTokensTruncation,
+            K::DoomLoopDetected,
+            K::Cancelled,
+        ];
+        for kind in all {
+            // Exhaustive: a new kind refuses to compile until it is listed above
+            match kind {
+                K::Auth
+                | K::Http
+                | K::Api
+                | K::Serialization
+                | K::IdleTimeout
+                | K::RateLimited
+                | K::EmptyResponse
+                | K::MaxTokensTruncation
+                | K::DoomLoopDetected
+                | K::Cancelled => {}
+            }
+            for status in [None, Some(503u16)] {
+                let data = terminal_error_data("boom detail".into(), status, kind);
+                let obj = data
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{kind:?}/{status:?} must be an object, got {data}"));
+                assert_eq!(obj.get("message"), Some(&serde_json::json!("boom detail")));
+                assert_eq!(
+                    obj.get("error_kind"),
+                    Some(&serde_json::json!(kind.as_str())),
+                    "{kind:?}/{status:?}"
+                );
+                assert_eq!(
+                    obj.get("http_status").and_then(|v| v.as_u64()),
+                    status.map(u64::from),
+                    "{kind:?}/{status:?}"
+                );
+                let err = acp::Error::internal_error().data(data.clone());
+                assert_eq!(error_kind_str_from_error(&err), Some(kind.as_str()));
+                assert_eq!(acp_error_message(&err), "boom detail");
+            }
+        }
+    }
+
+    #[test]
+    fn error_data_with_status_is_an_object_even_without_a_status() {
+        assert_eq!(
+            error_data_with_status("no status".into(), None),
+            serde_json::json!({ "message": "no status" })
+        );
+        assert_eq!(
+            error_data_with_status("with status".into(), Some(502)),
+            serde_json::json!({ "message": "with status", "http_status": 502 })
+        );
+    }
+
+    /// The status-less sampling errors are exactly the ones that used to go out as a bare string: they must carry their kind.
+    #[test]
+    fn status_less_sampling_errors_map_to_object_data_with_their_kind() {
+        let empty = SamplingError::EmptyResponse {
+            context: fuigo_sampling_types::EmptyResponseContext {
+                reason: fuigo_sampling_types::EmptyReason::ReasoningOnly,
+                had_reasoning: true,
+                content_len: 0,
+                tool_call_count: 0,
+                finish_reason: Some("stop".into()),
+                completion_tokens: Some(40),
+                reasoning_tokens: Some(40),
+                prompt_tokens: Some(5000),
+                model: "m".into(),
+                first_choice_seen: true,
+            },
+        };
+        let cases: Vec<(SamplingError, &str, &str)> = vec![
+            (
+                empty,
+                "empty_response",
+                "empty response from model (reasoning_only)",
+            ),
+            (
+                SamplingError::IdleTimeout { elapsed_secs: 90 },
+                "idle_timeout",
+                "No response from model for 90s",
+            ),
+            (
+                SamplingError::EventStreamError("connection reset".into()),
+                "http",
+                "connection reset",
+            ),
+            (
+                SamplingError::StreamError {
+                    error_type: "server_error".into(),
+                    message: "boom".into(),
+                    code: None,
+                },
+                "api",
+                "server_error: boom",
+            ),
+            (
+                SamplingError::DoomLoopDetected {
+                    triggers: vec!["repeat".into()],
+                    aborted_at_chunk: None,
+                },
+                "doom_loop_detected",
+                "doom loop detected",
+            ),
+            (
+                crate::sampling::error::SamplingError::auth_unknown("token expired"),
+                "auth",
+                "token expired",
+            ),
+            (
+                fuigo_sampler::events::request_cancelled_error(),
+                "cancelled",
+                "request cancelled",
+            ),
+            (
+                SamplingError::InvalidConfiguration("bad base url"),
+                "api",
+                "bad base url",
+            ),
+            (
+                SamplingError::Api {
+                    status: StatusCode::FORBIDDEN,
+                    message: "Content violates usage guidelines.".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                },
+                "api",
+                "Content violates usage guidelines.",
+            ),
+            (
+                SamplingError::Api {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    message: "Rate limit exceeded".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                },
+                "rate_limited",
+                "Rate limit exceeded",
+            ),
+        ];
+        for (err, kind, text) in cases {
+            let acp_err = map_sampling_err_to_acp(err);
+            let data = acp_err.data.clone().expect("terminal errors carry data");
+            assert!(
+                data.is_object(),
+                "{kind}: data must be an object, got {data}"
+            );
+            assert_eq!(
+                error_kind_str_from_error(&acp_err),
+                Some(kind),
+                "{kind}: wrong error_kind in {data}"
+            );
+            let message = data["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(text),
+                "{kind}: message {message:?} lacks {text:?}"
+            );
+            // The JSON-RPC frame a client reads
+            let wire = serde_json::to_value(&acp_err).expect("serialize acp error");
+            assert_eq!(wire["data"]["error_kind"], kind, "{kind}: wire {wire}");
+        }
+    }
+
+    #[test]
+    fn session_unavailable_error_carries_a_typed_object() {
+        let err = session_unavailable_error("session failed to respond");
+        assert_eq!(err.code, acp::ErrorCode::InternalError);
+        assert_eq!(
+            err.data,
+            Some(serde_json::json!({
+                "message": "session failed to respond",
+                "error_kind": ERROR_KIND_SESSION_UNAVAILABLE,
+            }))
+        );
+        assert_eq!(ERROR_KIND_SESSION_UNAVAILABLE, "session_unavailable");
+        // Outside the sampling vocabulary: the shell's typed view degrades to generic
+        assert_eq!(error_kind_from_error(&err), None);
+    }
+
+    /// People read `data.message`, never the JSON object `Display` would print.
+    #[test]
+    fn acp_error_text_renders_the_message_never_raw_json() {
+        let err = acp::Error::internal_error().data(terminal_error_data(
+            "empty response from model (reasoning_only)".into(),
+            None,
+            SamplingErrorKind::EmptyResponse,
+        ));
+        assert_eq!(
+            acp_error_text(&err),
+            "Internal error: empty response from model (reasoning_only)"
+        );
+        assert_eq!(
+            acp_error_text(&acp::Error::internal_error().data("bare string")),
+            "Internal error: bare string"
+        );
+        assert_eq!(
+            acp_error_text(&acp::Error::internal_error()),
+            "Internal error"
+        );
+    }
+
     #[test]
     fn error_detail_from_data_reads_message_field() {
         let data = error_data_with_status("upstream unavailable".into(), Some(503));
@@ -668,7 +927,10 @@ mod tests {
         assert_eq!(acp_err.message, "Rate limited");
         assert_eq!(
             acp_err.data,
-            Some(serde_json::Value::String("Rate limit exceeded".into()))
+            Some(serde_json::json!({
+                "message": "Rate limit exceeded",
+                "error_kind": "rate_limited",
+            }))
         );
     }
 
@@ -768,10 +1030,10 @@ mod tests {
         );
         assert_eq!(
             acp_err.data,
-            Some(serde_json::Value::String(
-                "Content violates usage guidelines. Failed check: SAFETY_CHECK_TYPE_DATA_LEAKAGE"
-                    .into()
-            ))
+            Some(serde_json::json!({
+                "message": "Content violates usage guidelines. Failed check: SAFETY_CHECK_TYPE_DATA_LEAKAGE",
+                "error_kind": "api",
+            }))
         );
     }
 
@@ -819,7 +1081,7 @@ mod tests {
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
-            let msg = data.as_str().unwrap();
+            let msg = error_detail_from_data(&data).expect("data.message");
             assert!(
                 msg.contains("fuigo logout"),
                 "should suggest fuigo logout when API key is available: {msg}"
@@ -845,7 +1107,7 @@ mod tests {
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
-            let msg = data.as_str().unwrap();
+            let msg = error_detail_from_data(&data).expect("data.message");
             assert!(
                 !msg.contains("fuigo logout"),
                 "should NOT suggest logout when no API key is available: {msg}"
@@ -867,7 +1129,7 @@ mod tests {
             };
             let acp_err = map_sampling_err_to_acp(err);
             let data = acp_err.data.unwrap();
-            let msg = data.as_str().unwrap();
+            let msg = error_detail_from_data(&data).expect("data.message");
             assert!(
                 !msg.contains("fuigo logout"),
                 "should NOT suggest logout for non-subscription 403: {msg}"
