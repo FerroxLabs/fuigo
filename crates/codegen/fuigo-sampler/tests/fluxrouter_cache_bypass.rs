@@ -349,6 +349,18 @@ const CI_GATE_MARK: &str = "# fluxrouter cache bypass gate:";
 /// `dispatch-policy.yml` is this repo's only `pull_request` workflow and it runs fuigo-extra-ca,
 /// ptyctl-cli, gcloud-auth, gcloud-metadata and fuigo-file-utils tests. When a PR-level run is added,
 /// this test makes it label its own gate the same way.
+/// The line indices of the workflow's LIVE call sites for this test file. A YAML comment runs nothing,
+/// so a commented-out line is not a call site -- and commenting a step out is the usual way one gets
+/// disabled.
+fn call_sites(workflow: &str) -> Vec<usize> {
+    workflow
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(CI_CALL) && !line.trim_start().starts_with('#'))
+        .map(|(at, _)| at)
+        .collect()
+}
+
 #[test]
 fn ci_runs_this_integration_test_and_every_call_site_names_its_gate() {
     let dir = repo_root().join(".github/workflows");
@@ -364,10 +376,7 @@ fn ci_runs_this_integration_test_and_every_call_site_names_its_gate() {
         let workflow = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let lines: Vec<&str> = workflow.lines().collect();
-        for (at, line) in lines.iter().enumerate() {
-            if !line.contains(CI_CALL) {
-                continue;
-            }
+        for at in call_sites(&workflow) {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             // The comment block directly above the run, innermost line first.
             let above: Vec<&str> = lines[..at]
@@ -392,21 +401,105 @@ fn ci_runs_this_integration_test_and_every_call_site_names_its_gate() {
     );
 }
 
-/// The cache opt-out paragraph of the user guide, as the single Markdown line it is written on.
+/// Commenting a step out is how a CI step actually gets disabled -- far more often than deleting it.
+/// A YAML comment is not a call site: a run block whose only mention of this test file is commented out
+/// runs nothing, so counting it would let the guard above report coverage that does not exist (and let a
+/// commented line satisfy the gate-comment requirement as well, since it begins with `#`).
+#[test]
+fn a_commented_out_ci_call_site_is_not_coverage() {
+    let live = format!(
+        "      run: |\n        # fluxrouter cache bypass gate: release only.\n        cargo test --locked {CI_CALL} -- --test-threads=1\n"
+    );
+    assert_eq!(
+        call_sites(&live).len(),
+        1,
+        "a live run line is a call site:\n{live}"
+    );
+
+    let disabled = format!(
+        "      run: |\n        # fluxrouter cache bypass gate: release only.\n        # DISABLED (flaky): cargo test --locked {CI_CALL} -- --test-threads=1\n"
+    );
+    assert!(
+        call_sites(&disabled).is_empty(),
+        "a commented-out run line counts as a call site, so this workflow would be reported as running \
+         the cache-bypass proof while it runs nothing:\n{disabled}"
+    );
+
+    // Indentation is normal in a YAML run block; the comment marker is what matters.
+    let indented = format!("            #cargo test --locked {CI_CALL}\n");
+    assert!(
+        call_sites(&indented).is_empty(),
+        "an indented comment counts as a call site:\n{indented}"
+    );
+}
+
+/// The literal the cache opt-out paragraph is found by.
+const CACHE_FIELD: &str = r#""cache": {"no-cache": true, "no-store": true}"#;
+
+/// The cache opt-out paragraph of `markdown`, as one string: the blank-line-delimited block containing
+/// the cache field, with its lines rejoined. Every paragraph in the guide is one long line today, but a
+/// hard wrap is an ordinary edit that changes nothing a reader sees and must not break the assertions
+/// below, which read whole sentences.
+fn cache_paragraph_of(markdown: &str) -> String {
+    markdown
+        .split("\n\n")
+        .find(|block| block.contains(CACHE_FIELD))
+        .expect("the user guide describes the cache opt-out")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+/// The cache opt-out paragraph of the user guide.
 fn cache_paragraph() -> String {
     let path = repo_root().join("crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md");
     let guide =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    guide
-        .lines()
-        .find(|line| line.contains(r#""cache": {"no-cache": true, "no-store": true}"#))
-        .expect("the user guide describes the cache opt-out")
-        .to_owned()
+    cache_paragraph_of(&guide)
 }
 
 /// Sentences of the paragraph. A surface and the verdict it is given have to share one.
 fn sentences(paragraph: &str) -> Vec<&str> {
     paragraph.split(". ").collect()
+}
+
+/// Every paragraph in `11-custom-models.md` is one long line today, but hard-wrapping a Markdown file is
+/// an ordinary edit that changes nothing a reader sees. The tests below read sentences, so the extraction
+/// has to rebuild the paragraph from all of its lines: taking only the line the cache literal sits on
+/// would cut the paragraph mid-sentence and fail these tests with "never names the surface", which is a
+/// misleading report of a reflow.
+#[test]
+fn the_cache_paragraph_survives_a_hard_wrapped_guide() {
+    let wrapped = format!(
+        "## Default Models\n\nSome earlier paragraph about the default route.\n\nEvery model request \
+         Fuigo sends to Flux Router carries the body field `{CACHE_FIELD}`.\nFlux Router honours it on \
+         `/v1/chat/completions`, where it is what stops a retried\nturn being answered with a stored \
+         copy. Its `/v1/responses` surface drops it.\n\nList all available models:\n"
+    );
+    let paragraph = cache_paragraph_of(&wrapped);
+    assert!(
+        paragraph.contains("/v1/responses"),
+        "the extraction stopped at the line the cache field is on, so the rest of the paragraph is \
+         invisible to every assertion below:\n{paragraph}"
+    );
+    let honours: Vec<&str> = sentences(&paragraph)
+        .into_iter()
+        .filter(|sentence| names_surface(sentence, "/v1/chat/completions"))
+        .collect();
+    assert!(
+        honours
+            .iter()
+            .all(|sentence| sentence.contains("stored copy")),
+        "a sentence broken across two source lines came out truncated, so a surface and its verdict no \
+         longer share one sentence: {honours:?}"
+    );
+    // Only this paragraph, not the whole file: neighbouring paragraphs must not bleed in.
+    assert!(
+        !paragraph.contains("List all available models"),
+        "the extraction ran past the blank line into the next paragraph:\n{paragraph}"
+    );
 }
 
 /// Does `text` name `surface` as a path in its own right? `/v1/messages` also occurs inside
@@ -458,6 +551,62 @@ fn the_user_guide_pairs_each_flux_router_surface_with_its_own_verdict() {
     }
 }
 
+/// Flux Router paths Fuigo posts to that are NOT model turns and carry no `cache` field. On a default
+/// install these are the same host as the inference route: `agent/config.rs` defaults
+/// `fuigo_api_base_url` to `https://api.fluxrouter.ai/v1`, and `agent_ops.rs` hands that same base to
+/// `ImageGenConfig` and `VideoGenConfig`, while fuigo-voice posts batch speech to it as multipart, which
+/// has no JSON body to put a field in at all.
+const NON_TURN_PATHS: [&str; 4] = [
+    "/images/generations",
+    "/images/edits",
+    "/videos/generations",
+    "/audio/transcriptions",
+];
+
+/// The opt-out covers the three inference wire formats and the side calls built on the same sampling
+/// client -- not literally every request addressed to `api.fluxrouter.ai`. A guide that claims the wider
+/// thing is wrong on a DEFAULT install, where `/imagine`, video generation and speech-to-text all go to
+/// that host without the field. This test pins the narrower claim from both sides: the paragraph has to
+/// say what does carry the field in terms of the wire formats and shared-client side calls, and it has to
+/// name at least one non-turn path as not carrying it. Widening the sentence again means deleting that
+/// naming, which fails here.
+#[test]
+fn the_user_guide_scopes_the_bypass_to_the_calls_that_carry_it() {
+    let paragraph = cache_paragraph();
+    let sentences = sentences(&paragraph);
+    let carrying = sentences
+        .iter()
+        .find(|sentence| sentence.contains(CACHE_FIELD))
+        .unwrap_or_else(|| panic!("the paragraph never quotes the cache field:\n{paragraph}"));
+    for scope in ["wire format", "side call"] {
+        assert!(
+            carrying.contains(scope),
+            "the sentence that says what carries the opt-out never says {scope:?}, so it reads as a \
+             claim about every request Fuigo sends to Flux Router:\n{carrying}"
+        );
+    }
+
+    let naming: Vec<&&str> = sentences
+        .iter()
+        .filter(|sentence| NON_TURN_PATHS.iter().any(|path| sentence.contains(path)))
+        .collect();
+    assert!(
+        !naming.is_empty(),
+        "the paragraph never names one of the Flux Router paths that do NOT carry the field \
+         ({NON_TURN_PATHS:?}), so nothing stops the claim widening back to every request to that \
+         host -- which is false on a default install:\n{paragraph}"
+    );
+    for sentence in naming {
+        assert!(
+            ["not", "never", "no "]
+                .iter()
+                .any(|negation| sentence.contains(negation)),
+            "the sentence naming a non-turn Flux Router path does not say the field is absent \
+             there:\n{sentence}"
+        );
+    }
+}
+
 /// `api.fluxrouter.ai` keeping agent traffic out of its own cache is a property of a DEPLOYMENT, not of
 /// the protocol: it becomes true when the router fix ships, which is why that deploy happens before Fuigo
 /// 1.0.18 publishes, and it is never a promise about a Flux Router the reader runs themselves. This guide
@@ -486,6 +635,23 @@ fn the_user_guide_pins_the_router_cache_claim_to_a_deployment() {
             .any(|when| claim.contains(when)),
         "the router-cache claim is stated as a standing fact instead of being tied to the router release \
          that makes it true:\n{claim}"
+    );
+    // Naming a deployment is not pinning one in time: "the api.fluxrouter.ai deployment stops storing
+    // agent traffic" still reads as a standing fact. The claim has to relate that deployment to THIS
+    // Fuigo, which is the release ordering the handoff records as a hard constraint.
+    assert!(
+        ["ahead of", "before", "as of", "since"]
+            .iter()
+            .any(|order| claim.contains(order)),
+        "the router-cache claim names a deployment but never says WHEN it became true relative to this \
+         Fuigo, so a reader of an older or newer binary cannot tell whether it applies:\n{claim}"
+    );
+    assert!(
+        ["this version", "this release", "1.0.18"]
+            .iter()
+            .any(|anchor| claim.contains(anchor)),
+        "the router-cache claim is not anchored to the version of Fuigo the reader is running, so the \
+         ordering it states has nothing to order against:\n{claim}"
     );
     for scope in ["self-hosted", "older"] {
         assert!(
