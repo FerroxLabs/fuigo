@@ -214,6 +214,22 @@ See the [Plugins guide](09-plugins.md) for more on installing plugins that provi
 
 ---
 
+## Discovery Budget
+
+Skills are discovered when a session starts. The scan runs off the async runtime and is capped at
+**5 seconds**; the result is cached for the life of the process and reused by later sessions whose
+working directory, skills config and skill roots are unchanged. The cache checks every directory
+the scan walks and every `SKILL.md` and command file it reads, at any depth and under every root
+(project, user, `[skills].paths`, and injected server/bundled directories), so adding, removing,
+renaming or editing a skill forces a fresh scan. `/skills reload` also drops the cache outright.
+
+If the scan overruns its cap — a network-mounted or very large skills tree — the session starts
+with whatever was already cached (nothing, the first time), and the reload path and the file
+watcher fill the rest in shortly after. The scan that overran is not thrown away: it keeps running
+and populates the cache for the next session, and sessions that start meanwhile wait on it instead
+of launching a second scan of the same tree. Raise or lower the cap with
+`FUIGO_SKILLS_DISCOVERY_TIMEOUT_MS` (milliseconds; unset or unparsable keeps the 5-second default).
+
 ## Best Practices
 
 1. **Write specific descriptions.** The description drives automatic invocation. "Create git commits" is too vague; "Create well-formatted git commits following conventional commit standards. Use when the user wants to commit changes or asks for /commit." works better.

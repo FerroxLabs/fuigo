@@ -18,6 +18,7 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "please also add tests".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
 
             assert!(
@@ -87,14 +88,17 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "first steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "second steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
             actor.pending_interjections.push(PendingInterjection {
                 text: "third steer".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
 
             assert!(actor.drain_pending_interjections().await);
@@ -200,6 +204,7 @@ async fn drain_with_closed_chat_mailbox_does_not_report_model_delivery() {
             actor.pending_interjections.push(PendingInterjection {
                 text: "please also add tests".to_string(),
                 attachments: vec![],
+                ..Default::default()
             });
 
             assert!(

@@ -2374,6 +2374,8 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             .as_deref()
             .map(fuigo_pager::headless::parse_json_schema)
             .transpose()?;
+        // Resolved before the options struct partially moves `args`.
+        let total_timeout = args.headless_total_timeout();
         if json_schema.is_some()
             && args.output_format == fuigo_pager::headless::OutputFormat::Plain
         {
@@ -2415,6 +2417,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                total_timeout,
                 memory_flush,
                 memory_enabled_override,
             },

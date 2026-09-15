@@ -20,6 +20,12 @@ pub(crate) struct ModelsCache {
     pub(crate) fuigo_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auth_method: Option<CacheAuthMethod>,
+    /// Which ACCOUNT this catalog was fetched for; see [`models_cache_identity`].
+    /// `load_fresh` compares it, so a catalog fetched by another account is a miss.
+    /// `None` is a cache written by a build that predates the field: always a miss,
+    /// which costs one refetch and never serves a foreign catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<String>,
     /// The models-list URL this catalog was fetched from.
     /// `load_fresh` compares it, so a cache written against another backend is a miss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,21 +83,76 @@ fn strip_cached_credentials(models: &mut IndexMap<String, ModelEntry>) {
     }
 }
 
+/// Account discriminator for `~/.fuigo/models_cache.json`.
+///
+/// The catalog file is one per machine, and every other field `load_fresh`
+/// checks — the auth METHOD (`Session | ApiKey | Deployment`), the models-list
+/// URL, the build version — is identical for two different accounts on the same
+/// host, or for two different API keys against the same origin. Without a
+/// discriminator, account B boots on account A's entitlements for the whole
+/// 300 s TTL. Credentials are stripped on read, so the exposure is entitlement
+/// visibility rather than key leakage, but the catalog still decides which
+/// models B is offered.
+///
+/// Same recipe as [`super::settings_cache::SettingsCacheManager::identity`]: a
+/// non-cryptographic hash of the credentials themselves, so the stored value
+/// names no secret and cannot be reversed into one.
+pub(crate) fn models_cache_identity(
+    auth: Option<&FuigoAuth>,
+    endpoints: &config::EndpointsConfig,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    auth.map(|a| a.user_id.as_str()).hash(&mut hasher);
+    auth.map(|a| a.key.as_str()).hash(&mut hasher);
+    endpoints.deployment_key.as_deref().hash(&mut hasher);
+    endpoints.alpha_test_key.as_deref().hash(&mut hasher);
+    crate::agent::auth_method::read_fuigo_api_key_env()
+        .ok()
+        .hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Test-only rendezvous inside [`ModelsCacheManager::renew_ttl`], between the
+/// read that produces its snapshot and the write that stamps it back. The
+/// lost-update window is a real race; parking the renewal here makes it
+/// reproducible instead of timing-dependent.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RenewBarrier {
+    /// The renewal signals here once it holds its snapshot.
+    pub(crate) reached: tokio::sync::Notify,
+    /// The test signals here to let the renewal proceed to its write.
+    pub(crate) release: tokio::sync::Notify,
+}
+
 pub(crate) struct ModelsCacheManager {
     pub(crate) path: std::path::PathBuf,
     pub(crate) ttl: std::time::Duration,
+    #[cfg(test)]
+    pub(crate) renew_barrier: Option<std::sync::Arc<RenewBarrier>>,
 }
 
 impl ModelsCacheManager {
     pub(crate) fn new() -> Self {
+        Self::at(
+            crate::util::fuigo_home::fuigo_home().join(MODELS_CACHE_FILE),
+            CACHE_TTL,
+        )
+    }
+
+    pub(crate) fn at(path: std::path::PathBuf, ttl: std::time::Duration) -> Self {
         Self {
-            path: crate::util::fuigo_home::fuigo_home().join(MODELS_CACHE_FILE),
-            ttl: CACHE_TTL,
+            path,
+            ttl,
+            #[cfg(test)]
+            renew_barrier: None,
         }
     }
 
     pub(crate) fn load_fresh(
         &self,
+        expected_identity: &str,
         expected_auth: &CacheAuthMethod,
         expected_origin: &str,
     ) -> Option<CacheResult> {
@@ -99,6 +160,10 @@ impl ModelsCacheManager {
         let cache: ModelsCache = serde_json::from_slice(&data).ok()?;
         if cache.fuigo_version.as_deref() != Some(fuigo_version::VERSION) {
             tracing::debug!("models cache version mismatch");
+            return None;
+        }
+        if cache.identity.as_deref() != Some(expected_identity) {
+            tracing::debug!("models cache identity mismatch");
             return None;
         }
         if cache.auth_method.as_ref() != Some(expected_auth) {
@@ -130,12 +195,14 @@ impl ModelsCacheManager {
         &self,
         models: &IndexMap<String, ModelEntry>,
         etag: Option<&str>,
+        identity: &str,
         auth_method: CacheAuthMethod,
         origin: &str,
     ) {
         let cache = ModelsCache {
             fetched_at: Utc::now(),
             fuigo_version: Some(fuigo_version::VERSION.to_string()),
+            identity: Some(identity.to_string()),
             auth_method: Some(auth_method),
             origin: Some(origin.to_string()),
             etag: etag.map(|s| s.to_string()),
@@ -144,7 +211,43 @@ impl ModelsCacheManager {
         self.atomic_write(&cache);
     }
 
-    pub(crate) async fn renew_ttl(&self, expected_auth: &CacheAuthMethod, expected_origin: &str) {
+    /// Stamp a still-matching catalog with a fresh `fetched_at`.
+    ///
+    /// The whole read-modify-write runs under the cache file's `fs_atomic` write
+    /// lock, which [`Self::atomic_write`] takes too. Without it this is a lost
+    /// update: a models fetch that persists a NEW catalog after the read below
+    /// and before the rename is silently overwritten by the stamped copy held
+    /// here, resurrecting a stale catalog for another full TTL. A
+    /// compare-and-swap on `fetched_at` cannot close that on its own -- whatever
+    /// is left between the re-read and the rename (a `create_dir_all`, a
+    /// `sweep_stale_tmp` directory scan, a serialize and a tmp-file write) is
+    /// still a window -- so the lock is the guarantee and the CAS is only a cheap
+    /// second line for a filesystem where the lock could not be taken.
+    ///
+    /// The lock is blocking, so it is acquired on the blocking pool.
+    pub(crate) async fn renew_ttl(
+        &self,
+        expected_identity: &str,
+        expected_auth: &CacheAuthMethod,
+        expected_origin: &str,
+    ) {
+        let lock_path = self.path.clone();
+        let lock = tokio::task::spawn_blocking(move || {
+            fuigo_config::fs_atomic::lock_config_for_write(&lock_path)
+        })
+        .await;
+        let _lock = match lock {
+            Ok(Ok(lock)) => Some(lock),
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "models cache renewal lock unavailable; renewing unlocked");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "models cache renewal lock task failed; renewing unlocked");
+                None
+            }
+        };
+
         let data = match tokio::fs::read(&self.path).await {
             Ok(data) => data,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -156,6 +259,10 @@ impl ModelsCacheManager {
         let Ok(mut cache) = serde_json::from_slice::<ModelsCache>(&data) else {
             return;
         };
+        if cache.identity.as_deref() != Some(expected_identity) {
+            tracing::debug!("models cache TTL renewal skipped: identity mismatch");
+            return;
+        }
         if cache.auth_method.as_ref() != Some(expected_auth) {
             tracing::debug!("models cache TTL renewal skipped: auth method mismatch");
             return;
@@ -164,8 +271,41 @@ impl ModelsCacheManager {
             tracing::debug!("models cache TTL renewal skipped: origin mismatch");
             return;
         }
+
+        #[cfg(test)]
+        if let Some(barrier) = self.renew_barrier.clone() {
+            barrier.reached.notify_one();
+            barrier.release.notified().await;
+        }
+
+        // Cheap second line, for a filesystem where the lock above could not be
+        // taken: if the file moved on, the renewal is moot -- whoever rewrote it
+        // stamped it fresh already.
+        let snapshot_fetched_at = cache.fetched_at;
+        let on_disk_unchanged = tokio::fs::read(&self.path)
+            .await
+            .ok()
+            .and_then(|current| serde_json::from_slice::<ModelsCache>(&current).ok())
+            .is_some_and(|current| current.fetched_at == snapshot_fetched_at);
+        if !on_disk_unchanged {
+            tracing::debug!("models cache TTL renewal skipped: rewritten since read");
+            return;
+        }
+
         cache.fetched_at = Utc::now();
-        self.atomic_write_async(&cache).await;
+        // Already holding the lock; must not take it again (a second `flock` fd
+        // in this process contends with the one above and would only time out).
+        let path = self.path.clone();
+        let ttl = self.ttl;
+        let cache_for_write = cache;
+        let wrote = tokio::task::spawn_blocking(move || {
+            Self::at(path, ttl).write_locked(&cache_for_write);
+        })
+        .await;
+        if let Err(e) = wrote {
+            tracing::warn!(error = %e, "models cache TTL renewal: write task failed");
+            return;
+        }
         tracing::debug!("models cache TTL renewed");
     }
 
@@ -177,7 +317,35 @@ impl ModelsCacheManager {
         }
     }
 
+    /// Replace the cache file, serialized against every other writer of it.
+    ///
+    /// Takes the same `fs_atomic` file lock [`Self::renew_ttl`] holds across its
+    /// whole read-modify-write, which is what actually closes the lost update: an
+    /// atomic rename alone only makes each write all-or-nothing, it does not stop
+    /// a renewal that read before this write from renaming its stale copy back
+    /// afterwards. A lock we could not take is logged and the write proceeds
+    /// anyway -- a cache write must never fail because a filesystem has no
+    /// `flock`; the race simply comes back, exactly as it was before.
     pub(crate) fn atomic_write(&self, cache: &ModelsCache) {
+        let _lock = self.lock_for_write();
+        self.write_locked(cache);
+    }
+
+    /// Acquire the cache file's write lock, or `None` if it could not be taken.
+    fn lock_for_write(&self) -> Option<fuigo_config::fs_atomic::ConfigWriteLock> {
+        match fuigo_config::fs_atomic::lock_config_for_write(&self.path) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                tracing::debug!(error = %e, "models cache write lock unavailable; writing unlocked");
+                None
+            }
+        }
+    }
+
+    /// The write itself. The caller must already hold [`Self::lock_for_write`].
+    /// Also the seam tests use to simulate a writer on a filesystem where the
+    /// lock could not be taken.
+    pub(in crate::agent::models) fn write_locked(&self, cache: &ModelsCache) {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -192,24 +360,6 @@ impl ModelsCacheManager {
             }
         } else {
             let _ = std::fs::remove_file(&tmp);
-        }
-    }
-
-    pub(crate) async fn atomic_write_async(&self, cache: &ModelsCache) {
-        if let Some(parent) = self.path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        sweep_stale_tmp(&self.path, self.ttl);
-        let Ok(json) = serde_json::to_vec_pretty(cache) else {
-            return;
-        };
-        let tmp = unique_tmp_path(&self.path);
-        if tokio::fs::write(&tmp, &json).await.is_ok() {
-            if tokio::fs::rename(&tmp, &self.path).await.is_err() {
-                let _ = tokio::fs::remove_file(&tmp).await;
-            }
-        } else {
-            let _ = tokio::fs::remove_file(&tmp).await;
         }
     }
 }

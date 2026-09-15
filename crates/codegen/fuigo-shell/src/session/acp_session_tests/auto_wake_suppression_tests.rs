@@ -4,7 +4,9 @@ use fuigo_tool_types::{
     KillTaskOutput, KillTaskResult, MultiTaskOutputResult, SubagentCompletedOutput,
     TaskOutputOutput, TaskOutputResult,
 };
-use fuigo_tools::reminders::task_completion::consumed_completion_ids;
+use fuigo_tools::reminders::task_completion::{
+    consumed_completion_content_ids, consumed_completion_ids,
+};
 use fuigo_tools::types::output::{BashOutput, TextOutput, ToolOutput};
 fn input_with_origin(prompt_id: &str, origin: crate::session::PromptOrigin) -> InputItem {
     input_with_origin_rx(prompt_id, origin).0
@@ -783,9 +785,10 @@ async fn task_output_completed_drops_matching_pending_input() {
                 "completed",
             )));
             let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
             assert_eq!(consumed, vec!["bg-target"]);
             actor
-                .drop_pending_items_for_consumed_completions(&consumed)
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state
@@ -826,7 +829,10 @@ async fn sweep_never_drops_running_turns_own_slot() {
                     .push_back(task_completed_input("bg-other"));
             }
             actor
-                .drop_pending_items_for_consumed_completions(&["bg-target", "bg-other"])
+                .drop_pending_items_for_consumed_completions(
+                    &["bg-target", "bg-other"],
+                    &["bg-target", "bg-other"],
+                )
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state
@@ -917,9 +923,10 @@ async fn await_text_completed_drops_matching_pending_input() {
                 consumed_completion_task_id: Some("bg-target".into()),
             });
             let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
             assert_eq!(consumed, vec!["bg-target"]);
             actor
-                .drop_pending_items_for_consumed_completions(&consumed)
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state
@@ -959,9 +966,10 @@ async fn kill_task_drops_matching_pending_input() {
                 message: "Task was terminated successfully".into(),
             }));
             let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
             assert_eq!(consumed, vec!["bg-killed"]);
             actor
-                .drop_pending_items_for_consumed_completions(&consumed)
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state
@@ -1010,9 +1018,10 @@ async fn subagent_completed_drops_matching_pending_input() {
                 persona_hint: None,
             });
             let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
             assert_eq!(consumed, vec!["sub-target"]);
             actor
-                .drop_pending_items_for_consumed_completions(&consumed)
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state
@@ -1066,9 +1075,10 @@ async fn multi_task_output_drops_each_completed_id() {
                     summary: String::new(),
                 }));
             let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
             assert_eq!(consumed, vec!["bg-done-1", "bg-done-2"]);
             actor
-                .drop_pending_items_for_consumed_completions(&consumed)
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
                 .await;
             let state = actor.state.lock().await;
             let remaining_ids: Vec<&str> = state
@@ -1101,12 +1111,13 @@ async fn task_output_running_does_not_drop_pending_input() {
                 "running",
             )));
             let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
             assert!(
                 consumed.is_empty(),
                 "running status must not yield a consumed completion id"
             );
             actor
-                .drop_pending_items_for_consumed_completions(&consumed)
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
                 .await;
             let state = actor.state.lock().await;
             assert_eq!(
@@ -1172,7 +1183,7 @@ async fn sweep_clears_matching_pending_notifications() {
                     .push(bash_completed_notification("bg-B"));
             }
             actor
-                .drop_pending_items_for_consumed_completions(&["bg-A"])
+                .drop_pending_items_for_consumed_completions(&["bg-A"], &["bg-A"])
                 .await;
             let state = actor.state.lock().await;
             let remaining: Vec<&str> = state
@@ -1673,6 +1684,274 @@ async fn state_is_busy_reflects_queued_inputs() {
                     "clearing the queue must return to not busy"
                 );
             }
+        })
+        .await;
+}
+
+/// A background task that ends in a NON-`completed` terminal status
+/// (`failed` / `cancelled` / `timed_out`) is just as consumed by a
+/// `get_task_output` read as a successful one: the model has seen the body.
+/// If the id is not reported as consumed, the queued
+/// `task-completed-{id}` synthetic prompt survives the sweep and fires
+/// again at turn end, re-delivering the same (up to 4 KB) body and forcing
+/// an extra full-context sampling round-trip. Failed builds/tests/lints are
+/// the common case, so this is the expensive one to get wrong.
+async fn assert_terminal_status_drops_pending_input(status: &str) {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(task_completed_input("bg-target"));
+                state
+                    .pending_inputs
+                    .push_back(task_completed_input("bg-other"));
+                state.pending_inputs.push_back(user_input("user-real"));
+            }
+            let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(task_output_result(
+                "bg-target",
+                status,
+            )));
+            let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
+            assert_eq!(
+                consumed,
+                vec!["bg-target"],
+                "status {status:?} is terminal and must consume the completion"
+            );
+            actor
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
+                .await;
+            let state = actor.state.lock().await;
+            let remaining_ids: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                remaining_ids,
+                vec!["task-completed-bg-other", "user-real"],
+                "status {status:?}: the matching synthetic auto-wake prompt must be dropped"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_output_failed_drops_matching_pending_input() {
+    assert_terminal_status_drops_pending_input("failed").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_output_cancelled_drops_matching_pending_input() {
+    assert_terminal_status_drops_pending_input("cancelled").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_output_timed_out_drops_matching_pending_input() {
+    assert_terminal_status_drops_pending_input("timed_out").await;
+}
+
+/// The `MultiResult` arm must apply the same terminal-status predicate:
+/// every finished task is consumed, only genuinely `running` ones survive.
+#[tokio::test(flavor = "current_thread")]
+async fn multi_task_output_drops_each_terminal_id() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            {
+                let mut state = actor.state.lock().await;
+                for id in [
+                    "bg-failed",
+                    "bg-cancelled",
+                    "bg-timed-out",
+                    "bg-done",
+                    "bg-running",
+                ] {
+                    state.pending_inputs.push_back(task_completed_input(id));
+                }
+            }
+            let output =
+                ToolOutput::TaskOutput(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
+                    mode: "all".into(),
+                    results: vec![
+                        task_output_result("bg-failed", "failed"),
+                        task_output_result("bg-cancelled", "cancelled"),
+                        task_output_result("bg-timed-out", "timed_out"),
+                        task_output_result("bg-done", "completed"),
+                        task_output_result("bg-running", "running"),
+                    ],
+                    summary: String::new(),
+                }));
+            let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
+            assert_eq!(
+                consumed,
+                vec!["bg-failed", "bg-cancelled", "bg-timed-out", "bg-done"],
+                "every terminal status in a MultiResult must be consumed"
+            );
+            actor
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
+                .await;
+            let state = actor.state.lock().await;
+            let remaining_ids: Vec<&str> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.as_str())
+                .collect();
+            assert_eq!(remaining_ids, vec!["task-completed-bg-running"]);
+        })
+        .await;
+}
+
+/// `not_found` is not a terminal completion: nothing was consumed.
+#[tokio::test(flavor = "current_thread")]
+async fn task_output_not_found_status_does_not_consume() {
+    let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(task_output_result(
+        "bg-missing",
+        "not_found",
+    )));
+    assert!(
+        consumed_completion_ids(&output).is_empty(),
+        "not_found must not consume a completion"
+    );
+}
+
+/// Reading a NON-`completed` terminal task's output drops its queued auto-wake
+/// prompt but KEEPS its buffered `MonitorEvent` notifications.
+///
+/// The two effects of "this completion was consumed" are deliberately split:
+///
+/// * The queued `task-completed-{id}` synthetic prompt is a duplicate
+///   NOTIFICATION -- the model just read a terminal result for this task, so
+///   firing that prompt at turn end buys a re-delivered body plus a forced
+///   full-context sampling round-trip. Dropped for every terminal status.
+/// * A pending `NotificationSource::MonitorEvent` is buffered CONTENT: it
+///   carries the TAIL of the monitor's output, while a `get_task_output` read
+///   that exceeds the byte budget keeps the HEAD (`truncate_with_preview`).
+///   For a failed / cancelled / timed-out monitor those lines are exactly what
+///   the model has NOT seen, so they survive and are delivered as before.
+///
+/// Unrelated tasks' notifications are untouched either way.
+#[tokio::test(flavor = "current_thread")]
+async fn failed_monitor_read_keeps_its_buffered_monitor_events() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(task_completed_input("mon-fail"));
+                state
+                    .pending_notifications
+                    .push(monitor_event_notification("mon-fail"));
+                state
+                    .pending_notifications
+                    .push(monitor_completed_notification("mon-fail"));
+                state
+                    .pending_notifications
+                    .push(monitor_event_notification("mon-live"));
+            }
+            let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(task_output_result(
+                "mon-fail", "failed",
+            )));
+            let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
+            assert_eq!(
+                consumed,
+                vec!["mon-fail"],
+                "a failed read still consumes the duplicate completion prompt"
+            );
+            assert!(
+                content.is_empty(),
+                "a failed read did not deliver the buffered content: {content:?}"
+            );
+            actor
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
+                .await;
+            let state = actor.state.lock().await;
+            assert!(
+                state.pending_inputs.is_empty(),
+                "the duplicate synthetic auto-wake prompt must still be dropped"
+            );
+            let remaining: Vec<&str> = state
+                .pending_notifications
+                .iter()
+                .map(|n| n.prompt_id.as_str())
+                .collect();
+            assert_eq!(
+                remaining,
+                vec![
+                    "monitor-mon-fail",
+                    "monitor-completed-mon-fail",
+                    "monitor-mon-live"
+                ],
+                "buffered notification content for a FAILED read carries output the \
+                 model has not seen and must survive; suppressing the duplicate \
+                 auto-wake prompt must not take it with it"
+            );
+        })
+        .await;
+}
+
+/// The `completed` read is the one that DOES deliver the buffered body, so its
+/// queued notifications are genuine duplicates and are still swept. This is the
+/// other side of the split: narrowing the content sweep must not turn into
+/// never sweeping.
+#[tokio::test(flavor = "current_thread")]
+async fn completed_monitor_read_still_sweeps_its_buffered_monitor_events() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            {
+                let mut state = actor.state.lock().await;
+                state
+                    .pending_inputs
+                    .push_back(task_completed_input("mon-ok"));
+                state
+                    .pending_notifications
+                    .push(monitor_event_notification("mon-ok"));
+                state
+                    .pending_notifications
+                    .push(monitor_event_notification("mon-live"));
+            }
+            let output = ToolOutput::TaskOutput(TaskOutputOutput::Result(task_output_result(
+                "mon-ok",
+                "completed",
+            )));
+            let consumed = consumed_completion_ids(&output);
+            let content = consumed_completion_content_ids(&output);
+            assert_eq!(content, vec!["mon-ok"]);
+            actor
+                .drop_pending_items_for_consumed_completions(&consumed, &content)
+                .await;
+            let state = actor.state.lock().await;
+            assert!(state.pending_inputs.is_empty());
+            let remaining: Vec<&str> = state
+                .pending_notifications
+                .iter()
+                .map(|n| n.prompt_id.as_str())
+                .collect();
+            assert_eq!(remaining, vec!["monitor-mon-live"]);
         })
         .await;
 }
