@@ -249,25 +249,27 @@ pub fn session_unavailable_error(message: impl Into<String>) -> acp::Error {
 }
 
 /// Human text for an `acp::Error`: the JSON-RPC message plus the `data` detail ([`error_detail_from_data`]: `data.message` or a bare string).
-/// `acp::Error`'s `Display` pretty-prints `data` as JSON, which is wrong for a person once `data` is an object.
-/// A detail that repeats the message is printed once (the overload copy is both); `data` with no readable detail falls back to `Display`, so nothing is hidden.
+/// `acp::Error`'s `Display` pretty-prints `data` as JSON, which is wrong for a person once `data` is an object, so this NEVER calls it.
+/// A detail that repeats the message is printed once (the overload copy is both).
+/// `data` with no readable detail (a foreign or purely machine-readable payload) degrades to the JSON-RPC message, never to the object.
 pub fn acp_error_text(err: &acp::Error) -> String {
+    let headline = || {
+        if err.message.is_empty() {
+            i32::from(err.code).to_string()
+        } else {
+            err.message.clone()
+        }
+    };
     let Some(data) = err.data.as_ref() else {
-        return err.to_string();
+        return headline();
     };
     match error_detail_from_data(data) {
-        Some(detail) if detail.is_empty() => {
-            if err.message.is_empty() {
-                i32::from(err.code).to_string()
-            } else {
-                err.message.clone()
-            }
-        }
+        Some(detail) if detail.is_empty() => headline(),
         Some(detail) if err.message.is_empty() => detail,
         // Overload copy (and any future error whose own message is the user-facing text) says it once, not twice
         Some(detail) if detail == err.message => detail,
         Some(detail) => format!("{}: {detail}", err.message),
-        None => err.to_string(),
+        None => headline(),
     }
 }
 
@@ -789,6 +791,26 @@ mod tests {
             acp_error_text(&acp::Error::internal_error()),
             "Internal error"
         );
+    }
+
+    /// `data` that carries no readable message must NEVER fall back to `Display`, which
+    /// pretty-prints the object across lines. `fuigo_acp_lib`'s channel-failure errors are
+    /// exactly this shape, and they are the first failure most users see (the agent dying
+    /// mid-prompt), rendered straight into the TUI by `acp_error_user_text`.
+    #[test]
+    fn acp_error_text_never_falls_back_to_display_for_an_object_without_a_message() {
+        let err = acp::Error::internal_error()
+            .data(serde_json::json!({ "fuigoAcpChannelFailure": "recv_failed" }));
+        let text = acp_error_text(&err);
+        assert!(
+            !text.contains('{') && !text.contains('\n'),
+            "raw JSON reached a person: {text:?}"
+        );
+        assert_eq!(text, "Internal error");
+        // A codeless-message error still says something a person can read.
+        let anonymous =
+            acp::Error::new(-32099, String::new()).data(serde_json::json!({ "some_tag": "x" }));
+        assert_eq!(acp_error_text(&anonymous), "-32099");
     }
 
     /// A turn failure is one log record on one line, even when its message spans lines.
