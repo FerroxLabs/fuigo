@@ -305,7 +305,9 @@ pub async fn handle(
     match args.method.as_ref() {
         "fuigo/git/git_repo_root" => {
             let req: git::GitRepoRequest = parse_params(args)?;
-            let response = git::is_git_repo(&req).await?;
+            let response = git::is_git_repo(&req)
+                .await
+                .map_err(crate::acp_error::internal_from)?;
             super::to_raw_response(&response)
         }
         "fuigo/git/serialize_changes" => {

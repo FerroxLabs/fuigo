@@ -132,6 +132,19 @@ pub fn invalid_params(message: impl Into<String>) -> acp::Error {
     )
 }
 
+/// `?`-boundary for malformed request parameters: `-32602`, kind `invalid_request`.
+/// Hand it to `map_err`; letting `?` convert a `serde_json::Error` on its own runs the schema crate's
+/// `From` impl, which puts a BARE STRING in `data` — the shape a JSON client drops.
+pub fn invalid_params_from(err: impl std::fmt::Display) -> acp::Error {
+    invalid_params(err.to_string())
+}
+
+/// `?`-boundary for a failure that is not itself an `acp::Error` (serde, anyhow, io): `-32603`, kind `internal`.
+/// Same reason as [`invalid_params_from`]: the schema crate's implicit conversions build untyped `data`.
+pub fn internal_from(err: impl std::fmt::Display) -> acp::Error {
+    internal_error(err.to_string())
+}
+
 /// `-32602` invalid params, kind `invalid_request`, plus the stable `data.code` a client matches on.
 pub fn invalid_params_with_code(code: &str, message: impl Into<String>) -> acp::Error {
     acp::Error::invalid_params().data(error_data_with_fields(

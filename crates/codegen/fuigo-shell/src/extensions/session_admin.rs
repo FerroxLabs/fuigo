@@ -771,7 +771,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
-        .map_err(|e| crate::acp_error::internal_error(e))?;
+        .map_err(crate::acp_error::internal_error)?;
 
     // Merge TOML-derived model fields into the agent's in-memory config
     // Runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI flags) are preserved; only model-related TOML fields are refreshed
@@ -888,7 +888,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         )
         .await?;
         return Ok(acp::ExtResponse::new(Arc::from(
-            serde_json::value::to_raw_value(&response)?,
+            serde_json::value::to_raw_value(&response).map_err(crate::acp_error::internal_from)?,
         )));
     }
 
@@ -901,7 +901,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         };
         let response = handle.list_available_commands().await;
         return Ok(acp::ExtResponse::new(Arc::from(
-            serde_json::value::to_raw_value(&response)?,
+            serde_json::value::to_raw_value(&response).map_err(crate::acp_error::internal_from)?,
         )));
     }
 
@@ -950,7 +950,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
     )
     .await?;
     Ok(acp::ExtResponse::new(Arc::from(
-        serde_json::value::to_raw_value(&response)?,
+        serde_json::value::to_raw_value(&response).map_err(crate::acp_error::internal_from)?,
     )))
 }
 

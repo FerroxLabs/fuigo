@@ -2,6 +2,18 @@
 //! JSON clients read `data.message` / `data.error_kind` and drop anything else; a bare string there left the user with a generic "Internal error".
 //! The scan covers non-test source under `src/`. It also rejects the two schema constructors that build ad-hoc `data`
 //! (`into_internal_error` and `resource_not_found(Some(..))`).
+//!
+//! `.data(..)` is not the only way a bare string gets on the wire. The schema crate converts implicitly —
+//! `impl From<serde_json::Error> for acp::Error` is `Error::invalid_params().data(error.to_string())`, and
+//! `impl From<anyhow::Error>` is `into_internal_error` — so a plain `?` inside a function that returns
+//! `Result<_, acp::Error>` ships one without a `.data(` anywhere in sight. The second scan below rejects those:
+//! inside an `acp::Error`-returning function, `?` may not be applied to an expression whose error type is
+//! recognisably `serde_json::Error` or `anyhow::Error`. Map it through `crate::acp_error` instead
+//! (`parse_params_str`, `invalid_params_from`, `internal_from`).
+//! Its reach is textual: it sees the error type where the expression names it (`serde_json::…`, `anyhow!`,
+//! `.context(..)`). A `?` on a crate-local helper that returns `anyhow::Result` names nothing, so those were
+//! enumerated once by compiling the tree against a schema crate with `impl From<anyhow::Error> for acp::Error`
+//! deleted; keep new helpers of that shape out of `acp::Error`-returning functions.
 
 use std::path::{Path, PathBuf};
 
@@ -196,6 +208,208 @@ fn line_of(code: &[char], offset: usize) -> usize {
     code[..offset].iter().filter(|&&c| c == '\n').count() + 1
 }
 
+/// A return type whose error is `acp::Error`, so `?` inside the body converts through the schema
+/// crate's `From` impls. `ExtResult` and `AcpResult<T>` are the crate's aliases for exactly that.
+fn returns_acp_error(ret: &str) -> bool {
+    let ret = ret.trim();
+    ret.starts_with("ExtResult")
+        || ret.starts_with("AcpResult<")
+        || ret.starts_with("acp::Result<")
+        || (ret.starts_with("Result<") && ret.contains("acp::Error"))
+}
+
+/// `(start, end)` of the body braces of every function whose error type is `acp::Error`.
+fn acp_error_fn_bodies(code: &[char]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = find(code, "fn ", from) {
+        from = pos + 3;
+        if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        let mut j = pos + 3;
+        while j < code.len() && code[j].is_whitespace() {
+            j += 1;
+        }
+        while j < code.len() && is_ident(code[j]) {
+            j += 1;
+        }
+        // Generics: `->` inside a bound (`F: Fn() -> T`) is not a closing angle bracket
+        while j < code.len() && code[j].is_whitespace() {
+            j += 1;
+        }
+        if code.get(j) == Some(&'<') {
+            let mut depth = 0i32;
+            while j < code.len() {
+                if code[j] == '-' && code.get(j + 1) == Some(&'>') {
+                    j += 2;
+                    continue;
+                }
+                match code[j] {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        while j < code.len() && code[j].is_whitespace() {
+            j += 1;
+        }
+        if code.get(j) != Some(&'(') {
+            continue;
+        }
+        let mut depth = 0i32;
+        while j < code.len() {
+            match code[j] {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        j += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let sig_start = j;
+        while j < code.len() && code[j] != '{' && code[j] != ';' {
+            j += 1;
+        }
+        // A trait method declaration has no body to scan
+        if code.get(j) != Some(&'{') {
+            continue;
+        }
+        let sig: String = code[sig_start..j].iter().collect();
+        let Some((_, ret)) = sig.split_once("->") else {
+            continue;
+        };
+        let ret = ret.split("where").next().unwrap_or(ret);
+        if !returns_acp_error(ret) {
+            continue;
+        }
+        let start = j;
+        let mut depth = 0i32;
+        while j < code.len() {
+            match code[j] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        out.push((start, j.min(code.len())));
+        from = j;
+    }
+    out
+}
+
+/// The expression a `?` at `q` is applied to, verbatim: walk back over one primary expression chain.
+fn try_chain(code: &[char], q: usize) -> String {
+    let mut j = q as isize - 1;
+    while j >= 0 && code[j as usize].is_whitespace() {
+        j -= 1;
+    }
+    let end = (j + 1) as usize;
+    while j >= 0 {
+        let c = code[j as usize];
+        if matches!(c, ')' | ']' | '}') {
+            let open = match c {
+                ')' => '(',
+                ']' => '[',
+                _ => '{',
+            };
+            let mut depth = 0i32;
+            while j >= 0 {
+                let cc = code[j as usize];
+                if cc == c {
+                    depth += 1;
+                } else if cc == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                j -= 1;
+            }
+            j -= 1;
+        } else if c == '>' {
+            // `->` / `=>` end the chain; anything else is a turbofish
+            if j > 0 && matches!(code[(j - 1) as usize], '-' | '=') {
+                break;
+            }
+            let mut depth = 0i32;
+            while j >= 0 {
+                let cc = code[j as usize];
+                if cc == '>' {
+                    depth += 1;
+                } else if cc == '<' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                j -= 1;
+            }
+            j -= 1;
+        } else if is_ident(c) || matches!(c, '.' | ':' | '?' | '&' | '*') {
+            j -= 1;
+        } else if c.is_whitespace() {
+            let mut k = j;
+            while k >= 0 && code[k as usize].is_whitespace() {
+                k -= 1;
+            }
+            // Whitespace continues the chain only between its own pieces (a wrapped `.method()` call)
+            if k >= 0
+                && (is_ident(code[k as usize])
+                    || matches!(code[k as usize], ')' | ']' | '}' | '.' | ':'))
+            {
+                j = k;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    // An unbalanced walk runs off the front of the file; clamp rather than index negatively.
+    let start = (j + 1).max(0) as usize;
+    code[start..end.max(start)].iter().collect()
+}
+
+/// The non-`acp::Error` error type this chain hands `?`, when the expression names it.
+/// A chain that already went through `map_err` produced an `acp::Error` itself, whatever it started as.
+fn implicit_conversion_source(chain: &str) -> Option<&'static str> {
+    if chain.contains(".map_err(") {
+        return None;
+    }
+    for (needle, source) in [
+        ("serde_json::", "serde_json::Error"),
+        ("anyhow::", "anyhow::Error"),
+        ("anyhow!", "anyhow::Error"),
+        (".context(", "anyhow::Error"),
+        (".with_context(", "anyhow::Error"),
+    ] {
+        if chain.contains(needle) {
+            return Some(source);
+        }
+    }
+    None
+}
+
 /// Offending sites in one file, as `rel:line: reason`.
 fn offenders(rel: &str, src: &str) -> Vec<String> {
     let mut code = code_only(src);
@@ -237,6 +451,30 @@ fn offenders(rel: &str, src: &str) -> Vec<String> {
             found.push(site(pos, "schema constructor builds untyped `data`"));
         }
     }
+    let mut implicit = Vec::new();
+    for (start, end) in acp_error_fn_bodies(&code) {
+        for q in start..end {
+            if code[q] != '?' {
+                continue;
+            }
+            // `?Sized` is a bound, not the operator
+            if code[q + 1..end.min(q + 8)]
+                .iter()
+                .collect::<String>()
+                .trim_start()
+                .starts_with("Sized")
+            {
+                continue;
+            }
+            if let Some(source) = implicit_conversion_source(&try_chain(&code, q)) {
+                implicit.push(site(
+                    q,
+                    &format!("`?` converts {source} implicitly into a bare-string `data`"),
+                ));
+            }
+        }
+    }
+    found.extend(implicit);
     found
 }
 
@@ -286,6 +524,33 @@ fn the_walker_only_hands_the_guard_files_it_can_read() {
         ["real.rs"],
         "only readable Rust sources reach the guard"
     );
+}
+
+/// `?` inside a function returning `Result<_, acp::Error>` converts through the schema crate's
+/// `From<serde_json::Error>` / `From<anyhow::Error>` impls, both of which put a BARE STRING in
+/// `data` — the exact shape an embedding client drops. The scanner must notice those, and must not
+/// flag a `?` that already went through `map_err` into a typed helper.
+#[test]
+fn the_scanner_flags_implicit_error_conversions_in_acp_returning_functions() {
+    let src = r##"
+type ExtResult = Result<acp::ExtResponse, acp::Error>;
+async fn handle(args: &acp::ExtRequest) -> ExtResult {
+    let req = serde_json::from_str::<Req>(args.params.get())?;
+    let ok = parse_params_str::<Req>(args.params.get())?;
+    let mapped = serde_json::from_str::<Req>(args.params.get())
+        .map_err(crate::acp_error::invalid_params_from)?;
+    let raw = serde_json::value::to_raw_value(&req)?;
+    let ctx = do_io().context("reading the thing")?;
+    Ok(acp::ExtResponse::new(raw))
+}
+fn plain(args: &str) -> anyhow::Result<u8> { serde_json::from_str(args)? }
+"##;
+    let found = offenders("x.rs", src);
+    let lines: Vec<&str> = found
+        .iter()
+        .map(|f| f.split(": ").next().unwrap())
+        .collect();
+    assert_eq!(lines, ["x.rs:4", "x.rs:8", "x.rs:9"], "{found:#?}");
 }
 
 /// The scanner itself: literals, comments and test items are ignored; untyped and typed arguments are told apart.
