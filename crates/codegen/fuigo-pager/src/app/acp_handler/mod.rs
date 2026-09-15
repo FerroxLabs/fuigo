@@ -152,6 +152,12 @@ fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
     match msg {
         AcpClientMessage::SessionNotification(notif) => {
+            // Retry-status mirrors carry no eventId or output for the pager, which renders `retry_state` itself
+            if fuigo_shell::extensions::notification::is_retry_status_update(&notif.request.update)
+            {
+                notif.response_tx.send(Ok(())).ok();
+                return false;
+            }
             let mut meta = NotificationMeta::from_json(notif.request.meta.as_ref());
 
             let affected = match find_session_match(app, &notif.request.session_id) {

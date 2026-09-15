@@ -477,6 +477,26 @@ impl SessionActor {
                 .forward_fire_and_forget(notification);
         }
     }
+    /// Mirror a `RetryState` onto the standard ACP rail as a live-only `agent_message_chunk` (see [`crate::extensions::notification::RETRY_STATUS_META_KEY`]).
+    /// Stock ACP clients drop the `_fuigo` rail, so without it a retry storm reads as silence and a terminal failure as a bare error code.
+    /// Never persisted: a replayed "Retrying" line is stale, and persisted agent text feeds `chat.jsonl` and the search index.
+    /// So no `eventId` either: a reconnect cursor must never point at an unpersisted line.
+    fn emit_retry_status_mirror(&self, state: &crate::extensions::notification::RetryState) {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "agentTimestampMs".to_string(),
+            chrono::Utc::now().timestamp_millis().into(),
+        );
+        if let Some(pid) = self.current_prompt_id.lock().ok().and_then(|g| g.clone()) {
+            meta.insert("promptId".to_string(), pid.into());
+        }
+        let notification = acp::SessionNotification::new(
+            self.session_info.id.clone(),
+            crate::extensions::notification::retry_status_update(state),
+        )
+        .meta(Some(meta));
+        self.emit_transient_notification(notification);
+    }
     /// [`Self::send_fuigo_notification`] minus persistence, for updates whose durable copy lives elsewhere (e.g. `LastTurnSummary` in `summary.json`).
     /// Skips the rewind-window close and notification hooks.
     ///
@@ -1025,6 +1045,9 @@ impl SessionActor {
             self.notifications
                 .gateway
                 .forward_fire_and_forget(ext_notification);
+        }
+        if let FuigoSessionUpdate::RetryState(state) = &notification.update {
+            self.emit_retry_status_mirror(state);
         }
         if let Some((notification_type, message, title, level)) =
             notification_hook_for_update(&notification.update)
