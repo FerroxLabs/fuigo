@@ -69,7 +69,7 @@ pub(super) fn log_prompt_result(
             ulog::error(
                 "agent response failed",
                 Some(sid),
-                Some(serde_json::json!({"error": acp_error_text(&e)})),
+                Some(serde_json::json!({"error": acp_error_text(e)})),
             )
         }
     }

@@ -943,7 +943,7 @@ impl acp::Agent for MvpAgent {
         mut arguments: acp::PromptRequest,
     ) -> Result<acp::PromptResponse, acp::Error> {
         let budget = fuigo_sampler::execution_budget::process_budget()
-            .map_err(|message| crate::acp_error::invalid_params(message))?;
+            .map_err(crate::acp_error::invalid_params)?;
         if budget.is_some_and(|budget| budget.expired()) {
             return Err(crate::acp_error::invalid_params(fuigo_sampler::execution_budget::WALL_LIMIT));
         }
