@@ -8,12 +8,18 @@ on:
     paths:
       - 'crates/codegen/fuigo-tty-utils/**'
       - 'crates/codegen/fuigo-shell/src/leader/**'
+      # The one production line that arms the parent-death watcher for
+      # `fuigo agent stdio`; the pager-bin path below holds the other arm site.
+      - 'crates/codegen/fuigo-shell/src/agent/app.rs'
       - 'crates/codegen/fuigo-pager-bin/src/main.rs'
       - '.github/workflows/windows-process-check.yml'
   pull_request:
     paths:
       - 'crates/codegen/fuigo-tty-utils/**'
       - 'crates/codegen/fuigo-shell/src/leader/**'
+      # The one production line that arms the parent-death watcher for
+      # `fuigo agent stdio`; the pager-bin path below holds the other arm site.
+      - 'crates/codegen/fuigo-shell/src/agent/app.rs'
       - 'crates/codegen/fuigo-pager-bin/src/main.rs'
       - '.github/workflows/windows-process-check.yml'
   workflow_dispatch:
@@ -86,17 +92,20 @@ jobs:
           grep -F 'tests::parent_death_hook_runs_before_termination_on_windows ... ok' process-receipts/tty-utils.log
           grep -F 'tests::a_disabled_parent_death_watch_leaves_the_process_alive_on_windows ... ok' process-receipts/tty-utils.log
       # The leader spawn tests (creation flags, and a probe spawned through the
-      # real leader spawn path that must get its own windowless console) plus
-      # the named-pipe transport tests.
-      - name: fuigo-shell leader spawn and transport tests
+      # real leader spawn path that must get its own windowless console), the
+      # named-pipe transport tests, and the pin on the `agent stdio` entrypoint
+      # line that arms the parent-death watcher — the line this workflow's
+      # `agent/app.rs` path filter exists for.
+      - name: fuigo-shell leader spawn, transport and parent-death arm tests
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p process-receipts
-          cargo test --locked -p fuigo-shell --lib -- leader::tests::leader_spawn leader::transport:: 2>&1 | tee process-receipts/fuigo-shell-leader.log
+          cargo test --locked -p fuigo-shell --lib -- leader::tests::leader_spawn leader::transport:: agent::app::tests::the_stdio_agent_entrypoint_arms 2>&1 | tee process-receipts/fuigo-shell-leader.log
           grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fuigo-shell-leader.log
           grep -F 'leader::tests::leader_spawn_gets_its_own_windowless_console ... ok' process-receipts/fuigo-shell-leader.log
           grep -F 'leader::tests::leader_spawn_flags_match_the_windows_crate ... ok' process-receipts/fuigo-shell-leader.log
+          grep -F 'agent::app::tests::the_stdio_agent_entrypoint_arms_the_parent_death_binding ... ok' process-receipts/fuigo-shell-leader.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
