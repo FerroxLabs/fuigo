@@ -556,7 +556,8 @@ async fn apply_retry_decision(
                 | SamplingError::IdleTimeout { .. }
                 | SamplingError::EmptyResponse { .. }
                 | SamplingError::MaxTokensTruncation
-                | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+                | SamplingError::DoomLoopDetected { .. }
+                | SamplingError::Cancelled => StripReason::PayloadHeuristic,
             };
             tracing::warn!(
                 stripped = stripped_urls.len(),

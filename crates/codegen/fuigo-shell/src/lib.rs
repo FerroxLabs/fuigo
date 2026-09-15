@@ -11,6 +11,7 @@
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
 pub(crate) use fuigo_telemetry::unified_log;
 pub use fuigo_tracing_macros::{teprintln, timed, tprintln};
+pub mod acp_error;
 pub mod agent;
 pub mod auth;
 pub mod builtin;

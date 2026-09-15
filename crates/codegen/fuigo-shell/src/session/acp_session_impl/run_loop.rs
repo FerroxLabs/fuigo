@@ -1096,8 +1096,7 @@ pub(super) async fn run_session(
                                     let _ = respond_to.send(Ok(did_flush));
                                 } else {
                                     let _ = respond_to.send(Err(
-                                        acp::Error::invalid_request()
-                                            .data("memory is not enabled for this session".to_string())
+                                        crate::acp_error::invalid_request("memory is not enabled for this session".to_string())
                                     ));
                                 }
                             });
@@ -1408,8 +1407,7 @@ pub(super) async fn run_session(
                                         continue;
                                     }
                                     drop(mcp_state);
-                                    let _ = respond_to.send(Err(acp::Error::invalid_params()
-                                        .data(format!("server '{}' not found in config", server_name))));
+                                    let _ = respond_to.send(Err(crate::acp_error::invalid_params(format!("server '{}' not found in config", server_name))));
                                     continue;
                                 }
                             } else {

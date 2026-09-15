@@ -33,7 +33,7 @@ async fn handle_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
     // Pass the session error through; rewrapping buries the detail in a Debug dump.
     rx.await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))??;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))??;
     to_raw_response(&CompactConversationResponse {})
 }
 
@@ -47,7 +47,7 @@ async fn handle_flush(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let not_found_err = format!("session not found: {}", req.session_id);
     let sid: acp::SessionId = req.session_id.into();
     let Some(session) = agent.resident_handle(&sid) else {
-        return Err(acp::Error::invalid_params().data(not_found_err));
+        return Err(crate::acp_error::invalid_params(not_found_err));
     };
     let (tx, rx) = oneshot::channel();
     let _ = session
@@ -55,8 +55,8 @@ async fn handle_flush(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .send(SessionCommand::FlushMemory { respond_to: tx });
     let flushed = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
-        .map_err(|e| acp::Error::internal_error().data(format!("{:?}", e)))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
+        .map_err(|e| crate::acp_error::internal_error(format!("{:?}", e)))?;
     to_raw_response(&MemoryFlushResponse { flushed })
 }
 
@@ -78,7 +78,7 @@ async fn handle_rewrite(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let not_found_err = format!("session not found: {}", req.session_id);
     let sid: acp::SessionId = req.session_id.into();
     let Some(session) = agent.resident_handle(&sid) else {
-        return Err(acp::Error::invalid_params().data(not_found_err));
+        return Err(crate::acp_error::invalid_params(not_found_err));
     };
     let (tx, rx) = oneshot::channel();
     let _ = session.cmd_tx.send(SessionCommand::RewriteMemoryNote {
@@ -88,7 +88,7 @@ async fn handle_rewrite(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     });
     let rewritten = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
-        .map_err(|e| acp::Error::internal_error().data(e))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
+        .map_err(|e| crate::acp_error::internal_error(e))?;
     to_raw_response(&serde_json::json!({ "rewritten": rewritten }))
 }

@@ -351,13 +351,13 @@ impl SubagentSnapshotDto {
 
 fn parse<T: serde::de::DeserializeOwned>(args: &acp::ExtRequest) -> Result<T, acp::Error> {
     serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))
 }
 
 fn respond<T: Serialize>(result: Result<T, impl std::fmt::Display>) -> ExtResult {
     ExtMethodResult::from_result(result)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {

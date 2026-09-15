@@ -297,7 +297,9 @@ pub async fn run_stdio_agent(
                 outgoing,
                 incoming,
             );
-            handle_io.await?;
+            handle_io
+                .await
+                .map_err(|e| anyhow::anyhow!(crate::sampling::error::acp_error_text(&e)))?;
             Ok::<(), anyhow::Error>(())
         })
         .await;

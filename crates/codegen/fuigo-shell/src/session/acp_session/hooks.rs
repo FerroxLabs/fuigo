@@ -59,7 +59,7 @@ fn classify(outcome: ReverseOutcome) -> (ClientHookResponse, ClientHookGateOutco
     let raw = match outcome {
         ReverseOutcome::Responded(raw) => raw,
         ReverseOutcome::Transport(err) => {
-            tracing::warn!(%err, "fuigo/hooks/run transport error (no client wired?); failing open");
+            tracing::warn!(error = %crate::sampling::error::acp_error_text(&err), "fuigo/hooks/run transport error (no client wired?); failing open");
             return fail_open(ClientHookGateOutcome::TransportError);
         }
         ReverseOutcome::Timeout => {

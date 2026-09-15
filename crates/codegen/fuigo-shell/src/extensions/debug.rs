@@ -30,7 +30,7 @@ async fn handle_agent(agent: &MvpAgent) -> ExtResult {
     let registries = agent.registry_snapshot().await;
     ExtMethodResult::success(serde_json::json!({ "registries": registries }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -56,7 +56,7 @@ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> Ex
         Some("tier3") => FeedbackTier::Tier3,
         Some("tier1") | None => FeedbackTier::Tier1,
         Some(other) => {
-            return Err(acp::Error::invalid_params().data(format!(
+            return Err(crate::acp_error::invalid_params(format!(
                 "unknown tier: {other:?} (expected tier1/tier2/tier3)"
             )));
         }
@@ -69,7 +69,7 @@ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> Ex
         Some("stars_text") => FeedbackMode::StarsText,
         Some("thumbs_text") | None => FeedbackMode::ThumbsText,
         Some(other) => {
-            return Err(acp::Error::invalid_params().data(format!(
+            return Err(crate::acp_error::invalid_params(format!(
                 "unknown mode: {other:?} (expected thumbs/stars/text/thumbs_text/stars_text)"
             )));
         }
@@ -77,7 +77,7 @@ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> Ex
 
     let session_id = acp::SessionId::new(params.session_id.clone());
     let handle = agent.resident_handle(&session_id).ok_or_else(|| {
-        acp::Error::invalid_params().data(format!("session not found: {}", params.session_id))
+        crate::acp_error::invalid_params(format!("session not found: {}", params.session_id))
     })?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -89,12 +89,12 @@ async fn handle_trigger_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> Ex
             respond_to: tx,
         })
         .map_err(|_| {
-            acp::Error::internal_error().data("failed to dispatch debug trigger to session")
+            crate::acp_error::session_unavailable("failed to dispatch debug trigger to session")
         })?;
 
     rx.await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
-        .map_err(|e| acp::Error::internal_error().data(format!("Internal error: {e:?}")))
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
+        .map_err(|e| crate::acp_error::internal_error(format!("Internal error: {e:?}")))
 }
 
 fn handle_arm_auto_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -103,12 +103,12 @@ fn handle_arm_auto_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
     let session_id_str = params["sessionId"]
         .as_str()
         .or_else(|| params["session_id"].as_str())
-        .ok_or_else(|| acp::Error::invalid_params().data("sessionId required"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("sessionId required"))?;
     let session_id = acp::SessionId::new(session_id_str);
 
     let handle = agent
         .resident_handle(&session_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
 
     handle
         .force_compact
@@ -121,5 +121,5 @@ fn handle_arm_auto_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
 
     ExtMethodResult::success(serde_json::json!({ "armed": true }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }

@@ -47,9 +47,10 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let sid: acp::SessionId = req.session_id.clone().into();
     let session_handle = agent.resident_handle(&sid);
     let Some(session) = session_handle else {
-        return Err(
-            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
-        );
+        return Err(crate::acp_error::invalid_params(format!(
+            "session not found: {}",
+            req.session_id
+        )));
     };
     let (tx, rx) = oneshot::channel();
     let _ = session.cmd_tx.send(SessionCommand::SideQuestion {
@@ -58,23 +59,32 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     });
     let result = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?;
     match result {
         Ok(answer) => super::to_ext_response(Ok(serde_json::json!({
             "answer": answer,
         }))),
-        Err(SideQuestionError::Sampling(e)) => {
-            Err(crate::sampling::error::map_sampling_err_to_acp(e))
-        }
-        Err(e) => Err(acp::Error::new(
-            acp::ErrorCode::InternalError.into(),
+        Err(e) => Err(side_question_error_to_acp(e)),
+    }
+}
+
+/// The `fuigo/btw` error reply for a failed side question; typed like every shell error, a cancel is request-cancelled (`-32800`).
+fn side_question_error_to_acp(err: SideQuestionError) -> acp::Error {
+    match err {
+        SideQuestionError::Sampling(e) => crate::sampling::error::map_sampling_err_to_acp(e),
+        e @ SideQuestionError::PrepareClient(_) => crate::acp_error::internal_error(e.to_string()),
+        e @ SideQuestionError::EmptyResponse => crate::acp_error::typed(
+            acp::Error::internal_error(),
+            crate::acp_error::AcpErrorKind::Sampling(
+                fuigo_sampler::SamplingErrorKind::EmptyResponse,
+            ),
             e.to_string(),
-        )),
+        ),
     }
 }
 async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     if !agent.cfg.borrow().is_feedback_enabled() {
-        return Err(acp::Error::internal_error().data(
+        return Err(crate::acp_error::internal_error(
             "Feedback is disabled. To enable, set FUIGO_FEEDBACK_ENABLED=true or \
              [features] feedback = true in config.toml.",
         ));
@@ -107,7 +117,9 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
             if let Err(e) = prod_mc_cli_chat_proxy_types::feedback_types::validate_feedback_images(
                 &feedback_input.images,
             ) {
-                return Err(acp::Error::invalid_params().data(format!("feedback images: {e}")));
+                return Err(crate::acp_error::invalid_params(format!(
+                    "feedback images: {e}"
+                )));
             }
             let session_id = acp::SessionId::new(feedback_input.session_id.clone());
             let session_handle = agent.resident_handle(&session_id);
@@ -218,8 +230,9 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 }
                 crate::session::feedback_manager::SubmitOutcome::Failed(e) => {
                     tracing::error!(error = %e, "feedback submission to proxy failed");
-                    return Err(acp::Error::internal_error()
-                        .data(format!("Feedback submission failed: {e}")));
+                    return Err(crate::acp_error::internal_error(format!(
+                        "Feedback submission failed: {e}"
+                    )));
                 }
             }
             let value = serde_json::to_value(FeedbackResponse { success: true })
@@ -273,7 +286,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
             let request_id = dismiss_input.request_id.clone();
             let client = agent
                 .feedback_client()
-                .ok_or_else(|| acp::Error::internal_error().data("No credentials for feedback"))?;
+                .ok_or_else(|| crate::acp_error::internal_error("No credentials for feedback"))?;
             let feedback_base_url = agent.cfg.borrow().endpoints.resolve_feedback_base_url();
             match client.dismiss_request(&request_id).await {
                 Ok(response) => {
@@ -296,8 +309,9 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                         feedback_url = %feedback_base_url,
                         "Failed to dismiss feedback request"
                     );
-                    Err(acp::Error::internal_error()
-                        .data(format!("Failed to dismiss feedback request: {e}")))
+                    Err(crate::acp_error::internal_error(format!(
+                        "Failed to dismiss feedback request: {e}"
+                    )))
                 }
             }
         }
@@ -320,20 +334,27 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             .is_some_and(|a| a.is_zdr_team())
         || agent.team_blocks_one_shot_trace_upload()
     {
-        return Err(acp::Error::internal_error().data("trace upload is not available"));
+        return Err(crate::acp_error::internal_error(
+            "trace upload is not available",
+        ));
     }
     if !agent.feedback_trace_offer() && !agent.cfg.borrow().is_trace_upload_enabled() {
-        return Err(acp::Error::internal_error().data("trace upload is not available"));
+        return Err(crate::acp_error::internal_error(
+            "trace upload is not available",
+        ));
     }
     let sid: acp::SessionId = req.session_id.clone().into();
     if agent.resident_handle(&sid).is_none() {
-        return Err(
-            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
-        );
+        return Err(crate::acp_error::invalid_params(format!(
+            "session not found: {}",
+            req.session_id
+        )));
     }
     let Some(session_dir) = crate::session::persistence::find_session_dir_by_id(&req.session_id)
     else {
-        return Err(acp::Error::invalid_params().data("session directory not found"));
+        return Err(crate::acp_error::invalid_params(
+            "session directory not found",
+        ));
     };
     let session_id = req.session_id.clone();
     let archive = tokio::task::spawn_blocking({
@@ -341,15 +362,17 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         move || crate::upload::feedback_archive::build_session_archive(&session_dir, &session_id)
     })
     .await
-    .map_err(|e| acp::Error::internal_error().data(format!("couldn't build session archive: {e}")))?
+    .map_err(|e| crate::acp_error::internal_error(format!("couldn't build session archive: {e}")))?
     .map_err(|e| {
-        acp::Error::internal_error().data(format!("couldn't build session archive: {e}"))
+        crate::acp_error::internal_error(format!("couldn't build session archive: {e}"))
     })?;
     let Some(gcs_config) = agent
         .one_shot_feedback_gcs_config(req.session_id.clone())
         .await
     else {
-        return Err(acp::Error::internal_error().data("trace upload is not available"));
+        return Err(crate::acp_error::internal_error(
+            "trace upload is not available",
+        ));
     };
     let object_path = format!("{}/feedback_trace.tar.gz", req.session_id);
     use crate::upload::gcs::WithAuth as _;
@@ -369,8 +392,10 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             "uploaded": true,
             "objectPath": object_path,
         }))),
-        Ok(Err(e)) => Err(acp::Error::internal_error().data(format!("trace upload failed: {e:#}"))),
-        Err(_) => Err(acp::Error::internal_error().data("trace upload timed out")),
+        Ok(Err(e)) => Err(crate::acp_error::internal_error(format!(
+            "trace upload failed: {e:#}"
+        ))),
+        Err(_) => Err(crate::acp_error::internal_error("trace upload timed out")),
     }
 }
 /// Record inline code review events.
@@ -407,7 +432,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .await
             {
                 let json_bytes = serde_json::to_vec_pretty(&record)
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
                 let gcs_path = format!(
                     "{}/{}.json",
                     gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
@@ -461,7 +486,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .await
             {
                 let json_bytes = serde_json::to_vec_pretty(&record)
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
                 let event_id = uuid::Uuid::now_v7().to_string();
                 let gcs_path = format!(
                     "{}/{}.json",
@@ -497,5 +522,41 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             Ok(acp::ExtResponse::new(value))
         }
         _ => Err(acp::Error::method_not_found()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A /btw whose side call was cancelled answers JSON-RPC request-cancelled with `error_kind: cancelled`, never an auth error.
+    #[test]
+    fn cancelled_btw_is_request_cancelled_not_auth() {
+        let err = side_question_error_to_acp(SideQuestionError::Sampling(
+            fuigo_sampler::events::request_cancelled_error(),
+        ));
+        assert_eq!(i32::from(err.code), -32800, "{err:?}");
+        assert_eq!(
+            crate::sampling::error::error_kind_str_from_error(&err),
+            Some("cancelled")
+        );
+    }
+
+    /// The non-sampling side-question failures reach the client as typed objects too.
+    #[test]
+    fn non_sampling_btw_failures_carry_typed_data() {
+        for (err, kind) in [
+            (
+                SideQuestionError::PrepareClient("no model configured".into()),
+                "internal",
+            ),
+            (SideQuestionError::EmptyResponse, "empty_response"),
+        ] {
+            let text = err.to_string();
+            let acp_err = side_question_error_to_acp(err);
+            let data = acp_err.data.clone().unwrap_or_default();
+            assert_eq!(data["message"], text.as_str(), "{acp_err:?}");
+            assert_eq!(data["error_kind"], kind, "{acp_err:?}");
+        }
     }
 }

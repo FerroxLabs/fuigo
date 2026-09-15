@@ -104,7 +104,10 @@ impl SessionActor {
             let client = match self.prepare_chat_completion(false).await {
                 Ok(client) => client,
                 Err(error) => {
-                    last_error = format!("could not prepare evaluator client: {error}");
+                    last_error = format!(
+                        "could not prepare evaluator client: {}",
+                        crate::sampling::error::acp_error_text(&error)
+                    );
                     continue;
                 }
             };

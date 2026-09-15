@@ -386,7 +386,7 @@ impl SessionActor {
             Ok(Err(e)) => {
                 tracing::warn!(
                     target: fuigo_telemetry::memory_log::TARGET,
-                    error = %e,
+                    error = %crate::sampling::error::acp_error_text(&e),
                     "{log_prefix}: model call failed"
                 );
                 self.memory.record_dream_result(false);
@@ -537,7 +537,7 @@ impl SessionActor {
             .conversation_collect(request)
             .await
             .map_err(|e| {
-                acp::Error::internal_error().data(format!("dream model call failed: {e}"))
+                crate::acp_error::internal_error(format!("dream model call failed: {e}"))
             })?;
         Ok(response.assistant_text())
     }
@@ -673,10 +673,9 @@ impl SessionActor {
             handle
                 .await
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("flush stream task panicked: {e}"))
+                    crate::acp_error::internal_error(format!("flush stream task panicked: {e}"))
                 })?
-                .map_err(|e| acp::Error::internal_error().data(e))
+                .map_err(|e| crate::acp_error::internal_error(e))
         }
         .await;
 
@@ -881,10 +880,12 @@ impl SessionActor {
             ));
         }
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
-            .await
-            .map_err(|e| format!("failed to prepare client: {e}"))?;
+        let sampling_client = self.prepare_chat_completion(false).await.map_err(|e| {
+            format!(
+                "failed to prepare client: {}",
+                crate::sampling::error::acp_error_text(&e)
+            )
+        })?;
 
         let system = "You are a memory note formatter. Rewrite the user's note into \
             well-structured markdown suitable for a persistent MEMORY.md file. The note should be:\n\

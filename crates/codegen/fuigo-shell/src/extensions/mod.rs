@@ -52,7 +52,7 @@ pub(crate) fn parse_params<T: DeserializeOwned>(args: &acp::ExtRequest) -> Resul
 /// Used by [`parse_params`] and the bridge `encode` hooks, which hold the params `RawValue` directly.
 pub(crate) fn parse_params_str<T: DeserializeOwned>(raw: &str) -> Result<T, acp::Error> {
     serde_json::from_str(raw)
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {}", e)))
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {}", e)))
 }
 pub fn parse_session_id(args: &acp::ExtRequest) -> Option<acp::SessionId> {
     let v: serde_json::Value = serde_json::from_str(args.params.get()).ok()?;
@@ -62,13 +62,13 @@ pub fn parse_session_id(args: &acp::ExtRequest) -> Option<acp::SessionId> {
 pub fn to_ext_response<T: Serialize>(result: anyhow::Result<T>) -> ExtResult {
     ExtMethodResult::from_result(result)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 /// Wrap a serializable value as an `ExtResponse` without the `ExtMethodResult` envelope.
 pub(crate) fn to_raw_response<T: Serialize>(v: &T) -> ExtResult {
     serde_json::value::to_raw_value(v)
         .map(|raw| acp::ExtResponse::new(Arc::from(raw)))
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 pub(crate) fn to_ext_response_partial<T: Serialize>(
     result: anyhow::Result<T>,
@@ -81,7 +81,7 @@ pub(crate) fn to_ext_response_partial<T: Serialize>(
     };
     ext_result
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 /// Empty response for operations that return no data.
 #[derive(Debug, Serialize)]

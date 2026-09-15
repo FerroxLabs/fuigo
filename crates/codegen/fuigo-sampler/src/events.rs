@@ -306,13 +306,11 @@ impl std::str::FromStr for SamplingErrorKind {
 }
 
 /// Message of the completion error a cancelled request resolves with (see [`request_cancelled_error`]).
-pub const REQUEST_CANCELLED_MESSAGE: &str = "request cancelled";
+pub use fuigo_sampling_types::error::REQUEST_CANCELLED_MESSAGE;
 
-/// The completion error a cancelled request resolves with.
-/// `SamplingError` has no cancellation variant, so this rides `Auth` with an unknown credential and a fixed message;
-/// [`SamplingErrorInfo::from`] recognises exactly that shape and classifies it [`SamplingErrorKind::Cancelled`], never `Auth`.
+/// The completion error a cancelled request resolves with: [`SamplingError::Cancelled`], classified [`SamplingErrorKind::Cancelled`].
 pub fn request_cancelled_error() -> SamplingError {
-    SamplingError::auth_unknown(REQUEST_CANCELLED_MESSAGE)
+    SamplingError::Cancelled
 }
 
 impl From<&SamplingError> for SamplingErrorInfo {
@@ -321,13 +319,6 @@ impl From<&SamplingError> for SamplingErrorInfo {
         let message = err.to_string();
 
         let (kind, status_code, retry_after_secs, model_metadata) = match err {
-            // The cancelled-request completion (`request_cancelled_error`) is not an auth rejection
-            SamplingError::Auth {
-                message,
-                credential: SentCredential::Unknown,
-            } if message == REQUEST_CANCELLED_MESSAGE => {
-                (SamplingErrorKind::Cancelled, None, None, None)
-            }
             SamplingError::Auth { .. } => (SamplingErrorKind::Auth, None, None, None),
             SamplingError::InvalidConfiguration(_) => (SamplingErrorKind::Api, None, None, None),
             SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
@@ -362,6 +353,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::DoomLoopDetected { .. } => {
                 (SamplingErrorKind::DoomLoopDetected, None, None, None)
             }
+            SamplingError::Cancelled => (SamplingErrorKind::Cancelled, None, None, None),
         };
 
         let empty_response_context = match err {
@@ -600,6 +592,13 @@ mod tests {
         // A real auth rejection that happens to carry a different message stays Auth
         let auth = SamplingErrorInfo::from(&SamplingError::auth_unknown("token expired"));
         assert_eq!(auth.kind, SamplingErrorKind::Auth);
+    }
+
+    /// Cancellation is its own variant, never inferred from text: a provider auth rejection whose body reads "request cancelled" is still an auth failure.
+    #[test]
+    fn auth_error_whose_message_reads_request_cancelled_stays_auth() {
+        let info = SamplingErrorInfo::from(&SamplingError::auth_unknown(REQUEST_CANCELLED_MESSAGE));
+        assert_eq!(info.kind, SamplingErrorKind::Auth);
     }
 
     #[test]
