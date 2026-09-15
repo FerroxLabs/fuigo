@@ -686,11 +686,167 @@ fn h(e: &acp::Error, d: &str) -> String { match Some(d) { Some(detail) if detail
 /// The `?`-boundary conversions also changed a JSON-RPC class on the wire: a failure to serialize the
 /// agent's OWN data used to reach the client as `-32602 invalid params` through the schema crate's
 /// `From<serde_json::Error>`, and now answers `-32603 internal`. 15-agent-mode.md publishes a code table
-/// for third-party client authors, so every file that flipped has to be named there. An incomplete record
+/// for third-party client authors, so every site that flipped has to be named there. An incomplete record
 /// of a wire change is the same class of defect as an error reply a client cannot read.
+///
+/// The scan used to recognise one literal spelling (`map_err(crate::acp_error::internal_from)`) and to
+/// check only that each site's FILE appeared somewhere in the guide. A flip written any other way --
+/// a shorter path, an imported name, an explicit closure -- was invisible to it, and a sixth flip added
+/// to a file the guide already named passed unnoticed. It now recognises the conversion by name however
+/// it is spelled, and holds the guide to the per-file COUNT it publishes.
+///
+/// The conversion is recognised, not the `serde_json` call: a `serde_json` value in the statement that
+/// ends at the conversion is what tells a serialization failure (`-32602` before 1.0.18) apart from an
+/// `anyhow` one (`into_internal_error`, `-32603` all along -- `extensions/git.rs` is that case).
+fn serialization_flips_in(rel: &str, src: &str) -> Vec<String> {
+    const NEEDLE: &str = "internal_from";
+    let mut code = code_only(src);
+    strip_cfg_test_items(&mut code);
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = find(&code, NEEDLE, from) {
+        from = pos + NEEDLE.len();
+        if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        if code.get(pos + NEEDLE.len()).is_some_and(|&c| is_ident(c)) {
+            continue;
+        }
+        if declares_the_helper(&code, pos) {
+            continue;
+        }
+        if statement_ending_at(&code, pos).contains("serde_json") {
+            out.push(format!("{rel}:{}", line_of(&code, pos)));
+        }
+    }
+    out
+}
+
+/// `fn internal_from(..)` -- the declaration of the conversion, not a use of it.
+fn declares_the_helper(code: &[char], pos: usize) -> bool {
+    let mut i = pos;
+    while i > 0 && code[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i >= 2 && code[i - 2] == 'f' && code[i - 1] == 'n' && (i == 2 || !is_ident(code[i - 3]))
+}
+
+/// The text of the statement that ends at `pos`: back to the nearest `;`, `{` or `}`, capped so a
+/// file-length scan back can never make the check quadratic.
+fn statement_ending_at(code: &[char], pos: usize) -> String {
+    let floor = pos.saturating_sub(600);
+    let mut begin = floor;
+    for i in (floor..pos).rev() {
+        if matches!(code[i], ';' | '{' | '}') {
+            begin = i + 1;
+            break;
+        }
+    }
+    code[begin..pos].iter().collect()
+}
+
+/// How the guide spells a count of replies.
+const COUNT_WORDS: [&str; 10] = [
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+
+/// Every way 15-agent-mode.md can be out of step with the sites the scan found: a file it does not
+/// name at all, or a file whose published count of changed replies is not the count in the tree.
+fn guide_gaps(sites: &[String], guide: &str) -> Vec<String> {
+    let mut per_file: Vec<(String, usize)> = Vec::new();
+    for site in sites {
+        let file = site.split(':').next().unwrap_or_default().to_owned();
+        match per_file.iter_mut().find(|(f, _)| *f == file) {
+            Some((_, n)) => *n += 1,
+            None => per_file.push((file, 1)),
+        }
+    }
+    let mut gaps = Vec::new();
+    for (file, count) in &per_file {
+        let Some(at) = guide.find(file.as_str()) else {
+            gaps.push(format!(
+                "{file}: {count} repl(y/ies) changed class, and the guide does not name the file"
+            ));
+            continue;
+        };
+        // by chars, so a window that lands mid-codepoint cannot panic the guard
+        let window: String = guide[at + file.len()..].chars().take(80).collect();
+        let Some(word) = COUNT_WORDS.get(count - 1) else {
+            // the guide spells counts in words, so a file with more than ten flips needs a new form
+            gaps.push(format!("{file}: {count} sites is past what the guide spells in words"));
+            continue;
+        };
+        if !window.contains(&format!("{word} site")) {
+            gaps.push(format!(
+                "{file}: {count} sites in the tree, but the guide says `{}`",
+                window.replace('\n', " ")
+            ));
+        }
+    }
+    let total = sites.len();
+    let files = per_file.len();
+    let word_for = |n: usize| n.checked_sub(1).and_then(|i| COUNT_WORDS.get(i));
+    if let (Some(t), Some(f)) = (word_for(total), word_for(files)) {
+        let sentence = format!("{t} replies changed class, in {f} file");
+        if !guide.to_lowercase().contains(&sentence) {
+            gaps.push(format!(
+                "the guide's summary does not say `{sentence}s`, which is what the tree holds"
+            ));
+        }
+    }
+    gaps
+}
+
+/// The conversion is recognised however it is written, not only as the one literal the round-5 scan knew.
+#[test]
+fn the_flip_scan_sees_every_spelling_of_the_conversion() {
+    let src = concat!(
+        "fn a() -> ExtResult { Ok(serde_json::value::to_raw_value(&r).map_err(crate::acp_error::internal_from)?) }\n",
+        "fn b() -> ExtResult { Ok(serde_json::to_value(&r).map_err(acp_error::internal_from)?) }\n",
+        "fn c() -> ExtResult { Ok(serde_json::to_value(&r).map_err(internal_from)?) }\n",
+        "fn d() -> ExtResult { Ok(serde_json::to_vec(&r)\n",
+        "    .map_err(|e| crate::acp_error::internal_from(e))?) }\n",
+        "fn e() -> ExtResult { Ok(run().await.map_err(crate::acp_error::internal_from)?) }\n",
+        "fn f() { let _ = \"serde_json .map_err(internal_from)\"; }\n",
+        // deliberately not valid Rust: the shape that puts a `serde_json` value in front of the
+        // DECLARATION of the conversion, which is the one occurrence of the name that is not a use.
+        "let v = serde_json::to_value(&r) pub fn internal_from(e: E) -> acp::Error\n",
+    );
+    assert_eq!(
+        serialization_flips_in("x.rs", src),
+        ["x.rs:1", "x.rs:2", "x.rs:3", "x.rs:5"],
+        "every spelling of the serialization conversion is a flip; an `anyhow` one (line 6), a string \
+         literal (line 7) and the declaration itself (line 8) are not"
+    );
+}
+
+/// The guide publishes a count per file, so the check has to hold it to the count -- naming the file
+/// is not enough once a sixth reply flips inside a file the guide already mentions.
+#[test]
+fn the_guide_check_bites_on_the_site_count_not_just_the_file_name() {
+    let sites: Vec<String> = ["a.rs:1", "a.rs:2", "b.rs:9"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let good = "a.rs`, two sites) and b.rs`, one site). three replies changed class, in two files.";
+    assert!(guide_gaps(&sites, good).is_empty(), "{:?}", guide_gaps(&sites, good));
+    let stale = "a.rs`, one site) and b.rs`, one site). two replies changed class, in two files.";
+    let gaps = guide_gaps(&sites, stale);
+    assert_eq!(gaps.len(), 2, "{gaps:#?}");
+    assert!(gaps[0].contains("a.rs: 2 sites in the tree"), "{gaps:#?}");
+    assert!(gaps[1].contains("three replies changed class, in two files"), "{gaps:#?}");
+    let unnamed = "b.rs`, one site). one replies changed class, in one files.";
+    assert!(
+        guide_gaps(&sites, unnamed)
+            .iter()
+            .any(|g| g.contains("a.rs") && g.contains("does not name the file")),
+        "{:#?}",
+        guide_gaps(&sites, unnamed)
+    );
+}
+
 #[test]
 fn every_serialization_code_flip_is_named_in_the_agent_mode_guide() {
-    const NEEDLE: &str = "map_err(crate::acp_error::internal_from)";
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_sources(&root, &root, &mut files);
@@ -699,23 +855,7 @@ fn every_serialization_code_flip_is_named_in_the_agent_mode_guide() {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let mut code = code_only(&src);
-        strip_cfg_test_items(&mut code);
-        let mut from = 0;
-        while let Some(pos) = find(&code, NEEDLE, from) {
-            from = pos + NEEDLE.len();
-            // Only a serialization (`serde_json::`) conversion flipped the class; an `anyhow` one was
-            // already `-32603` through `into_internal_error`.
-            let stmt: String = code[pos.saturating_sub(200)..pos].iter().collect();
-            if stmt
-                .rsplit(';')
-                .next()
-                .unwrap_or_default()
-                .contains("serde_json::")
-            {
-                flipped.push(format!("{rel}:{}", line_of(&code, pos)));
-            }
-        }
+        flipped.extend(serialization_flips_in(&rel, &src));
     }
     assert!(
         flipped.len() >= 5,
@@ -724,22 +864,12 @@ fn every_serialization_code_flip_is_named_in_the_agent_mode_guide() {
     let doc = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../fuigo-pager/docs/user-guide/15-agent-mode.md");
     let guide = std::fs::read_to_string(&doc).expect("read 15-agent-mode.md");
-    let missing: Vec<&String> = flipped
-        .iter()
-        .filter(|site| {
-            let file = site.split(':').next().unwrap_or_default();
-            !guide.contains(file)
-        })
-        .collect();
+    let gaps = guide_gaps(&flipped, &guide);
     assert!(
-        missing.is_empty(),
-        "{} site(s) changed their JSON-RPC class but 15-agent-mode.md does not name the file:\n{}",
-        missing.len(),
-        missing
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        gaps.is_empty(),
+        "15-agent-mode.md no longer records the replies that changed JSON-RPC class ({}):\n{}\nsites: {flipped:#?}",
+        gaps.len(),
+        gaps.join("\n")
     );
 }
 
