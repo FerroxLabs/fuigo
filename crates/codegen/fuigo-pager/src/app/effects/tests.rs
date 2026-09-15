@@ -56,6 +56,29 @@ fn format_acp_error_typed_truncation_kind_renders_truncation_copy() {
             "Request failed: a future failure quoting: response truncated by max_tokens. Try sending again."
         );
 }
+/// A session/new or session/load failure shows the typed `data.message` on one line, never `acp::Error`'s pretty-printed JSON.
+#[test]
+fn session_setup_failure_renders_the_data_message_not_raw_json() {
+    let err = acp::Error::internal_error().data(serde_json::json!({
+        "message": "http client init failed: invalid proxy url",
+        "error_kind": "api"
+    }));
+    let text = acp_error_user_text(&err);
+    assert_eq!(text, "Internal error: http client init failed: invalid proxy url");
+    assert!(!text.contains('{') && !text.contains('\n'), "{text:?}");
+}
+/// /btw renders its failure through `format_acp_error`.
+/// A status-less `api` error (a 403 content-safety block reaches the pager without `http_status`) must keep the provider's words.
+#[test]
+fn btw_status_less_api_failure_keeps_the_provider_detail() {
+    let err = acp::Error::internal_error().data(serde_json::json!({
+        "message": "Content violates usage guidelines.",
+        "error_kind": "api"
+    }));
+    let text = format_acp_error(&err, false);
+    assert!(text.contains("Content violates usage guidelines"), "{text:?}");
+    assert!(!text.contains("Something went wrong on our side"), "{text:?}");
+}
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     use fuigo_shell::sampling::error::{
