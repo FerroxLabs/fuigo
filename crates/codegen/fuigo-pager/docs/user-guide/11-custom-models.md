@@ -8,6 +8,8 @@ Fuigo connects to custom model endpoints for alternative providers, self-hosted 
 
 Fuigo's shipped default inference route is Flux Router (`https://api.fluxrouter.ai/v1`), using an API key. It does not require you to use that route: configure direct OpenAI, Anthropic, compatible gateways, local endpoints, or subscription models as named entries below. The selected default can be overridden by your configuration; use `-m` to choose a specific configured model.
 
+Every model request Fuigo sends to Flux Router (`api.fluxrouter.ai`, including side calls such as titles, recaps, compaction and web search) opts out of Flux Router's response cache with the body field `"cache": {"no-cache": true, "no-store": true}`, so a retried turn is never answered with a stored copy of an earlier reply; no other endpoint receives that field.
+
 List all available models:
 
 ```bash

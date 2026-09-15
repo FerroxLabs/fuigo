@@ -13,6 +13,7 @@ use rustls::pki_types::pem::PemObject;
 
 pub mod dispatch;
 pub mod egress;
+pub mod fluxrouter;
 pub mod public_download;
 mod redirect;
 
