@@ -60,9 +60,10 @@ static ARMED: Mutex<bool> = Mutex::new(false);
 /// # Errors
 ///
 /// Fails, leaving nothing armed, when the parent cannot be found or opened,
-/// when it already exited (its pid is gone or now names a process younger
-/// than this one), or when the watcher thread cannot start. Idempotent: a
-/// second call after a successful one returns `Ok(())`.
+/// when it already exited (its pid is gone, its process object is already
+/// signalled because someone still holds its handle, or its pid now names a
+/// process younger than this one), or when the watcher thread cannot start.
+/// Idempotent: a second call after a successful one returns `Ok(())`.
 pub(crate) fn arm() -> io::Result<()> {
     let mut armed = ARMED
         .lock()
@@ -109,6 +110,20 @@ fn open_parent() -> io::Result<OwnedHandle> {
         ))
     })?;
     let parent = OwnedHandle(handle);
+    // A pid stays reserved only while some handle to its process object is
+    // open, so a parent that already exited is still openable whenever a third
+    // party holds its handle — the real topology here, where the client that
+    // spawned this process's parent keeps the `Child` it got back. Arming on
+    // such a handle makes the watcher fire at once and terminate this process
+    // at startup, so an already signalled parent is refused exactly like a
+    // gone pid (on Linux `PR_SET_PDEATHSIG` never fires for a parent that is
+    // already dead, and the caller falls back to stdin-EOF cleanup).
+    // SAFETY: `parent.0` is a valid handle opened with SYNCHRONIZE.
+    if unsafe { WaitForSingleObject(parent.0, 0) } == WAIT_OBJECT_0 {
+        return Err(io::Error::other(format!(
+            "parent {parent_pid} already exited (its process object is still open)"
+        )));
+    }
     // A pid is recycled once its process exits: a "parent" created after this
     // process is an unrelated process that inherited the dead parent's pid.
     // SAFETY: both handles are valid for the duration of the calls.
