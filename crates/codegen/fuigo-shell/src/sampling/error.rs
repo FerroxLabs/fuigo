@@ -266,6 +266,18 @@ pub(crate) fn terminal_error_data(
     data
 }
 
+/// Log a failed turn as exactly one ERROR record: the human text ([`acp_error_text`]), the typed kind, and the JSON-RPC code.
+/// The text is logged Debug-quoted so an embedded newline (the legacy-auth hint has several) cannot split the record.
+/// This replaces `#[instrument(err)]` on the turn functions, whose `Display` rendering printed an object `data` as multi-line JSON.
+pub(crate) fn log_turn_error(err: &acp::Error) {
+    tracing::error!(
+        error = ?acp_error_text(err),
+        error_kind = error_kind_str_from_error(err).unwrap_or("none"),
+        code = i32::from(err.code),
+        "turn failed"
+    );
+}
+
 /// The raw `error_kind` marker string from `acp::Error.data`, unparsed, for readers with their own vocabulary.
 /// The pager maps an unknown kind to its `Other`, keeping it immune to text recovery.
 pub fn error_kind_str_from_error(err: &acp::Error) -> Option<&str> {
@@ -760,6 +772,68 @@ mod tests {
             acp_error_text(&acp::Error::internal_error()),
             "Internal error"
         );
+    }
+
+    /// A turn failure is one log record on one line, even when its message spans lines.
+    #[test]
+    fn log_turn_error_writes_one_line_per_record() {
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_turn_error(&acp::Error::internal_error().data(terminal_error_data(
+                "empty response from model (reasoning_only)".into(),
+                None,
+                SamplingErrorKind::EmptyResponse,
+            )));
+            log_turn_error(&acp::Error::internal_error().data(terminal_error_data(
+                "401 Unauthorized\n\nYou are using a deprecated authentication method".into(),
+                Some(401),
+                SamplingErrorKind::Auth,
+            )));
+        });
+        let out = String::from_utf8(capture.0.lock().expect("capture lock").clone())
+            .expect("utf8 log output");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per failed turn, got:\n{out}");
+        assert!(
+            lines[0].contains("ERROR")
+                && lines[0].contains("turn failed")
+                && lines[0].contains(
+                    "error=\"Internal error: empty response from model (reasoning_only)\""
+                )
+                && lines[0].contains("error_kind=\"empty_response\"")
+                && lines[0].contains("code=-32603"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("deprecated authentication method")
+                && lines[1].contains("error_kind=\"auth\""),
+            "{}",
+            lines[1]
+        );
+        assert!(!out.contains('{'), "no JSON object in the log: {out}");
     }
 
     #[test]

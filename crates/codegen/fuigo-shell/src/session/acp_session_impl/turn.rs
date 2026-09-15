@@ -1153,6 +1153,11 @@ impl SessionActor {
                         &mut salvage,
                     )
                     .await;
+                // One single-line record per failed turn, inside this prompt's span
+                // The turn functions no longer use `#[instrument(err)]`: its `Display` spread an object `data` over several lines, twice
+                if let Err(e) = &round {
+                    crate::sampling::error::log_turn_error(e);
+                }
                 if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
                     break round;
                 }
@@ -1845,7 +1850,6 @@ impl SessionActor {
     #[tracing::instrument(
         name = "session.process_conversation_turn_with_recovery",
         skip_all,
-        err,
         fields(req_id = %req_id, session_id = %self.session_info.id.0)
     )]
     pub(super) async fn process_conversation_turn_with_recovery(
@@ -2276,7 +2280,6 @@ impl SessionActor {
     #[tracing::instrument(
         name = "session.process_conversation_turn",
         skip_all,
-        err,
         fields(
             session_id = %self.session_info.id.0,
             model_id,
