@@ -2578,9 +2578,9 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::rewind::handle(self, &args).await
             }
             other => {
-                Err(
-                    crate::acp_error::method_not_found(format!("unknown ACP extension method: {other}")),
-                )
+                // One copy of this message: `unknown_ext_method` also restores the `_` the protocol
+                // crate stripped, so the reply names what the client actually sent.
+                Err(crate::acp_error::unknown_ext_method(other))
             }
         };
         if let Some(err) = backend_no_bridge_err

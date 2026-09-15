@@ -98,11 +98,14 @@ fn unknown_ext_methods_reply_with_typed_object_data() {
                 wire["data"]["error_kind"], "invalid_request",
                 "{method}: {wire}"
             );
+            // The client sent `_<method>` (the protocol crate adds the extension prefix and strips it
+            // again on the agent side). A client author matching our message against their own request
+            // string must find it verbatim, so the reply echoes the `_`-prefixed spelling.
             assert!(
                 wire["data"]["message"]
                     .as_str()
-                    .is_some_and(|m| m.contains(method)),
-                "{method}: the message must name the method the client asked for, got {wire}"
+                    .is_some_and(|m| m.contains(&format!("_{method}"))),
+                "{method}: the message must name the method as the client sent it (`_{method}`), got {wire}"
             );
         }
     });

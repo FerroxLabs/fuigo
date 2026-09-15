@@ -175,8 +175,25 @@ pub fn method_not_found(message: impl Into<String>) -> acp::Error {
 /// `-32601` for a `fuigo/*` extension method this build does not implement: an unknown name, or a member
 /// of a namespace it does serve. Version skew makes this the first error class a third-party client meets,
 /// so it carries the same typed `data` as everything else instead of `data: null`.
+///
+/// `method` is what the routers match on, which is the wire name with its ACP `_` prefix already stripped
+/// (`agent-client-protocol` strips it when it decodes an `ExtRequest`). The message echoes the name the
+/// CLIENT sent -- `_`-prefixed -- so a client author matching our text against their own request string finds it.
 pub fn unknown_ext_method(method: &str) -> acp::Error {
-    method_not_found(format!("unknown ACP extension method: {method}"))
+    method_not_found(format!(
+        "unknown ACP extension method: {}",
+        ext_method_as_sent(method)
+    ))
+}
+
+/// The wire spelling of an extension method name the routers hold in its stripped form.
+/// Idempotent: a name that still carries the `_` is returned untouched.
+fn ext_method_as_sent(method: &str) -> std::borrow::Cow<'_, str> {
+    if method.starts_with('_') {
+        std::borrow::Cow::Borrowed(method)
+    } else {
+        std::borrow::Cow::Owned(format!("_{method}"))
+    }
 }
 
 /// `-32603` internal error, kind `internal`.
@@ -307,9 +324,25 @@ mod tests {
             kind_and_message(&err),
             (
                 "invalid_request",
-                "unknown ACP extension method: fuigo/skills/definitely_not_a_method"
-            )
+                "unknown ACP extension method: _fuigo/skills/definitely_not_a_method"
+            ),
+            "the message must echo the method as the client sent it, `_` prefix included"
         );
+    }
+
+    /// The routers are handed `ExtRequest::method`, which the protocol crate already stripped of its
+    /// `_`. Echoing that back told a client that sent `_fuigo/skills/x` about `fuigo/skills/x`, which
+    /// its own request string never contained. Restoring the prefix is idempotent, so a caller that
+    /// somehow holds the wire spelling does not get `__`.
+    #[test]
+    fn unknown_ext_method_restores_the_wire_prefix_exactly_once() {
+        for name in ["fuigo/not_a_namespace/at_all", "_fuigo/not_a_namespace/at_all"] {
+            assert_eq!(
+                kind_and_message(&unknown_ext_method(name)).1,
+                "unknown ACP extension method: _fuigo/not_a_namespace/at_all",
+                "{name}"
+            );
+        }
     }
 
     /// `send_tool_call_start` used to let `?` convert a `serde_json::Error` through the schema crate:
