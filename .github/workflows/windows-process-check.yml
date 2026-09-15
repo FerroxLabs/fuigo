@@ -1,8 +1,21 @@
 name: Windows process ownership check
+# Windows-only process ownership: attached-child termination, the parent-death
+# watcher and the leader's creation flags. Nothing on Linux or macOS covers
+# them, so this is a gate on every change to the code that owns that behaviour.
 on:
   push:
-    branches: [release/audit-1.0.6]
-    paths: [.github/workflows/windows-process-check.yml]
+    branches: [main, 'release/**']
+    paths:
+      - 'crates/codegen/fuigo-tty-utils/**'
+      - 'crates/codegen/fuigo-shell/src/leader/**'
+      - 'crates/codegen/fuigo-pager-bin/src/main.rs'
+      - '.github/workflows/windows-process-check.yml'
+  pull_request:
+    paths:
+      - 'crates/codegen/fuigo-tty-utils/**'
+      - 'crates/codegen/fuigo-shell/src/leader/**'
+      - 'crates/codegen/fuigo-pager-bin/src/main.rs'
+      - '.github/workflows/windows-process-check.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,7 +26,9 @@ jobs:
       matrix:
         runner: [windows-latest, windows-11-arm]
     runs-on: ${{ matrix.runner }}
-    # A cold fuigo-shell debug test build dominates; the tty-utils suite runs first.
+    # A cold fuigo-shell debug test build dominates (~40 min observed on a cold
+    # cache); the tty-utils suite runs first so its own failures are not hidden
+    # behind that build.
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: never
