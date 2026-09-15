@@ -521,6 +521,103 @@ async fn a_retry_mirror_never_overtakes_answer_text_already_generated() {
         .await;
 }
 
+/// A mirror queued from outside this actor gets everything a mirror sent from inside it gets:
+/// the replay buffer flushed ahead of it, and its own paragraph after streamed reasoning.
+///
+/// The persistence actor's disk-full `retry_state` is the one mirror produced outside the session.
+/// It reaches the client as `SessionEvent::RetryStatusMirror`, and the notification is built here,
+/// where `turn_thought_text_emitted` and `current_prompt_id` live -- a `Send` actor on another task
+/// can read neither, and a direct gateway send would also race the answer text already generated.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mirror_queued_from_outside_the_actor_is_ordered_and_separated() {
+    use crate::extensions::notification::{DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let frames = drain_frames(gateway_rx);
+            let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            drain_persistence(persistence_rx);
+            let (mut actor, mut event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.buffering_settings = Some(crate::agent::update_chunk_merge::BufferingSettings {
+                max_items: 100,
+                max_bytes: 2048,
+                max_duration_ms: 10,
+            });
+            let mut replay_buffer = crate::agent::update_chunk_merge::ReplayBuffer::new(
+                actor.buffering_settings.clone(),
+            );
+
+            actor
+                .send_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new("Saving your answer")),
+                    )),
+                    None,
+                )
+                .await;
+            // The session loop drains it into the replay buffer, which holds it for merging
+            while let Ok(event) = event_rx.try_recv() {
+                actor.handle_session_event(event, &mut replay_buffer).await;
+            }
+            // The turn streamed reasoning before the write failed
+            actor
+                .turn_thought_text_emitted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let disk_full = RetryState::Failed {
+                error_type: DISK_FULL_ERROR_TYPE.to_string(),
+                message: DISK_FULL_USER_MESSAGE.to_string(),
+            };
+            actor
+                .handle_session_event(
+                    SessionEvent::RetryStatusMirror(Box::new(disk_full.clone())),
+                    &mut replay_buffer,
+                )
+                .await;
+            actor
+                .handle_session_event(
+                    SessionEvent::FlushReplay { respond_to: None },
+                    &mut replay_buffer,
+                )
+                .await;
+            pump_local_tasks().await;
+
+            let standard: Vec<Frame> = frames
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|f| matches!(f, Frame::Standard { .. }))
+                .cloned()
+                .collect();
+            assert_eq!(
+                standard,
+                vec![
+                    Frame::Standard {
+                        kind: AGENT_MESSAGE.to_string(),
+                        text: "Saving your answer".to_string(),
+                        retry_status: None,
+                    },
+                    mirror(
+                        &format!(
+                            "\n\nFuigo could not save this session: {DISK_FULL_USER_MESSAGE}\n\n"
+                        ),
+                        &disk_full
+                    ),
+                ],
+                "the queued mirror follows the text already generated and opens its own paragraph"
+            );
+            assert!(
+                !actor
+                    .turn_thought_text_emitted
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "the separator is consumed, so a second mirror does not add another blank line"
+            );
+        })
+        .await;
+}
+
 /// A durable execution scope for the turn `drive_turn` runs under `req_id`, as `handle_turn_input` opens one.
 async fn open_execution(
     actor: &Arc<SessionActor>,
@@ -578,6 +675,11 @@ async fn open_execution_scope(
 /// The assertion is scoped to this file's own fixture rather than to the slot being empty:
 /// a process-global absence would turn some future test's legitimate registration under
 /// `test-actor` into a failure here instead of in the test that made it.
+///
+/// Its red is a MUTATION, not a pre-round failure: this file's fixtures have opened under their
+/// own session id since they were written, so on the tree before this test there is nothing for
+/// it to catch. It goes red when `actor_under_test_for_session` is pointed back at the shared
+/// `test-actor` id, which is the regression it exists to stop.
 #[test]
 fn an_execution_scope_test_keeps_the_shared_session_slot_free() {
     on_session_stack(|| {

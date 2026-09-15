@@ -1276,6 +1276,9 @@ pub(crate) async fn spawn_session_actor(
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let permissions_for_handle = permissions.clone();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    // The persistence actor's disk-full `retry_state` mirror is the one produced outside this
+    // actor; give it the ordered queue so it cannot overtake answer text already generated.
+    persistence.install_retry_status_mirror(event_tx.clone());
     let mut sampler_config_initial = sampling_config.clone();
     sampler_config_initial.idle_timeout_secs = Some(inference_idle_timeout_secs);
     let task_output_budgeted = tool_context.task_output_token_budget.is_some();
