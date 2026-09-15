@@ -949,3 +949,193 @@ fn the_no_data_scan_exempts_the_typed_constructor_module() {
         "the `typed(..)` argument is exempt everywhere"
     );
 }
+
+/// A fourth way a client-visible failure loses its reason, and the one the three scans above cannot
+/// see: not building a bad `data`, but READING a good one as if it were the bare string it used to be.
+/// `err.data.as_ref().and_then(|d| d.as_str())` yields `None` against every error the shell builds
+/// since 1.0.18 typed `data` as an object, so the caller silently records its placeholder instead --
+/// `<no error data>` in the compaction request artifact, `memory flush failed` in the memory-flush
+/// outcome. Both were live defects on this branch until `9432302`.
+///
+/// `sampling/error.rs` is the one module exempt: `error_detail_from_data` reads the string shape on
+/// purpose, because a client may hand back an error built by an agent older than 1.0.18.
+fn string_shaped_data_reads(rel: &str, src: &str) -> Vec<String> {
+    if rel == "sampling/error.rs" {
+        return Vec::new();
+    }
+    let mut code = code_only(src);
+    strip_cfg_test_items(&mut code);
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = find(&code, "data", from) {
+        from = pos + 4;
+        if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        if code.get(pos + 4).is_some_and(|&c| is_ident(c)) {
+            continue;
+        }
+        let end = (pos + 4 + 140).min(code.len());
+        let tail: String = code[pos + 4..end].iter().collect();
+        if reads_the_whole_value_as_a_string(&tail) {
+            out.push(format!("{rel}:{}", line_of(&code, pos)));
+        }
+    }
+    out
+}
+
+/// `tail` begins just after a `data` identifier. Does what follows turn the WHOLE value into a string?
+/// `.as_str()` directly, or through a closure that does nothing else. Reading a FIELD as a string
+/// (`.get("message").and_then(|v| v.as_str())`) is the correct shape and is not flagged.
+fn reads_the_whole_value_as_a_string(tail: &str) -> bool {
+    let compact: String = tail.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut rest = compact.as_str();
+    loop {
+        let hop = [".as_ref()", ".as_deref()", ".clone()", "?"]
+            .into_iter()
+            .find_map(|h| rest.strip_prefix(h));
+        match hop {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    if rest.starts_with(".as_str()") {
+        return true;
+    }
+    [".and_then(|", ".map(|"].into_iter().any(|verb| {
+        rest.strip_prefix(verb).is_some_and(|r| {
+            r.split_once('|').is_some_and(|(bind, body)| {
+                !bind.is_empty()
+                    && bind.chars().all(is_ident)
+                    && body.starts_with(&format!("{bind}.as_str()"))
+            })
+        })
+    })
+}
+
+#[test]
+fn the_string_data_scan_flags_a_whole_value_read_and_leaves_field_reads_alone() {
+    let offending = concat!(
+        "fn a(e: &acp::Error) -> String { e.data.as_ref().and_then(|d| d.as_str()).unwrap_or(\"x\").into() }\n",
+        "fn b(e: &acp::Error) -> String { e\n",
+        "    .data\n",
+        "    .as_ref()\n",
+        "    .and_then(|d| d.as_str())\n",
+        "    .unwrap_or(\"<no error data>\")\n",
+        "    .to_owned() }\n",
+        "fn c(v: &serde_json::Value) -> Option<&str> { v.data.as_str() }\n",
+    );
+    assert_eq!(
+        string_shaped_data_reads("x.rs", offending),
+        ["x.rs:1", "x.rs:3", "x.rs:8"],
+        "every read of a whole `data` as a string is flagged, wherever the chain is broken across lines"
+    );
+    let fine = concat!(
+        "fn d(data: &serde_json::Value) -> Option<&str> { data.get(\"message\").and_then(|v| v.as_str()) }\n",
+        "fn e(e: &acp::Error) -> bool { e.data.as_ref().is_some_and(|d| d.is_object()) }\n",
+        "fn f() { let _ = \"e.data.as_ref().and_then(|d| d.as_str())\"; }\n",
+        "fn g(metadata: &str) -> &str { metadata }\n",
+    );
+    assert!(
+        string_shaped_data_reads("x.rs", fine).is_empty(),
+        "{:#?}",
+        string_shaped_data_reads("x.rs", fine)
+    );
+    assert!(
+        string_shaped_data_reads("sampling/error.rs", offending).is_empty(),
+        "the module that deliberately reads both shapes is exempt"
+    );
+}
+
+#[test]
+fn no_shell_source_reads_an_error_data_as_a_bare_string() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_sources(&root, &root, &mut files);
+    let mut found: Vec<String> = Vec::new();
+    for (rel, path) in files {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        found.extend(string_shaped_data_reads(&rel, &src));
+    }
+    assert!(
+        found.is_empty(),
+        "{} site(s) read an `acp::Error`'s `data` as a bare string, a shape nothing has carried since \
+         1.0.18; read `data.message` (`crate::sampling::error::acp_error_message`) instead:\n{}",
+        found.len(),
+        found.join("\n")
+    );
+}
+
+/// `compaction_artifact_error_text` is a one-line pass-through that exists only to make the read
+/// unit-testable, so `artifact_error_text_tests` pins the HELPER: re-inlining the pre-fix
+/// `e.data.as_ref().and_then(|d| d.as_str()).unwrap_or("<no error data>")` at the call site would leave
+/// every one of those tests green while the artifact went back to recording `<no error data>` for every
+/// failure. Same blind spot A-R5-3 closed for `authenticate`; close it the same way, at the real call
+/// site, on the real file.
+#[test]
+fn the_guard_bites_when_the_compaction_artifact_call_site_re_inlines_its_read() {
+    const CALL_SITE: &str = "let error_str = error.map(compaction_artifact_error_text);";
+    let rel = "session/compaction.rs";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(rel);
+    let src = std::fs::read_to_string(&path).expect("read compaction.rs");
+    assert_eq!(
+        src.matches(CALL_SITE).count(),
+        1,
+        "the compaction request artifact must take its failure text from the typed read, at one call site"
+    );
+    assert!(
+        string_shaped_data_reads(rel, &src).is_empty(),
+        "the shipped file is clean before the mutation"
+    );
+    let re_inlined = src.replace(
+        CALL_SITE,
+        "let error_str = error.map(|e| e.data.as_ref().and_then(|d| d.as_str()).unwrap_or(\"<no error data>\").to_owned());",
+    );
+    assert!(
+        !string_shaped_data_reads(rel, &re_inlined).is_empty(),
+        "the guard must see the bare-string read put back at the call site"
+    );
+}
+
+/// `memory_flush_error_detail` has the same shape and the same blind spot, and a wider blast radius
+/// than the commit that introduced it recorded: the `detail` it returns is not only the `warn` line.
+/// It is formatted into `skipped: {detail}`, which becomes the `outcome` sent to the client as
+/// `FuigoSessionUpdate::MemoryFlushCompleted { result }` on `_fuigo/session_notification`, and printed
+/// in headless JSON output as `AcpLine::MemoryFlushCompleted`. A placeholder there is a client-visible
+/// failure with no reason in it, not a thin log line -- so pin the call site AND the path from the
+/// detail to the notification.
+#[test]
+fn the_guard_bites_when_the_memory_flush_call_site_re_inlines_its_read() {
+    const CALL_SITE: &str = "let detail = memory_flush_error_detail(&e);";
+    let rel = "session/acp_session_impl/memory_dream.rs";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(rel);
+    let src = std::fs::read_to_string(&path).expect("read memory_dream.rs");
+    assert_eq!(
+        src.matches(CALL_SITE).count(),
+        1,
+        "the skipped-flush record must take its reason from the typed read, at one call site"
+    );
+    assert!(
+        src.contains("(format!(\"skipped: {detail}\")"),
+        "the detail this call site reads is what the client is told, so the two must stay wired together"
+    );
+    assert!(
+        src.contains("FuigoSessionUpdate::MemoryFlushCompleted {")
+            && src.contains("result: outcome,"),
+        "`outcome` -- the `skipped: {{detail}}` string -- is what goes out on `_fuigo/session_notification`"
+    );
+    assert!(
+        string_shaped_data_reads(rel, &src).is_empty(),
+        "the shipped file is clean before the mutation"
+    );
+    let re_inlined = src.replace(
+        CALL_SITE,
+        "let detail = e.data.as_ref().and_then(|d| d.as_str()).unwrap_or(\"memory flush failed\");",
+    );
+    assert!(
+        !string_shaped_data_reads(rel, &re_inlined).is_empty(),
+        "the guard must see the bare-string read put back at the call site"
+    );
+}
