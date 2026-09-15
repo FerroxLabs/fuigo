@@ -205,6 +205,11 @@ windows = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }
+# `parent_death_arm_calls`, so a test can observe that `run_stdio_agent` really
+# bound the agent to its parent's lifetime. Dev-only: the accessor is absent
+# from every shipped build (resolver 2 keeps dev-dependency features out of
+# non-test builds).
+fuigo-tty-utils = { workspace = true, features = ["testing"] }
 # The fixture that builds a `[ui.status_line]` section field by field.
 fuigo-status-line = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }

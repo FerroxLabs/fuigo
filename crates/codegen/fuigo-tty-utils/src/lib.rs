@@ -537,6 +537,7 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
 /// **Escape hatch.** [`PARENT_DEATH_DISABLE_ENV`] turns the binding off on
 /// both armed platforms; the call then arms nothing and returns `Ok(())`.
 pub fn kill_current_process_on_parent_death() -> io::Result<()> {
+    note_parent_death_arm_call();
     #[cfg(any(target_os = "linux", windows))]
     if parent_death_watch_disabled() {
         // Opted out: leave the process on its previous lifetime semantics
@@ -555,6 +556,35 @@ pub fn kill_current_process_on_parent_death() -> io::Result<()> {
     #[cfg(windows)]
     parent_death_windows::arm()?;
     Ok(())
+}
+
+/// Calls to [`kill_current_process_on_parent_death`], counted only when the
+/// `testing` feature is on.
+#[cfg(feature = "testing")]
+static PARENT_DEATH_ARM_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Record one call to [`kill_current_process_on_parent_death`]. Compiles to
+/// nothing unless the `testing` feature is on, so shipped builds are unchanged.
+#[inline]
+fn note_parent_death_arm_call() {
+    #[cfg(feature = "testing")]
+    PARENT_DEATH_ARM_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many times this process has called
+/// [`kill_current_process_on_parent_death`], whatever the call then did (armed,
+/// refused, or opted out through [`PARENT_DEATH_DISABLE_ENV`]).
+///
+/// Test-only introspection, the counterpart of
+/// [`registered_parent_death_hook`]: the arm call sits in an entrypoint of
+/// another crate, and off Windows deleting it changes no observable behaviour,
+/// so a test in that crate can only see it through this counter. Same `testing`
+/// cargo feature, enabled as a dev-dependency only, absent from every shipped
+/// build, and therefore not part of the supported surface.
+#[cfg(feature = "testing")]
+pub fn parent_death_arm_calls() -> usize {
+    PARENT_DEATH_ARM_CALLS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Env var that turns the parent-death binding armed by
