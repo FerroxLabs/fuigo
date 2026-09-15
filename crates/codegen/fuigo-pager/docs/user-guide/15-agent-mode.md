@@ -134,7 +134,7 @@ Communication follows the JSON-RPC 2.0 format. A typical session lifecycle:
 
 A failed request gets a JSON-RPC error reply. `code` is the error class and `message` is usually only the class name (for example `Internal error`), so never show `message` on its own. The detail is in `data`.
 
-Every error reply from the agent carries `data` as an object:
+Every error reply the agent itself produces carries `data` as an object (see the note on the protocol layer below):
 
 | `data` field  | Present                         | Meaning                                                                                  |
 | ------------- | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -163,6 +163,10 @@ Some failures add more structured fields next to these, for example the executio
 New values can be added in later releases, so treat an unknown `error_kind` as a generic failure.
 
 `code` stays the JSON-RPC class: `-32603` internal error, `-32000` authentication required, `-32602` invalid params, `-32600` invalid request, `-32601` method not found, `-32002` resource not found, `-32003` rate limited, `-32800` request cancelled.
+
+Two notes on the class:
+
+- A `fuigo/*` extension method this build does not implement answers `-32601` with the object above, naming the method in `data.message`. A request whose method the protocol layer itself rejects before the agent sees it -- an unknown top-level JSON-RPC method, one that is not an extension call -- still comes back as `-32601 Method not found` with no `data`, because no part of the agent runs.
 
 A prompt that failed on an empty model response:
 

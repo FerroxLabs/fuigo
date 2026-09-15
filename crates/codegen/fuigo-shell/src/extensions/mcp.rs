@@ -368,7 +368,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Some(McpRoute::ToggleTool) => handle_toggle_tool(agent, args).await,
         Some(McpRoute::Upsert) => handle_upsert(agent, args).await,
         Some(McpRoute::Delete) => handle_delete(agent, args).await,
-        None => Err(acp::Error::method_not_found()),
+        None => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
