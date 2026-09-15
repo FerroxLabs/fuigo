@@ -24,8 +24,8 @@ pub use self::doom_loop::{
 pub use self::error::{
     ApiErrorCode, EmptyReason, EmptyResponseContext, INVALID_IMAGE_ERROR_CODE,
     ResponseModelMetadata, Result, SamplingError, SentCredential, is_context_length_error,
-    is_retryable_api_status, is_size_overflow_error_code, parse_error_code, status_user_message,
-    user_facing_api_error_message,
+    is_rate_limit_error_code, is_retryable_api_status, is_size_overflow_error_code,
+    parse_error_code, status_user_message, user_facing_api_error_message,
 };
 pub use self::tool_overrides::{
     ClearableField, MAX_WEB_SEARCH_DOMAINS, SearchDateBound, SearchDateBoundError, ToolOverrides,

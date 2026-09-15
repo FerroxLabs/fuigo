@@ -695,8 +695,11 @@ impl Reducer for MessagesReducer {
             _ => None,
         };
         // Default stop reason when no `ResponseCompleted` supplied one; `null` when the turn did not complete normally.
-        let did_not_complete_normally =
-            self.max_turns_hit || refused || cancelled || structured_err.is_some();
+        let did_not_complete_normally = self.max_turns_hit
+            || refused
+            || cancelled
+            || structured_err.is_some()
+            || end.error.is_some();
         let flush_default = if did_not_complete_normally {
             None
         } else {
@@ -706,7 +709,14 @@ impl Reducer for MessagesReducer {
             }
         };
         self.flush_terminal_preamble(&mut out, flush_default);
-        let (subtype, is_error, errors) = if self.max_turns_hit {
+        let (subtype, is_error, errors) = if let Some(error) = end.error {
+            // A run-level failure after the turn answered: one `result` line, marked failed.
+            (
+                "error_during_execution",
+                true,
+                Some(vec![error.to_string()]),
+            )
+        } else if self.max_turns_hit {
             (
                 "error_max_turns",
                 true,
@@ -730,8 +740,11 @@ impl Reducer for MessagesReducer {
         } else {
             ("success", false, None)
         };
+        // A run-level failure after the turn answered still carries the answer it paid for: the
+        // line is `is_error`, but `result` and `structured_output` are real work, not error noise.
+        let keep_payload = !is_error || end.error.is_some();
         let structured_output = match end.structured_output.clone() {
-            Some(Ok(value)) if !is_error => Some(value),
+            Some(Ok(value)) if keep_payload => Some(value),
             _ => None,
         };
         let ru = self.messages_result_usage(end.usage);
@@ -742,7 +755,7 @@ impl Reducer for MessagesReducer {
             duration_api_ms: ru.duration_api_ms,
             num_turns: ru.num_turns,
             // Fall back to the caller's buffer only when no frame was flushed; else `last_text` is authoritative.
-            result: (!is_error).then(|| {
+            result: keep_payload.then(|| {
                 if self.assistant_frames == 0 && self.last_text.is_empty() {
                     end.result_text.to_string()
                 } else {

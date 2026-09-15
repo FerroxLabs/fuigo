@@ -9,6 +9,16 @@ pub(super) struct SendNowOutcome {
     pub(super) mutated: bool,
 }
 
+/// How a promoted queue row's still-pending result is resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PromotedResolution {
+    /// The row never ran and its submitter must discard it (`RemovedFromQueue`).
+    Removed,
+    /// The row's text was merged into the running turn, so whoever awaits it
+    /// must see a normal completion rather than a "removed before it ran" error.
+    DeliveredIntoRunningTurn,
+}
+
 /// Running-turn display fields for `fuigo/queue/changed` (clients paint turn-start UI).
 pub(super) struct RunningPromptDisplay {
     pub id: String,
@@ -637,10 +647,22 @@ impl SessionActor {
         item: InputItem,
         source: crate::session::events::InterjectionSource,
     ) {
+        self.enqueue_prompt_as_interjection_with(item, source, PromotedResolution::Removed);
+    }
+
+    /// `enqueue_prompt_as_interjection`, choosing how the promoted row's
+    /// still-pending result is resolved (see [`PromotedResolution`]).
+    fn enqueue_prompt_as_interjection_with(
+        &self,
+        item: InputItem,
+        source: crate::session::events::InterjectionSource,
+        resolution: PromotedResolution,
+    ) {
         let InputItem {
             prompt_id,
             prompt_blocks,
             respond_to,
+            input_origin,
             ..
         } = item;
         let mut text_parts = Vec::new();
@@ -659,9 +681,29 @@ impl SessionActor {
         }
         let text = text_parts.join("\n\n");
         let image_count = attachments.len() as u32;
+        // The row's origin, not the drain point, decides whose words these are.
+        // A parent-agent message is `InputAuthority::ModelAuthoredUntrusted`; it
+        // must keep that classification across promotion, or the child is told
+        // its parent spoke with its human user's authority and the text goes
+        // through the human slash resolver.
+        // The identity rides along: a buffered entry that never reaches the
+        // running turn (abort, chat-state failure, turn-end strand) is re-queued
+        // as its own prompt turn, and `flush_stranded_interjections` rebuilds the
+        // origin from this.
+        let authority = match input_origin.as_prompt_origin() {
+            PromptOrigin::ParentAgentMessage {
+                message_id,
+                sender_session_id,
+            } => fuigo_interjection_core::InterjectionAuthority::ParentAgent {
+                message_id: message_id.clone(),
+                sender_session_id: sender_session_id.clone(),
+            },
+            _ => fuigo_interjection_core::InterjectionAuthority::User,
+        };
         self.pending_interjections.push(PendingInterjection {
             text: text.clone(),
             attachments,
+            authority,
         });
         self.broadcast_interjection(&text, Some(&prompt_id));
         self.events
@@ -670,12 +712,124 @@ impl SessionActor {
                 image_count,
                 redirect_kind: crate::session::events::RedirectKind::Interjection,
             });
-        Self::respond_removed_prompt(respond_to);
+        match resolution {
+            PromotedResolution::Removed => Self::respond_removed_prompt(respond_to),
+            PromotedResolution::DeliveredIntoRunningTurn => {
+                Self::respond_delivered_prompt(respond_to)
+            }
+        }
         tracing::info!(
             ?source,
             prompt_id = %prompt_id,
             "queued prompt promoted as a mid-turn interjection"
         );
+    }
+
+    /// Resolve a promoted row whose text WAS delivered, merged into the running
+    /// turn rather than run as its own.
+    ///
+    /// `RemovedFromQueue` is wrong here: for a parent-agent message the receipt
+    /// folds into the subagent's final result (`reduce_prompt_turn_result`),
+    /// where it would read "Subagent turn was removed before it ran" and mark
+    /// an otherwise successful subagent failed. The tokens belong to the
+    /// running turn, so this carries none of its own.
+    fn respond_delivered_prompt(respond_to: oneshot::Sender<PromptTurnResult>) {
+        let _ = respond_to.send(Ok(PromptTurnOk {
+            stop_reason: acp::StopReason::EndTurn,
+            total_tokens: 0,
+            turn_snapshot: None,
+            completion_kind: PromptCompletionKind::Completed,
+            structured_output: None,
+            usage: None,
+            tool_overrides: None,
+        }));
+    }
+
+    /// Promote every queued message from the owning parent agent into a
+    /// mid-turn interjection.
+    ///
+    /// A parent-agent message is queue-protected (visible, not editable), so
+    /// `promote_queued_as_interjections` stops at it by design, and that
+    /// function is gated on the user's `follow_up_behavior` preference — which
+    /// governs the human queue, not the parent's channel. Without this the
+    /// message waits out the running turn (a `get_task_output` wait alone can
+    /// hold it for the 10-minute ceiling), and the child keeps executing an
+    /// instruction its parent has already superseded.
+    ///
+    /// No-op while idle: with no running turn the queued row simply starts its
+    /// own turn, exactly as before. Also a no-op for a message that resolves to
+    /// a static builtin (`/compact`), which only the own-turn path can execute.
+    /// Whether an owning parent agent's message resolves to a static builtin
+    /// (`/compact` — the only command with `ModelAuthoredEligibility::ExactCanonical`
+    /// and `BuiltinGate::AlwaysOn`).
+    ///
+    /// Such a message is handled at a turn boundary by `handle_turn_input`'s
+    /// `SlashCommandOutcome::Builtin` arm, which the mid-turn promotion path has
+    /// no equivalent of: promoting it would inject the raw `/compact ...` text as
+    /// `<parent_agent_message>` and silently lose the compaction. Purely
+    /// syntactic and allocation-free — no catalog, no I/O.
+    pub(super) fn parent_message_resolves_to_builtin(prompt_blocks: &[acp::ContentBlock]) -> bool {
+        matches!(
+            crate::session::slash_authority::resolve(
+                crate::session::InputAuthority::ModelAuthoredUntrusted,
+                prompt_blocks,
+                slash_commands::BUILTIN_COMMANDS,
+            ),
+            crate::session::slash_authority::AuthorityResolution::StaticBuiltin(_)
+        )
+    }
+
+    pub(super) async fn promote_parent_agent_messages(&self) {
+        let mut state = self.state.lock().await;
+        let Some(running_id) = state.running_prompt_id().map(str::to_string) else {
+            return;
+        };
+        let mut promoted = Vec::new();
+        while let Some(pos) = state.pending_inputs.iter().position(|item| {
+            item.prompt_id != running_id
+                && matches!(
+                    item.input_origin.as_prompt_origin(),
+                    PromptOrigin::ParentAgentMessage { .. }
+                )
+                // Only the protected row `admit_parent_agent_message` commits.
+                // A queue-hidden row carrying the same origin is an
+                // `interject-fallback-` turn a stranded entry already produced;
+                // promoting it back into the buffer it was rescued from would
+                // undo the rescue.
+                && item.is_queue_protected()
+                // A static builtin (`/compact`) is the one slash a parent agent
+                // can invoke, and `turn.rs` executes it only on the row's own
+                // turn. Promotion would inject the literal text mid-turn and
+                // drop the action, so leave it queued exactly as before.
+                && !Self::parent_message_resolves_to_builtin(&item.prompt_blocks)
+        }) {
+            let Some(item) = state.pending_inputs.remove(pos) else {
+                break;
+            };
+            promoted.push(item);
+        }
+        if promoted.is_empty() {
+            return;
+        }
+        for item in promoted {
+            // The hint that interrupted an in-flight wait named this message; it
+            // is reaching the model now, so later waits must not see it as
+            // pending. Per identifier, not a blanket clear: a message committed
+            // since the scan above belongs to a row this drain did not take.
+            if let PromptOrigin::ParentAgentMessage { message_id, .. } =
+                item.input_origin.as_prompt_origin()
+            {
+                self.rebuild_spec
+                    .parent_message_signal
+                    .message_delivered(message_id);
+            }
+            self.enqueue_prompt_as_interjection_with(
+                item,
+                crate::session::events::InterjectionSource::Queue,
+                PromotedResolution::DeliveredIntoRunningTurn,
+            );
+        }
+        self.broadcast_queue_changed(&state);
     }
 
     /// Move held user prompts into `pending_interjections` so the next drain injects them.

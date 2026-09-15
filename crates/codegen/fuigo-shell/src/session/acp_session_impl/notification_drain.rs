@@ -326,6 +326,17 @@ impl SessionActor {
             )
         };
         self.apply_tool_overrides_update(tool_overrides_update);
+        // This row is reaching the model as its own turn, so it is no longer a
+        // message waiting to be promoted. Left pending, its identifier would be
+        // named in every later interrupt hint as still outstanding and would
+        // keep cutting waits short for a correction the child already handled.
+        if let super::PromptOrigin::ParentAgentMessage { message_id, .. } =
+            input_origin.as_prompt_origin()
+        {
+            self.rebuild_spec
+                .parent_message_signal
+                .message_delivered(message_id);
+        }
         if input_origin.policy().authority.is_human_intent() {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(false);

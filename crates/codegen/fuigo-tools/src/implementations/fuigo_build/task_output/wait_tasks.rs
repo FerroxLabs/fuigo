@@ -178,10 +178,13 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             crate::implementations::fuigo_build::task_output::max_wait_block(),
         );
 
-        let (terminal, backend, read_file_name, max_output_bytes) = {
+        let (terminal, backend, parent_messages, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let backend = res.get::<SubagentBackendResource>().cloned();
+            let parent_messages = res
+                .get::<crate::implementations::fuigo_build::task::parent_message::ParentMessageSignal>()
+                .cloned();
             let renderer = res.require::<TemplateRenderer>()?;
             let rfn = renderer
                 .render("${{ tools.by_kind.read }}")
@@ -195,7 +198,7 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
                     )
                 })
                 .unwrap_or(DEFAULT_TOOL_OUTPUT_BYTES);
-            (terminal, backend, rfn, mob)
+            (terminal, backend, parent_messages, rfn, mob)
         };
 
         let initial = resolve_tasks(
@@ -204,31 +207,35 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             &backend,
             &read_file_name,
             max_output_bytes,
-            WaitHint::NotRequested,
+            &WaitHint::NotRequested,
         )
         .await;
 
         let has_pending =
             !initial.pending_bash_ids.is_empty() || !initial.pending_subagent_ids.is_empty();
 
+        let mut interrupt_notice: Option<String> = None;
         let results = if has_pending {
             let deadline = tokio::time::Instant::now() + timeout;
             let wait_hint = wait_any_event_driven(
                 &terminal,
                 &backend,
+                parent_messages.as_ref(),
                 &initial.pending_bash_ids,
                 &initial.pending_subagent_ids,
                 deadline,
             )
             .await
             .hint(requested, timeout);
+            let (per_task_hint, notice) = super::fold_multi_wait_interrupt(&wait_hint);
+            interrupt_notice = notice;
             resolve_tasks(
                 &input.task_ids,
                 &terminal,
                 &backend,
                 &read_file_name,
                 max_output_bytes,
-                wait_hint,
+                &per_task_hint,
             )
             .await
             .results
@@ -241,7 +248,11 @@ impl fuigo_tool_runtime::Tool for WaitTasksTool {
             .filter(|r| super::is_terminal_status(&r.status))
             .count();
         let total = results.len();
-        let summary = format!("{completed_count}/{total} tasks completed (wait_any)");
+        let mut summary = format!("{completed_count}/{total} tasks completed (wait_any)");
+        if let Some(notice) = interrupt_notice {
+            summary.push('\n');
+            summary.push_str(&notice);
+        }
 
         Ok(TaskOutputOutput::MultiResult(MultiTaskOutputResult {
             mode: "wait_any".to_string(),

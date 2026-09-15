@@ -92,6 +92,7 @@ fn messages_result_usage_splits_disjoint_buckets() {
         structured_output: None,
         result_text: "",
         duration_ms: 0,
+        error: None,
     });
     let usage = &out.last().unwrap()["usage"];
     assert_eq!(usage["input_tokens"], 85);
@@ -164,6 +165,7 @@ fn messages_result_carries_durations() {
         structured_output: None,
         result_text: "",
         duration_ms: 4242,
+        error: None,
     });
     let result = out.last().unwrap();
     assert_eq!(result["duration_ms"], 4242);
@@ -323,6 +325,7 @@ fn messages_structured_output_error_marks_retry_subtype() {
         structured_output: Some(Err("output does not match schema".into())),
         result_text: "",
         duration_ms: 0,
+        error: None,
     });
     let result = out.last().unwrap();
     assert_eq!(result["subtype"], "error_max_structured_output_retries");
@@ -407,6 +410,7 @@ fn messages_finish_abnormal_outcomes_stamp_null_stop_reason() {
             structured_output: None,
             result_text: "",
             duration_ms: 0,
+            error: None,
         });
         out.iter()
             .find(|m| m["type"] == "assistant")
@@ -486,6 +490,7 @@ fn messages_retry_exhausted_null_stop_reason_overrides_retained_end_turn() {
             structured_output: Some(Err("output does not match schema".into())),
             result_text: "",
             duration_ms: 0,
+            error: None,
         });
         let assistant = out
             .iter()

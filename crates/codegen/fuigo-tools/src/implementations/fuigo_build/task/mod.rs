@@ -12,6 +12,8 @@
 //! - `MaxSubagentDepth` — max nesting (optional, defaults to [`MAX_SUBAGENT_DEPTH`])
 //! - `SessionIdResource` — current session ID for parent scoping (optional)
 //! - `SubagentForegroundWait` — host wait-window guard factory (optional)
+//! - `ParentMessageSignal` — wakes in-flight tool waits when the owning parent
+//!   agent's message is committed to this session's queue (optional)
 //! - `TaskModelValidator` — validates explicit model slugs before spawn
 
 mod active_message;
@@ -20,6 +22,7 @@ pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
 pub use coordinator_state::{cap_completion_output, completion_summary};
+pub mod parent_message;
 pub mod types;
 
 use self::backend::SubagentBackendResource;

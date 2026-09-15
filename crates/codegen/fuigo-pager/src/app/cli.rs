@@ -720,6 +720,19 @@ pub struct PagerArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub background_wait_timeout_secs: u64,
+    /// Hard cap on a headless (`-p`) run, in seconds. Off by default: without it a turn whose agent
+    /// never produces an end event waits forever. On elapse the run kills pending background work,
+    /// prints an error result and exits non-zero. Does not apply to the interactive TUI.
+    ///
+    /// `FUIGO_HEADLESS_TIMEOUT_SECS` is read by [`PagerArgs::headless_total_timeout`], not by clap:
+    /// a host that exports it empty or unparsable must not break argument parsing for every other
+    /// mode (see [`parse_headless_timeout_env`]).
+    #[arg(
+        long = "timeout",
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub headless_timeout_secs: Option<u64>,
     /// Sandbox profile for filesystem and network access.
     #[arg(long, env = "FUIGO_SANDBOX", value_name = "PROFILE")]
     pub sandbox: Option<String>,
@@ -1060,10 +1073,96 @@ impl PagerArgs {
             .map(str::trim)
             .filter(|s| !s.is_empty())
     }
+    /// The headless run cap: `--timeout` if given, else `FUIGO_HEADLESS_TIMEOUT_SECS`, else off.
+    ///
+    /// The environment variable is resolved here rather than by clap so a malformed value degrades
+    /// to "no cap" instead of failing argument parsing for every `fuigo` invocation, the
+    /// interactive TUI included.
+    pub fn headless_total_timeout(&self) -> Option<std::time::Duration> {
+        self.headless_timeout_secs
+            .or_else(|| {
+                parse_headless_timeout_env(std::env::var(HEADLESS_TIMEOUT_ENV).ok().as_deref())
+            })
+            .map(std::time::Duration::from_secs)
+    }
+}
+
+/// Env fallback for `--timeout`, in whole seconds.
+pub const HEADLESS_TIMEOUT_ENV: &str = "FUIGO_HEADLESS_TIMEOUT_SECS";
+
+/// Lenient `FUIGO_HEADLESS_TIMEOUT_SECS` parse: unset, empty, `0` or unparsable all mean "no cap".
+///
+/// Deliberately not a clap `env =`: clap runs its `range(1..)` value parser on the environment for
+/// every subcommand and every mode, so an empty or garbage value there aborts `fuigo --version`,
+/// `fuigo doctor` and the TUI — modes the flag does not even apply to. This matches
+/// `FUIGO_SKILLS_DISCOVERY_TIMEOUT_MS`, which falls back the same way.
+pub fn parse_headless_timeout_env(raw: Option<&str>) -> Option<u64> {
+    let raw = raw.map(str::trim).filter(|v| !v.is_empty())?;
+    match raw.parse::<u64>() {
+        Ok(0) => {
+            ::tracing::warn!("{HEADLESS_TIMEOUT_ENV}=0 is not a timeout; running with no cap");
+            None
+        }
+        Ok(secs) => Some(secs),
+        Err(_) => {
+            ::tracing::warn!(
+                value = raw,
+                "{HEADLESS_TIMEOUT_ENV} is not a number of seconds; running with no cap"
+            );
+            None
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A host that exports `FUIGO_HEADLESS_TIMEOUT_SECS` empty or garbage must not brick the CLI:
+    /// clap runs an env-backed value parser for *every* subcommand and mode, so a `range(1..)`
+    /// parser on the environment made `fuigo --version`, `fuigo doctor` and the interactive TUI
+    /// fail at argument parsing over a flag none of them use.
+    #[test]
+    #[serial_test::serial(FUIGO_HEADLESS_TIMEOUT_SECS)]
+    fn a_malformed_headless_timeout_env_does_not_break_argument_parsing() {
+        for bad in ["", "  ", "0", "abc", "-5", "900s"] {
+            let _guard = crate::test_util::EnvVarGuard::set(HEADLESS_TIMEOUT_ENV, bad);
+            let args = PagerArgs::try_parse_from(["fuigo", "--version"]).unwrap_or_else(|e| {
+                panic!("{HEADLESS_TIMEOUT_ENV}={bad:?} must not fail argument parsing: {e}")
+            });
+            assert!(args.version);
+            assert_eq!(
+                args.headless_total_timeout(),
+                None,
+                "{HEADLESS_TIMEOUT_ENV}={bad:?} must degrade to no cap"
+            );
+        }
+    }
+    /// A well-formed value still applies, and an explicit `--timeout` outranks it.
+    #[test]
+    #[serial_test::serial(FUIGO_HEADLESS_TIMEOUT_SECS)]
+    fn a_valid_headless_timeout_env_still_applies_and_the_flag_wins() {
+        let _guard = crate::test_util::EnvVarGuard::set(HEADLESS_TIMEOUT_ENV, "900");
+        let from_env = PagerArgs::try_parse_from(["fuigo", "-p", "x"]).expect("parses");
+        assert_eq!(
+            from_env.headless_total_timeout(),
+            Some(std::time::Duration::from_secs(900))
+        );
+        let from_flag =
+            PagerArgs::try_parse_from(["fuigo", "-p", "x", "--timeout", "30"]).expect("parses");
+        assert_eq!(
+            from_flag.headless_total_timeout(),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+    /// `--timeout` itself stays strict: a bad *flag* value is a user error worth failing on.
+    #[test]
+    fn the_timeout_flag_itself_still_rejects_garbage() {
+        for bad in ["0", "abc", ""] {
+            assert!(
+                PagerArgs::try_parse_from(["fuigo", "-p", "x", "--timeout", bad]).is_err(),
+                "--timeout {bad:?} must be rejected"
+            );
+        }
+    }
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
         for flag in ["--version", "-v", "-V"] {
