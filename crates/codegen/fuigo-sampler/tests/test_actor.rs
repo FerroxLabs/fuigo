@@ -1416,6 +1416,82 @@ async fn responses_doom_loop_does_not_resample_after_output_when_retry_only_befo
 // Helpers for draining the event channel
 // ---------------------------------------------------------------------------
 
+/// A reasoning model that streams only reasoning (no text, no tool call) on every attempt.
+/// On the default budget this used to resend the byte-identical request 14 more times over ~5 minutes; it must now fail within seconds after one resend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_reasoning_only_stream_fails_fast_after_one_resend() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let events = sse_events_to_axum(sse::responses_api_reasoning_only_events(
+                    "Let me think about this carefully",
+                    "test-model",
+                ));
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let mut cfg = responses_config(server.base_url(), None);
+    // The production default budget, not this file's test-speed budget of 2.
+    cfg.max_retries = Some(fuigo_sampler::DEFAULT_MAX_RETRIES);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let started = std::time::Instant::now();
+    handle.submit(
+        RequestId::from("req-reasoning-only"),
+        user_request("Say hello in one word."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
+    let elapsed = started.elapsed();
+    server.shutdown();
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "must fail in under 10 s: {elapsed:?}"
+    );
+    let retrying: Vec<(u32, u32, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying {
+                attempt,
+                max_retries,
+                kind,
+                ..
+            } => Some((*attempt, *max_retries, kind.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retrying,
+        vec![(1, 2, "empty_response")],
+        "one resend, announced against the empty-response cap"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind.as_str(), "empty_response");
+            assert_eq!(
+                error.empty_response_context.as_ref().map(|c| c.reason),
+                Some(fuigo_sampling_types::EmptyReason::ReasoningOnly)
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "the original request plus exactly one resend"
+    );
+}
+
 /// Drain the event channel until a terminal event (`Completed` or `Failed`) is received, or until `deadline` elapses.
 async fn drain_until_terminal(
     rx: &mut mpsc::UnboundedReceiver<SamplingEvent>,
