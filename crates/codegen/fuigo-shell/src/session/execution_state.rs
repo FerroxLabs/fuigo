@@ -293,11 +293,17 @@ fn admit_attempt(
 ///
 /// The resend carries the liability forward, so the attempt stops counting as
 /// unresolved work on the terminal receipt. Its call debit is never refunded, and
-/// usage it reported is still charged. Unlike [`Change::Settle`], a superseded
-/// attempt with no reported usage does not poison the token limits with
-/// `unknown_usage`: a retry storm would otherwise deny every later admission under a
-/// token budget, and today such an attempt is never settled at all, so nothing is
-/// charged for it either way.
+/// usage it reported is still charged.
+///
+/// Unlike [`Change::Settle`], a superseded attempt with no reported usage does not set
+/// `unknown_usage`, which denies every later admission under a token budget and finalizes
+/// the turn. That protection is what keeps the empty-response path safe: an empty reply is
+/// never a `Change::Settle` (only a provider completion settles), so every resent empty
+/// attempt arrives here, carrying the usage the provider reported if it reported any and
+/// nothing if it did not. Without the distinction, the two empty replies in a row that this
+/// release exists to fix would deny the work that follows them.
+/// Pinned by `empty_replies_leave_the_execution_token_budget_usable` and by
+/// `a_resent_attempt_settles_while_an_abandoned_one_stays_unresolved`.
 fn supersede_attempt(
     state: &mut Snapshot,
     attempt_id: &str,
@@ -514,6 +520,13 @@ pub(crate) struct Execution {
     tx: mpsc::WeakUnboundedSender<PersistenceMsg>,
     deadline_ms: AtomicI64,
     parent_grant: Option<Arc<ChildGrant>>,
+    /// Whether any attempt of this execution is abandoned and still waiting for a resubmit
+    /// to take it over. [`Execution::supersede_pending_attempts`] runs before every model
+    /// submission and almost always has nothing to do; without this it pays a persistence
+    /// round trip and a state-file read each time to learn that. Set by [`ExecutionAdmission::abandon`]
+    /// (a child grant's abandon reaches its parent through the same method) and seeded from
+    /// the durable state at [`Execution::open`], so a restored execution still sweeps.
+    abandoned_attempts: std::sync::atomic::AtomicBool,
 }
 
 // Retain through cancellation so the existing terminal-delivery path can commit
@@ -568,6 +581,7 @@ impl Execution {
             tx: tx.downgrade(),
             deadline_ms: AtomicI64::new(i64::MAX),
             parent_grant,
+            abandoned_attempts: std::sync::atomic::AtomicBool::new(false),
         });
         let state = execution
             .change(Change::Open {
@@ -580,6 +594,10 @@ impl Execution {
         execution
             .deadline_ms
             .store(state.deadline_ms.unwrap_or(i64::MAX), Ordering::Release);
+        // A restored execution may already carry abandoned attempts; its first sweep must run.
+        execution
+            .abandoned_attempts
+            .store(!state.abandoned.is_empty(), Ordering::Release);
         // A restored execution with an unknown attempt may only finalize; it must
         // never repeat actions whose effects were lost at the crash boundary.
         if state.phase == Phase::Working
@@ -673,16 +691,37 @@ impl Execution {
         }
         self.change(Change::ToolsSettled { ids }).await.map(|_| ())
     }
-    /// Supersede every attempt the sampler marked abandoned, because this caller is
-    /// resubmitting the logical call they belong to (the shell's transient-retry, auth
-    /// and rate-limit resubmits). In-flight attempts and attempts of other logical calls
-    /// are untouched: only a finished, unsuperseded attempt is ever marked.
+    /// Supersede every abandoned attempt of this execution, because this caller is
+    /// resubmitting a logical call and the sampler marked those attempts finished.
+    ///
+    /// In-flight attempts are untouched -- only an attempt the sampler already handed off
+    /// with [`Change::Abandon`] is ever marked. Abandoned attempts of OTHER logical calls in
+    /// the same execution (a side call's, a subagent's through its parent grant) are swept
+    /// too: the execution's abandoned set is not partitioned by logical call, and the
+    /// sweeping resubmit does not know which attempts belong to it. That is deliberate --
+    /// an abandoned attempt is finished work whoever left it, and leaving one behind makes
+    /// the turn's terminal receipt partial -- but it is wider than "the caller's own call".
+    ///
+    /// Costs nothing when nothing is abandoned: that is the common case, and this runs
+    /// before every model submission.
     pub(crate) async fn supersede_pending_attempts(&self) -> io::Result<()> {
-        for attempt_id in self.snapshot().await?.abandoned {
+        if !self.abandoned_attempts.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        // Anything that fails leaves the sweep armed, so the next submission retries it.
+        let abandoned = match self.snapshot().await {
+            Ok(state) => state.abandoned,
+            Err(error) => {
+                self.abandoned_attempts.store(true, Ordering::Release);
+                return Err(error);
+            }
+        };
+        for attempt_id in abandoned {
             // `supersede` carries the same settlement to a parent grant.
-            ExecutionAdmission::supersede(self, attempt_id, None)
-                .await
-                .map_err(denied_owned)?;
+            if let Err(error) = ExecutionAdmission::supersede(self, attempt_id, None).await {
+                self.abandoned_attempts.store(true, Ordering::Release);
+                return Err(denied_owned(error));
+            }
         }
         Ok(())
     }
@@ -789,7 +828,11 @@ impl ExecutionAdmission for Execution {
             self.change(Change::Abandon { attempt_id })
                 .await
                 .map(|_| ())
-                .map_err(|_| "execution settlement not durable".into())
+                .map_err(|_| -> String { "execution settlement not durable".into() })?;
+            // Arm the sweep the next submission runs; until then the attempt stays pending.
+            self.abandoned_attempts
+                .store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
         })
     }
 }
@@ -926,6 +969,118 @@ mod tests {
             }
         });
         (tx, task)
+    }
+
+    type SeenChanges = Arc<Mutex<Vec<String>>>;
+
+    /// [`fixture_actor`] that also records the variant of every change it applied, so a test
+    /// can count what actually left the process.
+    fn counting_fixture_actor(
+        dir: std::path::PathBuf,
+    ) -> (
+        mpsc::UnboundedSender<PersistenceMsg>,
+        tokio::task::JoinHandle<()>,
+        SeenChanges,
+    ) {
+        let seen: SeenChanges = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } = message
+                {
+                    let label = format!("{:?}", mutation.change);
+                    sink.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(label.split_whitespace().next().unwrap_or("").to_owned());
+                    let _ = respond_to.send(apply(&dir, mutation).await);
+                } else {
+                    panic!("unexpected fixture message");
+                }
+            }
+        });
+        (tx, task, seen)
+    }
+
+    fn reads(seen: &SeenChanges) -> usize {
+        seen.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|label| *label == "Read")
+            .count()
+    }
+
+    /// The sweep that takes abandoned attempts over runs before EVERY model submission, and
+    /// the common case is that nothing was abandoned. Reading the durable state to discover
+    /// that is a persistence-actor round trip and a state-file read per model call, forever.
+    /// The execution remembers whether anything is abandoned, so the no-op sweep never leaves
+    /// the process -- and it starts sweeping again the moment something is.
+    #[tokio::test]
+    async fn a_sweep_with_nothing_to_supersede_never_leaves_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, actor, seen) = counting_fixture_actor(dir.path().to_owned());
+        let session = uuid::Uuid::new_v4().to_string();
+        let execution = Execution::open(
+            &tx,
+            &session,
+            "quiet",
+            "turn1",
+            9,
+            None,
+            Some(9),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        // Three model submissions of one turn, each preceded by the sweep, none abandoned.
+        for _ in 0..3 {
+            execution.supersede_pending_attempts().await.unwrap();
+            let attempt = uuid::Uuid::new_v4().to_string();
+            execution
+                .admit(RequestPurpose::Work, attempt.clone())
+                .await
+                .unwrap();
+            execution
+                .settle(attempt, Some(fuigo_sampling_types::TokenUsage::default()))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            reads(&seen),
+            0,
+            "a sweep with nothing to supersede costs no round trip: {:?}",
+            seen.lock().unwrap_or_else(|e| e.into_inner())
+        );
+
+        // An abandoned attempt still gets taken over, and the sweep goes quiet again after.
+        let attempt = uuid::Uuid::new_v4().to_string();
+        execution
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::abandon(execution.as_ref(), attempt.clone())
+            .await
+            .unwrap();
+        execution.supersede_pending_attempts().await.unwrap();
+        let state = execution.snapshot().await.unwrap();
+        assert!(
+            state.abandoned.is_empty() && !state.pending.contains(&attempt),
+            "the sweep takes the abandoned attempt over: {state:?}"
+        );
+        let settled = reads(&seen);
+        execution.supersede_pending_attempts().await.unwrap();
+        assert_eq!(
+            reads(&seen),
+            settled,
+            "the sweep is quiet again once nothing is abandoned"
+        );
+        execution.release(&session);
+        drop(tx);
+        actor.await.unwrap();
     }
 
     #[tokio::test]
