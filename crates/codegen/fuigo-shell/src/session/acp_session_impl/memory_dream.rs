@@ -934,9 +934,15 @@ impl SessionActor {
     }
 }
 
-/// Why a memory flush failed, for the warn record and the flush outcome.
+/// Why a memory flush failed.
+///
+/// Not only the `warn` record: the detail is formatted into `skipped: {detail}`, which becomes the
+/// flush `outcome` the client is sent as `FuigoSessionUpdate::MemoryFlushCompleted { result }` on
+/// `_fuigo/session_notification`, and which headless runs print as `AcpLine::MemoryFlushCompleted`.
+/// So this is a client-visible surface, not a log line.
+///
 /// It used to read `data` as a string, which is a shape no shell error has carried since 1.0.18 typed
-/// every `data` as an object -- so every failure recorded the bare fallback instead of its reason.
+/// every `data` as an object -- so every failure told the user `memory flush failed` and nothing else.
 fn memory_flush_error_detail(err: &acp::Error) -> String {
     crate::sampling::error::acp_error_message(err)
 }
@@ -946,7 +952,8 @@ mod memory_flush_error_detail_tests {
     use super::memory_flush_error_detail;
     use agent_client_protocol as acp;
 
-    /// The skip record is the only trace a dropped flush leaves, so it has to name the failure.
+    /// The skip record is what the client is shown -- `skipped: {detail}` on
+    /// `_fuigo/session_notification` and in headless output -- so it has to name the failure.
     #[test]
     fn a_failed_flush_records_why_not_a_placeholder() {
         let err = crate::acp_error::internal_error("empty response from model (reasoning_only)");
@@ -962,6 +969,25 @@ mod memory_flush_error_detail_tests {
         assert_eq!(
             memory_flush_error_detail(&acp::Error::internal_error()),
             "Internal error"
+        );
+    }
+
+    /// The detail is not a log line. It is formatted into the flush `outcome` and sent to the client,
+    /// so pin it on the wire shape the client actually receives.
+    #[test]
+    fn the_skip_outcome_reaches_the_client_carrying_the_reason() {
+        let err = crate::acp_error::internal_error("empty response from model (reasoning_only)");
+        let detail = memory_flush_error_detail(&err);
+        let update = crate::extensions::notification::SessionUpdate::MemoryFlushCompleted {
+            result: format!("skipped: {detail}"),
+            path: None,
+        };
+        let wire = serde_json::to_value(&update).expect("serialize the notification");
+        assert_eq!(wire["sessionUpdate"], "memory_flush_completed");
+        assert_eq!(
+            wire["result"],
+            "skipped: empty response from model (reasoning_only)",
+            "the client is told why the flush was skipped: {wire}"
         );
     }
 }
