@@ -47,8 +47,8 @@ pub use handle::{CollectedSamplingResult, DoomLoopRecoveryAttempt, SamplerHandle
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use retry::{
     DEFAULT_MAX_RETRIES, EMPTY_RESPONSE_MAX_ATTEMPTS, EMPTY_RESPONSE_RETRY_BACKOFF,
-    MAX_RETRY_BACKOFF, RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD,
-    REASONING_ONLY_MAX_ATTEMPTS, RetryDecision, classify_error, effective_max_retries,
+    MAX_RETRY_BACKOFF, RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision,
+    classify_error, effective_max_retries, empty_response_announced_attempts,
     format_sampling_error, jitter_backoff, resolve_max_retries, retry_after_or_backoff,
     retry_backoff_with_jitter,
 };

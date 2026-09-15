@@ -53,11 +53,26 @@ pub(super) fn drain_gateway(
     captured
 }
 
+/// Serves the persistence messages a turn depends on: flush acks, and the durable
+/// execution-state mutations an [`crate::session::execution_state::Execution`] makes
+/// (admission, settlement, terminal receipt), against a temporary state directory.
+/// Tests that never open an execution see no mutations, so the directory stays unused.
 pub(super) fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
     tokio::task::spawn_local(async move {
+        let dir = tempfile::tempdir().expect("execution-state fixture directory");
         while let Some(msg) = rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(Ok(()));
+            match msg {
+                PersistenceMsg::FlushAndAck { respond_to } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } => {
+                    let _ = respond_to
+                        .send(crate::session::execution_state::apply(dir.path(), mutation).await);
+                }
+                _ => {}
             }
         }
     });

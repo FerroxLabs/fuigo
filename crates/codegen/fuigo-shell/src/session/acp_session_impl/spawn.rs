@@ -1676,6 +1676,7 @@ pub(crate) async fn spawn_session_actor(
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
+        turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,

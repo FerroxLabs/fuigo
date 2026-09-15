@@ -520,10 +520,16 @@ impl SessionActor {
     /// Answer text rides that queue and the replay buffer's merge window, so a direct send could reach the client ahead of text generated before the retry.
     fn emit_retry_status_mirror(&self, state: &crate::extensions::notification::RetryState) {
         let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+        // Open a paragraph of its own after streamed reasoning; the line ends with a blank
+        // line of its own, so the mirror after a mirror needs no second separator.
+        let after_thought_text = self
+            .turn_thought_text_emitted
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
         let notification = crate::extensions::notification::retry_status_notification(
             self.session_info.id.clone(),
             state,
             prompt_id,
+            after_thought_text,
         );
         if let Err(unsent) = self
             .event_tx

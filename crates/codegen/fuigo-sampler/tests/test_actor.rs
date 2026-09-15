@@ -1417,9 +1417,9 @@ async fn responses_doom_loop_does_not_resample_after_output_when_retry_only_befo
 // ---------------------------------------------------------------------------
 
 /// A reasoning model that streams only reasoning (no text, no tool call) on every attempt.
-/// On the default budget this used to resend the byte-identical request 14 more times over ~5 minutes; it must now fail within seconds after one resend.
+/// On the default budget this used to resend the byte-identical request 14 more times over ~5 minutes; it must now fail within seconds after two resends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_reasoning_only_stream_fails_fast_after_one_resend() {
+async fn responses_reasoning_only_stream_fails_fast_after_the_empty_response_budget() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -1472,8 +1472,8 @@ async fn responses_reasoning_only_stream_fails_fast_after_one_resend() {
         .collect();
     assert_eq!(
         retrying,
-        vec![(1, 2, "empty_response")],
-        "one resend, announced against the empty-response cap"
+        vec![(1, 3, "empty_response"), (2, 3, "empty_response")],
+        "two resends, announced against the one empty-response budget"
     );
     match events.last().unwrap() {
         SamplingEvent::Failed { error, .. } => {
@@ -1487,15 +1487,15 @@ async fn responses_reasoning_only_stream_fails_fast_after_one_resend() {
     }
     assert_eq!(
         counter.load(Ordering::SeqCst),
-        2,
-        "the original request plus exactly one resend"
+        3,
+        "the original request plus exactly two resends"
     );
 }
 
-/// A 503 retry followed by a reasoning-only reply: the reasoning-only reply still gets its one resend.
-/// It used to be checked against the shared retry count, so it failed with zero resends after announcing a retry.
+/// A 503 retry followed by a reasoning-only reply: the empty replies still get their own full budget.
+/// The empty-response attempts used to be checked against the shared retry count, so they got zero resends after announcing a retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_reasoning_only_after_a_503_is_still_resent_once() {
+async fn responses_reasoning_only_after_a_503_keeps_its_own_budget() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -1548,8 +1548,12 @@ async fn responses_reasoning_only_after_a_503_is_still_resent_once() {
         .collect();
     assert_eq!(
         retrying,
-        vec![(1, 15, "api"), (1, 2, "empty_response")],
-        "the 503 retry, then one reasoning-only resend announced against its own cap"
+        vec![
+            (1, 15, "api"),
+            (1, 3, "empty_response"),
+            (2, 3, "empty_response")
+        ],
+        "the 503 retry, then the reasoning-only resends announced against their own budget"
     );
     match events.last().unwrap() {
         SamplingEvent::Failed { error, .. } => assert_eq!(error.kind.as_str(), "empty_response"),
@@ -1557,13 +1561,83 @@ async fn responses_reasoning_only_after_a_503_is_still_resent_once() {
     }
     assert_eq!(
         counter.load(Ordering::SeqCst),
-        3,
-        "the 503, the reasoning-only reply, and its one resend"
+        4,
+        "the 503, the reasoning-only reply, and its two resends"
     );
     assert!(
         elapsed < Duration::from_secs(10),
         "fails in seconds: {elapsed:?}"
     );
+}
+
+/// The customer's pattern: a reasoning-only reply, then cached fully-empty replies.
+/// Every empty reply of one request shares a single budget, so the announced denominator
+/// stays put instead of stepping "(1/2)" then "(2/3)", and the resends stop at the cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_mixed_empty_replies_share_one_announced_budget() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                // The first reply carries reasoning; every later one is fully empty.
+                let events = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    sse::responses_api_reasoning_only_events(
+                        "Let me think about this carefully",
+                        "test-model",
+                    )
+                } else {
+                    sse::responses_api_script_exact("", "test-model")
+                };
+                Sse::new(stream::iter(
+                    sse_events_to_axum(events)
+                        .into_iter()
+                        .map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let mut cfg = responses_config(server.base_url(), None);
+    cfg.max_retries = Some(fuigo_sampler::DEFAULT_MAX_RETRIES);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    handle.submit(
+        RequestId::from("req-mixed-empty"),
+        user_request("Say hello in one word."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    let retrying: Vec<(u32, u32, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying {
+                attempt,
+                max_retries,
+                kind,
+                ..
+            } => Some((*attempt, *max_retries, kind.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retrying,
+        vec![(1, 3, "empty_response"), (2, 3, "empty_response")],
+        "one budget for both shapes, announced with one denominator"
+    );
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        3,
+        "the reasoning-only reply and two resends, whatever shape the resends come back in"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => assert_eq!(error.kind.as_str(), "empty_response"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
 }
 
 /// Drain the event channel until a terminal event (`Completed` or `Failed`) is received, or until `deadline` elapses.
