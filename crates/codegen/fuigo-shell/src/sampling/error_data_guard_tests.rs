@@ -22,6 +22,16 @@ fn is_test_path(rel: &str) -> bool {
             .any(|part| part == "tests" || part.ends_with("_tests"))
 }
 
+/// A file the guard cannot read as Rust text: an AppleDouble sidecar (`._foo.rs`, left next to real
+/// sources by a macOS tar) or any other non-UTF-8 content. Reading one used to abort the whole test
+/// inside `expect("read source")` with a message about the wrong thing, masking the guard's own verdict.
+fn unreadable_as_rust(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("._"))
+        || std::fs::read_to_string(path).is_err()
+}
+
 fn rust_sources(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -31,7 +41,7 @@ fn rust_sources(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     for path in entries {
         if path.is_dir() {
             rust_sources(&path, root, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| ext == "rs") && !unreadable_as_rust(&path) {
             let rel = path
                 .strip_prefix(root)
                 .expect("under src")
@@ -246,6 +256,35 @@ fn every_acp_error_data_in_shell_source_comes_from_a_typed_helper() {
         "{} acp::Error data site(s) bypass the typed helpers (use crate::acp_error):\n{}",
         all.len(),
         all.join("\n")
+    );
+}
+
+/// Whatever the walker hands the guard must be readable as Rust text.
+/// A non-UTF-8 file under `src/` (an AppleDouble `._*.rs` sibling from a macOS tar, say) used to
+/// kill the suite inside `read_to_string(..).expect("read source")` with a message about the wrong
+/// thing, masking whether the guard itself passed.
+#[test]
+fn the_walker_only_hands_the_guard_files_it_can_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::write(root.join("real.rs"), "fn a() {}").expect("write real.rs");
+    std::fs::write(root.join("._real.rs"), [0xffu8, 0xfe, 0x00]).expect("write sidecar");
+    std::fs::write(root.join("blob.rs"), [0xffu8, 0xfe, 0x00]).expect("write blob");
+    let mut files = Vec::new();
+    rust_sources(root, root, &mut files);
+    for (rel, path) in &files {
+        assert!(
+            std::fs::read_to_string(path).is_ok(),
+            "the guard would die reading {rel}, not reporting on the thing it guards"
+        );
+    }
+    assert_eq!(
+        files
+            .iter()
+            .map(|(rel, _)| rel.as_str())
+            .collect::<Vec<_>>(),
+        ["real.rs"],
+        "only readable Rust sources reach the guard"
     );
 }
 
