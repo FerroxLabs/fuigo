@@ -773,7 +773,9 @@ fn guide_gaps(sites: &[String], guide: &str) -> Vec<String> {
         let window: String = guide[at + file.len()..].chars().take(80).collect();
         let Some(word) = COUNT_WORDS.get(count - 1) else {
             // the guide spells counts in words, so a file with more than ten flips needs a new form
-            gaps.push(format!("{file}: {count} sites is past what the guide spells in words"));
+            gaps.push(format!(
+                "{file}: {count} sites is past what the guide spells in words"
+            ));
             continue;
         };
         if !window.contains(&format!("{word} site")) {
@@ -829,12 +831,19 @@ fn the_guide_check_bites_on_the_site_count_not_just_the_file_name() {
         .map(|s| (*s).to_owned())
         .collect();
     let good = "a.rs`, two sites) and b.rs`, one site). three replies changed class, in two files.";
-    assert!(guide_gaps(&sites, good).is_empty(), "{:?}", guide_gaps(&sites, good));
+    assert!(
+        guide_gaps(&sites, good).is_empty(),
+        "{:?}",
+        guide_gaps(&sites, good)
+    );
     let stale = "a.rs`, one site) and b.rs`, one site). two replies changed class, in two files.";
     let gaps = guide_gaps(&sites, stale);
     assert_eq!(gaps.len(), 2, "{gaps:#?}");
     assert!(gaps[0].contains("a.rs: 2 sites in the tree"), "{gaps:#?}");
-    assert!(gaps[1].contains("three replies changed class, in two files"), "{gaps:#?}");
+    assert!(
+        gaps[1].contains("three replies changed class, in two files"),
+        "{gaps:#?}"
+    );
     let unnamed = "b.rs`, one site). one replies changed class, in one files.";
     assert!(
         guide_gaps(&sites, unnamed)

@@ -985,8 +985,7 @@ mod memory_flush_error_detail_tests {
         let wire = serde_json::to_value(&update).expect("serialize the notification");
         assert_eq!(wire["sessionUpdate"], "memory_flush_completed");
         assert_eq!(
-            wire["result"],
-            "skipped: empty response from model (reasoning_only)",
+            wire["result"], "skipped: empty response from model (reasoning_only)",
             "the client is told why the flush was skipped: {wire}"
         );
     }
