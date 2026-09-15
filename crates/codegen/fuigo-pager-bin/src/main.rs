@@ -1112,13 +1112,16 @@ fn record_parent_death_and_flush_telemetry() {
     flush_telemetry();
 }
 /// Install [`record_parent_death_and_flush_telemetry`] as this process's
-/// parent-death hook. Called from [`run_agent_command`], the only entrypoint
-/// that arms the parent-death binding.
+/// parent-death hook. Called from [`run_agent_command`] — its first statement,
+/// before any early return — the only entrypoint that arms the parent-death
+/// binding.
 ///
-/// Its own function so a test can pin the registration: off Windows nothing
-/// runs the hook, so deleting the call changed no other test's outcome while
-/// silently costing every Windows agent its shutdown log line and telemetry
-/// flush.
+/// Off Windows nothing runs the hook, so deleting the call changes no other
+/// test's outcome while silently costing every Windows agent its shutdown log
+/// line and telemetry flush. `the_agent_entrypoint_registers_the_parent_death_hook`
+/// pins it by running this entrypoint for real in a child process and reading
+/// the registration back through `fuigo_tty_utils::registered_parent_death_hook`
+/// (its `testing` feature, a dev-dependency here).
 fn install_agent_parent_death_hook() {
     fuigo_tty_utils::set_parent_death_hook(record_parent_death_and_flush_telemetry);
 }
@@ -1173,13 +1176,15 @@ async fn run_agent_command(
     disable_web_search: bool,
     update_config: &UpdateConfig,
 ) -> Result<()> {
+    // First, before any early return: the hook must be registered for every
+    // way this entrypoint can run, and registering it depends on nothing.
+    install_agent_parent_death_hook();
     if fuigo_shell::sampling::execution_budget::process_budget().map_err(anyhow::Error::msg)?.is_some() {
         if agent_args.leader || matches!(agent_args.mode, Some(AgentCmd::Leader(_))) {
             anyhow::bail!("execution budgets require a private agent process, not leader mode");
         }
         agent_args.no_leader = true;
     }
-    install_agent_parent_death_hook();
     let _signal_flush = tokio::spawn(async {
         #[cfg(unix)]
         {
@@ -2769,38 +2774,109 @@ mod tests {
         );
     }
 
-    /// Agent startup must register the parent-death hook: on Windows the
-    /// watcher runs it in place of the SIGTERM handler Linux gets, and nothing
-    /// else registers one.
+    /// Env marker (value: the report path) for the re-exec'd child that runs
+    /// the real agent entrypoint.
+    const AGENT_HOOK_CHILD_ENV: &str = "__FUIGO_PAGER_BIN_AGENT_HOOK_CHILD";
+
+    /// Child: run [`run_agent_command`] — the real entrypoint, not the
+    /// registration helper — and report which parent-death hook it left
+    /// registered.
+    ///
+    /// `--leader` under a process execution budget is refused by the
+    /// entrypoint immediately after its startup registrations, so this runs
+    /// the real function while touching nothing else: no tracing init, no
+    /// config load, no leader spawn. It lives in a child process because the
+    /// budget is read once per process into a `OnceLock`.
     #[test]
-    fn agent_startup_registers_the_parent_death_hook() {
-        install_agent_parent_death_hook();
-        let registered = fuigo_tty_utils::registered_parent_death_hook()
-            .expect("agent startup registered no parent-death hook");
-        assert!(
-            std::ptr::fn_addr_eq(registered, record_parent_death_and_flush_telemetry as fn()),
-            "agent startup registered some other parent-death hook, so a Windows agent \
-             would not record its parent's exit or flush telemetry"
-        );
+    fn agent_parent_death_hook_child_entry() {
+        let Some(report) = std::env::var_os(AGENT_HOOK_CHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd child
+        };
+        let args = PagerArgs::try_parse_from(["fuigo", "agent", "--leader"])
+            .expect("parse `fuigo agent --leader`");
+        let Some(Command::Agent(agent_args)) = args.command else {
+            panic!("`fuigo agent --leader` did not parse as the agent subcommand");
+        };
+        let update_config = build_update_config();
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(run_agent_command(
+                agent_args,
+                None,
+                None,
+                None,
+                false,
+                true,
+                false,
+                &update_config,
+            ));
+        let registered = match fuigo_tty_utils::registered_parent_death_hook() {
+            None => "none",
+            Some(hook)
+                if std::ptr::fn_addr_eq(hook, record_parent_death_and_flush_telemetry as fn()) =>
+            {
+                "installed"
+            }
+            Some(_) => "other",
+        };
+        let returned = match outcome {
+            Ok(()) => "ok".to_owned(),
+            Err(error) => format!("err: {error}"),
+        };
+        std::fs::write(report, format!("hook={registered} entrypoint={returned}"))
+            .expect("write the hook report");
     }
 
-    /// …and the agent entrypoint must actually call that registration: the hook
-    /// is process-global state no other test can observe it setting.
+    /// The agent entrypoint must register the parent-death hook: on Windows the
+    /// watcher runs it in place of the SIGTERM handler Linux gets, and nothing
+    /// else registers one — so deleting the call is invisible to every other
+    /// test. Pinned by running the entrypoint itself, so moving the call under
+    /// a dead branch, or renaming it, fails here too.
     #[test]
-    fn run_agent_command_installs_the_parent_death_hook() {
-        let source = include_str!("main.rs");
-        let body = source
-            .split("async fn run_agent_command(")
-            .nth(1)
-            .expect("run_agent_command is defined in main.rs");
-        let body = body
-            .split("\n}\n")
-            .next()
-            .expect("run_agent_command's body");
+    fn the_agent_entrypoint_registers_the_parent_death_hook() {
+        let report = std::env::temp_dir().join(format!(
+            "fuigo-agent-hook-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg("tests::agent_parent_death_hook_child_entry")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(AGENT_HOOK_CHILD_ENV, &report)
+            // Makes `process_budget()` Some, so `--leader` is refused right
+            // after the startup registrations.
+            .env("FUIGO_MAX_MODEL_CALLS", "1")
+            .env("FUIGO_DISABLE_AUTOUPDATER", "1")
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = cmd.output().expect("run the agent-entrypoint child");
+        let reported = std::fs::read_to_string(&report).unwrap_or_default();
+        let _ = std::fs::remove_file(&report);
         assert!(
-            body.contains("install_agent_parent_death_hook();"),
-            "run_agent_command no longer installs the parent-death hook: a Windows agent \
-             would be terminated by the watcher with no log line and no telemetry flush"
+            child.status.success(),
+            "the agent-entrypoint child failed ({}); stdout: {}; stderr: {}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            reported.starts_with("hook=installed"),
+            "running the real agent entrypoint left no parent-death hook of this \
+             binary registered ({reported:?}): a Windows agent would be terminated \
+             by the watcher with no log line and no telemetry flush"
         );
     }
     #[test]
