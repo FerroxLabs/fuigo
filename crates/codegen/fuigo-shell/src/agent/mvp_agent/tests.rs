@@ -7696,3 +7696,23 @@ fn stock_no_subagents_profile_strips_spawn_from_replacing_harness() {
         assert_eq!(spawns(&def), keeps, "profile {profile:?}");
     }
 }
+
+/// A failed or cancelled login must answer with typed object `data`, like every other error the agent
+/// sends. `authenticate` is the one method every embedding client calls on connect, and a client that
+/// renders only object-shaped `data` shows the user NOTHING for `{ "message": "...", "data": null }`.
+#[test]
+fn a_failed_login_answers_with_typed_data_not_a_bare_message() {
+    for reason in [
+        "Authentication cancelled",
+        "provider rejected the credentials",
+    ] {
+        let err = super::acp_agent::auth_flow_error(&anyhow::anyhow!("{reason}"));
+        assert_eq!(i32::from(err.code), -32000, "{reason}");
+        let data = err
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("{reason}: authenticate answered with no `data` at all"));
+        assert_eq!(data["message"], reason, "{reason}: {data}");
+        assert_eq!(data["error_kind"], "auth", "{reason}: {data}");
+    }
+}

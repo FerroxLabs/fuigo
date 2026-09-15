@@ -26,6 +26,13 @@ fn tool_overrides_capability() -> serde_json::Value {
     serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
         .expect("ToolOverridesCapability is always serializable")
 }
+/// The `authenticate` reply for a login that failed or that the user cancelled.
+/// Every embedding client calls `authenticate` on connect, and this is the failure path users hit most:
+/// bad credentials, a provider error, or a cancelled browser flow. It used to set `message` in place and
+/// send no `data` at all, so a client that renders only object-shaped `data` showed the user nothing.
+pub(super) fn auth_flow_error(err: &anyhow::Error) -> acp::Error {
+    crate::acp_error::auth_required(err.to_string())
+}
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
     /// The response meta carries `model_state` so the client can display the available models and the default model.
@@ -852,9 +859,7 @@ impl acp::Agent for MvpAgent {
                                 },
                             ),
                         );
-                        let mut err = acp::Error::auth_required();
-                        err.message = e.to_string();
-                        err
+                        auth_flow_error(&e)
                     })?;
                 {
                     let mut sampling_config = self.sampling_config.borrow_mut();
