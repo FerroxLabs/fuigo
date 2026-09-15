@@ -7,6 +7,9 @@
 //! wire format at plain-HTTP base URLs; an environment proxy delivers every request to the parent's mock, which
 //! records the body each destination actually received. The base URL host is the only variable.
 
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +21,7 @@ use fuigo_sampler::{
     ApiBackend, RequestId, RetryPolicy, SamplerActor, SamplerConfig, SamplingClient, SamplingEvent,
 };
 use fuigo_sampling_types::{ContentPart, ConversationItem, ConversationRequest, UserItem};
-use fuigo_test_support::sse;
+use fuigo_test_support::{TestSandbox, sse};
 use futures_util::stream;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -123,6 +126,37 @@ async fn child() {
     println!("{CHILD_DONE}");
 }
 
+/// Owns the child's isolated paths for as long as the child runs, and the variables it is given.
+struct ChildEnv {
+    _sandbox: TestSandbox,
+    vars: Vec<(OsString, OsString)>,
+}
+
+/// The environment the recording child is spawned with.
+///
+/// The child starts from a cleared environment so the parent's own proxy and endpoint settings cannot
+/// decide which base URL gets the bypass. Cleared cannot mean empty: a Windows process cannot be created
+/// without `PATH`, `SystemRoot` and `ComSpec`, so the platform essentials come from `TestSandbox`, the
+/// repo's hermetic child-environment owner, and this test's proxy wiring is layered on top of them.
+fn child_env(proxy_url: &str, bases: &[&str]) -> ChildEnv {
+    let mut sandbox = TestSandbox::new();
+    sandbox.extend_env([
+        (CHILD, "1".to_owned()),
+        (BASES, bases.join(",")),
+        ("HTTP_PROXY", proxy_url.to_owned()),
+        ("HTTPS_PROXY", proxy_url.to_owned()),
+        ("ALL_PROXY", proxy_url.to_owned()),
+        // The sandbox exempts loopback from proxying; here every destination must reach the mock.
+        ("NO_PROXY", String::new()),
+        ("no_proxy", String::new()),
+    ]);
+    let vars = sandbox.env();
+    ChildEnv {
+        _sandbox: sandbox,
+        vars,
+    }
+}
+
 /// Run `test` in a fresh child whose environment proxy is a recording mock, and return what the mock received.
 async fn run_child(test: &str, bases: &[&str]) -> Vec<Captured> {
     let log: Arc<Mutex<Vec<Captured>>> = Arc::default();
@@ -156,17 +190,11 @@ async fn run_child(test: &str, bases: &[&str]) -> Vec<Captured> {
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    let home = tempfile::tempdir().unwrap();
+    let child = child_env(&proxy_url, bases);
     let output = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env_clear()
-        .env("HOME", home.path())
-        .env(CHILD, "1")
-        .env(BASES, bases.join(","))
-        .env("HTTP_PROXY", &proxy_url)
-        .env("HTTPS_PROXY", &proxy_url)
-        .env("ALL_PROXY", &proxy_url)
-        .env("NO_PROXY", "")
+        .envs(child.vars.iter().map(|(key, value)| (key, value)))
         .kill_on_drop(true)
         .output()
         .await
@@ -260,5 +288,88 @@ async fn other_endpoints_never_receive_the_cache_bypass() {
                 keys(&sent.body)
             );
         }
+    }
+}
+
+/// Workspace root: this crate sits at `crates/codegen/fuigo-sampler`.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+
+/// Variables a child process needs from its parent to start at all on this platform.
+#[cfg(windows)]
+const PLATFORM_ESSENTIALS: &[&str] = &["PATH", "PATHEXT", "SystemRoot", "ComSpec"];
+#[cfg(not(windows))]
+const PLATFORM_ESSENTIALS: &[&str] = &["PATH"];
+
+/// The child is spawned from a cleared environment so the parent's own proxy and endpoint settings cannot
+/// decide the result. Cleared must not mean empty: a Windows child with no `PATH`, `SystemRoot` or
+/// `ComSpec` cannot be created, so this test would never run there.
+#[test]
+fn the_child_environment_keeps_the_platform_variables_a_spawn_needs() {
+    let child = child_env("http://127.0.0.1:1", &["http://api.fluxrouter.ai/v1"]);
+    let vars: BTreeMap<&OsStr, &OsStr> = child
+        .vars
+        .iter()
+        .map(|(key, value)| (key.as_os_str(), value.as_os_str()))
+        .collect();
+    for key in PLATFORM_ESSENTIALS {
+        if std::env::var_os(key).is_none() {
+            continue;
+        }
+        assert!(
+            vars.contains_key(OsStr::new(key)),
+            "the child environment drops {key}, which a spawn on this platform needs; \
+             it has {:?}",
+            vars.keys().collect::<Vec<_>>()
+        );
+    }
+    // The isolation the clear buys is still the point: this test's own wiring must win.
+    assert_eq!(vars.get(OsStr::new(CHILD)), Some(&OsStr::new("1")));
+    assert_eq!(vars.get(OsStr::new("NO_PROXY")), Some(&OsStr::new("")));
+    assert_eq!(
+        vars.get(OsStr::new("HTTPS_PROXY")),
+        Some(&OsStr::new("http://127.0.0.1:1"))
+    );
+}
+
+/// The bypass is only as good as the run that proves it. Pin the CI line that runs this file, so
+/// deleting it fails here instead of silently leaving the regression uncovered.
+#[test]
+fn ci_runs_this_integration_test() {
+    let path = repo_root().join(".github/workflows/release.yml");
+    let workflow =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(
+        workflow.contains("-p fuigo-sampler --test fluxrouter_cache_bypass"),
+        "no CI job runs `cargo test -p fuigo-sampler --test fluxrouter_cache_bypass`, so nothing \
+         proves the FluxRouter cache bypass is still sent"
+    );
+}
+
+/// Flux Router honours the body `cache` field on Chat Completions only: its Responses and Anthropic
+/// Messages surfaces rebuild the upstream request from a fixed field list and drop it. The user guide
+/// has to say that, not promise an opt-out everywhere.
+#[test]
+fn the_user_guide_states_the_bypass_surface_by_surface() {
+    let path = repo_root().join("crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md");
+    let guide =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let paragraph = guide
+        .lines()
+        .find(|line| line.contains(r#""cache": {"no-cache": true, "no-store": true}"#))
+        .expect("the user guide describes the cache opt-out");
+    for claim in [
+        "/v1/chat/completions",
+        "honours",
+        "/v1/responses",
+        "/anthropic/v1/messages",
+        "drop",
+    ] {
+        assert!(
+            paragraph.contains(claim),
+            "the cache opt-out paragraph never says {claim:?}, so it does not state what is true \
+             per Flux Router surface:\n{paragraph}"
+        );
     }
 }
