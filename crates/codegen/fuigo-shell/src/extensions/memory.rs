@@ -15,7 +15,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         m if m.starts_with("fuigo/compact_conversation") => handle_compact(agent, args).await,
         "fuigo/memory/flush" => handle_flush(agent, args).await,
         "fuigo/memory/rewrite" => handle_rewrite(agent, args).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

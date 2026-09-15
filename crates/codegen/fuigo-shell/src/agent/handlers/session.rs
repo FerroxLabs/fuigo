@@ -35,7 +35,7 @@ pub(crate) async fn handle(
         m if m.starts_with("fuigo/session_summaries/") => {
             handle_session_summaries(agent, args).await
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -225,7 +225,7 @@ async fn handle_session_summaries(
 
             Ok(acp::ExtResponse::new(value))
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -289,7 +289,9 @@ pub(crate) async fn handle_list_sessions(
 
     // Chat mode also withholds the session capabilities at initialize, so refuse the method here to match
     if crate::agent::chat_modes::process_chat_mode_enabled() {
-        return Err(acp::Error::method_not_found());
+        return Err(crate::acp_error::method_not_found(
+            "session/list is not available in chat mode",
+        ));
     }
 
     let additional_directories = args.additional_directories.len();

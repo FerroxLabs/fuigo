@@ -172,6 +172,13 @@ pub fn method_not_found(message: impl Into<String>) -> acp::Error {
     )
 }
 
+/// `-32601` for a `fuigo/*` extension method this build does not implement: an unknown name, or a member
+/// of a namespace it does serve. Version skew makes this the first error class a third-party client meets,
+/// so it carries the same typed `data` as everything else instead of `data: null`.
+pub fn unknown_ext_method(method: &str) -> acp::Error {
+    method_not_found(format!("unknown ACP extension method: {method}"))
+}
+
 /// `-32603` internal error, kind `internal`.
 pub fn internal_error(message: impl Into<String>) -> acp::Error {
     typed(
@@ -287,6 +294,21 @@ mod tests {
                 .data
                 .expect("data")["code"],
             "some_code"
+        );
+    }
+
+    /// Every namespace router answers an unimplemented `fuigo/*` method with this, so the reply names
+    /// what the client asked for instead of arriving as `-32601` with `data: null`.
+    #[test]
+    fn unknown_ext_method_names_the_method_the_client_asked_for() {
+        let err = unknown_ext_method("fuigo/skills/definitely_not_a_method");
+        assert_eq!(i32::from(err.code), -32601);
+        assert_eq!(
+            kind_and_message(&err),
+            (
+                "invalid_request",
+                "unknown ACP extension method: fuigo/skills/definitely_not_a_method"
+            )
         );
     }
 

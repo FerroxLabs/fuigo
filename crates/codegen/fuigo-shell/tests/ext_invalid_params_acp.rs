@@ -1,4 +1,4 @@
-//! Malformed extension params must not reply with a bare-string `error.data`.
+//! Malformed or unknown extension requests must not reply with `error.data` a client cannot read.
 //!
 //! The typed-data guard only sees a literal `.data(..)` call. It cannot see the schema crate's
 //! implicit conversions — `impl From<serde_json::Error> for acp::Error` is
@@ -69,6 +69,40 @@ fn malformed_ext_params_reply_with_typed_object_data() {
             assert_eq!(
                 wire["data"]["error_kind"], "invalid_request",
                 "{method}: {wire}"
+            );
+        }
+    });
+}
+
+/// A `fuigo/*` method this build does not implement is the first error class a client hits on version
+/// skew, and every namespace router answered it with a bare `acp::Error::method_not_found()` — `data: null`.
+/// A client following the agent-mode guide ("never show `message` on its own"; `message` and `error_kind`
+/// are present "always") then shows the user a blank. The reply must be typed like every other error.
+#[test]
+fn unknown_ext_methods_reply_with_typed_object_data() {
+    run_agent_test(|cwd, _mock| async move {
+        let (conn, _) = connect_and_auth(AutoApproveClient, "ext-unknown-method").await;
+        let _session = new_session(&conn, &cwd).await;
+
+        for method in [
+            // A namespace this build serves, with a member it does not
+            "fuigo/skills/definitely_not_a_method",
+            "fuigo/session_summaries/definitely_not_a_method",
+            // A namespace that does not exist at all
+            "fuigo/not_a_namespace/at_all",
+        ] {
+            let wire = ext_error(&conn, method, serde_json::json!({})).await;
+            assert_eq!(wire["code"], -32601, "{method}: {wire}");
+            assert_typed_data(method, &wire);
+            assert_eq!(
+                wire["data"]["error_kind"], "invalid_request",
+                "{method}: {wire}"
+            );
+            assert!(
+                wire["data"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains(method)),
+                "{method}: the message must name the method the client asked for, got {wire}"
             );
         }
     });

@@ -610,6 +610,6 @@ pub async fn handle(
                 .map_err(|e| crate::acp_error::internal_error(format!("checkout failed: {e}")))?;
             super::to_raw_response(&result)
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }

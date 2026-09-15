@@ -22,7 +22,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
         "fuigo/debug/arm_auto_compact" => handle_arm_auto_compact(agent, args),
         "fuigo/debug/agent" => handle_agent(agent).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

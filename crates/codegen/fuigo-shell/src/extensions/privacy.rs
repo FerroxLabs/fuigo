@@ -13,7 +13,7 @@ use crate::agent::MvpAgent;
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "fuigo/privacy/setCodingDataRetention" => handle_set(agent, args).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

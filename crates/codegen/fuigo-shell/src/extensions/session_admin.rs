@@ -51,7 +51,7 @@ pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
         "fuigo/session/fork" => handle_session_fork(agent, args).await,
         "fuigo/plugins/reload" => handle_plugins_reload(agent).await,
         "fuigo/commands/list" => handle_commands_list(agent, args).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -72,7 +72,10 @@ async fn handle_internal(
         InternalMethod::ReloadModelsCache => handle_reload_models_cache(agent),
         InternalMethod::AuthCleared => handle_auth_cleared(agent),
         // Arrives as a notification, so it never reaches this request path.
-        InternalMethod::EvictSessions => Err(acp::Error::method_not_found()),
+        InternalMethod::EvictSessions => Err(crate::acp_error::method_not_found(format!(
+            "{} is a notification, not a request",
+            args.method
+        ))),
     }
 }
 

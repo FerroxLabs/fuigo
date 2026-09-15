@@ -32,7 +32,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             tracing::info!("handling review comment");
             handle_review(agent, args).await
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 /// Handle `fuigo/btw`, a side question that doesn't interrupt the current turn.
@@ -315,7 +315,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 }
             }
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 /// Bounds the one-shot GCS upload so a stalled connection can't hang the ACP handler; sized for the 50 MiB archive cap on a slow uplink.
@@ -521,7 +521,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .expect("to work");
             Ok(acp::ExtResponse::new(value))
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

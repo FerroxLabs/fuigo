@@ -22,7 +22,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "fuigo/auth/logout" => handle_logout(agent, args).await,
         "fuigo/auth/info" => handle_info(agent),
         "fuigo/auth/check_subscription" => handle_check_subscription(agent).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
