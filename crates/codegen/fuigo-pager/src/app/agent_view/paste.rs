@@ -1996,20 +1996,22 @@ pub(super) mod paste_key_tests {
             "a successful load must drop the stale failure marker"
         );
     }
-    /// A same-length in-place rewrite whose mtime does not move (coarse clock) must still retry a negative-cached failure.
-    /// The Unix stamp includes the inode and ctime, and ctime is what a rewrite advances here.
+    /// A same-length in-place rewrite must still retry a negative-cached failure when NOTHING in the
+    /// file's metadata moved.
     ///
-    /// ctime advances on the kernel's COARSE clock, though, so two rewrites inside one tick
-    /// carry the same ctime and there is then no change signal for the stamp to see at all.
-    /// Measured on the build host (Linux 6.8, overlayfs): back-to-back write+utimensat pairs
-    /// land on an identical ctime 1878 times out of 2000. The rewrite below therefore waits
-    /// for the clock to move before the assertion, or the test races the clock rather than
-    /// exercising the retry (it failed 2 runs in 5 of the parallel suite without this).
+    /// Metadata is all the stamp used to have: `len` is equal by construction, mtime is pinned here,
+    /// and an in-place rewrite keeps the inode — which leaves ctime, and ctime comes off the kernel's
+    /// COARSE clock, so two writes inside one tick carry the same one (measured on the build host,
+    /// Linux 6.8/overlayfs: back-to-back write+utimensat pairs land on an identical ctime 1878 times
+    /// out of 2000). A test cannot make the clock stand still on demand, so that state is pinned the
+    /// only way it can be made deterministic: the cache entry is forced onto the REWRITTEN file's own
+    /// stamp, which is precisely what a same-tick rewrite leaves behind. The decision itself is
+    /// pinned field-by-field in `media::tests`.
     #[cfg(unix)]
     #[test]
     fn tool_media_same_length_same_mtime_rewrite_retries_failed_load() {
+        use crate::app::agent_view::media::{FailedMediaLoad, MediaFileStamp};
         use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
-        use std::os::unix::fs::MetadataExt as _;
         let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("slow-write.png");
@@ -2029,20 +2031,22 @@ pub(super) mod paste_key_tests {
         let mut agent = make_agent();
         let placement = tool_media_placement(path.clone());
         assert!(agent.build_inline_media_escapes(&placement).is_none());
-        assert!(agent.inline_media_load_failed.contains_key(&path));
-        let ctime_of = |p: &std::path::Path| {
-            let meta = std::fs::metadata(p).unwrap();
-            (meta.ctime(), meta.ctime_nsec())
-        };
-        let cached_ctime = ctime_of(&path);
+        let failed = agent
+            .inline_media_load_failed
+            .get(&path)
+            .cloned()
+            .expect("the placeholder must be negative-cached");
         std::fs::write(&path, &png).unwrap();
         pin_mtime(&path);
-        // Re-stamp until the coarse clock has actually moved: the rewrite is only
-        // a change the product can see once ctime differs from the negative-cached one.
-        while ctime_of(&path) == cached_ctime {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            pin_mtime(&path);
-        }
+        let rewritten = MediaFileStamp::from_metadata(&std::fs::metadata(&path).unwrap())
+            .expect("a rewritten file has an mtime");
+        agent.inline_media_load_failed.insert(
+            path.clone(),
+            FailedMediaLoad {
+                stamp: rewritten,
+                digest: failed.digest,
+            },
+        );
         assert!(
             agent.build_inline_media_escapes(&placement).is_some(),
             "a same-length same-mtime rewrite must retry and recover"

@@ -1278,12 +1278,15 @@ pub struct AgentView {
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
     /// decoding and iTerm2 re-sends. Kitty transmits once and re-places.
     pub(crate) inline_media_cache: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
-    /// Paths that failed to decode/extract, keyed by the file stamp at
-    /// failure: skips per-frame decode/ffmpeg retries while the file is
+    /// Paths that failed to decode/extract, keyed by what the file looked like
+    /// at failure: skips per-frame decode/ffmpeg retries while the file is
     /// unchanged, and self-heals when it changes (e.g. caught mid-write).
+    /// The metadata stamp alone cannot see a same-length in-place rewrite that
+    /// lands on the same coarse clock tick, so a content digest rides along and
+    /// decides for as long as that is possible (`media::FailedMediaLoad`).
     /// Cleared with the byte cache on eviction.
     pub(crate) inline_media_load_failed:
-        std::collections::HashMap<std::path::PathBuf, media::MediaFileStamp>,
+        std::collections::HashMap<std::path::PathBuf, media::FailedMediaLoad>,
     /// Kitty GPU image IDs per media path. Each path gets a unique ID (2+)
     /// so switching between images is a cheap re-place (~80 bytes) instead
     /// of a full re-transmit. ID 1 is reserved for modal overlays.
