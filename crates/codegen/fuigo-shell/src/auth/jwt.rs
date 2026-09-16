@@ -21,7 +21,7 @@ use serde::Deserialize;
 /// panic. It is kept because it is explicit and free: `install_default` returns
 /// Err if a provider is already installed, which is ignored -- first install
 /// wins, and it installs the same backend the features select.
-pub fn ensure_jwt_crypto_provider() {
+pub(super) fn ensure_jwt_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
