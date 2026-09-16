@@ -179,14 +179,13 @@ where
 /// modes run through that pair: `search_tool` is also the native discovery channel
 /// (`scope=native`), and the adaptive projection in `turn.rs` is only enabled when
 /// `search_tool` is advertised. A presentation fixture with no MCP server therefore
-/// measures presentation switched off - and silently depends on whether the machine
-/// running it happens to have MCP servers in `~/.claude.json`, which the merge reads
-/// from the real home directory.
+/// measures presentation switched off.
 ///
-/// Only the declaration is read at spawn (`spawn_session_actor`:
-/// `mcp_configured = !mcp_servers.is_empty() || !acp_mcp_servers.is_empty()`), so the
-/// command deliberately does not exist: nothing is spawned, nothing connects, and no
-/// MCP tool can reach the advertised list or perturb the assertions.
+/// Only the declaration is read at spawn (`spawn_session_actor` counts servers through
+/// `mcp_meta_tools_reachable`), so the command deliberately does not exist: nothing is
+/// spawned, nothing connects, and no MCP tool can reach the advertised list or perturb
+/// the assertions. `set_test_env` isolates `HOME`, so this declaration is the session's
+/// only MCP source - a `~/.claude.json` on the machine running the suite is not one.
 ///
 /// Call before the first `session/new`; `FUIGO_HOME` must already point at the test's
 /// temp dir (`run_agent_test` and `sweep_env_init` both set it).
@@ -268,9 +267,20 @@ pub async fn prompt_turn(
     );
 }
 
-fn set_test_env(fuigo_home: &std::path::Path, server_url: &str) {
+fn set_test_env(fuigo_home: &std::path::Path, home: &std::path::Path, server_url: &str) {
     // SAFETY: the only live threads are the mock's HTTP workers, which never read env.
     unsafe {
+        // `FUIGO_HOME` does not cover the home directory itself. `fuigo_dirs::home_dir()`
+        // is `std::env::home_dir()` (`HOME` on Unix, `USERPROFILE` on Windows), and the
+        // session MCP merge reads `$HOME/.claude.json` and `$HOME/.cursor/mcp.json` with
+        // the Claude and Cursor compat cells defaulting on (`util::config::mcp`,
+        // `VendorCompat::default`). Left alone, every fixture inherits whatever MCP
+        // servers the machine running it happens to have - which flips `mcp_configured`
+        // in `spawn_session_actor` and with it the advertised tool list, so the same
+        // assertion can pass on a workstation and fail in a clean container, or vice
+        // versa. `home_isolation_acp` pins that this is set.
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
         std::env::set_var("FUIGO_HOME", fuigo_home);
         std::env::set_var("FUIGO_CLI_CHAT_PROXY_BASE_URL", server_url);
         std::env::set_var("FUIGO_API_BASE_URL", server_url);
@@ -284,7 +294,8 @@ fn set_test_env(fuigo_home: &std::path::Path, server_url: &str) {
     }
 }
 
-/// Runs `body` against a mock inference server with `FUIGO_HOME` isolated to a temp dir.
+/// Runs `body` against a mock inference server with `FUIGO_HOME` and the home
+/// directory itself both isolated to temp dirs (see [`set_test_env`]).
 /// `body` gets the cwd and the mock, and opens its own connection, since each test wants a different `acp::Client`.
 /// One `#[test]` per binary: the env is global.
 pub fn run_agent_test<F, Fut>(body: F)
@@ -306,8 +317,11 @@ where
             .expect("mock server"),
     );
     let fuigo_home = tempfile::TempDir::new().expect("fuigo home");
+    // Separate from `fuigo_home` on purpose: a fixture that writes into `FUIGO_HOME`
+    // must not be able to plant a `~/.claude.json` for itself by accident.
+    let home = tempfile::TempDir::new().expect("home");
     let workdir = tempfile::TempDir::new().expect("workdir");
-    set_test_env(fuigo_home.path(), &server.url());
+    set_test_env(fuigo_home.path(), home.path(), &server.url());
 
     let agent_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
