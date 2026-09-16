@@ -169,6 +169,43 @@ where
     (client_conn, init)
 }
 
+/// Declares one MCP server in the calling test's isolated `FUIGO_HOME` so the
+/// session advertises the MCP meta-tools `search_tool` and `use_tool`.
+///
+/// `fuigo-agent`'s toolset builder drops both tools from every toolset when no MCP
+/// server is configured at session spawn (commit 82f6596, "feat(tools): content grep
+/// for codex, headless tool gating, MCP-less toolsets"; `fuigo-agent/src/builder.rs`,
+/// pinned there by `mcp_meta_tools_follow_the_configured_signal`). Both presentation
+/// modes run through that pair: `search_tool` is also the native discovery channel
+/// (`scope=native`), and the adaptive projection in `turn.rs` is only enabled when
+/// `search_tool` is advertised. A presentation fixture with no MCP server therefore
+/// measures presentation switched off - and silently depends on whether the machine
+/// running it happens to have MCP servers in `~/.claude.json`, which the merge reads
+/// from the real home directory.
+///
+/// Only the declaration is read at spawn (`spawn_session_actor`:
+/// `mcp_configured = !mcp_servers.is_empty() || !acp_mcp_servers.is_empty()`), so the
+/// command deliberately does not exist: nothing is spawned, nothing connects, and no
+/// MCP tool can reach the advertised list or perturb the assertions.
+///
+/// Call before the first `session/new`; `FUIGO_HOME` must already point at the test's
+/// temp dir (`run_agent_test` and `sweep_env_init` both set it).
+#[allow(dead_code)]
+pub fn declare_fixture_mcp_server() {
+    let fuigo_home = std::path::PathBuf::from(
+        std::env::var_os("FUIGO_HOME").expect("test harness sets FUIGO_HOME"),
+    );
+    std::fs::create_dir_all(&fuigo_home).expect("fuigo home");
+    std::fs::write(
+        fuigo_home.join("config.toml"),
+        "[mcp_servers.presentation-fixture]\n\
+         command = \"/nonexistent/fuigo-presentation-fixture-mcp\"\n\
+         args = []\n\
+         startup_timeout_sec = 1\n",
+    )
+    .expect("write fixture MCP declaration");
+}
+
 // Dead-code allows below: same per-binary compilation as `AutoApproveClient` above; each helper is used by some including test binaries, not all
 #[allow(dead_code)]
 pub async fn ext_method(
