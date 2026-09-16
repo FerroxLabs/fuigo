@@ -776,8 +776,11 @@ platform:
   so this line is the record of what happened.
 - **macOS**: nothing — there is no binding, and the agent exits when stdin closes.
 
-A parent that was already gone before the agent started does not trigger any of this: the binding
-refuses to arm, and stdin EOF remains the cleanup.
+A parent that was already gone before the agent started never triggers any of this, for a different
+reason on each platform: on **Windows** the binding refuses to arm (the parent's process object is
+already signalled, or its pid has been recycled), while on **Linux** `PR_SET_PDEATHSIG` arms
+normally and then simply never fires — the death it would signal has already happened. Either way
+the outcome is the same: stdin EOF remains the cleanup.
 
 **Turning it off.** Set `FUIGO_DISABLE_PARENT_DEATH_WATCH=1` to disable the binding on both
 Linux and Windows; the agent then lives until stdin closes, as it did before the Windows

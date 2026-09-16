@@ -12,6 +12,14 @@ on:
       # `fuigo agent stdio`; the pager-bin path below holds the other arm site.
       - 'crates/codegen/fuigo-shell/src/agent/app.rs'
       - 'crates/codegen/fuigo-pager-bin/src/main.rs'
+      # The manifests those sources need to compile: the root one carries the
+      # `windows` crate features `parent_death_windows.rs` needs, fuigo-shell's
+      # the `fuigo-tty-utils = { features = ["testing"] }` dev-dependency the
+      # arm pin needs. No other workflow builds this tree for Windows on a PR,
+      # so without these a manifest-only change breaks the build or the pin
+      # with the gate never running.
+      - 'Cargo.toml'
+      - 'crates/codegen/fuigo-shell/Cargo.toml'
       - '.github/workflows/windows-process-check.yml'
   pull_request:
     paths:
@@ -21,6 +29,14 @@ on:
       # `fuigo agent stdio`; the pager-bin path below holds the other arm site.
       - 'crates/codegen/fuigo-shell/src/agent/app.rs'
       - 'crates/codegen/fuigo-pager-bin/src/main.rs'
+      # The manifests those sources need to compile: the root one carries the
+      # `windows` crate features `parent_death_windows.rs` needs, fuigo-shell's
+      # the `fuigo-tty-utils = { features = ["testing"] }` dev-dependency the
+      # arm pin needs. No other workflow builds this tree for Windows on a PR,
+      # so without these a manifest-only change breaks the build or the pin
+      # with the gate never running.
+      - 'Cargo.toml'
+      - 'crates/codegen/fuigo-shell/Cargo.toml'
       - '.github/workflows/windows-process-check.yml'
   workflow_dispatch:
 permissions:
@@ -91,6 +107,8 @@ jobs:
           grep -F 'tests::current_process_dies_when_its_parent_exits_on_windows ... ok' process-receipts/tty-utils.log
           grep -F 'tests::parent_death_hook_runs_before_termination_on_windows ... ok' process-receipts/tty-utils.log
           grep -F 'tests::a_disabled_parent_death_watch_leaves_the_process_alive_on_windows ... ok' process-receipts/tty-utils.log
+          grep -F 'tests::a_hung_parent_death_hook_cannot_block_termination_on_windows ... ok' process-receipts/tty-utils.log
+          grep -F 'tests::win32_creation_flag_values_match_the_windows_crate ... ok' process-receipts/tty-utils.log
       # The leader spawn tests (creation flags, and a probe spawned through the
       # real leader spawn path that must get its own windowless console), the
       # named-pipe transport tests, and the pin on the `agent stdio` entrypoint
