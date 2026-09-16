@@ -376,6 +376,9 @@ pub struct SweepEnv {
     pub mock_rt: tokio::runtime::Runtime,
     pub deadline: Duration,
     _fuigo_home: TempDir,
+    /// Held for the whole sweep: dropping it would put `HOME` back on a deleted
+    /// path mid-run. See [`sweep_env_init`].
+    _home: TempDir,
 }
 
 /// SAFETY: call before any agent threads exist; mock workers never read env.
@@ -394,7 +397,14 @@ pub fn sweep_env_init() -> SweepEnv {
         .build()
         .expect("mock runtime");
     let fuigo_home = TempDir::new().expect("fuigo home");
+    let home = TempDir::new().expect("home");
     unsafe {
+        // Same reason as `acp_harness::set_test_env`: `FUIGO_HOME` does not isolate the
+        // home directory, and the session MCP merge reads `$HOME/.claude.json` and
+        // `$HOME/.cursor/mcp.json` by default. Without this a sweep measures the
+        // developer's MCP configuration.
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
         std::env::set_var("FUIGO_HOME", fuigo_home.path());
         std::env::set_var("FUIGO_API_KEY", "test-key-for-ci");
         std::env::set_var("FUIGO_TELEMETRY_ENABLED", "false");
@@ -405,6 +415,7 @@ pub fn sweep_env_init() -> SweepEnv {
         mock_rt,
         deadline: Duration::from_secs(env_usize("FUIGO_SWEEP_DEADLINE_S", 240) as u64),
         _fuigo_home: fuigo_home,
+        _home: home,
     }
 }
 
