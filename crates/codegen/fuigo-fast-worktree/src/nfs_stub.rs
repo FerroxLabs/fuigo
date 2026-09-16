@@ -112,12 +112,13 @@ pub struct NfsStatusView {
 pub fn try_nfs_remove(_worktree_path: &Path) -> Result<Option<RemoveReport>> {
     Ok(None)
 }
+/// Mirror of `nfs::confined::is_safe_worktree_id` for the non-unix build.
 pub(crate) fn is_safe_worktree_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('.')
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains('\0')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 pub(crate) fn try_grove_worktree(_plan: &WorktreePlan) -> Result<Option<CreateWorktreeResult>> {
     Ok(None)
