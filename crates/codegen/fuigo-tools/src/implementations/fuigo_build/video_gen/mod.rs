@@ -155,7 +155,7 @@ pub struct VideoGenClient {
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
     /// (free / X Basic). The video tools short-circuit before any HTTP call
-    /// and return the SuperGrok upsell prose. See [`VideoGenClient::is_tier_restricted`].
+    /// and return [`TIER_RESTRICTED_UPSELL`]. See [`VideoGenClient::is_tier_restricted`].
     tier_restricted: bool,
     /// See [`VideoGenConfig::Enabled`]'s `zdr_restricted`.
     zdr_restricted: bool,
@@ -289,7 +289,7 @@ impl VideoGenClient {
 
     /// Whether the current user's tier (free / X Basic) is zero-limited on
     /// Imagine server-side. The video tools use this to short-circuit with the
-    /// SuperGrok upsell instead of issuing a doomed request.
+    /// [`TIER_RESTRICTED_UPSELL`] instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
     }
@@ -764,7 +764,7 @@ pub enum VideoGenConfig {
         zdr_video_output_s3: Option<Box<ZdrVideoOutputS3Config>>,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The video tools stay advertised but short-circuit
-        /// at call time with the SuperGrok upsell prose. Set by the host from
+        /// at call time with [`TIER_RESTRICTED_UPSELL`]. Set by the host from
         /// the subscription tier; always `false` for team / API-key / workspace.
         tier_restricted: bool,
         /// `true` when `tools.disable_zdr_incompatible_tools` is set with no
@@ -786,7 +786,7 @@ impl VideoGenConfig {
 /// model relays it to the user.
 ///
 /// See the note on image_gen's constant: this previously instructed the model
-/// to sell the user a SuperGrok subscription, referral tag included.
+/// to sell the user the upstream vendor's subscription, referral tag included.
 pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Video generation is not available with the current API key or provider. Let the user know their key's provider does not grant access to video generation. Do not retry this tool.";
 
 /// Error for video tool calls in a ZDR session with no output bucket.
@@ -1184,7 +1184,7 @@ impl fuigo_tool_runtime::Tool for ImageToVideoTool {
         let (client, session_folder) = acquire_video_client(&ctx).await?;
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
-        // the upsell prose instead of a doomed request.
+        // the explanatory prose instead of a doomed request.
         if client.is_tier_restricted() {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
@@ -1317,7 +1317,7 @@ impl fuigo_tool_runtime::Tool for ReferenceToVideoTool {
         let (client, session_folder) = acquire_video_client(&ctx).await?;
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
-        // the upsell prose instead of a doomed request.
+        // the explanatory prose instead of a doomed request.
         if client.is_tier_restricted() {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }

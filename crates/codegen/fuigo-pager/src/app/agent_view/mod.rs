@@ -1907,19 +1907,14 @@ fn translate_local_submit(
             );
             InputOutcome::Action(Action::OpenUrl(url.to_string()))
         }
-        LocalQuestionKind::FreeUsageUpsell { source } => {
+        LocalQuestionKind::FreeUsageUpsell => {
             let url = qv
                 .questions
                 .first()
                 .and_then(|q| q.options.get(*idx))
                 .and_then(|o| o.id.as_deref())
                 .unwrap_or(super::dispatch::UPSELL_URL_UPGRADE);
-            fuigo_telemetry::session_ctx::log_event(
-                fuigo_telemetry::events::SuperGrokUpsellClicked {
-                    source,
-                    auth_method: None,
-                },
-            );
+            // No click event: this modal points at our own billing page and feeds no referral funnel.
             InputOutcome::Action(Action::OpenUrl(url.to_string()))
         }
         LocalQuestionKind::AgentTypeMismatch { model_id, effort } => {

@@ -119,7 +119,7 @@ impl ContentController {
             .await
             .context("start mock inference server")?;
         // Two defaults PTY tests depend on: settings must be 200 `{"allow_access": true}`, and the response must be a fixed text
-        // The shared server defaults to 404-until-set settings (which strands the pager on the upsell screen) and echo responses
+        // The shared server defaults to 404-until-set settings (which strands the pager on the access-gate screen) and echo responses
         server.preset_allow_access();
         server.set_response(default_response_text());
 
@@ -350,7 +350,7 @@ mod tests {
     }
 
     /// This harness's old private mock always served 200 `{"allow_access": true}`; the shared server defaults to 404-until-set.
-    /// A 404 strands the pager on the SuperGrok upsell screen and breaks every PTY test.
+    /// A 404 strands the pager on the access-gate screen and breaks every PTY test.
     #[tokio::test]
     async fn settings_endpoint_allows_access_by_default() {
         let content = ContentController::start().await.unwrap();
