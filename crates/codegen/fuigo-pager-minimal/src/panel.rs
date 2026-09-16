@@ -474,7 +474,6 @@ fn render_mcps(
                 badge: badges[i].as_str(),
                 badge_color: badge_colors[i],
                 collapsible: collapsibles[i],
-                underline_last_desc: false,
             })
         })
         .collect();

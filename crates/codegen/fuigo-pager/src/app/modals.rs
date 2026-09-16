@@ -1306,7 +1306,6 @@ impl AgentView {
                         badge: "",
                         badge_color: None,
                         collapsible: false,
-                        underline_last_desc: false,
                         fields: &[],
                         description_lines: &[],
                         summary_lines: &[],
@@ -1832,7 +1831,6 @@ impl AgentView {
                                 badge: "",
                                 badge_color: None,
                                 collapsible: false,
-                                underline_last_desc: false,
                             })
                         }
                     })
@@ -1904,7 +1902,6 @@ impl AgentView {
                             badge: "",
                             badge_color: None,
                             collapsible: false,
-                            underline_last_desc: false,
                         })
                     })
                     .collect();
@@ -2191,7 +2188,6 @@ impl AgentView {
                             badge: if has_snippet { "match" } else { "" },
                             badge_color: Some(theme.accent_user),
                             collapsible: true,
-                            underline_last_desc: false,
                         }));
                         non_sel_flags.push(false);
                     }
