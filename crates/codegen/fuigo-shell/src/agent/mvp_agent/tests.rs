@@ -7741,5 +7741,12 @@ fn a_failed_login_answers_with_typed_data_not_a_bare_message() {
             .unwrap_or_else(|| panic!("{reason}: authenticate answered with no `data` at all"));
         assert_eq!(data["message"], reason, "{reason}: {data}");
         assert_eq!(data["error_kind"], "auth", "{reason}: {data}");
+        // A-R7-4: the move put the reason in `data.message` and left `message` as the class name.
+        // That is a reduction for a client that reads only `message`, on the method every embedding
+        // client calls on connect, so it is recorded in 15-agent-mode.md's notes on the class.
+        assert_eq!(
+            err.message, "Authentication required",
+            "{reason}: `message` is the class name; the reason lives in `data.message`"
+        );
     }
 }
