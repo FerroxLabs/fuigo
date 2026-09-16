@@ -2349,7 +2349,9 @@ pub fn cleanup_orphaned_uploads(fuigo_home: &Path, max_age: Duration) -> u64 {
 /// When `stats` is `Some`, each deleted lone queue file (temp without sidecar
 /// or vice versa) bumps `cleanup_orphan_mismatched`. Pairing is decided against
 /// a name snapshot taken before any deletion, so the count is independent of
-/// visit order.
+/// visit order. Ages are likewise computed for every entry before the first
+/// deletion, so which of a pair `read_dir` happens to yield first cannot change
+/// what gets swept.
 fn cleanup_queue_dir(queue_dir: &Path, max_age: Duration, stats: Option<&UploadQueueStats>) -> u64 {
     let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(queue_dir) {
         Ok(e) => e.flatten().collect(),
@@ -2358,10 +2360,30 @@ fn cleanup_queue_dir(queue_dir: &Path, max_age: Duration, stats: Option<&UploadQ
     let all_names: HashSet<std::ffi::OsString> = entries.iter().map(|e| e.file_name()).collect();
     let mut cleaned = 0u64;
     let mut cleaned_bytes = 0u64;
-    for entry in &entries {
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
+    // Age EVERY entry before deleting any of them. `pair_age` reads the
+    // companion sidecar off the disk, so once a deletion has happened the
+    // answer depends on `read_dir` order: for a pair whose sidecar is visited
+    // (and removed) first, the temp file's own `pair_age` then finds no
+    // sidecar to read, falls back to mtime, and survives a sweep its
+    // `enqueued_at` had already condemned. Aging up front is what makes this
+    // pass agree with the recovery scan regardless of visit order.
+    let aged: Vec<(&std::fs::DirEntry, std::fs::Metadata, Duration)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let age = pair_age(&path, &name, &all_names).unwrap_or_else(|| {
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .unwrap_or(Duration::MAX)
+            });
+            Some((entry, metadata, age))
+        })
+        .collect();
+    for (entry, metadata, age) in aged {
         let path = entry.path();
         let name = entry.file_name();
         let is_scratch_root = metadata.is_dir() && name == "scratch";
@@ -2371,13 +2393,6 @@ fn cleanup_queue_dir(queue_dir: &Path, max_age: Duration, stats: Option<&UploadQ
             cleaned_bytes += sub_bytes;
             continue;
         }
-        let age = pair_age(&path, &name, &all_names).unwrap_or_else(|| {
-            metadata
-                .modified()
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .unwrap_or(Duration::MAX)
-        });
         if age <= max_age {
             continue;
         }

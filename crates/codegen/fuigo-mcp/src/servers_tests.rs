@@ -3211,8 +3211,24 @@ async fn ensure_initialized_inflight_wait_times_out_when_holder_silent() {
 
 #[tokio::test]
 async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
+    // A loopback listener that accepts and then says nothing, NOT an
+    // unroutable address: the holder has to still be inside `try_handshake`
+    // (state `Initializing`) when this test aborts it, and a sandbox with no
+    // route -- the suite runs the tests under `--network none` -- fails the
+    // connect to an off-host address instantly, so the holder was already
+    // finished before the poll below ever saw `Initializing`. Loopback exists
+    // in every sandbox, and a silent peer parks the handshake for the whole
+    // `startup_timeout_sec` on any host.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _silent_server = tokio::spawn(async move {
+        let mut accepted = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            accepted.push(stream);
+        }
+    });
     let config = HttpConfig {
-        url: "http://192.0.2.1:1/unreachable".to_string(),
+        url: format!("http://{addr}/mcp"),
         headers: vec![],
         local_agent_endpoint: false,
     };

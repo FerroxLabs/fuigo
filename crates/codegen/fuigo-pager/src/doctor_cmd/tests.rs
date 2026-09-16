@@ -241,7 +241,11 @@ fn fake_standalone_facts_compose_through_shared_view() {
         false,
         RuntimeEvidence::Available(ColorLevel::TrueColor),
     );
-    let report = collect_report_with(snapshot);
+    // `compose_report`, not `collect_report_with`: the latter also runs the
+    // voice probe against the host's real audio devices, and a machine with no
+    // microphone (any build container) contributes a second issue that has
+    // nothing to do with the facts composed here.
+    let report = compose_report(snapshot);
 
     assert_eq!(report.issue_count(), 1);
     assert!(
