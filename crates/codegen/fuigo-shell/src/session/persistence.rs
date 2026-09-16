@@ -1410,7 +1410,14 @@ struct SessionPersistence {
     disk_full_tx: watch::Sender<bool>,
     disk_full_notified: bool,
     /// The owning session's ordered event queue, once it exists.
-    /// Empty for a subagent/child actor and in tests that run the actor with no session.
+    ///
+    /// EVERY session installs one at spawn, subagents included: a subagent's persistence handle is
+    /// built in `agent::subagent::handle_request` and handed to the same `spawn_session_actor`,
+    /// which calls [`PersistenceHandle::install_retry_status_mirror`] unconditionally.
+    /// So this is empty only before that call: a write that fails between `persistence::new` /
+    /// `load_light` returning and spawn reaching the install (`init_session` and the early writes
+    /// happen in that window), a [`PersistenceHandle::noop`], and tests that run the actor with no
+    /// session.
     retry_status_mirror: RetryStatusMirrorSlot,
     /// Files that took buffered writes since the last successful sync barrier.
     /// Atomic-rename writes are durable at write time and never enter the set.
@@ -1627,8 +1634,11 @@ impl SessionPersistence {
                 .is_ok()
         });
         if !queued {
-            // No session owns this actor (a subagent child), or its loop is gone: nothing can be
-            // queued ahead of the mirror, so send it directly and open no paragraph of its own.
+            // No queue is installed yet -- the write failed before spawn reached
+            // `install_retry_status_mirror`, or this is a `noop`/test handle -- or the session loop
+            // is gone. A subagent is NOT one of these: it installs a queue like every other
+            // session. In each of those cases nothing can be queued ahead of the mirror, so send it
+            // directly and open no paragraph of its own.
             gateway.forward_fire_and_forget(
                 crate::extensions::notification::retry_status_notification(
                     self.info.id.clone(),
