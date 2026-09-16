@@ -693,6 +693,10 @@ mod tests {
     /// "Server error: Something went wrong on our side. Wait a minute and send again." became
     /// "Request failed: stream closed before the response completed." -- the reason, and no next step.
     /// Both halves must be there.
+    ///
+    /// A-R8-1: only the NEXT STEP half. The `Api` action constant used to conflate a cause claim
+    /// ("Something went wrong on our side.") with the next step ("Wait a minute and send again."), so
+    /// carrying `class.action` across told the user their provider's reason was a Fuigo outage.
     #[test]
     fn status_less_api_error_keeps_the_next_step_beside_the_detail() {
         let formatted = format_request_failure(
@@ -715,8 +719,29 @@ mod tests {
         );
         assert_eq!(
             formatted.message(),
-            "Request failed: stream closed before the response completed. Something went wrong on our \
-             side. Wait a minute and send again."
+            "Request failed: stream closed before the response completed. Wait a minute and send again."
+        );
+    }
+
+    /// A-R8-1: the status-less `api` branch exists because a 403 content-safety block arrives that way.
+    /// Its detail is the whole answer, and nothing about it is a server fault: the reply must not claim
+    /// the failure happened "on our side". The next step stays -- it is advice, not a diagnosis.
+    #[test]
+    fn status_less_content_safety_block_never_claims_a_server_fault() {
+        let formatted = format_request_failure(
+            None,
+            Some(WireErrorType::Api),
+            "Content violates usage guidelines.",
+        );
+        assert_eq!(formatted.headline, "Request failed");
+        assert_eq!(
+            formatted.message(),
+            "Request failed: Content violates usage guidelines. Wait a minute and send again."
+        );
+        assert!(
+            !formatted.message().contains("on our side"),
+            "a content-policy rejection is not a Fuigo outage: {}",
+            formatted.message()
         );
     }
 
