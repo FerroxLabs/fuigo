@@ -1,7 +1,7 @@
 //! Key shortcut types and the `key!()` macro.
 //!
 //! ```
-//! use fuigo_pager::input::key::key;
+//! use fuigo_pager_render::input::key::key;
 //!
 //! // Simple key
 //! let q = key!('q');
@@ -377,12 +377,14 @@ impl fmt::Display for KeyShortcut {
 
 /// Ergonomic macro for constructing [`KeyShortcut`] values.
 ///
-/// ```ignore
-/// key!(Enter)              // KeyCode::Enter, no modifiers
-/// key!('q')                // KeyCode::Char('q')
-/// key!('c', CONTROL)       // Ctrl-C
-/// key!('z', CONTROL | SHIFT) // Ctrl+⇧Z
-/// key!(F(5))               // F5
+/// ```
+/// use fuigo_pager_render::key;
+///
+/// key!(Enter);               // KeyCode::Enter, no modifiers
+/// key!('q');                 // KeyCode::Char('q')
+/// key!('c', CONTROL);        // Ctrl-C
+/// key!('z', CONTROL | SHIFT); // Ctrl+⇧Z
+/// key!(F(5));                // F5
 /// ```
 #[macro_export]
 macro_rules! key {
