@@ -180,11 +180,12 @@ pub(crate) fn format_request_failure(
     let extracted = extract_error_detail(raw);
     let mut class = classify(status, wire);
     // A status-less `api` error proves no server fault (a 403 content-safety block arrives this way): its readable detail is the message
-    // Only the headline and the canned `why` give way to it. `action` is the "what to do" line, and a
+    // Only the headline and the canned `why` give way to it. The next step survives, because a
     // status-less `api` failure is often transient with a detail that is not self-explanatory ("stream
-    // closed mid-response"); dropping the next step there left the user a reason and no guidance, which
-    // 1.0.17 did not do. Where retrying is genuinely useless (a content-safety block) the detail says so
-    // next to the advice, which is the same thing every 4xx reply with a provider reason already does.
+    // closed mid-response") and dropping the advice there left the user a reason and no guidance, which
+    // 1.0.17 did not do. It is `API_NEXT_STEP` and not `class.action`: the class's action also carries
+    // `API_SERVER_FAULT_WHY`, and pairing a content-policy rejection with "Something went wrong on our
+    // side" tells the user their own request was a Fuigo outage.
     if status.is_none()
         && wire == WireErrorType::Api
         && let Some(detail) = extracted.as_deref()
@@ -192,7 +193,7 @@ pub(crate) fn format_request_failure(
     {
         class = Classified {
             headline: "Request failed".to_string(),
-            action: class.action,
+            action: Some(API_NEXT_STEP),
             default_why: None,
         };
     }
@@ -250,6 +251,15 @@ struct Classified {
     /// Used only when the server body added nothing.
     default_why: Option<&'static str>,
 }
+
+/// The two halves of the `api` class's advice, kept apart because only one of them is always true.
+///
+/// `API_SERVER_FAULT_WHY` is a CAUSE claim: it holds when nothing contradicts it, and it is wrong the
+/// moment the provider hands back a reason of its own (a content-safety block arrives as a status-less
+/// `api` error). `API_NEXT_STEP` is advice, and holds either way. Composed by [`compose_detail`] they
+/// read as the single sentence 1.0.17 shipped.
+const API_SERVER_FAULT_WHY: &str = "Something went wrong on our side.";
+const API_NEXT_STEP: &str = "Wait a minute and send again.";
 
 fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
     if let Some(code) = status {
@@ -349,8 +359,8 @@ fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
         ),
         WireErrorType::Api => (
             "Server error",
-            Some("Something went wrong on our side. Wait a minute and send again."),
-            None,
+            Some(API_NEXT_STEP),
+            Some(API_SERVER_FAULT_WHY),
         ),
         WireErrorType::AuthTransient => (
             "Authentication temporarily unavailable",
