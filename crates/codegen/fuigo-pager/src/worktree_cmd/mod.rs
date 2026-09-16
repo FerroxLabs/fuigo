@@ -7,7 +7,7 @@ use fuigo_fast_worktree::WorktreeRecord;
 /// Reuse the agent's own report types rather than copies, so a field added there cannot go missing here.
 pub use fuigo_fast_worktree::{DbStats, GcReport, KeptWorktree, RebuildReport};
 use fuigo_shell::agent::config::Config as AgentConfig;
-use fuigo_shell::sampling::error::acp_error_text;
+use fuigo_shell::sampling::error::{acp_error_text, error_detail_from_data};
 use std::io::Write;
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, clap::Args, Clone)]
@@ -132,6 +132,23 @@ struct ExtEnvelope<T> {
     result: Option<T>,
     error: Option<serde_json::Value>,
 }
+/// The in-result `error` of an extension envelope, in words.
+///
+/// `ExtEnvelope.error` is a raw `serde_json::Value`, not an `acp::Error`, so printing it with `Display`
+/// dumps JSON at a CLI user -- and 1.0.18 made that dump worse by turning `data` from a string into an
+/// object. Read it the way the rest of the tree reads an error: `data` first (an object's `message`, or
+/// a pre-1.0.18 bare string), then the JSON-RPC `message`, and only then the value itself, so a shape
+/// nobody anticipated still prints something rather than nothing.
+///
+/// Low reachability, not unreachable: `fuigo/git/worktree/*` answers a failure as a JSON-RPC error, and
+/// `extensions/worktree.rs` pins that the wire result carries no `error` key. It is fixed rather than
+/// asserted away because a future extension may populate it and this is the CLI's last raw render.
+fn ext_envelope_error_text(err: &serde_json::Value) -> String {
+    err.get("data")
+        .and_then(error_detail_from_data)
+        .or_else(|| error_detail_from_data(err))
+        .unwrap_or_else(|| err.to_string())
+}
 async fn ext_call<T: serde::de::DeserializeOwned>(
     tx: &fuigo_acp_lib::AcpAgentTx,
     method: &str,
@@ -145,7 +162,7 @@ async fn ext_call<T: serde::de::DeserializeOwned>(
     let envelope: ExtEnvelope<T> = serde_json::from_str(resp.0.get())
         .map_err(|e| anyhow::anyhow!("response parse error: {e}"))?;
     if let Some(err) = envelope.error {
-        bail!("ACP error: {err}");
+        bail!("ACP error: {}", ext_envelope_error_text(&err));
     }
     envelope
         .result
@@ -280,6 +297,40 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A-R8-3: `83112ed` converted this file's other renders to `data.message` and left the envelope
+    /// error printing its whole JSON value. A 1.0.18 agent answers with object `data`, so the dump is
+    /// now nested: the CLI user must get the sentence, not the envelope.
+    #[test]
+    fn envelope_error_renders_the_message_not_the_json() {
+        let text = ext_envelope_error_text(&serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"message": "worktree store is locked", "error_kind": "session_storage"},
+        }));
+        assert_eq!(text, "worktree store is locked");
+        assert!(!text.contains('{'), "{text}");
+    }
+    /// No `data`: the JSON-RPC `message` is the only readable part.
+    #[test]
+    fn envelope_error_falls_back_to_the_jsonrpc_message() {
+        let text = ext_envelope_error_text(&serde_json::json!({
+            "code": -32601,
+            "message": "Method not found",
+        }));
+        assert_eq!(text, "Method not found");
+    }
+    /// An older agent, or a foreign one, may send a bare string.
+    #[test]
+    fn envelope_error_reads_a_bare_string() {
+        let text = ext_envelope_error_text(&serde_json::json!("worktree store is locked"));
+        assert_eq!(text, "worktree store is locked");
+    }
+    /// Nothing readable anywhere: the value itself is better than an empty message.
+    #[test]
+    fn envelope_error_keeps_an_unreadable_value_verbatim() {
+        let text = ext_envelope_error_text(&serde_json::json!({"code": -32603}));
+        assert_eq!(text, r#"{"code":-32603}"#);
+    }
     #[test]
     fn ext_request_builds_list_with_filters() {
         let req = ext_request(

@@ -1996,6 +1996,7 @@
     }
 
     /// The TurnFailed marker keeps a status-less `api` error's detail on every rail: live wake, busy-wake pierce, and replay.
+    /// The class's next step stays beside it (A-R7-3): the detail replaces the generic headline, not the guidance.
     #[test]
     fn status_less_api_turn_failed_marker_keeps_the_provider_detail() {
         use crate::app::agent::AgentState;
@@ -2006,7 +2007,8 @@
             match last_session_event(&agent.scrollback) {
                 Some(SessionEvent::TurnFailed { error, .. }) => {
                     assert!(error.contains("Content violates usage guidelines"), "{rail}: {error:?}");
-                    assert!(!error.contains("Something went wrong on our side"), "{rail}: {error:?}");
+                    assert!(error.starts_with("Request failed:"), "{rail}: {error:?}");
+                    assert!(error.contains("Wait a minute and send again"), "{rail}: {error:?}");
                 }
                 other => panic!("{rail}: expected TurnFailed, got {other:?}"),
             }

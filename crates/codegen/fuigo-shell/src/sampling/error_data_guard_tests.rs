@@ -13,7 +13,29 @@
 //! Its reach is textual: it sees the error type where the expression names it (`serde_json::…`, `anyhow!`,
 //! `.context(..)`). A `?` on a crate-local helper that returns `anyhow::Result` names nothing, so those were
 //! enumerated once by compiling the tree against a schema crate with `impl From<anyhow::Error> for acp::Error`
-//! deleted; keep new helpers of that shape out of `acp::Error`-returning functions.
+//! deleted. That enumeration was a one-time act, not a gate, so a second scan now covers the same shape from
+//! the other end: collect every `fn .. -> anyhow::Result<..>` declared in the crate, then reject a call to one
+//! under `?` inside an `acp::Error`-returning function (`crate_local_anyhow_try_sites`). It is WEAKER THAN
+//! COMPILING AGAINST A STRIPPED SCHEMA CRATE -- it reads declarations textually, so it misses a helper whose
+//! return type is spelled `Result<T>` behind `use anyhow::Result`, one reached as a method or a trait call, and
+//! one declared in another crate. Keep new helpers of that shape out of `acp::Error`-returning functions.
+//!
+//! TODO(1.0.19): replace that scan with the durable check -- a CI job that builds the tree against a schema
+//! crate with `impl From<anyhow::Error> for acp::Error` deleted and fails on the type errors, which is the
+//! enumeration above, automated. Deferred out of 1.0.18 because it needs a patched vendored copy of the schema
+//! crate and a new CI job, and this release ships days after a customer incident; the textual scan closes the
+//! same hole for every shape the crate writes today.
+//!
+//! TODO(1.0.19), same root cause and the same vendored copy, so do them together: the schema crate's OTHER
+//! implicit conversion, `impl From<serde_json::Error> for acp::Error`, also fires during request DECODE, before
+//! any shell code runs. Malformed params on a core ACP method (`session/prompt`, `session/new`, `session/load`,
+//! `session/set_mode`, `session/set_model`, `authenticate`) therefore answer `-32602` with a bare-string `data`
+//! that no scan in this file can see, because the call site is in the schema crate. 1.0.17 answers identically,
+//! so it is not a regression -- but `session/prompt` is sent every turn, and a content-block shape skew between
+//! a client's ACP version and this build's lands there, which is the exact silence 1.0.18 exists to kill.
+//! Fix: decode core requests through a wrapper that re-shapes the rejection into object `data` with
+//! `error_kind: "invalid_request"`. 1.0.18 documents the shape instead (`15-agent-mode.md`, fourth note on the
+//! class), because a decode wrapper reaches every core method days before a customer-incident release.
 //!
 //! A third way to reach a client with nothing readable is to build an error and give it NO `data` at all:
 //! `acp::Error::method_not_found()` answers `data: null`, which a client that renders only object-shaped `data`
@@ -225,8 +247,19 @@ fn returns_acp_error(ret: &str) -> bool {
         || (ret.starts_with("Result<") && ret.contains("acp::Error"))
 }
 
-/// `(start, end)` of the body braces of every function whose error type is `acp::Error`.
-fn acp_error_fn_bodies(code: &[char]) -> Vec<(usize, usize)> {
+/// A return type whose error is `anyhow::Error`, spelled so the text says so: `anyhow::Result<..>`
+/// or `Result<.., anyhow::Error>`. A crate that imports `anyhow::Result` and writes a bare
+/// `Result<T>` is indistinguishable from `std::result::Result` in text, and is not collected.
+fn returns_anyhow_error(ret: &str) -> bool {
+    let ret = ret.trim();
+    ret.starts_with("anyhow::Result")
+        || (ret.starts_with("Result<") && ret.contains("anyhow::Error"))
+}
+
+/// `(name, body start, body end)` of every function with a body whose return type satisfies `keep`.
+/// The body of a kept function is not re-scanned for nested declarations: a `fn` nested inside one
+/// belongs to the enclosing body, which the callers scan whole.
+fn fn_decls(code: &[char], keep: impl Fn(&str) -> bool) -> Vec<(String, usize, usize)> {
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(pos) = find(code, "fn ", from) {
@@ -238,9 +271,11 @@ fn acp_error_fn_bodies(code: &[char]) -> Vec<(usize, usize)> {
         while j < code.len() && code[j].is_whitespace() {
             j += 1;
         }
+        let name_start = j;
         while j < code.len() && is_ident(code[j]) {
             j += 1;
         }
+        let name: String = code[name_start..j].iter().collect();
         // Generics: `->` inside a bound (`F: Fn() -> T`) is not a closing angle bracket
         while j < code.len() && code[j].is_whitespace() {
             j += 1;
@@ -300,7 +335,7 @@ fn acp_error_fn_bodies(code: &[char]) -> Vec<(usize, usize)> {
             continue;
         };
         let ret = ret.split("where").next().unwrap_or(ret);
-        if !returns_acp_error(ret) {
+        if !keep(ret) {
             continue;
         }
         let start = j;
@@ -318,10 +353,28 @@ fn acp_error_fn_bodies(code: &[char]) -> Vec<(usize, usize)> {
             }
             j += 1;
         }
-        out.push((start, j.min(code.len())));
+        out.push((name, start, j.min(code.len())));
         from = j;
     }
     out
+}
+
+/// `(start, end)` of the body braces of every function whose error type is `acp::Error`.
+fn acp_error_fn_bodies(code: &[char]) -> Vec<(usize, usize)> {
+    fn_decls(code, returns_acp_error)
+        .into_iter()
+        .map(|(_, start, end)| (start, end))
+        .collect()
+}
+
+/// The names of every `fn .. -> anyhow::Result<..>` declared in one file.
+fn anyhow_returning_fn_names(src: &str) -> Vec<String> {
+    let mut code = code_only(src);
+    strip_cfg_test_items(&mut code);
+    fn_decls(&code, returns_anyhow_error)
+        .into_iter()
+        .map(|(name, _, _)| name)
+        .collect()
 }
 
 /// The expression a `?` at `q` is applied to, verbatim: walk back over one primary expression chain.
@@ -415,6 +468,76 @@ fn implicit_conversion_source(chain: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// A `?` applied to a call to one of `helpers` -- crate-local functions returning `anyhow::Result` --
+/// inside a function whose error type is `acp::Error`. The schema crate's `From<anyhow::Error>` is
+/// `into_internal_error`, which puts a BARE STRING in `data`, and the call names no error type, so the
+/// `implicit_conversion_source` scan above cannot see it. Map it through `crate::acp_error` instead.
+///
+/// This gate is WEAKER THAN COMPILING AGAINST A STRIPPED SCHEMA CRATE (the one-off enumeration that
+/// found the sites this branch fixed: build the tree with `impl From<anyhow::Error> for acp::Error`
+/// deleted and read the type errors). It sees only helpers DECLARED in this crate, only where the
+/// declaration spells `anyhow::Result` / `Result<.., anyhow::Error>`, and only where the `?` is applied
+/// to a direct call by name -- not to a method on a value, a trait method, or a helper from another
+/// crate. It is a real gate in the pattern already here; the durable replacement is a 1.0.19 item
+/// (see the module header).
+fn crate_local_anyhow_try_sites(rel: &str, src: &str, helpers: &[String]) -> Vec<String> {
+    let mut code = code_only(src);
+    strip_cfg_test_items(&mut code);
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for (start, end) in acp_error_fn_bodies(&code) {
+        for q in start..end {
+            if code[q] != '?' {
+                continue;
+            }
+            if code[q + 1..end.min(q + 8)]
+                .iter()
+                .collect::<String>()
+                .trim_start()
+                .starts_with("Sized")
+            {
+                continue;
+            }
+            let chain = try_chain(&code, q);
+            // A chain that already went through `map_err` produced an `acp::Error` itself
+            if chain.contains(".map_err(") {
+                continue;
+            }
+            let Some(helper) = helpers.iter().find(|h| calls_by_name(&chain, h)) else {
+                continue;
+            };
+            let line = line_of(&code, q);
+            out.push(format!(
+                "{rel}:{line}: `?` on the crate-local `anyhow::Result` helper `{helper}` converts \
+                 implicitly into a bare-string `data`: {}",
+                lines.get(line - 1).map(|l| l.trim()).unwrap_or("")
+            ));
+        }
+    }
+    out
+}
+
+/// Does `chain` call `name` as a function -- the whole identifier, followed by `(` or a turbofish?
+/// `foo(..)`, `crate::x::foo(..)` and `self.foo(..)` all count; `foobar(..)` and `NAME_FOO` do not.
+fn calls_by_name(chain: &str, name: &str) -> bool {
+    let bytes: Vec<char> = chain.chars().collect();
+    let needle: Vec<char> = name.chars().collect();
+    if needle.is_empty() {
+        return false;
+    }
+    (0..bytes.len().saturating_sub(needle.len() - 1)).any(|i| {
+        if !bytes[i..].starts_with(&needle) {
+            return false;
+        }
+        if i > 0 && is_ident(bytes[i - 1]) {
+            return false;
+        }
+        let after: String = bytes[i + needle.len()..].iter().collect();
+        let after = after.trim_start();
+        after.starts_with('(') || after.starts_with("::<")
+    })
 }
 
 /// Offending sites in one file, as `rel:line: reason`.
@@ -579,6 +702,105 @@ fn every_acp_error_data_in_shell_source_comes_from_a_typed_helper() {
         "{} acp::Error data site(s) bypass the typed helpers (use crate::acp_error):\n{}",
         all.len(),
         all.join("\n")
+    );
+}
+
+/// A-R7-2: the `?`-conversion blind spot, closed with the gate that is achievable now.
+/// `?` on a crate-local helper that returns `anyhow::Result` names no error type, so
+/// `implicit_conversion_source` cannot see it, yet it ships a bare-string `data` exactly like an
+/// inline `anyhow!`. The scan collects the helpers by declaration and flags the calls.
+#[test]
+fn the_anyhow_helper_scan_sees_a_call_the_named_type_scan_cannot() {
+    let src = concat!(
+        "fn load_thing(p: &str) -> anyhow::Result<String> { Ok(p.to_owned()) }\n",
+        "fn boxed(p: &str) -> Result<String, anyhow::Error> { Ok(p.to_owned()) }\n",
+        "fn io_thing(p: &str) -> Result<String, std::io::Error> { Ok(p.to_owned()) }\n",
+        "async fn handler(p: &str) -> ExtResult { let v = load_thing(p)?; io_thing(p)?; Ok(v) }\n",
+        "fn two(p: &str) -> AcpResult<String> { Ok(boxed(p)?) }\n",
+        "fn mapped(p: &str) -> ExtResult { Ok(load_thing(p).map_err(crate::acp_error::internal_from)?) }\n",
+        "fn plain(p: &str) -> anyhow::Result<String> { load_thing(p) }\n",
+        "fn similar(p: &str) -> ExtResult { Ok(load_thing_else(p)?) }\n",
+    );
+    assert_eq!(
+        anyhow_returning_fn_names(src),
+        ["load_thing", "boxed", "plain"],
+        "the helpers are collected by the spelling of their declared return type"
+    );
+    let helpers = anyhow_returning_fn_names(src);
+    let found = crate_local_anyhow_try_sites("x.rs", src, &helpers);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(
+        found[0].contains("x.rs:4") && found[0].contains("`load_thing`"),
+        "{found:#?}"
+    );
+    assert!(
+        found[1].contains("x.rs:5") && found[1].contains("`boxed`"),
+        "{found:#?}"
+    );
+    assert!(
+        offenders("x.rs", src).is_empty(),
+        "the named-type scan is blind to these, which is why this one exists: {:#?}",
+        offenders("x.rs", src)
+    );
+}
+
+/// No `acp::Error`-returning function in the shell hands `?` a crate-local `anyhow::Result` helper.
+/// The scan is proved live on real sources in the same test, by mutation: a call injected into a real
+/// `acp::Error`-returning body is found.
+#[test]
+fn no_acp_returning_function_swallows_a_crate_local_anyhow_helper() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_sources(&root, &root, &mut files);
+    let sources: Vec<(String, String)> = files
+        .iter()
+        .filter_map(|(rel, path)| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|src| (rel.clone(), src))
+        })
+        .collect();
+    let mut helpers: Vec<String> = Vec::new();
+    for (_, src) in &sources {
+        helpers.extend(anyhow_returning_fn_names(src));
+    }
+    helpers.sort();
+    helpers.dedup();
+    assert!(
+        helpers.len() > 20,
+        "the scan collected only {} `anyhow::Result` helpers, so it is watching nothing",
+        helpers.len()
+    );
+    let mut found: Vec<String> = Vec::new();
+    for (rel, src) in &sources {
+        found.extend(crate_local_anyhow_try_sites(rel, src, &helpers));
+    }
+    assert!(
+        found.is_empty(),
+        "{} site(s) let `?` convert a crate-local `anyhow::Result` helper into a bare-string `data`; \
+         map it through `crate::acp_error::internal_from` instead:\n{}",
+        found.len(),
+        found.join("\n")
+    );
+    // Live on real sources: inject a call to a real helper at the top of a real acp-returning body.
+    let helper = helpers.first().expect("the crate declares anyhow helpers");
+    let (rel, src, at) = sources
+        .iter()
+        .find_map(|(rel, src)| {
+            let mut code = code_only(src);
+            strip_cfg_test_items(&mut code);
+            acp_error_fn_bodies(&code)
+                .first()
+                .map(|&(start, _)| (rel.clone(), src.clone(), start))
+        })
+        .expect("the shell has `acp::Error`-returning functions");
+    let mut chars: Vec<char> = src.chars().collect();
+    let injected: Vec<char> = format!(" let _injected = {helper}()?;").chars().collect();
+    chars.splice(at + 1..at + 1, injected);
+    let mutated: String = chars.into_iter().collect();
+    assert!(
+        !crate_local_anyhow_try_sites(&rel, &mutated, &helpers).is_empty(),
+        "the scan must find a crate-local anyhow helper called under `?` in {rel}"
     );
 }
 
@@ -908,6 +1130,28 @@ fn the_guide_explains_every_reply_that_still_comes_back_without_data() {
     }
 }
 
+/// A-R7-4: the same login-failure fix moved the reason out of `message` and into `data.message`, leaving
+/// `message` as the class name. For a client that reads only `message` -- on the one method every
+/// embedding client calls on connect -- that is a reduction against shipped 1.0.17, so the published
+/// guide records it beside the other class changes. `a_failed_login_answers_with_typed_data_not_a_bare_message`
+/// pins the reply itself; this pins the record of it.
+#[test]
+fn the_guide_records_the_auth_required_message_change() {
+    let doc = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fuigo-pager/docs/user-guide/15-agent-mode.md");
+    let guide = std::fs::read_to_string(&doc).expect("read 15-agent-mode.md");
+    let note = guide
+        .split("\n\n")
+        .find(|p| p.contains("a failed `authenticate`"))
+        .expect("the guide records the `authenticate` reply change next to the other class notes");
+    for expected in ["`data.message`", "Authentication required", "Before 1.0.18"] {
+        assert!(
+            note.contains(expected),
+            "the `authenticate` note does not say {expected}:\n{note}"
+        );
+    }
+}
+
 /// The login-failure reply is the whole reason the third scan exists (A-R4-2), and the test that pins it
 /// (`a_failed_login_answers_with_typed_data_not_a_bare_message`) pins the HELPER: re-inlining the pre-fix
 /// `let mut err = acp::Error::auth_required(); err.message = e.to_string(); err` at the `authenticate`
@@ -959,6 +1203,55 @@ fn the_no_data_scan_exempts_the_typed_constructor_module() {
     );
 }
 
+/// The body braces of the first `fn <name>` declared in `code`, or `None` when the file has no such
+/// function. Used to scope an exemption to one function instead of a whole file.
+fn fn_body_span(code: &[char], name: &str) -> Option<(usize, usize)> {
+    let needle = format!("fn {name}");
+    let mut from = 0;
+    while let Some(pos) = find(code, &needle, from) {
+        from = pos + needle.chars().count();
+        if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        if code.get(from).is_some_and(|&c| is_ident(c)) {
+            continue;
+        }
+        let mut j = from;
+        while j < code.len() && code[j] != '{' && code[j] != ';' {
+            j += 1;
+        }
+        // A trait method declaration has no body
+        if code.get(j) != Some(&'{') {
+            continue;
+        }
+        let start = j;
+        let mut depth = 0i32;
+        while j < code.len() {
+            match code[j] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((start, j));
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        return Some((start, code.len()));
+    }
+    None
+}
+
+/// The one function allowed to read a whole `data` as a string: `error_detail_from_data`, which reads
+/// both shapes so an error built by a pre-1.0.18 agent still yields its detail.
+fn legacy_string_read_exemption(rel: &str, code: &[char]) -> Option<(usize, usize)> {
+    (rel == "sampling/error.rs")
+        .then(|| fn_body_span(code, "error_detail_from_data"))
+        .flatten()
+}
+
 /// A fourth way a client-visible failure loses its reason, and the one the three scans above cannot
 /// see: not building a bad `data`, but READING a good one as if it were the bare string it used to be.
 /// `err.data.as_ref().and_then(|d| d.as_str())` yields `None` against every error the shell builds
@@ -966,19 +1259,24 @@ fn the_no_data_scan_exempts_the_typed_constructor_module() {
 /// `<no error data>` in the compaction request artifact, `memory flush failed` in the memory-flush
 /// outcome. Both were live defects on this branch until `9432302`.
 ///
-/// `sampling/error.rs` is the one module exempt: `error_detail_from_data` reads the string shape on
-/// purpose, because a client may hand back an error built by an agent older than 1.0.18.
+/// Exactly one whole-value read in the tree is deliberate: `error_detail_from_data` in
+/// `sampling/error.rs` accepts the pre-1.0.18 string shape on purpose, because a client may hand back
+/// an error built by an agent older than 1.0.18. The exemption is THAT FUNCTION'S BODY, not the file:
+/// `sampling/error.rs` also holds `acp_error_text`, `acp_error_message`, `error_kind_str_from_error`
+/// and `http_status_from_error` -- the likeliest place a future whole-value read is added, and a
+/// file-wide exemption made every one of them invisible to this scan forever.
 fn string_shaped_data_reads(rel: &str, src: &str) -> Vec<String> {
-    if rel == "sampling/error.rs" {
-        return Vec::new();
-    }
     let mut code = code_only(src);
     strip_cfg_test_items(&mut code);
+    let exempt = legacy_string_read_exemption(rel, &code);
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(pos) = find(&code, "data", from) {
         from = pos + 4;
         if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        if exempt.is_some_and(|(start, end)| pos > start && pos < end) {
             continue;
         }
         if code.get(pos + 4).is_some_and(|&c| is_ident(c)) {
@@ -1050,9 +1348,70 @@ fn the_string_data_scan_flags_a_whole_value_read_and_leaves_field_reads_alone() 
         "{:#?}",
         string_shaped_data_reads("x.rs", fine)
     );
+    let in_error_rs: Vec<String> = string_shaped_data_reads("sampling/error.rs", offending);
+    assert_eq!(
+        in_error_rs,
+        [
+            "sampling/error.rs:1",
+            "sampling/error.rs:3",
+            "sampling/error.rs:8"
+        ],
+        "the module that reads both shapes is not exempt wholesale"
+    );
+    let deliberate = concat!(
+        "pub fn error_detail_from_data(data: &serde_json::Value) -> Option<String> {\n",
+        "    if let Some(s) = data.as_str() {\n",
+        "        return Some(s.to_owned());\n",
+        "    }\n",
+        "    None\n",
+        "}\n",
+        "fn later(e: &acp::Error) -> Option<&str> { e.data.as_ref().and_then(|d| d.as_str()) }\n",
+    );
+    assert_eq!(
+        string_shaped_data_reads("sampling/error.rs", deliberate),
+        ["sampling/error.rs:7"],
+        "the exemption is the body of `error_detail_from_data`, not the file around it"
+    );
+    assert_eq!(
+        string_shaped_data_reads("x.rs", deliberate).len(),
+        2,
+        "the exemption is keyed to the one module that owns the compatibility read"
+    );
+}
+
+/// A-R7-1: the exemption used to be the whole FILE, so every read in `sampling/error.rs` -- the module
+/// that holds `acp_error_text`, `acp_error_message`, `error_kind_str_from_error` and
+/// `http_status_from_error`, the likeliest place a whole-value read is added next -- was invisible to
+/// the guard forever. Prove the scoped exemption by mutation, on the real file: the deliberate read
+/// stays exempt (the shipped file is clean) and a read added ANYWHERE ELSE in the module is seen.
+#[test]
+fn the_string_data_scan_sees_a_whole_value_read_elsewhere_in_the_error_module() {
+    let rel = "sampling/error.rs";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(rel);
+    let src = std::fs::read_to_string(&path).expect("read error.rs");
     assert!(
-        string_shaped_data_reads("sampling/error.rs", offending).is_empty(),
-        "the module that deliberately reads both shapes is exempt"
+        src.contains("pub fn error_detail_from_data("),
+        "the exemption names a function this module must still declare"
+    );
+    assert!(
+        string_shaped_data_reads(rel, &src).is_empty(),
+        "the shipped module is clean: its one whole-value read is the deliberate compatibility read, \
+         and it is inside `error_detail_from_data`"
+    );
+    const ANCHOR: &str = "pub fn http_status_from_error(err: &acp::Error) -> Option<u16> {";
+    assert_eq!(
+        src.matches(ANCHOR).count(),
+        1,
+        "the mutation needs one anchor outside the exempt function"
+    );
+    let mutated = src.replace(
+        ANCHOR,
+        &format!("{ANCHOR}\n    let _legacy = err.data.as_ref().and_then(|d| d.as_str());"),
+    );
+    assert!(
+        !string_shaped_data_reads(rel, &mutated).is_empty(),
+        "a whole-value read added outside `error_detail_from_data` must be flagged, in this module \
+         like in every other"
     );
 }
 
