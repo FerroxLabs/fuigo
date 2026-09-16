@@ -1318,11 +1318,10 @@ mod tests {
         assert_eq!(receipt.pending_tool_calls, vec!["child:unsettled".to_string()]);
         parent.release(&parent_session);
         child.release(&child_session);
-    /// A resend takes its attempt over: the superseded attempt stops counting as
-    /// unresolved work, its debit stays, and it never poisons the token budget with
-    /// unknown usage (a retry would otherwise deny every later admission under a limit).
-    /// An attempt no resend takes over stays unresolved until a resubmit supersedes it,
-    /// so a turn that really failed still issues a partial receipt.
+        drop(tx);
+        actor.await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_resent_attempt_settles_while_an_abandoned_one_stays_unresolved() {
         let dir = tempfile::tempdir().unwrap();
