@@ -79,29 +79,7 @@ mod tests {
     };
     use crate::token_source::TokenSource;
 
-    /// Pick the jsonwebtoken crypto backend explicitly before any signing.
-    ///
-    /// `jsonwebtoken` 10 refuses to guess when more than one backend is compiled
-    /// in, and in this workspace both are: this crate turns on
-    /// `jsonwebtoken/aws_lc_rs` (feature `jwt-aws-lc-rs`) while `fuigo-shell`
-    /// depends on `jsonwebtoken` directly with `rust_crypto`. Cargo unifies the
-    /// two, so `CryptoProvider::get_default()` matches neither `cfg` arm and the
-    /// first sign/verify panics with its NOT_INSTALLED_ERROR instead of erroring.
-    /// The rest of the workspace installs a provider at each JWT entry point
-    /// (`fuigo_shell::auth::jwt::ensure_jwt_crypto_provider`, `auth::oidc::login`);
-    /// these tests establish the same process precondition rather than relying on
-    /// whichever test happened to run first. `install_default` returns `Err` when a
-    /// provider is already installed, which is the normal case: first install wins.
-    /// `lib.rs` makes the two `cfg`s below mutually exclusive and exhaustive.
-    fn ensure_jwt_crypto_provider() {
-        #[cfg(feature = "jwt-aws-lc-rs")]
-        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-        #[cfg(feature = "jwt-rust-crypto")]
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-    }
-
     fn fixture_credentials(token_uri: &str) -> CredentialsFile {
-        ensure_jwt_crypto_provider();
         // Ephemeral test-only key; never reads ambient Google credentials.
         let output = std::process::Command::new("openssl")
             .args(["genrsa", "2048"]).output().expect("openssl test-key generator");
@@ -136,6 +114,13 @@ mod tests {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS/BSD hand back an accepted socket that inherited the
+                        // listener's O_NONBLOCK, and a read timeout has no effect on a
+                        // non-blocking socket, so the first `read` returns WouldBlock
+                        // instead of the request. Linux does not inherit it, which is
+                        // why this only ever showed up off the CI host. Clear it
+                        // explicitly; the 3s read timeout below is the real bound.
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
                         let mut bytes = Vec::new();
                         let mut buffer = [0; 4096];

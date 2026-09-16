@@ -19,6 +19,17 @@ auth and metadata dispatch consult it before network contact. Fuigo installs its
 TLS/redirect/destination policy before GCS credential discovery. Clients retain
 their upstream timeouts, credential modes and payloads; construction is fallible.
 Standalone SDK use without hook installation retains its default transport.
+The `gcloud-auth` manifest's default feature set is the second local
+modification: `jwt-rust-crypto` replaces upstream's `jwt-aws-lc-rs` (the
+pristine manifest is kept beside it as `Cargo.toml.orig`). Fuigo links this
+crate into the same binary as `fuigo-shell`, which depends on `jsonwebtoken`
+with `rust_crypto`; Cargo unifies features, so the upstream default put both
+`jsonwebtoken/aws_lc_rs` and `jsonwebtoken/rust_crypto` in one process.
+`CryptoProvider::from_crate_features` matches neither cfg arm in that case and
+returns a provider whose signer factory panics, which aborted the shipping
+binary on the first service-account JWT. `[workspace.dependencies]` asks
+`gcloud-storage` for `jwt-rust-crypto` for the same reason. `jwt-aws-lc-rs`
+still exists for standalone SDK use; only one of the two may be enabled.
 Guarded dispatch also changes which error variant a failed metadata request
 produces, so `gcloud-metadata-1.0.2/tests/test.rs` matches
 `Error::TransportPolicy(transport::Error::Http(_))` where upstream matched
