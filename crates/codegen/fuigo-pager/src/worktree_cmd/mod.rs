@@ -7,7 +7,7 @@ use fuigo_fast_worktree::WorktreeRecord;
 /// Reuse the agent's own report types rather than copies, so a field added there cannot go missing here.
 pub use fuigo_fast_worktree::{DbStats, GcReport, KeptWorktree, RebuildReport};
 use fuigo_shell::agent::config::Config as AgentConfig;
-use fuigo_shell::sampling::error::acp_error_text;
+use fuigo_shell::sampling::error::{acp_error_text, error_detail_from_data};
 use std::io::Write;
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, clap::Args, Clone)]
@@ -134,10 +134,20 @@ struct ExtEnvelope<T> {
 }
 /// The in-result `error` of an extension envelope, in words.
 ///
-/// `ExtEnvelope.error` is a raw `serde_json::Value`, so printing it with `Display` dumps JSON at a CLI
-/// user -- and 1.0.18 made that dump worse by turning `data` from a string into an object.
+/// `ExtEnvelope.error` is a raw `serde_json::Value`, not an `acp::Error`, so printing it with `Display`
+/// dumps JSON at a CLI user -- and 1.0.18 made that dump worse by turning `data` from a string into an
+/// object. Read it the way the rest of the tree reads an error: `data` first (an object's `message`, or
+/// a pre-1.0.18 bare string), then the JSON-RPC `message`, and only then the value itself, so a shape
+/// nobody anticipated still prints something rather than nothing.
+///
+/// Low reachability, not unreachable: `fuigo/git/worktree/*` answers a failure as a JSON-RPC error, and
+/// `extensions/worktree.rs` pins that the wire result carries no `error` key. It is fixed rather than
+/// asserted away because a future extension may populate it and this is the CLI's last raw render.
 fn ext_envelope_error_text(err: &serde_json::Value) -> String {
-    err.to_string()
+    err.get("data")
+        .and_then(error_detail_from_data)
+        .or_else(|| error_detail_from_data(err))
+        .unwrap_or_else(|| err.to_string())
 }
 async fn ext_call<T: serde::de::DeserializeOwned>(
     tx: &fuigo_acp_lib::AcpAgentTx,
