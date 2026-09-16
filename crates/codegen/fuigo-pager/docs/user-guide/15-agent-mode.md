@@ -164,10 +164,11 @@ New values can be added in later releases, so treat an unknown `error_kind` as a
 
 `code` stays the JSON-RPC class: `-32603` internal error, `-32000` authentication required, `-32602` invalid params, `-32600` invalid request, `-32601` method not found, `-32002` resource not found, `-32003` rate limited, `-32800` request cancelled.
 
-Two notes on the class:
+Three notes on the class:
 
 - A `fuigo/*` extension method this build does not implement answers `-32601` with the object above, naming the method in `data.message` exactly as you sent it, `_` prefix included (`unknown ACP extension method: _fuigo/skills/whatever`), so you can match it against your own request string. Before 1.0.18 the name came back without the `_`. Two kinds of request are rejected by the protocol layer before the agent sees them, and both still come back as `-32601 Method not found` with no `data`, because no part of the agent runs: an unknown top-level JSON-RPC method, one that is not an extension call, and `session/cancel` -- a notification-only method -- sent as a request instead of as a notification. Sent the way the protocol specifies, as a notification, `session/cancel` cancels the turn normally.
 - Since 1.0.18 a failure to serialize the agent's OWN data answers `-32603` (`internal`) where it used to answer `-32602` (`invalid params`). The parameters the client sent were fine; the fault was inside the agent, so the class now says so. Five replies changed class, in two files: the agent's tool input while a prompt is running (`fuigo-shell` `session/acp_session_impl/tool_calls.rs`, two sites) and the `fuigo/commands/list` response (`fuigo-shell` `extensions/session_admin.rs`, three sites). Nothing the client sends can reach them; a malformed request still answers `-32602`.
+- Since 1.0.18 a failed `authenticate` puts its reason in `data.message` and leaves `message` as the class name `Authentication required`. Before 1.0.18 the reply carried no `data` at all and `message` held the reason (`bad credentials`, `Authentication cancelled`), so a client that renders only object-shaped `data` showed the user nothing on a failed login. The class and the code (`-32000`) are unchanged. Every embedding client calls `authenticate` on connect, so a client that reads only `message` sees the class name where it used to see the reason: read `data.message`.
 
 A prompt that failed on an empty model response:
 
