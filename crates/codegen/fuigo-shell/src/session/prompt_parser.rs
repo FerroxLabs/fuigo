@@ -108,8 +108,9 @@ pub(crate) async fn parse_prompt_with_skills(
             }
             acp::ContentBlock::Resource(resource) => embedded_resources.push(resource.clone()),
             other => {
-                return Err(acp::Error::invalid_params()
-                    .data(format!("unsupported content block in prompt: {other:?}")));
+                return Err(crate::acp_error::invalid_params(format!(
+                    "unsupported content block in prompt: {other:?}"
+                )));
             }
         }
     }

@@ -1630,6 +1630,7 @@ pub(super) fn apply_retry_state(
             attempts,
             reason,
             is_rate_limited: rate_limited,
+            error_type,
         } => {
             session.set_retry_activity(None);
             session.rate_limited = *rate_limited;
@@ -1663,9 +1664,15 @@ pub(super) fn apply_retry_state(
                     error_type: None,
                 }));
             } else {
+                // An exhaustion names the kind that ran out of budget when the shell sent one,
+                // so an empty-response exhaustion still headlines "Empty response" here.
                 scrollback.push_block(RenderBlock::session_event(
-                    crate::app::error_display::format_request_failure(None, None, reason)
-                        .into_session_event(),
+                    crate::app::error_display::format_request_failure(
+                        None,
+                        crate::app::error_display::wire_error_kind(error_type.as_deref()),
+                        reason,
+                    )
+                    .into_session_event(),
                 ));
             }
         }

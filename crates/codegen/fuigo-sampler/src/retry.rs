@@ -12,6 +12,50 @@ pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 pub const TRANSPORT_REBUILD_BACKOFF: Duration = Duration::from_millis(200);
 
+/// Fixed wait before resending a request whose response came back empty.
+/// An empty response is a completed stream, not a transport fault: the doubling ladder only buys minutes of silence and repeated prompt billing.
+pub const EMPTY_RESPONSE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Attempt cap (the original plus resends) for the empty replies of one request: at most
+/// two resends, whether a reply carried reasoning or was fully empty, and whether or not
+/// the kinds are mixed. One budget for every empty reply keeps the announced denominator
+/// stable across a request; splitting it announced "(1/2)" and then "(2/3)".
+pub const EMPTY_RESPONSE_MAX_ATTEMPTS: u32 = 3;
+
+/// The attempt budget [`classify_error`] applies to `err`.
+/// It is the configured `max_retries`, lowered to [`EMPTY_RESPONSE_MAX_ATTEMPTS`] for `SamplingError::EmptyResponse`.
+/// Like `max_retries` it counts attempts including the original, so `Retrying` events report `attempt/effective`.
+/// A lower configured budget (`FUIGO_MAX_RETRIES`, `max_retries`) always wins; the cap never raises it.
+pub fn effective_max_retries(err: &SamplingError, max_retries: u32) -> u32 {
+    match err {
+        SamplingError::EmptyResponse { .. } => max_retries.min(EMPTY_RESPONSE_MAX_ATTEMPTS),
+        _ => max_retries,
+    }
+}
+
+/// The denominator an empty-response `Retrying` event announces, given the resends
+/// already recorded (this one included).
+///
+/// It is [`EMPTY_RESPONSE_MAX_ATTEMPTS`], lowered to what the configured budget can still
+/// fund: every resend of the request, of any kind, spends that shared budget, and an empty
+/// reply is only resent while `total_resends + 1 < configured_max_retries`. Announcing the
+/// bare cap after an earlier 503 retry, or under a lowered `FUIGO_MAX_RETRIES`, promises
+/// attempts that cannot happen.
+pub fn empty_response_announced_attempts(
+    empty_resends_used: u32,
+    total_resends_used: u32,
+    configured_max_retries: u32,
+) -> u32 {
+    let fundable = configured_max_retries
+        .saturating_sub(1)
+        .saturating_sub(total_resends_used);
+    EMPTY_RESPONSE_MAX_ATTEMPTS.min(
+        empty_resends_used
+            .saturating_add(1)
+            .saturating_add(fundable),
+    )
+}
+
 pub(crate) fn resolve_max_retries_with_env(
     env_override: Option<&str>,
     model_max_retries: Option<u32>,
@@ -124,6 +168,17 @@ pub fn classify_error(
     if matches!(err, SamplingError::DoomLoopDetected { .. }) {
         return RetryDecision::Retry {
             backoff: doom_loop_backoff(retry_count + 1),
+        };
+    }
+
+    // An empty response resends the byte-identical request, which rarely answers differently
+    // Capped low with a fixed short backoff, never the 30 s ladder: that was a five-minute silent storm billed per attempt
+    if matches!(err, SamplingError::EmptyResponse { .. }) {
+        if retry_count + 1 >= effective_max_retries(err, max_retries) {
+            return RetryDecision::Fatal(clone_error(err));
+        }
+        return RetryDecision::Retry {
+            backoff: EMPTY_RESPONSE_RETRY_BACKOFF,
         };
     }
 
@@ -286,6 +341,7 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 triggers.join(", ")
             )
         }
+        SamplingError::Cancelled => format!("{}Request cancelled.", retry_prefix),
     }
 }
 
@@ -340,6 +396,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             triggers: triggers.clone(),
             aborted_at_chunk: *aborted_at_chunk,
         },
+        SamplingError::Cancelled => SamplingError::Cancelled,
     }
 }
 
@@ -677,6 +734,7 @@ mod tests {
                     prompt_tokens: Some(10),
                     model: "m".into(),
                     first_choice_seen: true,
+                    attempts: None,
                 },
             },
         ] {
@@ -1076,5 +1134,123 @@ mod tests {
             classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD),
             RetryDecision::Fatal(_)
         ));
+    }
+
+    fn empty_response(reason: fuigo_sampling_types::EmptyReason) -> SamplingError {
+        let had_reasoning = reason == fuigo_sampling_types::EmptyReason::ReasoningOnly;
+        SamplingError::EmptyResponse {
+            context: fuigo_sampling_types::EmptyResponseContext {
+                reason,
+                had_reasoning,
+                content_len: 0,
+                tool_call_count: 0,
+                finish_reason: Some("end_turn".into()),
+                completion_tokens: Some(40),
+                reasoning_tokens: Some(if had_reasoning { 39 } else { 0 }),
+                prompt_tokens: Some(5000),
+                model: "m".into(),
+                first_choice_seen: true,
+                attempts: None,
+            },
+        }
+    }
+
+    /// Drive `classify_error` the way `apply_retry_decision` does: each retrying decision bumps the count and sleeps its backoff, until a terminal decision.
+    /// Returns the backoff slept before each resend.
+    fn retry_ladder(err: &SamplingError, max_retries: u32) -> Vec<Duration> {
+        let mut backoffs = Vec::new();
+        let mut retry_count = 0;
+        loop {
+            match classify_error(err, retry_count, max_retries, RATE_LIMIT_RETRY_THRESHOLD) {
+                RetryDecision::Retry { backoff }
+                | RetryDecision::RetryWithBackoff { backoff, .. }
+                | RetryDecision::RetryWithClientRebuild { backoff } => {
+                    retry_count += 1;
+                    backoffs.push(backoff);
+                }
+                RetryDecision::Fatal(_) => return backoffs,
+                other => panic!("unexpected decision after {retry_count} retries: {other:?}"),
+            }
+            assert!(retry_count <= 1000, "retry ladder never terminated");
+        }
+    }
+
+    /// The field "-32603 after five minutes": a reasoning-only reply was resent 14 more times over ~5 min on the default budget.
+    /// Every empty reply, reasoning-only or fully empty, shares one budget of at most two resends 2 s apart.
+    #[test]
+    fn every_empty_response_shape_is_resent_at_most_twice_after_two_seconds() {
+        use fuigo_sampling_types::EmptyReason::{NoVisibleContent, ReasoningOnly};
+        for reason in [ReasoningOnly, NoVisibleContent] {
+            let backoffs = retry_ladder(&empty_response(reason), DEFAULT_MAX_RETRIES);
+            assert_eq!(
+                backoffs,
+                vec![Duration::from_secs(2); 2],
+                "{reason}: two resends 2 s apart; got {} resends sleeping {:?} in total",
+                backoffs.len(),
+                backoffs.iter().sum::<Duration>()
+            );
+        }
+    }
+
+    /// The empty-response cap is a ceiling: a lower configured budget still wins, a higher one never raises it.
+    #[test]
+    fn empty_response_cap_is_a_ceiling_on_the_configured_budget() {
+        use fuigo_sampling_types::EmptyReason::{NoVisibleContent, ReasoningOnly};
+        for reason in [ReasoningOnly, NoVisibleContent] {
+            let err = empty_response(reason);
+            assert!(
+                retry_ladder(&err, 1).is_empty(),
+                "{reason}: budget 1 never resends"
+            );
+            assert_eq!(retry_ladder(&err, 2).len(), 1, "{reason}: budget 2");
+            assert_eq!(retry_ladder(&err, 100).len(), 2, "{reason}: the cap wins");
+        }
+    }
+
+    /// The announced denominator never promises a resend the shared configured budget cannot fund.
+    #[test]
+    fn the_announced_empty_response_cap_never_promises_unfundable_resends() {
+        // The default budget funds every resend the cap allows.
+        assert_eq!(
+            empty_response_announced_attempts(1, 1, DEFAULT_MAX_RETRIES),
+            3
+        );
+        assert_eq!(
+            empty_response_announced_attempts(2, 2, DEFAULT_MAX_RETRIES),
+            3
+        );
+        // An earlier retry of another kind spends the same budget: after a 503 resend the
+        // cap is still fundable on the default budget, but not on a lowered one.
+        assert_eq!(
+            empty_response_announced_attempts(1, 2, DEFAULT_MAX_RETRIES),
+            3
+        );
+        assert_eq!(
+            empty_response_announced_attempts(1, 2, 3),
+            2,
+            "one 503 resend then one empty resend spends a budget of 3: no second empty resend"
+        );
+        assert_eq!(
+            empty_response_announced_attempts(1, 1, 2),
+            2,
+            "FUIGO_MAX_RETRIES=2 funds exactly this resend"
+        );
+    }
+
+    /// Every other retryable kind keeps the configured budget and the 2 s doubling ladder capped at 30 s.
+    #[test]
+    fn other_retryable_errors_keep_the_configured_budget_and_ladder() {
+        for err in [
+            api_err(StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
+            SamplingError::EventStreamError("connection reset".into()),
+        ] {
+            let backoffs = retry_ladder(&err, DEFAULT_MAX_RETRIES);
+            assert_eq!(backoffs.len(), DEFAULT_MAX_RETRIES as usize - 1, "{err}");
+            assert!(
+                backoffs[5] >= Duration::from_secs(24) && backoffs[5] <= Duration::from_secs(36),
+                "{err}: sixth resend waits the capped 30 s (+/-20%): {:?}",
+                backoffs[5]
+            );
+        }
     }
 }

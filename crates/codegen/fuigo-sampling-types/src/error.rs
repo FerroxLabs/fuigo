@@ -58,6 +58,13 @@ pub struct EmptyResponseContext {
     pub model: String,
     /// Whether at least one `choice` was seen in the stream.
     pub first_choice_seen: bool,
+    /// Attempts (the original plus every resend) this request's shared empty-response budget
+    /// had spent when the retry loop gave up on it. Stamped only on the terminal error, so it
+    /// is `None` on the per-attempt context every empty reply builds, and `None` from a peer
+    /// that predates the field. The shell reports it as `RetryState::Exhausted { attempts }`,
+    /// so the user who watched "(1/3)" and "(2/3)" climb is told the cap was reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
 }
 
 impl EmptyResponseContext {
@@ -197,7 +204,14 @@ pub enum SamplingError {
         triggers: Vec<String>,
         aborted_at_chunk: Option<u64>,
     },
+    /// The request was cancelled client-side (turn cancel, rewind, a superseded request id, sampler shutdown) before it produced a result.
+    /// Its own variant so nothing infers a cancel from message text: never retried, never an auth or API rejection.
+    #[error("{text}", text = REQUEST_CANCELLED_MESSAGE)]
+    Cancelled,
 }
+
+/// Display text of [`SamplingError::Cancelled`]; frozen, clients and logs match on it.
+pub const REQUEST_CANCELLED_MESSAGE: &str = "request cancelled";
 
 /// Semantic `error.code` the server stamps on invalid-image rejections, on both non-stream error bodies and mid-stream SSE error events.
 pub const INVALID_IMAGE_ERROR_CODE: &str = "invalid_image";
@@ -442,7 +456,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::Cancelled => false,
         }
     }
 
@@ -456,9 +471,11 @@ impl SamplingError {
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
             SamplingError::IdleTimeout { .. } => false,
+            // Retryable on a low cap the sampler applies (`fuigo_sampler::effective_max_retries`): every empty reply of one request shares one budget of 3 attempts, so at most two resends, 2 s apart, whatever shape each reply has
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
+            SamplingError::Cancelled => false,
         }
     }
 
@@ -544,7 +561,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::Cancelled => false,
         }
     }
 
@@ -566,7 +584,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::Cancelled => false,
         }
     }
 

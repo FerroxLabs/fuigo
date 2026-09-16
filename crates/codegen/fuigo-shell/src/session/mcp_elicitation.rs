@@ -134,7 +134,7 @@ async fn handle_one_job(
             Err(e) => {
                 tracing::warn!(
                     server = %server_name,
-                    error = %e,
+                    error = %crate::sampling::error::acp_error_text(&e),
                     "mcp elicit ACP transport error; cancelling"
                 );
                 cancel_result()

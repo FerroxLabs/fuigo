@@ -15,5 +15,14 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
+[features]
+# Test-only introspection for crates that link this one and need to pin their
+# own production startup: that it registered a parent-death hook
+# (`registered_parent_death_hook`) and that it called
+# `kill_current_process_on_parent_death` (`parent_death_arm_calls`). Enabled as
+# a dev-dependency only; never in a shipped build, so neither accessor is part
+# of the supported surface.
+testing = []
+
 [lints]
 workspace = true

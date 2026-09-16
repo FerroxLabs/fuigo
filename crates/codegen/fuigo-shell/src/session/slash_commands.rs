@@ -1173,8 +1173,9 @@ pub(crate) async fn list_commands(
 ) -> Result<ListCommandsResponse, acp::Error> {
     if kind == Some("chat") {
         {
-            return Err(acp::Error::invalid_params()
-                .data("commands/list kind=\"chat\" requires a chat-enabled binary"));
+            return Err(crate::acp_error::invalid_params(
+                "commands/list kind=\"chat\" requires a chat-enabled binary",
+            ));
         }
         let skills = product_skill_infos(auth).await.unwrap_or_default();
         return Ok(ListCommandsResponse {

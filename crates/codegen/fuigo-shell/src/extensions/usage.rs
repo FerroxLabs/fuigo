@@ -28,7 +28,7 @@ pub struct SessionUsageResponse {
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "fuigo/session/usage" => handle_session_usage(agent, args).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -38,10 +38,10 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     // Wait out an in-flight session/load so a reconnecting client is not answered with not-found
     let Some(handle) = agent.session_handle_waiting_for_load(&session_id).await else {
-        return Err(acp::Error::resource_not_found(Some(format!(
+        return Err(crate::acp_error::resource_not_found(format!(
             "session not found: {}",
             req.session_id
-        ))));
+        )));
     };
 
     // Fail closed: a dead chat-state actor is an error, never a zero bill.
@@ -49,7 +49,7 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         .chat_state_handle
         .try_get_session_usage()
         .await
-        .map_err(|()| acp::Error::internal_error().data("failed to read session usage"))?;
+        .map_err(|()| crate::acp_error::internal_error("failed to read session usage"))?;
 
     to_raw_response(&SessionUsageResponse {
         usage: PromptUsage::from(&ledger),

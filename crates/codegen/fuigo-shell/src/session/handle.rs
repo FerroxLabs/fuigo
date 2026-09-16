@@ -437,10 +437,10 @@ impl SessionHandle {
             })
             .is_err()
         {
-            return Err(agent_client_protocol::Error::internal_error().data("session closed"));
+            return Err(crate::acp_error::session_unavailable("session closed"));
         }
         rx.await
-            .map_err(|_| agent_client_protocol::Error::internal_error().data("session closed"))?
+            .map_err(|_| crate::acp_error::session_unavailable("session closed"))?
     }
     pub(crate) async fn toggle_mcp_tool(
         &self,
@@ -479,10 +479,10 @@ impl SessionHandle {
             })
             .is_err()
         {
-            return Err(agent_client_protocol::Error::internal_error().data("session closed"));
+            return Err(crate::acp_error::session_unavailable("session closed"));
         }
         rx.await
-            .map_err(|_| agent_client_protocol::Error::internal_error().data("session closed"))?
+            .map_err(|_| crate::acp_error::session_unavailable("session closed"))?
     }
     pub(crate) async fn managed_gateway_disabled_tool_names(
         &self,

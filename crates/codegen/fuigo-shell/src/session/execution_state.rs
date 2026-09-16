@@ -59,6 +59,10 @@ pub struct Snapshot {
     pub(crate) pending: BTreeSet<String>,
     pub(crate) optional_attempts: BTreeSet<String>,
     pub(crate) admitted: BTreeSet<String>,
+    /// Finished attempts no resend has taken over yet. Still pending (still unresolved
+    /// work) until a resubmit of the same logical call supersedes them.
+    #[serde(default)]
+    pub(crate) abandoned: BTreeSet<String>,
     pub(crate) terminal: Option<TerminalReceipt>,
     #[serde(default)]
     known_session_edited_paths: Vec<String>,
@@ -118,6 +122,15 @@ pub(crate) enum Change {
         attempt_id: String,
         usage: Option<fuigo_sampling_types::TokenUsage>,
     },
+    /// Settle an attempt its own resend took over.
+    Supersede {
+        attempt_id: String,
+        usage: Option<fuigo_sampling_types::TokenUsage>,
+    },
+    /// Mark a finished attempt no resend has taken over (it stays pending).
+    Abandon {
+        attempt_id: String,
+    },
     Tools {
         ids: Vec<String>,
     },
@@ -155,6 +168,10 @@ fn denied(message: &'static str) -> io::Error {
     io::Error::other(message)
 }
 
+fn denied_owned(message: String) -> io::Error {
+    io::Error::other(message)
+}
+
 pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result<Snapshot> {
     // The key is a fixed-length hash minted locally, never a client-provided path.
     if mutation.key.len() != 64 || !mutation.key.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -182,6 +199,7 @@ pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result
                 phase: Phase::Working,
                 max_calls: *max_calls,
                 calls: 0,
+                abandoned: BTreeSet::new(),
                 completion_admitted: false,
                 recall_finalization: false,
                 deadline_ms: *deadline_ms,
@@ -271,6 +289,39 @@ fn admit_attempt(
     Ok(())
 }
 
+/// Release an attempt whose resend took over the same logical call.
+///
+/// The resend carries the liability forward, so the attempt stops counting as
+/// unresolved work on the terminal receipt. Its call debit is never refunded, and
+/// usage it reported is still charged.
+///
+/// Unlike [`Change::Settle`], a superseded attempt with no reported usage does not set
+/// `unknown_usage`, which denies every later admission under a token budget and finalizes
+/// the turn. That protection is what keeps the empty-response path safe: an empty reply is
+/// never a `Change::Settle` (only a provider completion settles), so every resent empty
+/// attempt arrives here, carrying the usage the provider reported if it reported any and
+/// nothing if it did not. Without the distinction, the two empty replies in a row that this
+/// release exists to fix would deny the work that follows them.
+/// Pinned by `empty_replies_leave_the_execution_token_budget_usable` and by
+/// `a_resent_attempt_settles_while_an_abandoned_one_stays_unresolved`.
+fn supersede_attempt(
+    state: &mut Snapshot,
+    attempt_id: &str,
+    usage: Option<fuigo_sampling_types::TokenUsage>,
+) {
+    state.abandoned.remove(attempt_id);
+    if state.pending.remove(attempt_id)
+        && let Some(usage) = usage
+    {
+        state.total_tokens = state
+            .total_tokens
+            .saturating_add(u64::from(usage.total_tokens));
+        state.output_tokens = state
+            .output_tokens
+            .saturating_add(u64::from(usage.completion_tokens));
+    }
+}
+
 fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<()> {
     match change {
         Change::Read | Change::Open { .. } => {}
@@ -318,6 +369,20 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                 } else {
                     state.unknown_usage = true;
                 }
+            }
+        }
+        Change::Supersede { attempt_id, usage } => {
+            if !state.admitted.contains(&attempt_id) {
+                return Err(denied("unknown execution admission"));
+            }
+            supersede_attempt(state, &attempt_id, usage);
+        }
+        Change::Abandon { attempt_id } => {
+            if !state.admitted.contains(&attempt_id) {
+                return Err(denied("unknown execution admission"));
+            }
+            if state.pending.contains(&attempt_id) {
+                state.abandoned.insert(attempt_id);
             }
         }
         Change::Tools { ids } => {
@@ -455,6 +520,13 @@ pub(crate) struct Execution {
     tx: mpsc::WeakUnboundedSender<PersistenceMsg>,
     deadline_ms: AtomicI64,
     parent_grant: Option<Arc<ChildGrant>>,
+    /// Whether any attempt of this execution is abandoned and still waiting for a resubmit
+    /// to take it over. [`Execution::supersede_pending_attempts`] runs before every model
+    /// submission and almost always has nothing to do; without this it pays a persistence
+    /// round trip and a state-file read each time to learn that. Set by [`ExecutionAdmission::abandon`]
+    /// (a child grant's abandon reaches its parent through the same method) and seeded from
+    /// the durable state at [`Execution::open`], so a restored execution still sweeps.
+    abandoned_attempts: std::sync::atomic::AtomicBool,
 }
 
 // Retain through cancellation so the existing terminal-delivery path can commit
@@ -509,6 +581,7 @@ impl Execution {
             tx: tx.downgrade(),
             deadline_ms: AtomicI64::new(i64::MAX),
             parent_grant,
+            abandoned_attempts: std::sync::atomic::AtomicBool::new(false),
         });
         let state = execution
             .change(Change::Open {
@@ -521,6 +594,10 @@ impl Execution {
         execution
             .deadline_ms
             .store(state.deadline_ms.unwrap_or(i64::MAX), Ordering::Release);
+        // A restored execution may already carry abandoned attempts; its first sweep must run.
+        execution
+            .abandoned_attempts
+            .store(!state.abandoned.is_empty(), Ordering::Release);
         // A restored execution with an unknown attempt may only finalize; it must
         // never repeat actions whose effects were lost at the crash boundary.
         if state.phase == Phase::Working
@@ -614,6 +691,41 @@ impl Execution {
         }
         self.change(Change::ToolsSettled { ids }).await.map(|_| ())
     }
+    /// Supersede every abandoned attempt of this execution, because this caller is
+    /// resubmitting a logical call and the sampler marked those attempts finished.
+    ///
+    /// In-flight attempts are untouched -- only an attempt the sampler already handed off
+    /// with [`Change::Abandon`] is ever marked. Abandoned attempts of OTHER logical calls in
+    /// the same execution (a side call's, a subagent's through its parent grant) are swept
+    /// too: the execution's abandoned set is not partitioned by logical call, and the
+    /// sweeping resubmit does not know which attempts belong to it. That is deliberate --
+    /// an abandoned attempt is finished work whoever left it, and leaving one behind makes
+    /// the turn's terminal receipt partial -- but it is wider than "the caller's own call".
+    ///
+    /// Costs nothing when nothing is abandoned: that is the common case, and this runs
+    /// before every model submission.
+    pub(crate) async fn supersede_pending_attempts(&self) -> io::Result<()> {
+        if !self.abandoned_attempts.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        // Anything that fails leaves the sweep armed, so the next submission retries it.
+        let abandoned = match self.snapshot().await {
+            Ok(state) => state.abandoned,
+            Err(error) => {
+                self.abandoned_attempts.store(true, Ordering::Release);
+                return Err(error);
+            }
+        };
+        for attempt_id in abandoned {
+            // `supersede` carries the same settlement to a parent grant.
+            if let Err(error) = ExecutionAdmission::supersede(self, attempt_id, None).await {
+                self.abandoned_attempts.store(true, Ordering::Release);
+                return Err(denied_owned(error));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn terminal(&self, succeeded: bool) -> io::Result<TerminalReceipt> {
         let receipt = self
             .change(Change::Terminal { succeeded })
@@ -688,6 +800,51 @@ impl ExecutionAdmission for Execution {
                 .await
                 .map(|_| ())
                 .map_err(|_| "execution settlement not durable".into())
+        })
+    }
+    fn supersede(
+        &self,
+        attempt_id: String,
+        usage: Option<fuigo_sampling_types::TokenUsage>,
+    ) -> AdmissionFuture<'_> {
+        Box::pin(async move {
+            if let Some(parent) = &self.parent_grant {
+                parent
+                    .parent
+                    .supersede(attempt_id.clone(), usage.clone())
+                    .await?;
+            }
+            self.change(Change::Supersede { attempt_id, usage })
+                .await
+                .map(|_| ())
+                .map_err(|_| "execution settlement not durable".into())
+        })
+    }
+    fn abandon(&self, attempt_id: String) -> AdmissionFuture<'_> {
+        Box::pin(async move {
+            if let Some(parent) = &self.parent_grant {
+                parent.parent.abandon(attempt_id.clone()).await?;
+            }
+            // Arm the sweep the next submission runs BEFORE the durable round trip, not after.
+            //
+            // What this guarantees: the in-process flag is never behind the durable `abandoned`
+            // set, so no sweep can read it disarmed for an abandon that has already been ordered
+            // -- including forever, which is what an armed-after flag did when the write failed.
+            //
+            // What it does NOT guarantee: that a sweep inside the round trip finds anything. The
+            // snapshot it reads still lists the attempt as pending until the `Change::Abandon`
+            // write lands, so a resubmit in that window still supersedes nothing and can still
+            // leave a partial receipt. The window is narrowed, not closed; it stays unreachable
+            // only because every shell resubmit path sleeps, compacts or refreshes credentials
+            // first, which is a property of four call sites, not an invariant.
+            //
+            // Arming first costs at most one `Change::Read` on a sweep that has nothing to do.
+            self.abandoned_attempts
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.change(Change::Abandon { attempt_id })
+                .await
+                .map(|_| ())
+                .map_err(|_| -> String { "execution settlement not durable".into() })
         })
     }
 }
@@ -826,6 +983,209 @@ mod tests {
         (tx, task)
     }
 
+    type SeenChanges = Arc<Mutex<Vec<String>>>;
+
+    /// [`fixture_actor`] that also records the variant of every change it applied, so a test
+    /// can count what actually left the process.
+    fn counting_fixture_actor(
+        dir: std::path::PathBuf,
+    ) -> (
+        mpsc::UnboundedSender<PersistenceMsg>,
+        tokio::task::JoinHandle<()>,
+        SeenChanges,
+    ) {
+        let seen: SeenChanges = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } = message
+                {
+                    let label = format!("{:?}", mutation.change);
+                    sink.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(label.split_whitespace().next().unwrap_or("").to_owned());
+                    let _ = respond_to.send(apply(&dir, mutation).await);
+                } else {
+                    panic!("unexpected fixture message");
+                }
+            }
+        });
+        (tx, task, seen)
+    }
+
+    fn reads(seen: &SeenChanges) -> usize {
+        seen.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|label| *label == "Read")
+            .count()
+    }
+
+    /// The sweep that takes abandoned attempts over runs before EVERY model submission, and
+    /// the common case is that nothing was abandoned. Reading the durable state to discover
+    /// that is a persistence-actor round trip and a state-file read per model call, forever.
+    /// The execution remembers whether anything is abandoned, so the no-op sweep never leaves
+    /// the process -- and it starts sweeping again the moment something is.
+    #[tokio::test]
+    async fn a_sweep_with_nothing_to_supersede_never_leaves_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, actor, seen) = counting_fixture_actor(dir.path().to_owned());
+        let session = uuid::Uuid::new_v4().to_string();
+        let execution = Execution::open(
+            &tx,
+            &session,
+            "quiet",
+            "turn1",
+            9,
+            None,
+            Some(9),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        // Three model submissions of one turn, each preceded by the sweep, none abandoned.
+        for _ in 0..3 {
+            execution.supersede_pending_attempts().await.unwrap();
+            let attempt = uuid::Uuid::new_v4().to_string();
+            execution
+                .admit(RequestPurpose::Work, attempt.clone())
+                .await
+                .unwrap();
+            execution
+                .settle(attempt, Some(fuigo_sampling_types::TokenUsage::default()))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            reads(&seen),
+            0,
+            "a sweep with nothing to supersede costs no round trip: {:?}",
+            seen.lock().unwrap_or_else(|e| e.into_inner())
+        );
+
+        // An abandoned attempt still gets taken over, and the sweep goes quiet again after.
+        let attempt = uuid::Uuid::new_v4().to_string();
+        execution
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::abandon(execution.as_ref(), attempt.clone())
+            .await
+            .unwrap();
+        execution.supersede_pending_attempts().await.unwrap();
+        let state = execution.snapshot().await.unwrap();
+        assert!(
+            state.abandoned.is_empty() && !state.pending.contains(&attempt),
+            "the sweep takes the abandoned attempt over: {state:?}"
+        );
+        let settled = reads(&seen);
+        execution.supersede_pending_attempts().await.unwrap();
+        assert_eq!(
+            reads(&seen),
+            settled,
+            "the sweep is quiet again once nothing is abandoned"
+        );
+        execution.release(&session);
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// `abandon` arms the sweep BEFORE its durable round trip, not after.
+    ///
+    /// The in-process flag is what [`Execution::supersede_pending_attempts`] consults to skip
+    /// the no-op sweep. Armed only after the acknowledgment returns, it lags the durable
+    /// `abandoned` set for the whole round trip -- and stays disarmed forever if the write
+    /// fails -- so a resubmit that sweeps inside that window reads it disarmed, skips the
+    /// sweep, and leaves the attempt pending: the partial receipt (and its `-32603`) the
+    /// sweep exists to prevent.
+    ///
+    /// Arming first removes that disagreement; it does not close the window. Until the
+    /// `Change::Abandon` write lands, the snapshot a sweep reads still lists the attempt as
+    /// pending, so a resubmit inside the round trip supersedes nothing either way. What is
+    /// pinned here is the flag's ordering, which is what the optimisation in
+    /// `supersede_pending_attempts` reads. Nothing reaches that window today only because
+    /// every shell resubmit path happens to sleep, compact or refresh credentials first,
+    /// which is a property of four call sites, not an invariant.
+    /// Arming first costs at most one `Change::Read` on a sweep that turns out to be a no-op.
+    #[tokio::test]
+    async fn abandon_arms_the_sweep_before_its_durable_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_owned();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (in_flight_tx, in_flight_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        // A persistence actor that holds the abandon's acknowledgment until the test releases it.
+        let actor = tokio::spawn(async move {
+            let mut in_flight = Some(in_flight_tx);
+            let mut release = Some(release_rx);
+            while let Some(message) = rx.recv().await {
+                let PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } = message
+                else {
+                    panic!("unexpected fixture message");
+                };
+                if matches!(mutation.change, Change::Abandon { .. }) {
+                    if let Some(tx) = in_flight.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = release.take() {
+                        let _ = rx.await;
+                    }
+                }
+                let _ = respond_to.send(apply(&path, mutation).await);
+            }
+        });
+        let session = uuid::Uuid::new_v4().to_string();
+        let execution = Execution::open(
+            &tx,
+            &session,
+            "abandon-race",
+            "turn1",
+            9,
+            None,
+            Some(9),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        execution
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+
+        let mut abandoning = ExecutionAdmission::abandon(execution.as_ref(), attempt.clone());
+        tokio::select! {
+            biased;
+            _ = &mut abandoning => panic!("the fixture holds the acknowledgment; abandon cannot have returned"),
+            _ = in_flight_rx => {}
+        }
+        assert!(
+            execution
+                .abandoned_attempts
+                .load(std::sync::atomic::Ordering::Acquire),
+            "the sweep must be armed while the abandon's round trip is still in flight"
+        );
+        let _ = release_tx.send(());
+        abandoning.await.expect("the abandon is durable");
+        execution.supersede_pending_attempts().await.unwrap();
+        assert!(
+            execution.snapshot().await.unwrap().pending.is_empty(),
+            "the sweep still takes the abandoned attempt over"
+        );
+        execution.release(&session);
+        drop(tx);
+        actor.await.unwrap();
+    }
+
     #[tokio::test]
     async fn goal_continuation_preserves_authority_and_bounded_edit_evidence() {
         let dir = tempfile::tempdir().unwrap();
@@ -852,6 +1212,130 @@ mod tests {
         let repeated = next.terminal(false).await.unwrap();
         assert_eq!(serde_json::to_value(&receipt).unwrap(), serde_json::to_value(&repeated).unwrap());
         next.release(&session);
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// A resend takes its attempt over: the superseded attempt stops counting as
+    /// unresolved work, its debit stays, and it never poisons the token budget with
+    /// unknown usage (a retry would otherwise deny every later admission under a limit).
+    /// An attempt no resend takes over stays unresolved until a resubmit supersedes it,
+    /// so a turn that really failed still issues a partial receipt.
+    #[tokio::test]
+    async fn a_resent_attempt_settles_while_an_abandoned_one_stays_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, actor) = fixture_actor(dir.path().to_owned());
+        let session = uuid::Uuid::new_v4().to_string();
+        let limits = TokenLimits {
+            total: Some(100_000),
+            initial_total: 0,
+            output: None,
+        };
+        let recovered = Execution::open(
+            &tx,
+            &session,
+            "resent",
+            "turn1",
+            9,
+            None,
+            Some(9),
+            limits.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let first = uuid::Uuid::new_v4().to_string();
+        recovered
+            .admit(RequestPurpose::Work, first.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::supersede(recovered.as_ref(), first.clone(), None)
+            .await
+            .unwrap();
+        assert!(
+            recovered.snapshot().await.unwrap().pending.is_empty(),
+            "the resend takes the failed attempt over"
+        );
+        let second = uuid::Uuid::new_v4().to_string();
+        recovered
+            .admit(RequestPurpose::Work, second.clone())
+            .await
+            .expect("a superseded attempt with no usage must not poison the token budget");
+        recovered
+            .settle(second, Some(fuigo_sampling_types::TokenUsage::default()))
+            .await
+            .unwrap();
+        let state = recovered.snapshot().await.unwrap();
+        assert!(state.pending.is_empty());
+        assert_eq!(state.calls, 2, "both attempts keep their debit");
+        let receipt = recovered.terminal(true).await.unwrap();
+        assert!(
+            !receipt.partial,
+            "a turn its retry rescued is not partial: {receipt:?}"
+        );
+        recovered.release(&session);
+
+        let abandoned = Execution::open(
+            &tx,
+            &session,
+            "abandoned",
+            "turn2",
+            9,
+            None,
+            Some(9),
+            limits,
+            None,
+        )
+        .await
+        .unwrap();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        abandoned
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::abandon(abandoned.as_ref(), attempt.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            abandoned.snapshot().await.unwrap().pending,
+            BTreeSet::from([attempt.clone()]),
+            "nothing has taken the attempt over yet"
+        );
+        abandoned.supersede_pending_attempts().await.unwrap();
+        let state = abandoned.snapshot().await.unwrap();
+        assert!(
+            state.pending.is_empty() && state.abandoned.is_empty(),
+            "the resubmit takes it over: {state:?}"
+        );
+        assert!(!abandoned.terminal(true).await.unwrap().partial);
+        abandoned.release(&session);
+
+        let stranded = Execution::open(
+            &tx,
+            &session,
+            "stranded",
+            "turn3",
+            9,
+            None,
+            Some(9),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let attempt = uuid::Uuid::new_v4().to_string();
+        stranded
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        ExecutionAdmission::abandon(stranded.as_ref(), attempt)
+            .await
+            .unwrap();
+        assert!(
+            stranded.terminal(true).await.unwrap().partial,
+            "an attempt no resubmit took over is still unresolved work"
+        );
+        stranded.release(&session);
         drop(tx);
         actor.await.unwrap();
     }

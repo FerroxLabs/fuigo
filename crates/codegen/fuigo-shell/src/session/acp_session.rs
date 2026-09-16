@@ -783,6 +783,13 @@ pub(crate) struct SessionActor {
     /// Current running prompt/turn id, shared with SessionHandle.
     pub(crate) current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) unattributed_background_usage: std::sync::atomic::AtomicBool,
+    /// Whether this turn has already put thought text on the standard rail (streamed
+    /// model reasoning). The next retry-status mirror then opens with a blank line so it
+    /// starts its own paragraph in a client that concatenates thought chunks, instead of
+    /// running into the reasoning sentence before it.
+    /// Cleared at each turn start, and again after a mirror (which ends with its own
+    /// blank line, so the next one must not add a second).
+    pub(crate) turn_thought_text_emitted: std::sync::atomic::AtomicBool,
     /// Open blocking reverse-requests (permission / question / plan-approval), keyed by `tool_call_id`.
     /// Shared with `SessionHandle` so the roster can read it synchronously to report `NeedsInput`.
     /// Mutated by `PendingInteractionGuard` at each reverse-request site. Never persisted.
@@ -2005,6 +2012,9 @@ mod chat_history_integrity_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/disk_full_tests.rs"]
 mod disk_full_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
+mod empty_response_retry_status_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;

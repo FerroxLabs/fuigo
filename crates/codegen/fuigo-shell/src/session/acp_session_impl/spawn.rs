@@ -1276,6 +1276,9 @@ pub(crate) async fn spawn_session_actor(
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let permissions_for_handle = permissions.clone();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    // The persistence actor's disk-full `retry_state` mirror is the one produced outside this
+    // actor; give it the ordered queue so it cannot overtake answer text already generated.
+    persistence.install_retry_status_mirror(event_tx.clone());
     let mut sampler_config_initial = sampling_config.clone();
     sampler_config_initial.idle_timeout_secs = Some(inference_idle_timeout_secs);
     let task_output_budgeted = tool_context.task_output_token_budget.is_some();
@@ -1676,6 +1679,7 @@ pub(crate) async fn spawn_session_actor(
         initial_client_mcp_servers: initial_client_mcp_servers.clone(),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
+        turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: current_prompt_id.clone(),
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,
@@ -2160,7 +2164,7 @@ pub(crate) async fn spawn_session_actor(
                                         )),
                                     }
                                 }
-                                Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
+                                Err(e) => Err(UserQuestionError::TransportError(crate::sampling::error::acp_error_text(&e))),
                             }
                         }
                     }
@@ -2607,19 +2611,19 @@ pub(crate) async fn spawn_session_on_thread(
                 error = %e,
                 "failed to spawn session thread (thread/PID limit or memory pressure?)"
             );
-            return Err(
-                acp::Error::internal_error().data(format!("failed to spawn session thread: {e}"))
-            );
+            return Err(crate::acp_error::internal_error(format!(
+                "failed to spawn session thread: {e}"
+            )));
         }
     };
     let init = init_rx
         .await
         .map_err(|_| {
             tracing::error!("Session thread panicked during initialization");
-            acp::Error::internal_error().data("session thread panicked during initialization")
+            crate::acp_error::internal_error("session thread panicked during initialization")
         })?
         .map_err(|e| {
-            acp::Error::internal_error().data(format!("session initialization failed: {e}"))
+            crate::acp_error::internal_error(format!("session initialization failed: {e}"))
         })?;
     Ok((
         init.handle,

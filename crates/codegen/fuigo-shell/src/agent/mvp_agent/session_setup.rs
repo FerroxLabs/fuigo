@@ -61,8 +61,9 @@ fn parse_client_session_kind(meta: Option<&acp::Meta>) -> Result<Option<String>,
         return Ok(Some(kind.to_owned()));
     }
     if kind.starts_with("subagent") {
-        return Err(acp::Error::invalid_params()
-            .data("_meta.sessionKind uses the server-reserved subagent namespace"));
+        return Err(crate::acp_error::invalid_params(
+            "_meta.sessionKind uses the server-reserved subagent namespace",
+        ));
     }
     tracing::warn!(kind, "ignoring unsupported _meta.sessionKind claim");
     Ok(None)
@@ -212,7 +213,7 @@ impl MvpAgent {
         meta: Option<&acp::Meta>,
     ) -> Result<SessionWorkspace, acp::Error> {
         let cwd = AbsPathBuf::new(cwd.to_path_buf())
-            .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+            .map_err(|e| crate::acp_error::invalid_params(e.to_string()))?;
         let remote_settings = self.cfg.borrow().remote_settings.clone();
         folder_trust::resolve_and_record(cwd.as_path(), remote_settings.as_ref(), false);
         let (initial_client_mcp_servers, mcp_servers) = self
@@ -265,7 +266,7 @@ impl MvpAgent {
         reject_chat_kind_without_feature(arguments.meta.as_ref())?;
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
         let init = self.initialize_request.get().ok_or_else(|| {
-            acp::Error::invalid_params().data("initialize must be called before new_session")
+            crate::acp_error::invalid_params("initialize must be called before new_session")
         })?;
         self.seed_client_config_auth_if_available();
         self.spawn_settings_reapply();
@@ -328,7 +329,7 @@ impl MvpAgent {
         let session_id = match client_session_id {
             Some(s) => {
                 uuid::Uuid::try_parse(s).map_err(|e| {
-                    acp::Error::invalid_params().data(format!(
+                    crate::acp_error::invalid_params(format!(
                         "Invalid UUID format for _meta.sessionId '{}': {}",
                         s, e
                     ))
@@ -756,7 +757,7 @@ impl MvpAgent {
         }
         tracing::debug!("Received load session request {arguments:?}");
         let init = self.initialize_request.get().ok_or_else(|| {
-            acp::Error::invalid_params().data("initialize must be called before load_session")
+            crate::acp_error::invalid_params("initialize must be called before load_session")
         })?;
         self.seed_client_config_auth_if_available();
         let persist_data = arguments
@@ -1573,13 +1574,13 @@ impl MvpAgent {
     ) -> Result<acp::ResumeSessionResponse, acp::Error> {
         tracing::info!(session_id = %args.session_id.0, "session/resume");
         if !args.additional_directories.is_empty() {
-            return Err(acp::Error::invalid_params().data(RESUME_REFUSES_EXTRA_DIRS));
+            return Err(crate::acp_error::invalid_params(RESUME_REFUSES_EXTRA_DIRS));
         }
         if crate::agent::chat_modes::process_chat_mode_enabled()
             || ChatKindClaim::from_meta(args.meta.as_ref()).resolve(self, &args.session_id)
                 == SessionKind::Chat
         {
-            return Err(acp::Error::invalid_params().data(RESUME_REFUSES_CHAT));
+            return Err(crate::acp_error::invalid_params(RESUME_REFUSES_CHAT));
         }
         let loaded = self
             .attach_session(load_request_for_resume(args), AttachOperation::Resume)

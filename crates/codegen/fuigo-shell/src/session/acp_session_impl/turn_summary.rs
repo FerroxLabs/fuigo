@@ -72,7 +72,7 @@ impl SessionActor {
         let setup = match self.prepare_side_call().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "turn summary: failed to prepare sampling client");
+                tracing::warn!(error = %crate::sampling::error::acp_error_text(&e), "turn summary: failed to prepare sampling client");
                 return;
             }
         };

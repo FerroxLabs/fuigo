@@ -107,6 +107,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(false)),
         chat_state_handle: fuigo_chat_state::ChatStateHandle::noop(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
+        turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),

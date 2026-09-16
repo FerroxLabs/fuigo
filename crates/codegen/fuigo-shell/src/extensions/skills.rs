@@ -280,7 +280,7 @@ pub async fn handle(
 ) -> ExtResult {
     match args.method.as_ref() {
         "fuigo/skills/add" => {
-            let req: SkillsAddRequest = serde_json::from_str(args.params.get())?;
+            let req: SkillsAddRequest = super::parse_params_str(args.params.get())?;
             let cwd = req.cwd.as_deref().unwrap_or(".");
 
             // Resolve to absolute path so config entries work from any cwd.
@@ -336,7 +336,7 @@ pub async fn handle(
         }
 
         "fuigo/skills/remove" => {
-            let req: SkillsRemoveRequest = serde_json::from_str(args.params.get())?;
+            let req: SkillsRemoveRequest = super::parse_params_str(args.params.get())?;
             let cwd = req.cwd.as_deref().unwrap_or(".");
 
             // Resolve so relative/tilde paths match what was saved by add.
@@ -397,13 +397,13 @@ pub async fn handle(
         }
 
         "fuigo/skills/list" => {
-            let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
+            let req: SkillsListRequest = super::parse_params_str(args.params.get())?;
             let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
         "fuigo/workflows/list" => {
-            let req: WorkflowsListRequest = serde_json::from_str(args.params.get())?;
+            let req: WorkflowsListRequest = super::parse_params_str(args.params.get())?;
             let Some(handle) = agent.session_handle_waiting_for_load(&req.session_id).await else {
                 return super::to_ext_response(Err::<serde_json::Value, _>(anyhow::anyhow!(
                     "unknown session id: {}",
@@ -485,7 +485,7 @@ pub async fn handle(
         }
 
         "fuigo/skills/toggle" => {
-            let req: SkillsToggleRequest = serde_json::from_str(args.params.get())?;
+            let req: SkillsToggleRequest = super::parse_params_str(args.params.get())?;
             let cwd = req.cwd.as_deref().unwrap_or(".");
 
             // Validate the skill name exists before modifying config.
@@ -527,7 +527,7 @@ pub async fn handle(
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
