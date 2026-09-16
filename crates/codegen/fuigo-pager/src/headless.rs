@@ -3,6 +3,7 @@
 //! Runs the agent in-process via `spawn_fuigo_shell` and drives the ACP lifecycle (init, auth, session, prompt).
 //! Streams to stdout and exits via `CancellationToken`.
 
+use fuigo_shell::sampling::error::acp_error_text;
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -525,7 +526,8 @@ async fn authenticate(
             .meta(serde_json::json!({"headless": true}).as_object().cloned()),
         acp_tx,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!(acp_error_text(&e)))?;
     Ok(is_api_key_auth)
 }
 
@@ -904,17 +906,41 @@ impl std::error::Error for SendDeadlineElapsed {}
 
 /// Await an ACP send under `limit`, failing with a named error instead of blocking forever.
 /// `None` means unbounded — the shape every send on this path had before `--timeout` existed.
+/// Text of an error a deadline-bounded send failed with.
+/// An `acp::Error` goes through `acp_error_text`: its `Display` would print an object `data` as multi-line JSON.
+trait SendErrorText {
+    fn send_error_text(&self) -> String;
+}
+
+impl SendErrorText for acp::Error {
+    fn send_error_text(&self) -> String {
+        acp_error_text(self)
+    }
+}
+
+impl SendErrorText for anyhow::Error {
+    fn send_error_text(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl SendErrorText for String {
+    fn send_error_text(&self) -> String {
+        self.clone()
+    }
+}
+
 async fn with_send_deadline<T, E, F>(what: &str, limit: Option<Duration>, fut: F) -> Result<T>
 where
     F: Future<Output = std::result::Result<T, E>>,
-    E: std::fmt::Display,
+    E: SendErrorText,
 {
     let Some(limit) = limit else {
-        return fut.await.map_err(|e| anyhow::anyhow!("{e}"));
+        return fut.await.map_err(|e| anyhow::anyhow!(e.send_error_text()));
     };
     match tokio::time::timeout(limit, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+        Ok(Err(e)) => Err(anyhow::anyhow!(e.send_error_text())),
         Err(_) => Err(anyhow::Error::new(SendDeadlineElapsed {
             what: what.to_string(),
             limit,
@@ -1460,7 +1486,8 @@ fn finish_turn(
                     is_api_key_auth,
                 ))
             } else {
-                err.to_string()
+                // `Display` would print an object `data` as raw JSON; people read its `message`
+                fuigo_shell::sampling::error::acp_error_text(&err)
             };
             if let Some(usage) = fuigo_shell::sampling::error::prompt_usage_from_error(&err) {
                 match serde_json::to_value(&usage) {
@@ -1783,7 +1810,8 @@ async fn run_headless_memory_flush(
         &mut pending_bg,
         &mut completed_bg,
     );
-    let response = response.map_err(|e| anyhow::anyhow!("memory flush failed: {e}"))?;
+    let response =
+        response.map_err(|e| anyhow::anyhow!("memory flush failed: {}", acp_error_text(&e)))?;
     let flushed = serde_json::from_str::<serde_json::Value>(response.0.get())
         .ok()
         .and_then(|v| v.get("flushed")?.as_bool())
@@ -1845,7 +1873,7 @@ async fn reap_pending_background_tasks(
                 tracing::debug!(?work, %method, "headless: reaped pending background work")
             }
             Ok(Err(e)) => {
-                tracing::warn!(?work, %method, error = %e, "headless: failed to reap background work")
+                tracing::warn!(?work, %method, error = %acp_error_text(&e), "headless: failed to reap background work")
             }
             Err(_) => {
                 tracing::warn!(?work, %method, "headless: timed out reaping background work")

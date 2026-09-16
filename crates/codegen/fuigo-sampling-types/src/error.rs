@@ -204,7 +204,14 @@ pub enum SamplingError {
         triggers: Vec<String>,
         aborted_at_chunk: Option<u64>,
     },
+    /// The request was cancelled client-side (turn cancel, rewind, a superseded request id, sampler shutdown) before it produced a result.
+    /// Its own variant so nothing infers a cancel from message text: never retried, never an auth or API rejection.
+    #[error("{text}", text = REQUEST_CANCELLED_MESSAGE)]
+    Cancelled,
 }
+
+/// Display text of [`SamplingError::Cancelled`]; frozen, clients and logs match on it.
+pub const REQUEST_CANCELLED_MESSAGE: &str = "request cancelled";
 
 /// Semantic `error.code` the server stamps on invalid-image rejections, on both non-stream error bodies and mid-stream SSE error events.
 pub const INVALID_IMAGE_ERROR_CODE: &str = "invalid_image";
@@ -449,7 +456,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::Cancelled => false,
         }
     }
 
@@ -467,6 +475,7 @@ impl SamplingError {
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
+            SamplingError::Cancelled => false,
         }
     }
 
@@ -552,7 +561,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::Cancelled => false,
         }
     }
 
@@ -574,7 +584,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::Cancelled => false,
         }
     }
 

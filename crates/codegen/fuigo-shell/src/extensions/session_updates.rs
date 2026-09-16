@@ -245,7 +245,7 @@ fn response_from_page<T: AsRef<str>>(
 
     serde_json::value::RawValue::from_string(buf)
         .map(|raw| acp::ExtResponse::new(std::sync::Arc::from(raw)))
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 /// Extract `_meta.eventId` from the last line that has one (reverse scan).
@@ -324,7 +324,7 @@ pub async fn handle(
     let _timer = crate::instrumentation_timer!("session.ext.bulk_updates");
 
     let request: Request = serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::invalid_params(e.to_string()))?;
 
     let target_client_id = request
         .meta
@@ -345,7 +345,7 @@ pub async fn handle(
             crate::session::persistence::find_persisted_session_dir_by_id_result(
                 &request.session_id,
             )
-            .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+            .map_err(|error| crate::acp_error::internal_error(error.to_string()))?
     {
         let candidate = found_dir.join(crate::session::storage::UPDATES_FILE);
         if candidate.exists() {
@@ -361,7 +361,7 @@ pub async fn handle(
     }
 
     if let Some(tail_page) = try_stream_tail_page(&request, &updates_path)
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?
     {
         if request.stream {
             let chunk_size = request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE).max(1);
@@ -390,7 +390,7 @@ pub async fn handle(
     }
 
     let raw_contents = std::fs::read_to_string(&updates_path)
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     let lines: Vec<&str> = raw_contents
         .lines()
@@ -470,14 +470,14 @@ fn streamed_metadata_response(
     json.push('}');
     serde_json::value::RawValue::from_string(json)
         .map(|raw| acp::ExtResponse::new(std::sync::Arc::from(raw)))
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn empty_response(total_count: usize) -> ExtResult {
     let json =
         format!(r#"{{"updates":[],"totalCount":{total_count},"hasMore":false,"promptStarts":[]}}"#);
     let raw = serde_json::value::RawValue::from_string(json)
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
     Ok(acp::ExtResponse::new(std::sync::Arc::from(raw)))
 }
 

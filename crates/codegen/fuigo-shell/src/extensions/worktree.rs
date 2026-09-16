@@ -36,7 +36,10 @@ impl WorktreeNotificationSender for GatewayWorktreeNotifier {
         };
         let notification = acp::ExtNotification::new("fuigo/git/worktree/status", params.into());
         if let Err(e) = self.gateway.send(notification).await {
-            tracing::warn!("Failed to send worktree progress notification: {}", e);
+            tracing::warn!(
+                "Failed to send worktree progress notification: {}",
+                crate::sampling::error::acp_error_text(&e)
+            );
         }
     }
 }
@@ -44,7 +47,7 @@ impl WorktreeNotificationSender for GatewayWorktreeNotifier {
 fn to_response<T: serde::Serialize>(result: anyhow::Result<T>) -> ExtResult {
     ExtMethodResult::from_result(result)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 /// Extract the worktree path from a `Creating` response for pinning.
@@ -122,13 +125,13 @@ fn parse_duration(s: &str) -> Result<i64, acp::Error> {
     } else if let Some(n) = s.strip_suffix('s') {
         (n, 1)
     } else {
-        return Err(acp::Error::invalid_params().data(format!(
+        return Err(crate::acp_error::invalid_params(format!(
             "invalid duration: {s} (expected e.g. 7d, 24h, 30m, 60s)"
         )));
     };
     num.parse::<i64>()
         .map(|v| v * mult)
-        .map_err(|_| acp::Error::invalid_params().data(format!("invalid number in duration: {s}")))
+        .map_err(|_| crate::acp_error::invalid_params(format!("invalid number in duration: {s}")))
 }
 
 fn log_effective_worktree_type(
@@ -157,7 +160,7 @@ pub async fn handle(
 
     match args.method.as_ref() {
         "fuigo/git/worktree/create" => {
-            let mut req = serde_json::from_str::<CreateWorktreeRequest>(args.params.get())?;
+            let mut req = super::parse_params_str::<CreateWorktreeRequest>(args.params.get())?;
             // Pre-dispatch: apply worktree_type default
             let request_worktree_type = req.worktree_type;
             if req.worktree_type.is_none() {
@@ -173,7 +176,7 @@ pub async fn handle(
             let result = ops
                 .dispatch(&req, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             // Post-dispatch: spawn async task for Creating variant.
             if let Ok(resp) = serde_json::from_value::<CreateWorktreeResponse>(result.clone())
                 && matches!(&resp, CreateWorktreeResponse::Creating { .. })
@@ -190,25 +193,25 @@ pub async fn handle(
             to_response(Ok(result))
         }
         "fuigo/git/worktree/remove" => {
-            let req = serde_json::from_str::<RemoveWorktreeRequest>(args.params.get())?;
+            let req = super::parse_params_str::<RemoveWorktreeRequest>(args.params.get())?;
             let result = ops
                 .dispatch(&req, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/apply" => {
-            let req = serde_json::from_str::<ApplyWorktreeRequest>(args.params.get())?;
+            let req = super::parse_params_str::<ApplyWorktreeRequest>(args.params.get())?;
             let result = ops
                 .dispatch(&req, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         // Create a worktree from an existing worktree (used during session fork)
         "fuigo/git/worktree/create_from_worktree" => {
             let mut req =
-                serde_json::from_str::<CreateWorktreeFromWorktreeRequest>(args.params.get())?;
+                super::parse_params_str::<CreateWorktreeFromWorktreeRequest>(args.params.get())?;
             let request_worktree_type = req.worktree_type;
             if req.worktree_type.is_none() {
                 req.worktree_type = Some(worktree_type_default.into());
@@ -228,17 +231,16 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
             // Convert the serialized response back
             if let Some(err) = result.error {
-                return Err(acp::Error::internal_error().data(err));
+                return Err(crate::acp_error::internal_error(err));
             }
             let response_value = result.response.unwrap_or(serde_json::Value::Null);
             let response: CreateWorktreeResponse =
                 serde_json::from_value(response_value).map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to deserialize response: {e}"))
+                    crate::acp_error::internal_error(format!("failed to deserialize response: {e}"))
                 })?;
 
             if result.spawn_task {
@@ -257,7 +259,7 @@ pub async fn handle(
         // Synchronous variant: waits for worktree creation to complete
         "fuigo/git/worktree/create_from_worktree_sync" => {
             let mut req =
-                serde_json::from_str::<CreateWorktreeFromWorktreeRequest>(args.params.get())?;
+                super::parse_params_str::<CreateWorktreeFromWorktreeRequest>(args.params.get())?;
 
             // For jj repos, use jj workspace add instead of git worktree
             let source_path = std::path::Path::new(&req.source_worktree_path);
@@ -306,12 +308,12 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         // Resume a session in a fresh worktree.
         "fuigo/git/worktree/resume_session" => {
-            let req = serde_json::from_str::<ResumeSessionInWorktreeRequest>(args.params.get())?;
+            let req = super::parse_params_str::<ResumeSessionInWorktreeRequest>(args.params.get())?;
             log_effective_worktree_type(
                 "fuigo/git/worktree/resume_session",
                 req.worktree_type,
@@ -341,7 +343,7 @@ pub async fn handle(
         // ── Repo-wide session resolution ─────────────────────────────────
         "fuigo/session/resolve_local_for_worktree_resume" => {
             let req =
-                serde_json::from_str::<ResolveLocalForWorktreeResumeRequest>(args.params.get())?;
+                super::parse_params_str::<ResolveLocalForWorktreeResumeRequest>(args.params.get())?;
             let result = resolve_session_repo_wide(&req.session_id, std::path::Path::new(&req.cwd));
             match result {
                 Ok(Some(resolved)) => to_response(Ok(ResolveLocalForWorktreeResumeResponse {
@@ -356,15 +358,14 @@ pub async fn handle(
                     resolved_cwd: None,
                     resolution_kind: None,
                 })),
-                Err(e) => {
-                    Err(acp::Error::internal_error()
-                        .data(format!("repo-wide resolution failed: {e}")))
-                }
+                Err(e) => Err(crate::acp_error::internal_error(format!(
+                    "repo-wide resolution failed: {e}"
+                ))),
             }
         }
         // ── Session rehydration (devbox recovery) ─────────────────────────
         "fuigo/session/rehydrate" => {
-            let req = serde_json::from_str::<RehydrateSessionRequest>(args.params.get())?;
+            let req = super::parse_params_str::<RehydrateSessionRequest>(args.params.get())?;
             let registry_client = agent.session_registry_client();
 
             to_response(rehydrate_session_in_worktree(&req, ops, registry_client.as_ref()).await)
@@ -373,26 +374,26 @@ pub async fn handle(
         "fuigo/git/worktree/list" => {
             let req: fuigo_workspace::workspace_ops::WorktreeListReq =
                 serde_json::from_str(args.params.get())
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                    .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             let result = ops
                 .dispatch(&req, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/show" => {
-            let req = serde_json::from_str::<ShowWorktreeRequest>(args.params.get())?;
+            let req = super::parse_params_str::<ShowWorktreeRequest>(args.params.get())?;
             let op = fuigo_workspace::workspace_ops::WorktreeShowReq {
                 id_or_path: req.id_or_path,
             };
             let result = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/gc" => {
-            let req = serde_json::from_str::<GcWorktreeRequest>(args.params.get())?;
+            let req = super::parse_params_str::<GcWorktreeRequest>(args.params.get())?;
             let max_age_secs = req.max_age.as_deref().map(parse_duration).transpose()?;
             let op = fuigo_workspace::workspace_ops::WorktreeGcReq {
                 dry_run: req.dry_run,
@@ -402,14 +403,14 @@ pub async fn handle(
             let result = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/db/stats" => {
             let result = ops
                 .dispatch(&fuigo_workspace::workspace_ops::WorktreeDbStatsReq {}, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/db/rebuild" => {
@@ -419,14 +420,14 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/db/path" => {
             let result = ops
                 .dispatch(&fuigo_workspace::workspace_ops::WorktreeDbPathReq {}, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/detach" => {
@@ -437,7 +438,7 @@ pub async fn handle(
                 #[serde(default)]
                 allow_copy: bool,
             }
-            let req = serde_json::from_str::<DetachReq>(args.params.get())?;
+            let req = super::parse_params_str::<DetachReq>(args.params.get())?;
             let result = ops
                 .dispatch(
                     &fuigo_workspace::workspace_ops::WorktreeDetachReq {
@@ -447,7 +448,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/salvage" => {
@@ -457,7 +458,7 @@ pub async fn handle(
                 id_or_path: String,
                 out: String,
             }
-            let req = serde_json::from_str::<SalvageReq>(args.params.get())?;
+            let req = super::parse_params_str::<SalvageReq>(args.params.get())?;
             let result = ops
                 .dispatch(
                     &fuigo_workspace::workspace_ops::WorktreeSalvageReq {
@@ -467,7 +468,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
         "fuigo/git/worktree/clean-artifacts" => {
@@ -476,7 +477,7 @@ pub async fn handle(
             struct CleanReq {
                 id_or_path: String,
             }
-            let req = serde_json::from_str::<CleanReq>(args.params.get())?;
+            let req = super::parse_params_str::<CleanReq>(args.params.get())?;
             let result = ops
                 .dispatch(
                     &fuigo_workspace::workspace_ops::WorktreeCleanArtifactsReq {
@@ -485,10 +486,10 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_response(Ok(result))
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

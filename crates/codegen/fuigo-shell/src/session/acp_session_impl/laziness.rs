@@ -477,7 +477,7 @@ impl SessionActor {
         let sampling_client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
             Err(err) => {
-                let detail = err.to_string();
+                let detail = crate::sampling::error::acp_error_text(&err);
                 tracing::debug!(error = %detail, "laziness classifier: prepare_chat_completion failed");
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 self.maybe_write_laziness_debug_log(

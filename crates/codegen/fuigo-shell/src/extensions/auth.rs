@@ -22,7 +22,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "fuigo/auth/logout" => handle_logout(agent, args).await,
         "fuigo/auth/info" => handle_info(agent),
         "fuigo/auth/check_subscription" => handle_check_subscription(agent).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -59,14 +59,14 @@ async fn handle_get_bearer_token(agent: &MvpAgent) -> ExtResult {
     };
     ExtMethodResult::success(serde_json::json!({ "token": token }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn handle_get_api_key() -> ExtResult {
     let key = crate::agent::auth_method::read_fuigo_api_key_env().ok();
     ExtMethodResult::success(serde_json::json!({ "key": key }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn handle_set_api_key(args: &acp::ExtRequest) -> ExtResult {
@@ -76,24 +76,24 @@ fn handle_set_api_key(args: &acp::ExtRequest) -> ExtResult {
     if let Some(k) = key {
         if k.is_empty() {
             crate::auth::clear_api_key(&fuigo_home)
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             // SAFETY: ext_method is single-threaded per agent
             unsafe { std::env::remove_var("FUIGO_API_KEY") };
         } else {
             crate::auth::store_api_key(&fuigo_home, k)
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             // SAFETY: ext_method is single-threaded per agent
             unsafe { std::env::set_var("FUIGO_API_KEY", k) };
         }
     } else {
         crate::auth::clear_api_key(&fuigo_home)
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
         // SAFETY: ext_method is single-threaded per agent
         unsafe { std::env::remove_var("FUIGO_API_KEY") };
     }
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 /// Handles an auth code submitted from the TUI.
@@ -104,15 +104,15 @@ fn handle_submit_code(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 
     let params: SubmitCodeParams = serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
 
     match agent.interactive_auth.submit_code(params.code) {
         Ok(()) => to_raw_response(&serde_json::json!({ "submitted": true })),
-        Err(crate::auth::single_flight::SubmitCodeError::SendFailed(e)) => {
-            Err(acp::Error::internal_error().data(format!("failed to submit auth code: {e}")))
-        }
+        Err(crate::auth::single_flight::SubmitCodeError::SendFailed(e)) => Err(
+            crate::acp_error::internal_error(format!("failed to submit auth code: {e}")),
+        ),
         Err(crate::auth::single_flight::SubmitCodeError::NoPendingAttempt) => {
-            Err(acp::Error::invalid_params().data("no pending auth session"))
+            Err(crate::acp_error::invalid_params("no pending auth session"))
         }
     }
 }
@@ -143,13 +143,13 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 
     let params: LogoutParams = serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
 
     // Stop any in-flight login so it cannot write credentials back after logout.
     agent.interactive_auth.cancel();
 
     let result = crate::auth::perform_logout(&agent.auth_manager, params.scope.as_deref())
-        .map_err(|e| acp::Error::internal_error().data(format!("failed to logout: {e}")))?;
+        .map_err(|e| crate::acp_error::internal_error(format!("failed to logout: {e}")))?;
     // `auth.lifecycle` (not `auth`) avoids colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span
     tracing::info_span!("auth.lifecycle", action = "logout", success = true).in_scope(|| {});
 

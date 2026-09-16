@@ -674,7 +674,8 @@ async fn apply_retry_decision(
                 | SamplingError::IdleTimeout { .. }
                 | SamplingError::EmptyResponse { .. }
                 | SamplingError::MaxTokensTruncation
-                | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+                | SamplingError::DoomLoopDetected { .. }
+                | SamplingError::Cancelled => StripReason::PayloadHeuristic,
             };
             tracing::warn!(
                 stripped = stripped_urls.len(),
@@ -1133,6 +1134,7 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
             triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
             aborted_at_chunk: info.doom_loop_aborted_at_chunk,
         },
+        SamplingErrorKind::Cancelled => crate::events::request_cancelled_error(),
     }
 }
 
@@ -1231,12 +1233,11 @@ fn handle_cancellation(
     request_id: &RequestId,
     completion: &mut CompletionState,
 ) {
-    // No status code, no upstream API error: this is a client-side termination
-    // Use kind=Api so consumers that switch on kind have a sensible default; the message clearly identifies it
+    // No status code, no upstream API error: this is a client-side termination, typed `Cancelled` so clients see `error_kind: cancelled`
     let info = SamplingErrorInfo {
-        kind: SamplingErrorKind::Api,
+        kind: SamplingErrorKind::Cancelled,
         status_code: None,
-        message: "request cancelled".to_string(),
+        message: crate::events::REQUEST_CANCELLED_MESSAGE.to_string(),
         is_retryable: false,
         retry_after_secs: None,
         should_retry: None,
@@ -1255,7 +1256,7 @@ fn handle_cancellation(
         .is_ok();
     send_completion(
         completion,
-        Err(SamplingError::auth_unknown("request cancelled")),
+        Err(crate::events::request_cancelled_error()),
         terminal_event_queued,
     );
 }
@@ -1383,6 +1384,33 @@ mod tests {
         assert_eq!(total.usage.unwrap().total_tokens, 60);
         assert_eq!(total.cost_usd_ticks, Some(60));
         assert!(total.unknown_liability);
+    }
+
+    /// A cancelled request tells the session it was cancelled: the Failed event and the completion both classify as `Cancelled`.
+    /// Before, the event said `api` and the completion said `auth`, so a client saw a generic or auth failure for a cancel.
+    #[tokio::test]
+    async fn cancellation_reports_the_cancelled_kind_on_event_and_completion() {
+        let id = RequestId::from("cancelled");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tx = AccountingEvents::new(tx);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        handle_cancellation(&tx, &id, &mut CompletionState::new(Some(completion_tx)));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+            panic!("cancellation must end with a Failed event, got {events:?}");
+        };
+        assert_eq!(error.kind, SamplingErrorKind::Cancelled);
+        assert_eq!(error.kind.as_str(), "cancelled");
+        assert_eq!(error.status_code, None);
+        assert!(!error.is_retryable);
+        let completion = completion_rx.await.expect("completion delivered");
+        let Err(err) = completion.result else {
+            panic!("a cancelled request has no response");
+        };
+        assert_eq!(
+            SamplingErrorInfo::from(&err).kind,
+            SamplingErrorKind::Cancelled
+        );
     }
 
     #[tokio::test]

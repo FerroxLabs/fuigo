@@ -49,10 +49,9 @@ impl SessionActor {
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
-            .await
-            .map_err(|e| SideQuestionError::PrepareClient(e.to_string()))?;
+        let sampling_client = self.prepare_chat_completion(false).await.map_err(|e| {
+            SideQuestionError::PrepareClient(crate::sampling::error::acp_error_text(&e))
+        })?;
 
         // Full conversation snapshot including system prompt, reasoning, tool calls, and results.
         let mut items = self.chat_state_handle.get_conversation().await;
@@ -237,7 +236,7 @@ impl SessionActor {
         let setup = match self.prepare_side_call().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "recap: failed to prepare sampling client");
+                tracing::warn!(error = %crate::sampling::error::acp_error_text(&e), "recap: failed to prepare sampling client");
                 clear_in_flight();
                 // A manual `/recap` shows a loading spinner; clear it on failure.
                 if !auto {

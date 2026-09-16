@@ -7,6 +7,7 @@ use fuigo_fast_worktree::WorktreeRecord;
 /// Reuse the agent's own report types rather than copies, so a field added there cannot go missing here.
 pub use fuigo_fast_worktree::{DbStats, GcReport, KeptWorktree, RebuildReport};
 use fuigo_shell::agent::config::Config as AgentConfig;
+use fuigo_shell::sampling::error::acp_error_text;
 use std::io::Write;
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, clap::Args, Clone)]
@@ -92,7 +93,8 @@ pub async fn run(args: WorktreeArgs, agent_config: &AgentConfig) -> Result<()> {
             ),
         &spawned.channel.tx,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!(acp_error_text(&e)))?;
     dispatch(args.command, &spawned.channel.tx).await
 }
 async fn dispatch(command: WorktreeCommand, tx: &fuigo_acp_lib::AcpAgentTx) -> Result<()> {
@@ -139,7 +141,7 @@ async fn ext_call<T: serde::de::DeserializeOwned>(
         ext_request(method, params).map_err(|e| anyhow::anyhow!("failed to build request: {e}"))?;
     let resp = acp_send(req, tx)
         .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("{}", acp_error_text(&e)))?;
     let envelope: ExtEnvelope<T> = serde_json::from_str(resp.0.get())
         .map_err(|e| anyhow::anyhow!("response parse error: {e}"))?;
     if let Some(err) = envelope.error {

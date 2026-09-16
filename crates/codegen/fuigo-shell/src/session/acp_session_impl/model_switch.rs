@@ -141,7 +141,7 @@ impl SessionActor {
             };
             tracing::info!("Family-switch compact: -> {}", sampling_config.model);
             if let Err(e) = self.run_compact_only(trigger_info, true).await {
-                tracing::error!(error = %e, "Family-switch compaction failed; switching anyway");
+                tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Family-switch compaction failed; switching anyway");
             }
         }
         Ok(model_id)
@@ -153,14 +153,17 @@ impl SessionActor {
         effort: fuigo_sampling_types::ReasoningEffort,
     ) -> Result<acp::ModelId, acp::Error> {
         let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await else {
-            return Err(acp::Error::internal_error().data("session has no sampling config"));
+            return Err(crate::acp_error::internal_error(
+                "session has no sampling config",
+            ));
         };
         if !self
             .models_manager
             .model_supports_reasoning_effort(&cfg.model)
         {
-            return Err(acp::Error::invalid_params()
-                .data("the session's current model does not support reasoning effort"));
+            return Err(crate::acp_error::invalid_params(
+                "the session's current model does not support reasoning effort",
+            ));
         }
         if let Some(routed) = self.models_manager.model_for_effort(&cfg.model, effort) {
             cfg.model = routed;
@@ -200,8 +203,9 @@ impl SessionActor {
                     new_agent_type = %definition.name,
                     "handle_rebuild_agent_for_definition: turn in flight, rejecting rebuild"
                 );
-                return Err(acp::Error::internal_error()
-                    .data("rebuild_agent: turn in flight, refusing to rebuild harness"));
+                return Err(crate::acp_error::internal_error(
+                    "rebuild_agent: turn in flight, refusing to rebuild harness",
+                ));
             }
         }
         let new_agent_name = definition.name.clone();
@@ -223,7 +227,7 @@ impl SessionActor {
                     error = %e,
                     "handle_rebuild_agent_for_definition: AgentBuilder::build failed"
                 );
-                acp::Error::internal_error().data(format!(
+                crate::acp_error::internal_error(format!(
                     "rebuild_agent: build failed for agent_type={new_agent_name}: {e}"
                 ))
             })?;

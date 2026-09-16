@@ -94,7 +94,7 @@ impl AcpReverseInvoker for GatewayAcpInvoker {
                     timeout.as_millis()
                 )
             })?
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| crate::sampling::error::acp_error_text(&err))?;
         serde_json::from_str(response.0.get()).map_err(|err| err.to_string())
     }
 }

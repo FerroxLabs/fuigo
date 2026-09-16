@@ -107,7 +107,8 @@ pub(super) fn transient_retry_eligible(error: &fuigo_sampler::SamplingErrorInfo)
         | SamplingErrorKind::RateLimited
         | SamplingErrorKind::EmptyResponse
         | SamplingErrorKind::MaxTokensTruncation
-        | SamplingErrorKind::DoomLoopDetected => false,
+        | SamplingErrorKind::DoomLoopDetected
+        | SamplingErrorKind::Cancelled => false,
     }
 }
 
@@ -290,7 +291,8 @@ fn error_after_stream_drain(
 
 fn revoked_sampling_info() -> fuigo_sampler::SamplingErrorInfo {
     fuigo_sampler::SamplingErrorInfo {
-        kind: fuigo_sampler::SamplingErrorKind::Api,
+        // A revocation is a cancellation, not an upstream failure; typed so a client that still sees it reads `error_kind: cancelled`
+        kind: fuigo_sampler::SamplingErrorKind::Cancelled,
         status_code: None,
         message: "sampling result revoked by turn cancellation or rewind".to_string(),
         is_retryable: false,
@@ -1158,8 +1160,10 @@ impl SessionActor {
             },
         ))
         .await;
-        acp::Error::internal_error().data(crate::sampling::error::error_data_with_status(
-            message, STATUS,
+        acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
+            message,
+            STATUS,
+            fuigo_sampler::SamplingErrorKind::Auth,
         ))
     }
 
@@ -1290,7 +1294,8 @@ impl SessionActor {
                     }),
                 );
             }
-            return Err(acp::Error::internal_error().data(data));
+            return Err(acp::Error::internal_error()
+                .data(crate::acp_error::typed_error_data(Some(data), "")));
         }
 
         if self.tool_context.task_output_token_budget.is_some() {
@@ -1300,7 +1305,10 @@ impl SessionActor {
                 error.message
             );
             self.log_terminal_failure("output_budget_usage_unknown", error.status_code, &message);
-            return Err(acp::Error::internal_error().data(message));
+            // Arms that used to send a bare string gain the typed object but no `http_status`: a status (401) changes what clients do
+            return Err(acp::Error::internal_error().data(
+                crate::sampling::error::terminal_error_data(message, None, error.kind),
+            ));
         }
         if self.tool_context.sampler_retry_only_before_output {
             self.mark_turn_usage_unaccounted();
@@ -1313,7 +1321,9 @@ impl SessionActor {
                 error.status_code,
                 &message,
             );
-            return Err(acp::Error::internal_error().data(message));
+            return Err(acp::Error::internal_error().data(
+                crate::sampling::error::terminal_error_data(message, None, error.kind),
+            ));
         }
 
         // Never compact mid-salvage: the rewrite would drop the continue reminder and split the joined report
@@ -1375,7 +1385,9 @@ impl SessionActor {
                 },
             ))
             .await;
-            return Err(acp::Error::invalid_params().data(friendly));
+            return Err(acp::Error::invalid_params().data(
+                crate::sampling::error::terminal_error_data(friendly, None, error.kind),
+            ));
         }
 
         if matches!(error.kind, SamplingErrorKind::RateLimited) {
@@ -1393,7 +1405,11 @@ impl SessionActor {
                 crate::sampling::error::RATE_LIMITED_ERROR_CODE,
                 "Rate limited".to_string(),
             )
-            .data(detailed_message);
+            .data(crate::sampling::error::terminal_error_data(
+                detailed_message,
+                None,
+                error.kind,
+            ));
             return Err(acp_err);
         }
 
@@ -1626,7 +1642,9 @@ impl SessionActor {
                 },
             ))
             .await;
-            return Err(acp::Error::internal_error().data(msg));
+            return Err(acp::Error::internal_error().data(
+                crate::sampling::error::terminal_error_data(msg, None, error.kind),
+            ));
         }
 
         // 5d. Enriched error for 404 model-not-found and 401 auth errors.
@@ -2416,5 +2434,8 @@ mod stream_drain_tests {
             "sampling result revoked by turn cancellation or rewind"
         );
         assert!(!result.is_retryable);
+        // A revocation is a cancellation, not an upstream API failure: it must reach the client typed `cancelled`
+        assert_eq!(result.kind, fuigo_sampler::SamplingErrorKind::Cancelled);
+        assert_eq!(result.status_code, None);
     }
 }

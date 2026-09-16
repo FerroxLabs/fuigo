@@ -99,8 +99,19 @@ pub(crate) fn normalize_compact_detail(raw: &str) -> String {
 /// `message` is the key [`crate::sampling::error::error_detail_from_data`] reads first, so text-only consumers see the plain detail.
 /// Normalized here at the wire boundary: typed-kind pagers render it verbatim, so no producer can ship raw upstream text.
 /// Prefix-stripping stays producer-side.
+/// Also typed like every shell error (`crate::acp_error`): `error_kind` is `cancelled` for a cancel, else `compaction`.
 pub fn compact_error_data(kind: CompactErrorKind, message: &str) -> serde_json::Value {
-    serde_json::json!({ "kind": kind.wire(), "message": normalize_compact_detail(message) })
+    let error_kind = match kind {
+        CompactErrorKind::Cancelled => {
+            crate::acp_error::AcpErrorKind::Sampling(fuigo_sampler::SamplingErrorKind::Cancelled)
+        }
+        CompactErrorKind::Failed => crate::acp_error::AcpErrorKind::Compaction,
+    };
+    crate::acp_error::error_data_with_fields(
+        error_kind,
+        normalize_compact_detail(message),
+        serde_json::json!({ "kind": kind.wire() }),
+    )
 }
 
 /// Read the typed discriminator back.
@@ -127,7 +138,7 @@ pub(crate) use fuigo_compaction::is_context_length_error;
 /// `Auth`, `InvalidConfiguration`, `Serialization` and `IdleTimeout` are all deterministic by construction.
 /// Re-issuing the same request cannot change the outcome: auth state, config, payload shape, and stuck-model conditions all persist.
 fn classify_sampling_error(err: SamplingError) -> CompactFailure {
-    let acp_err = acp::Error::internal_error().data(format!("{COMPACT_FAILED_PREFIX}{err}"));
+    let acp_err = crate::acp_error::compaction(format!("{COMPACT_FAILED_PREFIX}{err}"));
     // Size beats the generic 4xx rule so the input ladder sees it; 413
     // matches by status because proxies send it with generic body text.
     // Deliberately not laddering on `is_likely_body_rejected()`: the same
@@ -139,7 +150,8 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
         SamplingError::Auth { .. }
         | SamplingError::InvalidConfiguration(_)
         | SamplingError::Serialization(_)
-        | SamplingError::IdleTimeout { .. } => true,
+        | SamplingError::IdleTimeout { .. }
+        | SamplingError::Cancelled => true,
         SamplingError::Api { status, .. } => {
             status.is_client_error()
                 && *status != StatusCode::REQUEST_TIMEOUT
@@ -167,7 +179,7 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
 /// HTTP status as a string, but Anthropic also uses error-type strings like
 /// `"invalid_request_error"`). `message` is the human-readable detail.
 fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFailure {
-    let acp_err = acp::Error::internal_error().data(match code {
+    let acp_err = crate::acp_error::compaction(match code {
         Some(c) => format!("{COMPACT_FAILED_PREFIX}{c}: {message}"),
         None => format!("{COMPACT_FAILED_PREFIX}{message}"),
     });
@@ -559,21 +571,21 @@ pub(crate) async fn generate_session_compact(
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
-                        return Err(CompactFailure::Transient(
-                            acp::Error::internal_error().data(format!(
+                        return Err(CompactFailure::Transient(crate::acp_error::compaction(
+                            format!(
                                 "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
                                 content.chars().count()
-                            )),
-                        ));
+                            ),
+                        )));
                     }
                 };
                 // Wall-clock backstop (0 disables it): cut a runaway, including a reasoning spiral that token limits miss, and let it retry
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
-                    return Err(CompactFailure::Transient(
-                        acp::Error::internal_error().data(format!(
+                    return Err(CompactFailure::Transient(crate::acp_error::compaction(
+                        format!(
                             "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                        )),
-                    ));
+                        ),
+                    )));
                 }
                 match chunk_result {
                     Ok(chunk) => {
@@ -649,21 +661,21 @@ pub(crate) async fn generate_session_compact(
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
-                        return Err(CompactFailure::Transient(
-                            acp::Error::internal_error().data(format!(
+                        return Err(CompactFailure::Transient(crate::acp_error::compaction(
+                            format!(
                                 "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
                                 content.chars().count()
-                            )),
-                        ));
+                            ),
+                        )));
                     }
                 };
                 // Wall-clock backstop (0 disables it): cut a runaway, including a reasoning spiral that token limits miss, and let it retry
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
-                    return Err(CompactFailure::Transient(
-                        acp::Error::internal_error().data(format!(
+                    return Err(CompactFailure::Transient(crate::acp_error::compaction(
+                        format!(
                             "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                        )),
-                    ));
+                        ),
+                    )));
                 }
                 match chunk_result {
                     Ok(chunk) => {
@@ -774,21 +786,21 @@ pub(crate) async fn generate_session_compact(
                     StreamStep::Item(item) => item,
                     StreamStep::Ended => break,
                     StreamStep::IdleTimeout => {
-                        return Err(CompactFailure::Transient(
-                            acp::Error::internal_error().data(format!(
+                        return Err(CompactFailure::Transient(crate::acp_error::compaction(
+                            format!(
                                 "{COMPACT_FAILED_PREFIX}stream idle timeout after {idle_timeout:?} ({} chars received)",
                                 content.chars().count()
-                            )),
-                        ));
+                            ),
+                        )));
                     }
                 };
                 // Wall-clock backstop (0 disables it): cut a runaway, including a reasoning spiral that token limits miss, and let it retry
                 if wall_clock_budget_secs > 0 && timing.elapsed_secs() >= wall_clock_budget_secs {
-                    return Err(CompactFailure::Transient(
-                        acp::Error::internal_error().data(format!(
+                    return Err(CompactFailure::Transient(crate::acp_error::compaction(
+                        format!(
                             "{COMPACT_FAILED_PREFIX}exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                        )),
-                    ));
+                        ),
+                    )));
                 }
                 match chunk_result {
                     Ok(event) => {
@@ -839,11 +851,9 @@ pub(crate) async fn generate_session_compact(
         // Content-filter refusals (provider returns 200 with no body) are a known counterexample
         // They are not currently distinguishable from stream blips at this layer; revisit if stop_reason or finish_reason gets threaded through
         // After max_retries the caller still surfaces the error to the user
-        Err(CompactFailure::Transient(
-            acp::Error::internal_error().data(format!(
-                "{COMPACT_FAILED_PREFIX}model returned empty response"
-            )),
-        ))
+        Err(CompactFailure::Transient(crate::acp_error::compaction(
+            format!("{COMPACT_FAILED_PREFIX}model returned empty response"),
+        )))
     } else {
         Ok(output)
     }
