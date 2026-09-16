@@ -112,6 +112,9 @@ pub struct NfsStatusView {
 pub fn try_nfs_remove(_worktree_path: &Path) -> Result<Option<RemoveReport>> {
     Ok(None)
 }
+/// Mirror of `nfs::GROVE_ENV_LOCK` so `db::FuigoHomeFixture` links on non-unix.
+#[cfg(test)]
+pub(crate) static GROVE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Mirror of `nfs::confined::is_safe_worktree_id` for the non-unix build.
 pub(crate) fn is_safe_worktree_id(id: &str) -> bool {
     !id.is_empty()

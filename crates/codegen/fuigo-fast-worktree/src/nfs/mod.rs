@@ -34,8 +34,63 @@ pub use mount_table::{
 #[allow(unused_imports)]
 pub(crate) use mount_table::{dest_path_contains, dest_paths_equivalent};
 pub use remove::try_nfs_remove;
+/// The ONE lock for every test writer of the process-global grove env vars
+/// (`GROVE_DATA_DIR`, `GROVE_CONTROL_SOCK`). `std::env::set_var` is a process-wide
+/// write, so two tests that guard it with different mutexes still interleave;
+/// every writer in this crate must take this lock and no other —
+/// [`GroveEnvGuard`] here and `db::FuigoHomeFixture::isolate_xdg_grove_data` are
+/// the only two, and both go through it.
+///
+/// Lock order where both are held: `db::FUIGO_HOME_ENV_LOCK` first, then this.
 #[cfg(test)]
 pub(crate) static GROVE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Test-only: hold [`GROVE_ENV_LOCK`], point `GROVE_DATA_DIR` at `data` and
+/// `GROVE_CONTROL_SOCK` at `sock`, and restore both on drop — while still holding
+/// the lock, so the next writer never sees a half-restored environment.
+#[cfg(test)]
+pub(crate) struct GroveEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev_data_dir: Option<std::ffi::OsString>,
+    prev_control_sock: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl GroveEnvGuard {
+    pub(crate) fn set(data: &Path, sock: &Path) -> Self {
+        let lock = GROVE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_data_dir = std::env::var_os("GROVE_DATA_DIR");
+        let prev_control_sock = std::env::var_os("GROVE_CONTROL_SOCK");
+        // SAFETY: the guard holds GROVE_ENV_LOCK for its whole lifetime, and every
+        // test writer of these two variables takes the same lock.
+        unsafe {
+            std::env::set_var("GROVE_DATA_DIR", data);
+            std::env::set_var("GROVE_CONTROL_SOCK", sock);
+        }
+        Self {
+            _lock: lock,
+            prev_data_dir,
+            prev_control_sock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GroveEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: still under GROVE_ENV_LOCK (fields drop after this body).
+        unsafe {
+            match self.prev_data_dir.take() {
+                Some(p) => std::env::set_var("GROVE_DATA_DIR", p),
+                None => std::env::remove_var("GROVE_DATA_DIR"),
+            }
+            match self.prev_control_sock.take() {
+                Some(p) => std::env::set_var("GROVE_CONTROL_SOCK", p),
+                None => std::env::remove_var("GROVE_CONTROL_SOCK"),
+            }
+        }
+    }
+}
 use crate::copy::CopyStats;
 use crate::worktree::CreateWorktreeResult;
 use crate::worktree::plan::WorktreePlan;
