@@ -636,7 +636,6 @@ fn render_list(
             badge: &badge,
             badge_color: glyph_style.fg,
             collapsible: false,
-            underline_last_desc: false,
         };
         let rendered = render_picker_row(
             buf,
@@ -649,7 +648,7 @@ fn render_list(
             Some(theme.bg_base),
             bottom.saturating_sub(y),
         );
-        let row_h = rendered.rows.max(1);
+        let row_h = rendered.max(1);
         state.run_hits.push((
             Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), row_h),
             run.run_id.clone(),

@@ -1,5 +1,5 @@
 //! MCP server data types, status enum, response conversion, and section
-//! presentation helpers (labels, description lines, connectors URLs).
+//! presentation helpers (labels, description lines).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpWireSource {
@@ -53,40 +53,20 @@ pub fn section_label(section: &McpSectionId, count: usize) -> String {
     }
 }
 
-/// Base grok.com connectors URL (no team). Prefer [`managed_connectors_url`] when opening.
-pub const MANAGED_SECTION_CONNECTORS_URL: &str = "https://grok.com/connectors";
-
-/// Connectors deep link, appending percent-encoded `teamId` when the session is a team principal.
-pub fn managed_connectors_url(team_id: Option<&str>) -> String {
-    match team_id.filter(|id| !id.is_empty()) {
-        Some(id) => format!(
-            "{MANAGED_SECTION_CONNECTORS_URL}?teamId={}",
-            urlencoding::encode(id)
-        ),
-        None => MANAGED_SECTION_CONNECTORS_URL.to_string(),
-    }
-}
-
-/// Display form of [`managed_connectors_url`] with the `https://` scheme dropped.
+/// Copy under the Managed section header, and the notice shown when the user tries to
+/// authenticate a managed gateway row from this modal.
 ///
-/// Used for the Managed section subtitle so the URL is shorter and more likely
-/// to fit on one row; the Ctrl+O action still opens the full-scheme URL.
-pub fn managed_connectors_url_display(team_id: Option<&str>) -> String {
-    let url = managed_connectors_url(team_id);
-    url.strip_prefix("https://").unwrap_or(&url).to_string()
-}
+/// Managed connectors are provisioned server-side; nothing about them is configured, sold or
+/// linked from here. Upstream painted a `grok.com/connectors` deep link in this slot and opened
+/// it from Ctrl+O and a mouse click. Fuigo's egress guard refuses that host, so the link was a
+/// competitor funnel under Fuigo's own label; it is gone, not relocated.
+pub const MANAGED_SECTION_DESCRIPTION: &str =
+    "Managed connectors are configured by your Fuigo administrator.";
 
 /// Description lines shown under the Managed section header (when expanded).
-/// `team_id` matches the Ctrl+O / open-connectors deep link for the session.
-pub fn section_description_lines(section: &McpSectionId, team_id: Option<&str>) -> Vec<String> {
+pub fn section_description_lines(section: &McpSectionId) -> Vec<String> {
     match section {
-        McpSectionId::Managed => {
-            let url = managed_connectors_url_display(team_id);
-            vec![
-                "Add, remove, or manage connectors. Ctrl+O to open or go to:".into(),
-                format!("[{url}]"),
-            ]
-        }
+        McpSectionId::Managed => vec![MANAGED_SECTION_DESCRIPTION.into()],
         McpSectionId::Plugin(_) | McpSectionId::Local => vec![],
     }
 }
@@ -450,58 +430,24 @@ mod tests {
     }
 
     #[test]
-    fn section_description_lines_managed_includes_connectors_url() {
-        let lines = section_description_lines(&McpSectionId::Managed, None);
-        assert_eq!(lines.len(), 2);
-        // Instruction leads; Ctrl+O hint lives on the first line.
-        assert!(
-            lines[0].contains("Ctrl+O"),
-            "should mention Ctrl+O shortcut: {}",
-            lines[0]
-        );
-        // URL sits alone on the second line, scheme-stripped and bracket-highlighted.
-        assert_eq!(lines[1], "[grok.com/connectors]");
-        assert!(
-            !lines[1].contains("https://"),
-            "displayed URL should drop the scheme: {}",
-            lines[1]
-        );
-        let with_team = section_description_lines(&McpSectionId::Managed, Some("team-1"));
-        assert_eq!(with_team[1], "[grok.com/connectors?teamId=team-1]");
-    }
-
-    #[test]
-    fn managed_connectors_url_display_strips_scheme() {
-        assert_eq!(managed_connectors_url_display(None), "grok.com/connectors");
-        assert_eq!(
-            managed_connectors_url_display(Some("team-uuid-1")),
-            "grok.com/connectors?teamId=team-uuid-1"
-        );
-    }
-
-    #[test]
-    fn managed_connectors_url_appends_team_id_when_present() {
-        assert_eq!(managed_connectors_url(None), MANAGED_SECTION_CONNECTORS_URL);
-        assert_eq!(
-            managed_connectors_url(Some("")),
-            MANAGED_SECTION_CONNECTORS_URL
-        );
-        assert_eq!(
-            managed_connectors_url(Some("team-uuid-1")),
-            format!("{MANAGED_SECTION_CONNECTORS_URL}?teamId=team-uuid-1")
-        );
-        assert_eq!(
-            managed_connectors_url(Some("a b/c")),
-            format!(
-                "{MANAGED_SECTION_CONNECTORS_URL}?teamId={}",
-                urlencoding::encode("a b/c")
-            )
-        );
+    fn section_description_lines_managed_sells_nothing_and_links_nowhere() {
+        let lines = section_description_lines(&McpSectionId::Managed);
+        assert_eq!(lines, vec![MANAGED_SECTION_DESCRIPTION.to_string()]);
+        // Upstream painted `[grok.com/connectors]` here with a Ctrl+O hint; the Managed section
+        // now describes provenance only, with no host, no scheme and no shortcut to press.
+        for line in &lines {
+            for needle in ["grok.com", "https://", "http://", "Ctrl+O", "[", "]"] {
+                assert!(
+                    !line.contains(needle),
+                    "Managed description must not contain {needle:?}: {line}"
+                );
+            }
+        }
     }
 
     #[test]
     fn section_description_lines_local_is_empty() {
-        assert!(section_description_lines(&McpSectionId::Local, None).is_empty());
+        assert!(section_description_lines(&McpSectionId::Local).is_empty());
     }
 
     #[test]

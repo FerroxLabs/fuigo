@@ -39,8 +39,6 @@ fn cta_mcps_loaded_needs_auth_opens_modal_and_seeds() {
         .as_ref()
         .expect("extensions modal should be open");
     assert_eq!(modal.active_tab, ExtensionsTab::McpServers);
-    // Session team id seeded so the Managed subtitle deep link matches Ctrl+O.
-    assert_eq!(modal.session_team_id.as_deref(), Some("team-uuid"));
     // MCP tab seeded directly from the read we already have (no flash).
     match &modal.mcps_data {
         TabDataState::Loaded(servers) => assert_eq!(servers.len(), 4),

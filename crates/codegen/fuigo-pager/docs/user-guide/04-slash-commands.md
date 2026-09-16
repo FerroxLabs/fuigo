@@ -357,7 +357,7 @@ View release notes for the current version. Alias: `/changelog`.
 
 ### `/docs`
 
-Browse the built-in How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
+Browse the built-in How-to Guides, open the online FluxRouter docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
 
 ```
 /docs
@@ -366,7 +366,7 @@ Browse the built-in How-to Guides, open the online Build docs, or jump straight 
 ```
 
 - Bare `/docs` (or `/docs how-to`) opens the How-to Guides picker.
-- `/docs web` opens https://docs.x.ai/build/overview in your browser.
+- `/docs web` opens https://fluxrouter.ai/docs in your browser.
 - `/docs <title>` opens a specific guide by case-insensitive title match.
 
 ### `/tutorial`
@@ -429,7 +429,7 @@ Open Settings on **Coding data, retention, and training**, where you choose
 /privacy
 ```
 
-This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser.
+This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team (an account-level setting managed from your FluxRouter dashboard, not from Fuigo). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser.
 
 ---
 

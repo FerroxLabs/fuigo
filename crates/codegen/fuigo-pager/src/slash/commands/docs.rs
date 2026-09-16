@@ -1,7 +1,7 @@
-//! `/docs` opens How-to Guides (in-TUI) or the online Build docs.
+//! `/docs` opens How-to Guides (in-TUI) or the online FluxRouter docs.
 //!
 //! Bare `/docs` opens the same DocPicker as command-palette "How-to Guides".
-//! `/docs web` opens https://docs.x.ai/build/overview in the browser.
+//! `/docs web` opens https://fluxrouter.ai/docs in the browser.
 //! `/docs <title>` opens a single guide by title (case-insensitive).
 
 use crate::app::actions::Action;
@@ -10,8 +10,8 @@ use crate::slash::command::{
     AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
 };
 
-/// The online Build docs landing page, hardcoded like other TUI deep-links; docs.x.ai can redirect if the path moves.
-pub const BUILD_DOCS_URL: &str = "https://docs.x.ai/build/overview";
+/// The online docs landing page, hardcoded like other TUI deep-links; fluxrouter.ai can redirect if the path moves.
+pub const BUILD_DOCS_URL: &str = "https://fluxrouter.ai/docs";
 
 pub struct DocsCommand;
 
@@ -19,7 +19,7 @@ impl SlashCommand for DocsCommand {
     slash_meta! {
         name: "docs",
         aliases: ["howto", "guides"],
-        description: "Open How-to Guides or online Build docs",
+        description: "Open How-to Guides or online FluxRouter docs",
         usage: "/docs [web|title]",
         takes_args: true,
         args_required: false,
@@ -38,7 +38,7 @@ impl SlashCommand for DocsCommand {
                 display: "web".into(),
                 match_text: "web".into(),
                 insert_text: "web".into(),
-                description: "Open docs.x.ai/build in the browser".into(),
+                description: "Open fluxrouter.ai/docs in the browser".into(),
             },
         ];
         items.extend(all_titles().map(|title| ArgItem {
@@ -152,6 +152,55 @@ mod tests {
                     assert_eq!(url, BUILD_DOCS_URL, "args={args:?}");
                 }
                 other => panic!("expected OpenUrl for args={args:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// `/docs web` is a user-reachable deep link, so it is pinned by the literal destination, not by
+    /// the constant it is built from: a constant that drifts back to the upstream vendor's docs
+    /// would otherwise pass `web_opens_build_docs_url` unchanged.
+    #[test]
+    fn web_opens_the_fluxrouter_docs_and_never_the_upstream_vendor() {
+        assert_eq!(BUILD_DOCS_URL, "https://fluxrouter.ai/docs");
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        match DocsCommand.run(&mut ctx, "web") {
+            CommandResult::Action(Action::OpenUrl(url)) => {
+                assert_eq!(url, "https://fluxrouter.ai/docs");
+            }
+            other => panic!("expected OpenUrl, got {other:?}"),
+        }
+        let cwd = std::path::Path::new(".");
+        let app_ctx = AppCtx {
+            models: &models,
+            cwd,
+            has_session_announcements: false,
+            billing_surface_visible: true,
+            usage_command_visible: true,
+            workflows_available: true,
+            saved_workflows: &[],
+            workflow_runs: &[],
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
+        };
+        let web = DocsCommand
+            .suggest_args(&app_ctx, "")
+            .expect("suggestions")
+            .into_iter()
+            .find(|i| i.insert_text == "web")
+            .expect("web suggestion");
+        assert!(
+            web.description.contains("fluxrouter.ai/docs"),
+            "suggestion must name the real destination: {:?}",
+            web.description
+        );
+        for text in [
+            web.description.as_str(),
+            DocsCommand.description(),
+            DocsCommand.usage(),
+        ] {
+            for needle in ["x.ai", "grok.com"] {
+                assert!(!text.contains(needle), "{needle:?} in {text:?}");
             }
         }
     }
