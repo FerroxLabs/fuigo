@@ -802,7 +802,7 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub image_gen_enabled: Option<bool>,
     /// Remote settings flag: optional Imagine model override for `image_gen`.
-    /// When present and non-empty, `image_gen` uses this model slug (e.g. `fuigo-imagine-image`) instead of the default `fuigo-imagine-image-quality`.
+    /// When present and non-empty, `image_gen` uses this model slug (e.g. `grok-imagine-image`) instead of the default `grok-imagine-image-quality`. These are the provider's model ids on the wire.
     /// Absent or empty uses the default model.
     #[serde(default)]
     pub image_gen_model_override: Option<String>,

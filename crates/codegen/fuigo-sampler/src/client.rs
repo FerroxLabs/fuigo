@@ -345,14 +345,22 @@ fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
         })
 }
 
+/// Per-model limits the upstream inference proxy reports on every completion response.
+///
+/// These are RESPONSE header names, i.e. the provider's spelling: the 1.0.1 mechanical rebrand
+/// rewrote them to `x-fuigo-*`, names no provider sends, so the limits were silently never read.
+/// FluxRouter sends neither spelling today; a proxy that does sends the `x-grok-*` ones.
+const CONTEXT_WINDOW_HEADER: &str = "x-grok-context-window";
+const MAX_COMPLETION_TOKENS_HEADER: &str = "x-grok-max-completion-tokens";
+
 fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<ResponseModelMetadata> {
     let context_window = headers
-        .get("x-fuigo-context-window")
+        .get(CONTEXT_WINDOW_HEADER)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
     let max_completion_tokens = headers
-        .get("x-fuigo-max-completion-tokens")
+        .get(MAX_COMPLETION_TOKENS_HEADER)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
@@ -2279,6 +2287,28 @@ mod tests {
     use indexmap::IndexMap;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+
+    /// The model-limit headers are read off the PROVIDER's response, so their names are the
+    /// provider's spelling. The 1.0.1 mechanical rebrand rewrote them to `x-fuigo-*`, which no
+    /// provider sends, so a proxy that reports limits was silently ignored.
+    #[test]
+    fn model_metadata_is_read_from_the_providers_header_spelling() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-grok-context-window", "131072".parse().unwrap());
+        headers.insert("x-grok-max-completion-tokens", "8192".parse().unwrap());
+        let meta = extract_model_metadata(&headers)
+            .expect("the provider's x-grok-* limit headers must populate the metadata");
+        assert_eq!(meta.context_window, Some(131072));
+        assert_eq!(meta.max_completion_tokens, Some(8192));
+
+        let mut rebranded = reqwest::header::HeaderMap::new();
+        rebranded.insert("x-fuigo-context-window", "131072".parse().unwrap());
+        rebranded.insert("x-fuigo-max-completion-tokens", "8192".parse().unwrap());
+        assert!(
+            extract_model_metadata(&rebranded).is_none(),
+            "`x-fuigo-*` is a rebrand artefact no provider sends; it must not be honoured"
+        );
+    }
 
     #[test]
     fn splice_extra_tool_entries_extends_existing_tools_array() {
