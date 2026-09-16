@@ -1025,15 +1025,7 @@ async fn drive_l2(
                     });
                 }
                 Some(other) => {
-                    if matches!(other, SamplingEvent::StreamStarted { .. }) {
-                        let _ = event_tx.send(SamplingEvent::AttemptAccounting {
-                            request_id: request_id.clone(),
-                            accounting: AttemptAccounting {
-                                unknown_liability: true,
-                                ..Default::default()
-                            },
-                        });
-                    }
+                    let opens_attempt = matches!(other, SamplingEvent::StreamStarted { .. });
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -1046,6 +1038,17 @@ async fn drive_l2(
                         await_first_output_span.take();
                     }
                     let _ = event_tx.send(retag(other, &request_id));
+                    // The liability marker describes the attempt `StreamStarted` opens, so it follows that boundary
+                    // Every L2 transform yields `StreamStarted` first; a subscriber must see the attempt begin before its accounting
+                    if opens_attempt {
+                        let _ = event_tx.send(SamplingEvent::AttemptAccounting {
+                            request_id: request_id.clone(),
+                            accounting: AttemptAccounting {
+                                unknown_liability: true,
+                                ..Default::default()
+                            },
+                        });
+                    }
                 }
                 None => {
                     // L2 streams always terminate with Completed or Failed
@@ -1307,6 +1310,58 @@ mod tests {
             fuigo_sampling_types::LengthPolicy::Fail,
         )
         .await
+    }
+
+    /// `StreamStarted` is the attempt boundary: it is the first event a submit emits, and the
+    /// unknown-liability marker for that attempt comes immediately after it, never before.
+    #[tokio::test]
+    async fn stream_started_precedes_the_attempt_liability_marker() {
+        let id = RequestId::from("accounting");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tx = AccountingEvents::new(tx);
+        let outcome = drive_accounting_attempt(
+            vec![
+                SamplingEvent::StreamStarted {
+                    request_id: id.clone(),
+                    timestamp_ms: 0,
+                },
+                SamplingEvent::FirstToken {
+                    request_id: id.clone(),
+                },
+                SamplingEvent::Completed {
+                    request_id: id,
+                    response: Box::new(completed_response(None, "hello")),
+                    metrics: Default::default(),
+                },
+            ],
+            &tx,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, AttemptOutcome::Completed { .. }));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(events[0], SamplingEvent::StreamStarted { .. }),
+            "first event must be StreamStarted, got {:?}",
+            events[0]
+        );
+        let SamplingEvent::AttemptAccounting { accounting, .. } = &events[1] else {
+            panic!(
+                "the liability marker must follow StreamStarted, got {:?}",
+                events[1]
+            );
+        };
+        assert!(accounting.unknown_liability);
+        assert!(accounting.usage.is_none());
+        assert!(matches!(events[2], SamplingEvent::FirstToken { .. }));
+        // The terminal is the caller's to emit (`emit_failed` / the `Completed` arm of `run_request_task`)
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+            )),
+            "drive_l2 forwards no terminal itself: {events:?}"
+        );
     }
 
     #[tokio::test]
