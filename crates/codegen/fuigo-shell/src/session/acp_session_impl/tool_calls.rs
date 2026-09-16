@@ -3554,6 +3554,9 @@ mod wait_interrupt_tests {
         };
         assert_eq!(out, "wait-result");
     }
+    /// The classifier follows [`fuigo_tool_types::task_output_waits`]: an output read
+    /// waits (and is therefore interruptible) unless `timeout_ms` is an explicit `0`,
+    /// which is the non-blocking snapshot. Omitting `timeout_ms` blocks by default.
     #[test]
     fn interruptible_wait_tool_only_when_timeout_positive() {
         assert!(is_interruptible_wait_tool(
@@ -3564,7 +3567,7 @@ mod wait_interrupt_tests {
             "get_task_output",
             &serde_json::json!({"task_ids": ["t"], "timeout_ms": 0})
         ));
-        assert!(!is_interruptible_wait_tool(
+        assert!(is_interruptible_wait_tool(
             "get_task_output",
             &serde_json::json!({"task_ids": ["t"]})
         ));
