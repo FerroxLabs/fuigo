@@ -1397,6 +1397,21 @@ async fn run_agent_command(
             fs_write: false,
             status_line: false,
         };
+        // Bind this bridge to its parent before the leader connect, not after:
+        // a cold leader spawn takes seconds, and a client that dies inside that
+        // window would otherwise leave the bridge running with nothing to
+        // notice. Linux: PR_SET_PDEATHSIG. Windows: the parent-handle watcher
+        // (hook, telemetry flush, then terminate). macOS: stdin EOF only.
+        // `ClientMode::Stdio` only — a headless run owns its own lifetime.
+        if matches!(mode, ClientMode::Stdio)
+            && let Err(error) = fuigo_tty_utils::kill_current_process_on_parent_death()
+        {
+            tracing::warn!(
+                %error,
+                "failed to bind to parent death; stdio bridge will not die \
+                 with its parent — stdin EOF remains the only cleanup"
+            );
+        }
         let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();
         let (status_tx, _status_rx) = LeaderReconnector::status_channel();
@@ -1410,13 +1425,6 @@ async fn run_agent_command(
         let cancel = CancellationToken::new();
         match mode {
             ClientMode::Stdio => {
-                if let Err(error) = fuigo_tty_utils::kill_current_process_on_parent_death() {
-                    tracing::warn!(
-                        %error,
-                        "failed to bind to parent death; stdio bridge will not die \
-                         with its parent — stdin EOF remains the only cleanup"
-                    );
-                }
                 let replay_state = Arc::new(std::sync::Mutex::new(StdioReplayState::default()));
                 let leader_tx = Arc::new(TokioMutex::new(tx));
                 let leader_tx_stdin = leader_tx.clone();
