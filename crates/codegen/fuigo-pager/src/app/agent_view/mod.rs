@@ -1283,7 +1283,10 @@ pub struct AgentView {
     /// unchanged, and self-heals when it changes (e.g. caught mid-write).
     /// The metadata stamp alone cannot see a same-length in-place rewrite that
     /// lands on the same coarse clock tick, so a content digest rides along and
-    /// decides for as long as that is possible (`media::FailedMediaLoad`).
+    /// decides until a frame has verified the bytes a full window after the
+    /// attempt, on this process's clock (`media::FailedMediaLoad`). Reads for
+    /// that are capped at `media::MEDIA_DIGEST_MAX_BYTES`; a larger file is
+    /// decided by its stamp alone.
     /// Cleared with the byte cache on eviction.
     pub(crate) inline_media_load_failed:
         std::collections::HashMap<std::path::PathBuf, media::FailedMediaLoad>,
