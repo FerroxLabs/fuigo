@@ -30,7 +30,8 @@ pub(crate) fn sqlite_to_io_error(error: rusqlite::Error) -> io::Error {
     io::Error::other(format!("sqlite error: {error}"))
 }
 
-/// Rate-limits a repetitive log site: the first `cap` events go to `warn`, the rest to `debug`; the budget resets when the search cache is healed.
+/// Rate-limits a repetitive log site: the first `cap` events go to `warn`, the rest to `debug`; the budget resets when a search cache is healed.
+/// The reset keys on the process-wide heal generation, not one cache's epoch: the budget is per log site, and a log site has no cache path.
 pub(crate) struct HealAwareLogCounter {
     count: AtomicU64,
     epoch_seen: AtomicU64,
@@ -69,7 +70,7 @@ impl HealAwareLogCounter {
     }
 
     fn should_warn(&self, kind: &str) -> bool {
-        let epoch = recovery::current_epoch();
+        let epoch = recovery::heal_generation();
         if self.epoch_seen.swap(epoch, Ordering::Relaxed) != epoch {
             self.count.store(0, Ordering::Relaxed);
         }

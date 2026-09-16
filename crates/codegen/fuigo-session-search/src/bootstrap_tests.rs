@@ -12,6 +12,9 @@ struct FakeSource {
     /// Without it the fake enumerates so fast that the loser's first claim can land after the winner already released.
     /// A launch's first claim always reindexes, so both gates would run the reindex.
     peer_done: Option<Arc<AtomicBool>>,
+    /// A sibling cache file to quarantine and recreate while the claimant enumerates, i.e. inside its reindex.
+    /// Stands in for a sibling test healing its own cache in the shared test process.
+    heal_during_enumeration: Option<PathBuf>,
 }
 
 /// Bounds the hold in [`FakeSource::list_sessions`] so a bug cannot hang CI.
@@ -22,6 +25,7 @@ impl FakeSource {
         Self {
             sessions: Vec::new(),
             peer_done: None,
+            heal_during_enumeration: None,
         }
     }
 
@@ -38,13 +42,27 @@ impl FakeSource {
                 })
                 .collect(),
             peer_done: Some(peer_done),
+            heal_during_enumeration: None,
         }
     }
+}
+
+/// Quarantine and recreate the cache at `db_path`, as the index layer does on a corrupt file.
+fn heal_cache(db_path: &Path) {
+    recovery::heal_unusable(
+        db_path,
+        &rusqlite::Error::QueryReturnedNoRows,
+        |_| Ok(false),
+        |p| SessionSearchIndex::open_or_create(p).map(|_| ()),
+    );
 }
 
 #[async_trait::async_trait]
 impl SessionSource for FakeSource {
     async fn list_sessions(&self) -> io::Result<Vec<IndexableSession>> {
+        if let Some(sibling) = &self.heal_during_enumeration {
+            heal_cache(sibling);
+        }
         if let Some(peer_done) = &self.peer_done {
             let deadline = Instant::now() + PEER_DONE_TIMEOUT;
             while !peer_done.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -88,8 +106,7 @@ const _: () = assert!(TEST_TIMING.refresh.as_millis() < TEST_TIMING.lease.as_mil
 const _: () = assert!(TEST_TIMING.poll.as_millis() < TEST_TIMING.peer_wait.as_millis());
 
 /// [`TEST_TIMING`] with a shorter peer wait, for the single-flight test.
-/// That test holds the winning gate's claim open for the losing gate's whole wait.
-/// The shorter the hold, the smaller the window in which a sibling test bumps the process-global cache epoch (see the marker assertion there).
+/// That test holds the winning gate's claim open for the losing gate's whole wait, so the shorter the wait, the shorter the test.
 const CONTENDED_TIMING: BootstrapTiming = BootstrapTiming {
     lease: Duration::from_secs(300),
     refresh: Duration::from_millis(50),
@@ -117,7 +134,7 @@ async fn test_claimant_reindexes_even_when_marker_exists() {
     stamp_marker(&db_path, "123");
 
     let source = FakeSource::empty();
-    bootstrap_with_lease_inner(
+    let outcome = bootstrap_with_lease_inner(
         tmp.path(),
         &source,
         no_content,
@@ -129,10 +146,68 @@ async fn test_claimant_reindexes_even_when_marker_exists() {
     .unwrap();
 
     // The reindex rewrote the marker and released the claim.
-    assert_ne!(read_marker(&db_path).as_deref(), Some("123"));
+    assert_eq!(
+        outcome,
+        BootstrapOutcome::Done,
+        "a claimant whose own cache was not replaced owes no second pass"
+    );
+    assert_ne!(
+        read_marker(&db_path).as_deref(),
+        Some("123"),
+        "the claimant's reindex must rewrite the completion marker"
+    );
     let claim =
         with_search_index(&db_path, |index| index.get_meta(META_KEY_BOOTSTRAP_CLAIM)).unwrap();
     assert_eq!(claim, None);
+}
+
+/// A heal of a DIFFERENT cache file while the claimant reindexes must not withhold this cache's completion marker.
+/// The gate tests share one process and one cache epoch: a sibling test's heal landing inside this reindex is what made
+/// `test_claimant_reindexes_even_when_marker_exists` fail at 16 threads with the marker still at its pre-reindex value.
+#[tokio::test]
+async fn test_claimant_keeps_marker_when_another_cache_heals_mid_reindex() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = search_db_path(tmp.path());
+    stamp_marker(&db_path, "123");
+
+    let sibling = tempfile::TempDir::new().unwrap();
+    let sibling_db = search_db_path(sibling.path());
+    with_search_index(&sibling_db, |_| Ok(())).unwrap();
+
+    let source = FakeSource {
+        sessions: Vec::new(),
+        peer_done: None,
+        heal_during_enumeration: Some(sibling_db.clone()),
+    };
+    let outcome = bootstrap_with_lease_inner(
+        tmp.path(),
+        &source,
+        no_content,
+        &Arc::new(BootstrapProgress::default()),
+        &TEST_TIMING,
+        BootstrapRole::Launch,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        std::fs::read_dir(sibling_db.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("corrupt")),
+        "the sibling cache was quarantined during the reindex"
+    );
+    assert_eq!(
+        outcome,
+        BootstrapOutcome::Done,
+        "a sibling cache's heal is not this cache's heal: no second pass is owed"
+    );
+    assert_ne!(
+        read_marker(&db_path).as_deref(),
+        Some("123"),
+        "the completion marker must be rewritten; a sibling cache's heal must not withhold it"
+    );
+    assert!(!has_bootstrap_claim(&db_path).unwrap());
 }
 
 #[tokio::test]
@@ -278,12 +353,7 @@ fn test_shared_index_reopens_after_epoch_change() {
         .unwrap();
 
     // A heal bumps the epoch and replaces the file.
-    recovery::heal_unusable(
-        &db_path,
-        &rusqlite::Error::QueryReturnedNoRows,
-        |_| Ok(false),
-        |p| SessionSearchIndex::open_or_create(p).map(|_| ()),
-    );
+    heal_cache(&db_path);
 
     let value = shared.with(&db_path, |index| index.get_meta("k")).unwrap();
     assert_eq!(
@@ -325,7 +395,6 @@ async fn test_concurrent_gates_single_flight() {
     let start = Arc::new(tokio::sync::Barrier::new(2));
     let start_a = Arc::clone(&start);
     let start_b = Arc::clone(&start);
-    let epoch_before = recovery::current_epoch();
     let (a, b) = tokio::join!(
         tokio::spawn(async move {
             start_a.wait().await;
@@ -362,12 +431,9 @@ async fn test_concurrent_gates_single_flight() {
     assert!(b.is_ok(), "gate b: {b:?}");
 
     let db_path = search_db_path(tmp.path());
-    // The cache epoch is process-global
-    // A sibling test healing its own cache while these gates run makes the winner withhold its completion marker ("cache healed during bootstrap")
-    // That is the behavior under test elsewhere; here it just means the marker is legitimately absent
-    let healed = recovery::current_epoch() != epoch_before;
+    // The cache epoch is per cache file, so a sibling test healing its own cache cannot make the winner withhold this marker
     assert!(
-        healed || read_marker(&db_path).is_some(),
+        read_marker(&db_path).is_some(),
         "completion marker must exist after concurrent gates"
     );
     assert!(
