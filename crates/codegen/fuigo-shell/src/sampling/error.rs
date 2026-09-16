@@ -657,6 +657,13 @@ mod tests {
                 prompt_tokens: Some(5000),
                 model: "m".into(),
                 first_choice_seen: true,
+                // Cluster B added this field to EmptyResponseContext; cluster A added this
+                // construction site. Neither branch is wrong alone and they are in different
+                // files, so the merge was clean and did not compile. `None` is what B's own
+                // doc specifies for a per-attempt context (it is stamped only on the terminal
+                // error), and it is `skip_serializing_if = "Option::is_none"`, so the data
+                // shape this test asserts is unchanged.
+                attempts: None,
             },
         };
         let cases: Vec<(SamplingError, &str, &str)> = vec![
