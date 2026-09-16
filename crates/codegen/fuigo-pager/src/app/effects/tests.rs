@@ -98,7 +98,9 @@ fn btw_status_less_api_failure_keeps_the_provider_detail() {
     }));
     let text = format_acp_error(&err, false);
     assert!(text.contains("Content violates usage guidelines"), "{text:?}");
-    assert!(!text.contains("Something went wrong on our side"), "{text:?}");
+    // A-R7-3: the headline gives way to the detail, the "what to do" line does not
+    assert!(text.contains("Request failed:"), "{text:?}");
+    assert!(text.contains("Wait a minute and send again"), "{text:?}");
 }
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
