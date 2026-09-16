@@ -51,8 +51,9 @@ pub fn is_free_usage_exhausted_error(detail: &str) -> bool {
 
 /// User-facing text for an ACP -32003 rate-limit error.
 ///
-/// The free-usage code wins first (consumer-only; checked before the API-key rewrite).
-/// An API-key caller whose detail pushes the personal SuperGrok upsell gets the team credits copy instead.
+/// The free-usage code wins first (consumer-only; checked before the upsell rewrite).
+/// A detail that pushes the upstream provider's consumer-subscription plan is replaced with our own
+/// rate-limit copy for EVERY auth mode — see [`consumer_subscription_upsell_replacement`].
 /// Otherwise the body is shown after stripping the `API error (status …):` prefix (SamplingError Display).
 /// An empty detail falls back to the OAuth or API-key message.
 /// Callers that show this in UI should still run their usual sanitizer (scrub/cap).
@@ -66,8 +67,10 @@ pub fn format_rate_limited_user_message(
     }
     if let Some(detail) = server_detail.map(str::trim).filter(|s| !s.is_empty()) {
         let detail = strip_sampling_api_error_prefix(detail);
-        if is_api_key_auth && pushes_consumer_subscription_upsell(detail) {
-            return RATE_LIMITED_USER_MESSAGE_API_KEY.to_string();
+        if let Some(replacement) =
+            consumer_subscription_upsell_replacement(detail, is_api_key_auth)
+        {
+            return replacement.to_string();
         }
         return detail.to_string();
     }
@@ -91,11 +94,45 @@ fn strip_sampling_api_error_prefix(detail: &str) -> &str {
     detail.trim()
 }
 
-/// IC sometimes reuses OAuth free-tier upsell copy on 429s ("upgrade to a Fuigo subscription" / grok.com/supergrok).
-/// That is wrong for API-key / team auth: higher limits come from credits and spend-based rate-limit tiers, not a personal SuperGrok plan.
+/// The upstream provider reuses its own consumer-plan upsell copy on 429s ("upgrade to a SuperGrok
+/// subscription for higher limits: https://grok.com/supergrok").
+///
+/// Fuigo does not sell that plan and does not market anybody else's subscription, so this copy is
+/// never shown to any user, in any auth mode. It is wrong twice over: for an API key the limits come
+/// from whoever issued the key, and for a session account the provider's consumer plan is not the
+/// thing the user is even on.
+///
+/// The needle list carries the provider's own spelling on purpose. The `b5e43b9` rebrand rewrote
+/// "SuperGrok" to "Fuigo" in this matcher, which is the one place the rebrand must NOT reach: the
+/// string being matched comes off the wire from the provider, so it still says "SuperGrok".
 fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
-    d.contains("grok.com/supergrok") || d.contains("upgrade to a fuigo subscription")
+    d.contains("grok.com/supergrok")
+        || d.contains("supergrok subscription")
+        || d.contains("upgrade to a fuigo subscription")
+        // Generic shape of the same pitch, whatever the plan is called this quarter.
+        || (d.contains("upgrade to a") && d.contains("subscription"))
+}
+
+/// Our replacement copy for a 429 body that markets a consumer subscription, or `None` to show the
+/// provider's body unchanged.
+///
+/// Callers may pass either the raw `SamplingError::Api` Display string or an already-stripped body.
+/// The replacement still tells the user they hit a rate limit — only the upsell clause is dropped —
+/// and it is auth-appropriate: the API-key copy talks about the key issuer's limits, which is not
+/// true for a session account, so a session account gets the plan copy instead.
+pub fn consumer_subscription_upsell_replacement(
+    detail: &str,
+    is_api_key_auth: bool,
+) -> Option<&'static str> {
+    if !pushes_consumer_subscription_upsell(strip_sampling_api_error_prefix(detail)) {
+        return None;
+    }
+    Some(if is_api_key_auth {
+        RATE_LIMITED_USER_MESSAGE_API_KEY
+    } else {
+        RATE_LIMITED_USER_MESSAGE_OAUTH
+    })
 }
 
 /// User-facing copy for capacity/overload failures (stream `overloaded_error`, HTTP 529, proxy-wrapped 5xx).
@@ -555,15 +592,44 @@ mod tests {
         );
     }
 
+    /// The provider's consumer-subscription pitch is suppressed for EVERY auth mode.
+    ///
+    /// This used to assert the opposite for `is_api_key_auth = false` ("OAuth keeps the IC body"),
+    /// which made the default user — `AppView::is_api_key_auth` starts `false` — the one person who
+    /// still saw the competitor's upsell on a 429.
     #[test]
-    fn format_rate_limited_api_key_rewrites_consumer_subscription_upsell() {
+    fn format_rate_limited_rewrites_consumer_subscription_upsell_for_every_auth_mode() {
         let body = "Some resource has been exhausted: You are sending requests too quickly. \
              Please slow down, or upgrade to a Fuigo subscription for higher limits: \
              https://grok.com/supergrok";
         let wire = format!("API error (status 429 Too Many Requests): {body}");
-        // OAuth keeps the IC body (personal plan upgrade is correct).
-        assert_eq!(format_rate_limited_user_message(Some(&wire), false), body);
-        // API key must not push grok.com SuperGrok; it gets the team credits / rate-limit tiers copy
+        assert_eq!(
+            format_rate_limited_user_message(Some(&wire), false),
+            RATE_LIMITED_USER_MESSAGE_OAUTH
+        );
+        assert_eq!(
+            format_rate_limited_user_message(Some(&wire), true),
+            RATE_LIMITED_USER_MESSAGE_API_KEY
+        );
+        for is_api_key_auth in [false, true] {
+            let shown = format_rate_limited_user_message(Some(&wire), is_api_key_auth);
+            assert!(!shown.to_ascii_lowercase().contains("supergrok"), "{shown}");
+            assert!(!shown.contains("grok.com"), "{shown}");
+            assert!(shown.contains("rate limit"), "{shown}");
+        }
+    }
+
+    /// The needle the mechanical rebrand (`b5e43b9`) mangled: the provider sends its own plan name,
+    /// never "Fuigo", so matching only the rebranded spelling left the live wording undetected.
+    #[test]
+    fn format_rate_limited_rewrites_the_providers_own_upsell_wording() {
+        let body = "You are sending requests too quickly. Please slow down, or \
+             upgrade to a SuperGrok subscription for higher limits.";
+        let wire = format!("API error (status 429 Too Many Requests): {body}");
+        assert_eq!(
+            format_rate_limited_user_message(Some(&wire), false),
+            RATE_LIMITED_USER_MESSAGE_OAUTH
+        );
         assert_eq!(
             format_rate_limited_user_message(Some(&wire), true),
             RATE_LIMITED_USER_MESSAGE_API_KEY

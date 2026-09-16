@@ -1302,9 +1302,10 @@ fn free_usage_failure_opens_paywall_modal() {
     );
 }
 
-/// Answer translation: every upgrade option opens the upgrade URL.
+/// Answer translation: the one remaining option opens our own billing page.
+/// The modal used to carry three "Upgrade to SuperGrok / Plus / Heavy" rows; it now has one.
 #[test]
-fn free_usage_translate_local_submit_maps_options() {
+fn free_usage_translate_local_submit_maps_the_billing_option() {
     use crate::app::agent_view::translate_local_submit_for_test;
     use crate::app::app_view::InputOutcome;
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
@@ -1315,20 +1316,38 @@ fn free_usage_translate_local_submit_maps_options() {
     let mut qv = agent.question_view.take().unwrap();
     let kind = || LocalQuestionKind::FreeUsageUpsell;
 
-    for idx in [0] {
+    assert_eq!(
+        qv.questions[0].options.len(),
+        1,
+        "one billing option, no tier ladder"
+    );
+    qv.selections[0] = QuestionSelection::Single(Some(0));
+    match translate_local_submit_for_test(&qv, kind(), false) {
+        InputOutcome::Action(Action::OpenUrl(url)) => assert_eq!(url, UPSELL_URL_UPGRADE),
+        other => panic!("expected OpenUrl for the billing option, got {other:?}"),
+    }
+    // No index reaches any destination but our own billing page. The tier ladder used to put a
+    // competitor plan behind rows 1 and 2, and out-of-range still falls back to `UPSELL_URL_UPGRADE`,
+    // so sweep past the end rather than assume the row count alone retires those rows.
+    for idx in [1usize, 2, 7] {
         qv.selections[0] = QuestionSelection::Single(Some(idx));
         match translate_local_submit_for_test(&qv, kind(), false) {
-            InputOutcome::Action(Action::OpenUrl(url)) => assert_eq!(url, UPSELL_URL_UPGRADE),
-            other => panic!("expected OpenUrl for option {idx}, got {other:?}"),
+            InputOutcome::Action(Action::OpenUrl(url)) => {
+                assert_eq!(url, UPSELL_URL_UPGRADE, "row {idx} opened a foreign page")
+            }
+            InputOutcome::Changed => {}
+            other => panic!("row {idx} must not act, got {other:?}"),
         }
     }
+    assert!(!UPSELL_URL_UPGRADE.contains("grok.com"));
+    assert!(!UPSELL_URL_UPGRADE.contains("referrer="));
 }
 
 // ── Restricted-command upsell tests ─────────────────────────────────
 
 /// Submitting a tier-restricted command opens the usage-limit notice and neither runs the command nor leaks the text to the model.
 #[test]
-fn restricted_command_submit_opens_three_option_upsell() {
+fn restricted_command_submit_opens_single_option_billing_notice() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.agents

@@ -2087,7 +2087,8 @@ impl MvpAgent {
     }
     /// Whether the current session is a personal grok.com account on a gated tier (free / X Basic).
     /// The Imagine tools stay advertised to the model but are flagged tier-restricted.
-    /// They then short-circuit at call time with the SuperGrok upsell prose (see `ImageGenConfig`/`VideoGenConfig`'s `tier_restricted`).
+    /// They then short-circuit at call time with our own "not available for this key/provider" prose
+    /// (see `ImageGenConfig`/`VideoGenConfig`'s `tier_restricted`); it markets no subscription.
     ///
     /// Fails **open** (returns `false`) whenever we can't positively confirm a restricted personal tier.
     /// No auth yet, BYOK / API-key sessions, team accounts, and an unknown/absent tier all pass.

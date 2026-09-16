@@ -601,8 +601,6 @@ struct SettingsUpdateNotification {
     /// So a `/model` pick can record a remote campaign's dismissal even when the TUI's own startup prefetch missed.
     campaigns: Option<Vec<crate::util::config::CampaignOverride>>,
     gate_message: Option<String>,
-    gate_url: Option<String>,
-    gate_label: Option<String>,
     allow_access: Option<bool>,
     consent_gate: Option<crate::util::config::ConsentGate>,
     subscription_tier_display: Option<String>,
@@ -1957,8 +1955,6 @@ impl MvpAgent {
                 .filter(|m| !m.is_empty())
                 .map(|message| crate::auth::GateInfo {
                     message: message.clone(),
-                    url: rs.and_then(|s| s.gate_url.clone()),
-                    label: rs.and_then(|s| s.gate_label.clone()),
                 });
             let subscription_tier = rs.and_then(|s| s.subscription_tier_display.clone());
             (rs.and_then(|s| s.show_resolved_model), gate, subscription_tier)
@@ -2105,8 +2101,6 @@ impl MvpAgent {
                 announcements: rs.and_then(|s| s.announcements.clone()),
                 campaigns: rs.map(|s| s.campaigns.clone()),
                 gate_message: rs.and_then(|s| s.gate_message.clone()),
-                gate_url: rs.and_then(|s| s.gate_url.clone()),
-                gate_label: rs.and_then(|s| s.gate_label.clone()),
                 allow_access: rs.and_then(|s| s.allow_access),
                 consent_gate: rs.and_then(|s| s.consent_gate.clone()),
                 subscription_tier_display: rs

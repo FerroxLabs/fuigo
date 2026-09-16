@@ -2159,8 +2159,6 @@ fn gate_refreshed_emits_check_subscription_on_gate_lift() {
     // User starts gated (no subscription).
     app.gate = Some(fuigo_shell::auth::GateInfo {
         message: "Access is not enabled for this account".into(),
-        url: Some("https://billing.example/upgrade".into()),
-        label: Some("Subscribe".into()),
     });
     assert!(!app.has_access());
 
@@ -2191,8 +2189,6 @@ fn gate_refreshed_no_effect_when_still_gated() {
     let mut app = test_app();
     app.gate = Some(fuigo_shell::auth::GateInfo {
         message: "Subscribe".into(),
-        url: None,
-        label: None,
     });
 
     let settings = fuigo_shell::util::config::RemoteSettings {
@@ -2269,8 +2265,6 @@ fn gate_refreshed_newly_blocked_defers_gate_for_verification() {
 fn test_gate() -> fuigo_shell::auth::GateInfo {
     fuigo_shell::auth::GateInfo {
         message: "Subscribe".into(),
-        url: None,
-        label: None,
     }
 }
 

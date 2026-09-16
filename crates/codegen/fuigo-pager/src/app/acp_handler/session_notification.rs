@@ -139,6 +139,7 @@ fn synthesize_replay_turn_marker(
     error_kind: Option<crate::app::error_display::WireErrorType>,
     elapsed_ms: Option<u64>,
     meta: Option<&serde_json::Value>,
+    is_api_key_auth: bool,
 ) -> Option<crate::scrollback::blocks::SessionEvent> {
     use crate::app::turn_completion::{
         CANCEL_TRIGGER_KEY, CANCELLATION_CATEGORY_KEY, TerminalMarkerInput, TurnStopReason,
@@ -179,6 +180,7 @@ fn synthesize_replay_turn_marker(
             super::prompt_origin::rate_limited_wake_failure_event(
                 agent_result,
                 elapsed_ms.map(std::time::Duration::from_millis),
+                is_api_key_auth,
             )
         })
     })
@@ -366,6 +368,7 @@ pub(super) fn handle_session_notification_with_origin(
                         error_kind,
                         elapsed_ms,
                         session_notif.meta.as_ref(),
+                        is_api_key_auth,
                     )
                 {
                     agent.push_end_marker_block(event, Vec::new(), Some(prompt_id));
@@ -396,6 +399,7 @@ pub(super) fn handle_session_notification_with_origin(
                                 super::prompt_origin::rate_limited_wake_failure_event(
                                     agent_result.as_deref(),
                                     None,
+                                    is_api_key_auth,
                                 )
                             } else {
                                 crate::app::turn_completion::failed_turn_event(
@@ -426,6 +430,7 @@ pub(super) fn handle_session_notification_with_origin(
                                 super::super::turn_completion::CANCELLATION_CATEGORY_KEY,
                             ),
                             error_kind,
+                            is_api_key_auth,
                         },
                     );
                     true

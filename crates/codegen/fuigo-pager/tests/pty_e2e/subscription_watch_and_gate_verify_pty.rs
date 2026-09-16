@@ -306,11 +306,11 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
 async fn startup_gate_shows_paywall_for_free_user_after_live_check() {
     let content = ContentController::start().await.expect("start content");
     // Explicit deny and gate copy. An absent allow_access fails open.
+    // Message only: the gate carries no CTA url/label any more (the upsell funnel that used them
+    // is gone), so sending them would be inert keys the client ignores.
     content.server().set_settings(json!({
         "allow_access": false,
         "gate_message": GATE_MSG,
-        "gate_url": "https://billing.example/upgrade",
-        "gate_label": "Subscribe",
     }));
 
     let mut harness = spawn_subscription_pager(&content, "pty-subgate-free", &[]);

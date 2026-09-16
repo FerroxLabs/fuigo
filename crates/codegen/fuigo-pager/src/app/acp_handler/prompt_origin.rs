@@ -41,16 +41,26 @@ pub(crate) fn suppress_replay_marker_for_origin(
 
 /// Builds the failure row for a wake turn that hit a rate limit after streaming visible output.
 /// Shared by live `finish_wake_turn`, the arm that handles a wake terminal while a local turn is busy, and replay.
+///
+/// `agent_result` is the provider's own 429 body, so it goes through the same suppression the
+/// retry rail uses ([`fuigo_shell::sampling::error::consumer_subscription_upsell_replacement`]):
+/// this rail deliberately skips the generic "Request failed" formatter, which is what let the
+/// upstream consumer-subscription pitch reach the user verbatim on this path.
 pub(super) fn rate_limited_wake_failure_event(
     agent_result: Option<&str>,
     elapsed: Option<std::time::Duration>,
+    is_api_key_auth: bool,
 ) -> crate::scrollback::blocks::SessionEvent {
-    crate::scrollback::blocks::SessionEvent::TurnFailed {
-        error: agent_result
-            .map(str::to_string)
-            .unwrap_or_else(|| "rate limited".to_string()),
-        elapsed,
-    }
+    let error = agent_result
+        .map(|detail| {
+            fuigo_shell::sampling::error::consumer_subscription_upsell_replacement(
+                detail,
+                is_api_key_auth,
+            )
+            .map_or_else(|| detail.to_string(), str::to_string)
+        })
+        .unwrap_or_else(|| "rate limited".to_string());
+    crate::scrollback::blocks::SessionEvent::TurnFailed { error, elapsed }
 }
 
 /// Returns true for the auto-wake turn families (`task-completed-…`, `subagent-completed-…`, `workflow-completed-…`, `notifications-…`).
@@ -115,6 +125,8 @@ pub(super) struct WakeTerminal<'a> {
     pub cancel_trigger: Option<&'a str>,
     pub cancellation_category: Option<&'a str>,
     pub error_kind: Option<crate::app::error_display::WireErrorType>,
+    /// Picks the auth-appropriate replacement when a 429 body has to be suppressed.
+    pub is_api_key_auth: bool,
 }
 
 /// Close out a wake turn. This is the only place that flushes its streamed entries still in flight, because wake turns skip `PromptResponse`.
@@ -130,6 +142,7 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
         cancel_trigger,
         cancellation_category,
         error_kind,
+        is_api_key_auth,
     } = terminal;
 
     let had_output = agent.session.tracker.output_since_last_finish();
@@ -171,7 +184,11 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
                     elapsed,
                 ))
             } else {
-                Some(rate_limited_wake_failure_event(agent_result, elapsed))
+                Some(rate_limited_wake_failure_event(
+                    agent_result,
+                    elapsed,
+                    is_api_key_auth,
+                ))
             }
         }
         // Silent wakes stay markerless; `terminal_marker` below cannot see the turn's origin, so skip it here

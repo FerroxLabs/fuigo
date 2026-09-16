@@ -213,9 +213,15 @@
         }
     }
 
+    /// The retry rail is the third place the provider's 429 body reaches the screen (after
+    /// `format_acp_error` and the wake rail). It must suppress the consumer-subscription pitch in
+    /// BOTH auth modes: this test only covered `is_api_key_auth = true`, which is exactly how the
+    /// default user kept seeing it.
     #[test]
     fn retry_exhausted_api_key_rewrites_consumer_subscription_upsell() {
-        use fuigo_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_API_KEY;
+        use fuigo_shell::sampling::error::{
+            RATE_LIMITED_USER_MESSAGE_API_KEY, RATE_LIMITED_USER_MESSAGE_OAUTH,
+        };
 
         let rpm = RetryState::Exhausted {
             attempts: 2,
@@ -236,6 +242,18 @@
                 assert!(!error.contains("grok.com/supergrok"));
             }
             other => panic!("expected API-key rate-limit RetryFailed, got {other:?}"),
+        }
+
+        // The default user is not on an API key.
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(&rpm, &mut session, &mut scrollback, false);
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RetryFailed { error, .. }) => {
+                assert_eq!(error, RATE_LIMITED_USER_MESSAGE_OAUTH);
+                assert!(!error.contains("grok.com/supergrok"));
+            }
+            other => panic!("expected session rate-limit RetryFailed, got {other:?}"),
         }
     }
 
