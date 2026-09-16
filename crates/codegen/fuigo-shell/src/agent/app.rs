@@ -233,6 +233,12 @@ pub async fn run_stdio_agent(
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
+    // Linux: PR_SET_PDEATHSIG. Windows: a parent-handle watcher that runs the
+    // binary's parent-death hook (log line + telemetry flush, bounded), reaps
+    // the global process scope and terminates us, which also closes every owned
+    // kill-on-close Job Object (MCP/LSP servers, hooks, terminals). No
+    // process-wide Job Object: it would kill children meant to outlive the
+    // agent (the background `fuigo update` download). macOS: stdin EOF only.
     if let Err(error) = fuigo_tty_utils::kill_current_process_on_parent_death() {
         tracing::warn!(
             %error,
@@ -2051,6 +2057,109 @@ mod tests {
             *shutdown_rx.borrow(),
             crate::leader::ShutdownReason::AutoUpdate,
             "shutdown reason must be AutoUpdate for an auto-update-triggered shutdown"
+        );
+    }
+
+    /// Report path handed to the re-exec'd child of
+    /// [`the_stdio_agent_entrypoint_arms_the_parent_death_binding`].
+    const STDIO_ARM_CHILD_ENV: &str = "FUIGO_TEST_STDIO_AGENT_ARM_REPORT";
+
+    /// The child half: runs the real [`run_stdio_agent`] and reports whether it
+    /// called [`fuigo_tty_utils::kill_current_process_on_parent_death`].
+    ///
+    /// The entrypoint never returns on its own here (it serves stdio until its
+    /// client closes it), so the observation runs on this thread while the
+    /// entrypoint runs on another, and the process exits as soon as the answer
+    /// is known. A no-op when run as an ordinary test of this suite.
+    #[test]
+    fn stdio_agent_parent_death_arm_child_entry() {
+        let Some(report) = std::env::var_os(STDIO_ARM_CHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd child
+        };
+        let before = fuigo_tty_utils::parent_death_arm_calls();
+        std::thread::Builder::new()
+            .name("stdio-agent-entry".into())
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("multi-thread runtime");
+                let _ = runtime.block_on(run_stdio_agent(&AgentConfig::default(), None, None));
+            })
+            .expect("spawn the entrypoint thread");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let armed = loop {
+            let calls = fuigo_tty_utils::parent_death_arm_calls().saturating_sub(before);
+            if calls > 0 || std::time::Instant::now() >= deadline {
+                break calls;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        std::fs::write(report, format!("arm_calls={armed}")).expect("write the arm report");
+        // The entrypoint thread is still serving stdio; nothing here is worth
+        // draining, and the answer is already on disk.
+        std::process::exit(0);
+    }
+
+    /// `run_stdio_agent` must bind the agent to its parent's lifetime: it is the
+    /// one production line that arms the Windows parent-death watcher for
+    /// `fuigo agent stdio`, and the whole Windows process-ownership gate rests
+    /// on it. Off Windows, deleting it changes no other test's outcome — hence
+    /// this pin, taken through the real entrypoint (so moving the call under a
+    /// dead branch, or renaming it, fails here too) rather than by grepping the
+    /// source.
+    #[test]
+    fn the_stdio_agent_entrypoint_arms_the_parent_death_binding() {
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let report = std::env::temp_dir().join(format!("fuigo-stdio-arm-{unique}.txt"));
+        let home = std::env::temp_dir().join(format!("fuigo-stdio-arm-home-{unique}"));
+        std::fs::create_dir_all(&home).expect("create the child's FUIGO_HOME");
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg("agent::app::tests::stdio_agent_parent_death_arm_child_entry")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(STDIO_ARM_CHILD_ENV, &report)
+            .env("FUIGO_HOME", &home)
+            // Keep the child's startup to the entrypoint itself.
+            .env("FUIGO_DISABLE_AUTOUPDATER", "1")
+            // The arm under test must really run: it is what binds the child to
+            // this test process, so the child cannot outlive the suite either.
+            .env_remove(fuigo_tty_utils::PARENT_DEATH_DISABLE_ENV)
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = cmd.output().expect("run the stdio-agent child");
+        let reported = std::fs::read_to_string(&report).unwrap_or_default();
+        let _ = std::fs::remove_file(&report);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            child.status.success(),
+            "the stdio-agent child failed ({}); stdout: {}; stderr: {}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
+        );
+        assert_eq!(
+            reported,
+            "arm_calls=1",
+            "run_stdio_agent must call \
+             fuigo_tty_utils::kill_current_process_on_parent_death exactly once; \
+             child stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
         );
     }
 }

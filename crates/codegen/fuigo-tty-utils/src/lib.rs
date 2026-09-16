@@ -64,10 +64,32 @@ pub use process_resources::{
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};
 
+#[cfg(windows)]
+mod parent_death_windows;
+#[cfg(windows)]
+pub use parent_death_windows::PARENT_DEATH_EXIT_CODE;
+
 /// How long a shell gets to forward a hangup to its jobs before it is killed.
 pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub mod runtime;
+
+/// Win32 `CreateProcess` creation-flag values, spelled out so a spawn policy can
+/// be computed and pinned by tests on every host (the `windows` crate only
+/// builds for Windows). `win32_creation_flag_values_match_the_windows_crate`
+/// pins them to the `windows` crate on Windows.
+pub mod win32_creation_flags {
+    /// `CREATE_NEW_PROCESS_GROUP`: the child leads a new console process group,
+    /// so a Ctrl+C / Ctrl+Break aimed at the spawner's group does not reach it.
+    pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    /// `CREATE_NO_WINDOW`: the child does not attach to the spawner's console;
+    /// it gets its own console with no window, so it neither flashes a window
+    /// nor is terminated when the spawner's console closes.
+    pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// `DETACHED_PROCESS`: named only so policies can assert its absence — it
+    /// breaks stdio pipe inheritance for grandchildren (see [`crate::detach_command`]).
+    pub const DETACHED_PROCESS: u32 = 0x0000_0008;
+}
 
 // ---------------------------------------------------------------------------
 // TTY detach — pre_exec building block
@@ -462,9 +484,19 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
     }
 }
 
-/// Bind the *current* process's lifetime to its parent: on Linux, arm
-/// `PR_SET_PDEATHSIG(SIGTERM)` so this process is terminated when the
-/// process that spawned it dies. No-op elsewhere.
+/// Bind the *current* process's lifetime to its parent, so this process is
+/// terminated when the process that spawned it dies. No-op on macOS.
+///
+/// - Linux: arms `PR_SET_PDEATHSIG(SIGTERM)`.
+/// - Windows (no kernel equivalent): a watcher thread waits on a handle to
+///   the parent; when the parent exits it runs the hook registered with
+///   [`set_parent_death_hook`] (bounded by [`PARENT_DEATH_HOOK_BOUND`]), reaps
+///   [`global_process_scope`] and terminates this process with
+///   `PARENT_DEATH_EXIT_CODE` (143, the code fuigo's SIGTERM handler exits
+///   with). Termination closes every
+///   [`ProcessGroup`] Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), so
+///   owned child trees die too. The binding does not join this process to a
+///   process-wide Job Object; see `parent_death_windows` for why.
 ///
 /// This is the child-side variant of [`kill_on_parent_death_std`] for protocol
 /// servers whose parents are not spawned from this workspace (IDE clients,
@@ -474,9 +506,12 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
 ///
 /// Unlike the spawn-time helper there is no ppid race check: a direct
 /// parent at pid 1 is legitimate here (containers where the client is PID
-/// 1), so an already-dead parent is indistinguishable from that case. The
-/// caller's stdin-EOF handling covers the parent-died-before-arm race —
-/// dead parent means closed pipes.
+/// 1). Windows does refuse a parent that died before the arm — a gone or
+/// recycled pid, or a process object that is already signalled because
+/// someone else still holds its handle — rather than fire instantly and
+/// terminate this process at startup. Either way the caller's stdin-EOF
+/// handling covers the parent-died-before-arm race: dead parent means
+/// closed pipes.
 ///
 /// The binding keys off the death of the **parent's thread that spawned
 /// this process** — a property of the spawner that the child can neither
@@ -487,16 +522,29 @@ pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
 ///
 /// # Errors
 ///
-/// Returns the `prctl` errno on Linux when the arm fails; the process then
-/// keeps its previous lifetime semantics (stdin-EOF only), so callers
-/// should log the failure. This crate stays logging-free by design —
-/// surfacing the result is the observable seam. Always `Ok(())` on
-/// non-Linux platforms (no-op).
+/// Returns the `prctl` errno on Linux, or on Windows the reason the parent
+/// could not be watched (not found, not openable, already exited — its pid
+/// now names a newer process — or the watcher thread failed to start), when
+/// the arm fails; the process then keeps its previous lifetime semantics
+/// (stdin-EOF only), so callers should log the failure. This crate stays
+/// logging-free by design — surfacing the result is the observable seam.
+/// Always `Ok(())` on macOS (no-op). Idempotent on both armed platforms.
 ///
 /// **Opt-in.** Only call from entrypoints that are useless without the
 /// process that spawned them (e.g. stdio transports over inherited pipes).
 /// Never from daemons designed to outlive their spawner.
+///
+/// **Escape hatch.** [`PARENT_DEATH_DISABLE_ENV`] turns the binding off on
+/// both armed platforms; the call then arms nothing and returns `Ok(())`.
 pub fn kill_current_process_on_parent_death() -> io::Result<()> {
+    note_parent_death_arm_call();
+    #[cfg(any(target_os = "linux", windows))]
+    if parent_death_watch_disabled() {
+        // Opted out: leave the process on its previous lifetime semantics
+        // (stdin EOF), exactly as on macOS. Not an error — the caller asked
+        // for it — so callers do not log it as a failed arm.
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     {
         // SAFETY: prctl(PR_SET_PDEATHSIG, …) only sets the calling process's
@@ -505,7 +553,143 @@ pub fn kill_current_process_on_parent_death() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
+    #[cfg(windows)]
+    parent_death_windows::arm()?;
     Ok(())
+}
+
+/// Calls to [`kill_current_process_on_parent_death`], counted only when the
+/// `testing` feature is on.
+#[cfg(feature = "testing")]
+static PARENT_DEATH_ARM_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Record one call to [`kill_current_process_on_parent_death`]. Compiles to
+/// nothing unless the `testing` feature is on, so shipped builds are unchanged.
+#[inline]
+fn note_parent_death_arm_call() {
+    #[cfg(feature = "testing")]
+    PARENT_DEATH_ARM_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many times this process has called
+/// [`kill_current_process_on_parent_death`], whatever the call then did (armed,
+/// refused, or opted out through [`PARENT_DEATH_DISABLE_ENV`]).
+///
+/// Test-only introspection, the counterpart of
+/// [`registered_parent_death_hook`]: the arm call sits in an entrypoint of
+/// another crate, and off Windows deleting it changes no observable behaviour,
+/// so a test in that crate can only see it through this counter. Same `testing`
+/// cargo feature, enabled as a dev-dependency only, absent from every shipped
+/// build, and therefore not part of the supported surface.
+#[cfg(feature = "testing")]
+pub fn parent_death_arm_calls() -> usize {
+    PARENT_DEATH_ARM_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Env var that turns the parent-death binding armed by
+/// [`kill_current_process_on_parent_death`] off, on every platform that has
+/// one (Linux `PR_SET_PDEATHSIG`, the Windows watcher). Follows the repo's
+/// `FUIGO_DISABLE_*` convention: any value except the falsy spellings (`0`,
+/// `false`, `off`, `no`, empty) disables the binding; unset leaves it on.
+///
+/// The escape hatch exists because the binding kills this process the moment
+/// its spawner exits. That is what fuigo wants for a stdio agent whose client
+/// is gone, but a wrapper that launches the agent and returns straight away is
+/// a legitimate topology where the agent should survive on stdin-EOF cleanup
+/// instead, and there is otherwise no way back short of downgrading.
+pub const PARENT_DEATH_DISABLE_ENV: &str = "FUIGO_DISABLE_PARENT_DEATH_WATCH";
+
+/// Whether [`PARENT_DEATH_DISABLE_ENV`] is set to a value that disables the
+/// parent-death binding.
+#[cfg(any(target_os = "linux", windows))]
+fn parent_death_watch_disabled() -> bool {
+    parent_death_watch_disabled_by(std::env::var_os(PARENT_DEATH_DISABLE_ENV).as_deref())
+}
+
+/// The [`PARENT_DEATH_DISABLE_ENV`] decision for one raw value, split out so it
+/// is testable without mutating this process's environment.
+#[cfg(any(target_os = "linux", windows, test))]
+fn parent_death_watch_disabled_by(value: Option<&std::ffi::OsStr>) -> bool {
+    // Same truthiness as every other FUIGO_DISABLE_* flag: everything except
+    // the common falsy spellings turns the flag on.
+    value.is_some_and(|value| {
+        !matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        )
+    })
+}
+
+/// Upper bound on how long the hook registered with [`set_parent_death_hook`]
+/// may delay the teardown that follows it.
+pub const PARENT_DEATH_HOOK_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The hook registered with [`set_parent_death_hook`].
+static PARENT_DEATH_HOOK: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
+
+/// Register `hook` to run when the Windows parent-death watcher armed by
+/// [`kill_current_process_on_parent_death`] sees the parent exit, before it
+/// reaps [`global_process_scope`] and terminates this process.
+///
+/// This crate stays logging-free, so this is the seam through which the
+/// binary records the event and flushes telemetry — the work its SIGTERM
+/// handler does on Linux, where `PR_SET_PDEATHSIG` delivers the signal to that
+/// handler instead. Never called on Linux or macOS.
+///
+/// The hook runs on its own thread and gets at most
+/// [`PARENT_DEATH_HOOK_BOUND`]: a hook that hangs or blocks cannot keep the
+/// process alive past that bound. A later registration replaces an earlier
+/// one.
+pub fn set_parent_death_hook(hook: fn()) {
+    *PARENT_DEATH_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+}
+
+/// The hook currently registered with [`set_parent_death_hook`], if any.
+///
+/// Test-only introspection, so a binary's own tests can pin that its
+/// production startup path registered its parent-death hook — a registration
+/// that is otherwise invisible to every test, since deleting it changes no
+/// observable behaviour off Windows. Those tests live in other crates, which
+/// link this one without `cfg(test)`, so the gate is the `testing` cargo
+/// feature instead: they enable it as a dev-dependency, and it is absent from
+/// every shipped build, so this is not part of the supported surface.
+#[cfg(feature = "testing")]
+pub fn registered_parent_death_hook() -> Option<fn()> {
+    *PARENT_DEATH_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Run the hook registered with [`set_parent_death_hook`], waiting at most
+/// [`PARENT_DEATH_HOOK_BOUND`] for it. No-op when none is registered.
+#[cfg(windows)]
+fn run_parent_death_hook() {
+    let hook = *PARENT_DEATH_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hook) = hook {
+        let _ = run_hook_bounded(hook, PARENT_DEATH_HOOK_BOUND);
+    }
+}
+
+/// Run `hook` on a fresh thread and wait at most `bound` for it to return.
+///
+/// `true` when it returned in time; `false` when it is still running, died, or
+/// its thread could not start. The hook thread is never joined, so a hung hook
+/// is simply abandoned.
+#[cfg(any(windows, test))]
+fn run_hook_bounded(hook: fn(), bound: std::time::Duration) -> bool {
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let started = std::thread::Builder::new()
+        .name("fuigo-parent-death-hook".into())
+        .spawn(move || {
+            hook();
+            let _ = done_tx.send(());
+        });
+    started.is_ok() && done_rx.recv_timeout(bound).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,5 +2148,772 @@ mod tests {
         let foreign = if own == 2 { 3 } else { 2 };
         let id = ProcessGroupId::new(foreign).expect("foreign pgid should be accepted");
         assert_eq!(id.get(), foreign);
+    }
+
+    /// The portable flag values spawn policies are computed from are the
+    /// real Win32 values.
+    #[cfg(windows)]
+    #[test]
+    fn win32_creation_flag_values_match_the_windows_crate() {
+        use windows::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        };
+        assert_eq!(
+            win32_creation_flags::CREATE_NEW_PROCESS_GROUP,
+            CREATE_NEW_PROCESS_GROUP.0
+        );
+        assert_eq!(win32_creation_flags::CREATE_NO_WINDOW, CREATE_NO_WINDOW.0);
+        assert_eq!(win32_creation_flags::DETACHED_PROCESS, DETACHED_PROCESS.0);
+    }
+
+    // ── parent-death hook bound ─────────
+
+    /// Set by [`completed_hook`].
+    static BOUNDED_HOOK_RAN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    fn completed_hook() {
+        BOUNDED_HOOK_RAN.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn hung_hook() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    /// The escape hatch reads like every other `FUIGO_DISABLE_*` flag: unset or
+    /// a falsy spelling leaves the parent-death binding armed.
+    #[test]
+    fn the_parent_death_escape_hatch_follows_the_fuigo_env_convention() {
+        use std::ffi::OsStr;
+        assert!(
+            !parent_death_watch_disabled_by(None),
+            "{PARENT_DEATH_DISABLE_ENV} unset must leave the binding armed"
+        );
+        for off in ["", " ", "0", "false", "off", "no", "  FALSE  "] {
+            assert!(
+                !parent_death_watch_disabled_by(Some(OsStr::new(off))),
+                "{PARENT_DEATH_DISABLE_ENV}={off:?} must leave the binding armed"
+            );
+        }
+        for on in ["1", "true", "yes", "on", "enabled"] {
+            assert!(
+                parent_death_watch_disabled_by(Some(OsStr::new(on))),
+                "{PARENT_DEATH_DISABLE_ENV}={on:?} must disable the binding"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parent_death_hook_that_returns_runs_to_completion() {
+        assert!(
+            run_hook_bounded(completed_hook, std::time::Duration::from_secs(30)),
+            "a hook that returned was reported as not completing"
+        );
+        assert!(BOUNDED_HOOK_RAN.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The parent-death teardown waits for the hook only up to the bound: a
+    /// hook that never returns cannot keep the process alive.
+    #[test]
+    fn a_hung_parent_death_hook_cannot_delay_past_the_bound() {
+        let bound = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let completed = run_hook_bounded(hung_hook, bound);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < bound + std::time::Duration::from_secs(5),
+            "a hung hook held the teardown for {elapsed:?}, past the {bound:?} bound"
+        );
+        assert!(
+            !completed,
+            "a hook that is still sleeping cannot have completed"
+        );
+        assert!(
+            elapsed >= bound,
+            "gave up on the hook after {elapsed:?}, before the {bound:?} bound"
+        );
+    }
+
+    // ── parent-death binding integration tests (Windows) ─────────
+    //
+    // Same shape as the Linux pdeathsig tests: the test binary re-execs
+    // itself. The driver spawns `parent_death_intermediate_entry`, which
+    // spawns `parent_death_grandchild_entry`; the grandchild registers the
+    // parent-death hook the scenario names (if any), arms
+    // `kill_current_process_on_parent_death` on itself and sleeps. The driver
+    // first checks the grandchild stays alive while its parent does, then lets
+    // the intermediate exit and observes how the grandchild follows it.
+
+    /// Env marker (value: the "armed" marker path) for the intermediate.
+    #[cfg(windows)]
+    const PARENT_DEATH_INTERMEDIATE_ENV: &str = "__FUIGO_TTY_UTILS_PARENT_DEATH_INTERMEDIATE";
+    /// Env marker (value: the "armed" marker path) for the grandchild.
+    #[cfg(windows)]
+    const PARENT_DEATH_GRANDCHILD_ENV: &str = "__FUIGO_TTY_UTILS_PARENT_DEATH_GRANDCHILD";
+    /// Env (value: `record` or `hang`) naming the parent-death hook the
+    /// grandchild registers before arming. Unset: no hook.
+    #[cfg(windows)]
+    const PARENT_DEATH_HOOK_ENV: &str = "__FUIGO_TTY_UTILS_PARENT_DEATH_HOOK";
+    /// How long an armed grandchild must stay alive while its parent lives.
+    #[cfg(windows)]
+    const PARENT_ALIVE_GUARD: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// Where the grandchild's hook records that it ran.
+    #[cfg(windows)]
+    static PARENT_DEATH_HOOK_MARKER: std::sync::OnceLock<std::path::PathBuf> =
+        std::sync::OnceLock::new();
+
+    #[cfg(windows)]
+    fn hook_marker_path(armed_marker: &std::path::Path) -> std::path::PathBuf {
+        armed_marker.with_extension("hook")
+    }
+
+    /// Grandchild hook `record`: note that the hook ran, then return.
+    #[cfg(windows)]
+    fn record_parent_death_hook() {
+        if let Some(path) = PARENT_DEATH_HOOK_MARKER.get() {
+            let _ = std::fs::write(path, b"hook ran");
+        }
+    }
+
+    /// Grandchild hook `hang`: note that the hook started, then never return.
+    #[cfg(windows)]
+    fn hang_parent_death_hook() {
+        if let Some(path) = PARENT_DEATH_HOOK_MARKER.get() {
+            let _ = std::fs::write(path, b"hook hung");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(300));
+    }
+
+    /// Re-exec this test binary as a run of exactly the test `name`.
+    #[cfg(any(windows, target_os = "linux"))]
+    fn reexec_single_test(name: &str, env: &str, value: &std::ffi::OsStr) -> std::process::Command {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg(name)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(env, value)
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY");
+        cmd
+    }
+
+    /// Grandchild: register the scenario's hook, bind to the intermediate's
+    /// lifetime, record that the binding is armed, then sleep far past any
+    /// test deadline — only the binding can end it early.
+    #[cfg(windows)]
+    #[test]
+    fn parent_death_grandchild_entry() {
+        let Some(marker) = std::env::var_os(PARENT_DEATH_GRANDCHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd grandchild
+        };
+        let marker = std::path::PathBuf::from(marker);
+        let hook: Option<fn()> = match std::env::var(PARENT_DEATH_HOOK_ENV).as_deref() {
+            Ok("record") => Some(record_parent_death_hook),
+            Ok("hang") => Some(hang_parent_death_hook),
+            _ => None,
+        };
+        if let Some(hook) = hook {
+            PARENT_DEATH_HOOK_MARKER
+                .set(hook_marker_path(&marker))
+                .expect("hook marker set once");
+            set_parent_death_hook(hook);
+        }
+        kill_current_process_on_parent_death().expect("arm the parent-death binding");
+        std::fs::write(&marker, b"armed").expect("write the armed marker");
+        std::thread::sleep(std::time::Duration::from_secs(300));
+    }
+
+    /// Intermediate parent: spawn the grandchild, wait until it is armed,
+    /// report its pid, then exit once the driver closes our stdin (the driver
+    /// opens the grandchild's handle first, so its pid cannot be recycled).
+    #[cfg(windows)]
+    #[test]
+    fn parent_death_intermediate_entry() {
+        use std::io::{Read as _, Write as _};
+        let Some(marker) = std::env::var_os(PARENT_DEATH_INTERMEDIATE_ENV) else {
+            return; // skip when not invoked as the re-exec'd intermediate
+        };
+        let mut cmd = reexec_single_test(
+            "tests::parent_death_grandchild_entry",
+            PARENT_DEATH_GRANDCHILD_ENV,
+            &marker,
+        );
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; the driver kills it
+        let child = cmd.spawn().expect("spawn grandchild");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !std::path::Path::new(&marker).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild never armed its parent-death binding"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        println!("grandchild:{}", child.id());
+        std::io::stdout().flush().expect("flush stdout");
+        // Do not reap: the grandchild must die only via its binding.
+        std::mem::forget(child);
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+    }
+
+    /// What the driver saw of an armed grandchild once its parent exited.
+    #[cfg(windows)]
+    struct ParentDeathOutcome {
+        /// The grandchild's exit code; `None` when it was still running 20 s
+        /// after its parent exited (the driver then killed it).
+        exit_code: Option<u32>,
+        /// From the parent's observed exit to the grandchild's.
+        after_parent_exit: std::time::Duration,
+        /// What the grandchild's parent-death hook recorded, if anything.
+        hook_marker: Option<String>,
+    }
+
+    /// Run one parent-death scenario with the grandchild hook named `hook`
+    /// (see [`PARENT_DEATH_HOOK_ENV`]).
+    ///
+    /// Panics when the armed grandchild exits while its parent is still
+    /// alive: a watcher that fires early (without waiting for the parent) must
+    /// not pass as a working binding. That guard lasts [`PARENT_ALIVE_GUARD`],
+    /// plus [`PARENT_DEATH_HOOK_BOUND`] when `hook` names one, so no early fire
+    /// can hide behind the time the hook is allowed to take.
+    #[cfg(windows)]
+    fn run_parent_death_scenario(hook: Option<&str>, disable_watch: bool) -> ParentDeathOutcome {
+        use std::io::BufRead as _;
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        };
+
+        let marker = std::env::temp_dir().join(format!(
+            "fuigo-parent-death-{}-{}.armed",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let hook_marker = hook_marker_path(&marker);
+        let mut cmd = reexec_single_test(
+            "tests::parent_death_intermediate_entry",
+            PARENT_DEATH_INTERMEDIATE_ENV,
+            marker.as_os_str(),
+        );
+        match hook {
+            Some(hook) => cmd.env(PARENT_DEATH_HOOK_ENV, hook),
+            None => cmd.env_remove(PARENT_DEATH_HOOK_ENV),
+        };
+        // Inherited by the grandchild the intermediate spawns, which is the
+        // process that arms; the driver's own environment is never touched.
+        match disable_watch {
+            true => cmd.env(PARENT_DEATH_DISABLE_ENV, "1"),
+            false => cmd.env_remove(PARENT_DEATH_DISABLE_ENV),
+        };
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; reaped below
+        let mut intermediate = cmd.spawn().expect("spawn intermediate test process");
+
+        // Substring match: with `--nocapture` libtest prints the test header
+        // without a trailing newline, so the pid shares its line.
+        let stdout = intermediate.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut seen: Vec<String> = Vec::new();
+        let grandchild_pid: u32 = loop {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .expect("read intermediate stdout");
+            assert_ne!(
+                n, 0,
+                "intermediate exited without reporting a grandchild; stdout seen: {seen:?}"
+            );
+            if let Some(idx) = line.find("grandchild:") {
+                let digits: String = line[idx + "grandchild:".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                break digits.parse().expect("grandchild pid");
+            }
+            seen.push(line);
+        };
+
+        // SAFETY: plain FFI call; the handle is closed below.
+        let grandchild = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                grandchild_pid,
+            )
+        }
+        .expect("open the grandchild while its parent is still alive");
+
+        // Early-fire guard: armed, with its parent alive, the grandchild must
+        // keep running. A registered hook delays the watcher's termination by
+        // up to PARENT_DEATH_HOOK_BOUND, so the guard grows by that bound too:
+        // otherwise a watcher that fires early and then spends the bound in the
+        // hook lands just past a PARENT_ALIVE_GUARD-long guard and hides.
+        let guard = match hook {
+            Some(_) => PARENT_ALIVE_GUARD + PARENT_DEATH_HOOK_BOUND,
+            None => PARENT_ALIVE_GUARD,
+        };
+        let guard_ms = u32::try_from(guard.as_millis()).expect("guard fits u32");
+        // SAFETY: `grandchild` is a valid handle opened with SYNCHRONIZE.
+        let while_parent_alive = unsafe { WaitForSingleObject(grandchild, guard_ms) };
+        if while_parent_alive != WAIT_TIMEOUT {
+            let _ = intermediate.kill();
+            let _ = intermediate.wait();
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(&hook_marker);
+            // SAFETY: valid handle; closed exactly once.
+            let _ = unsafe { CloseHandle(grandchild) };
+            panic!(
+                "grandchild {grandchild_pid} ended while its parent was still alive \
+                 (wait result {while_parent_alive:?} within {guard:?}): the \
+                 parent-death binding fired before the parent exited"
+            );
+        }
+
+        drop(intermediate.stdin.take()); // let the intermediate exit
+        let status = intermediate.wait().expect("reap intermediate");
+        let parent_exited = std::time::Instant::now();
+        let _ = std::fs::remove_file(&marker);
+        assert!(status.success(), "intermediate failed: {status}");
+
+        // SAFETY: `grandchild` is a valid handle opened with SYNCHRONIZE.
+        let waited = unsafe { WaitForSingleObject(grandchild, 20_000) };
+        let after_parent_exit = parent_exited.elapsed();
+        let exit_code = if waited == WAIT_OBJECT_0 {
+            let mut code = 0u32;
+            // SAFETY: valid handle with query access; `code` is a live out-pointer.
+            unsafe { GetExitCodeProcess(grandchild, &mut code) }.expect("GetExitCodeProcess");
+            Some(code)
+        } else {
+            // SAFETY: valid handle with PROCESS_TERMINATE.
+            let _ = unsafe { TerminateProcess(grandchild, 1) };
+            None
+        };
+        // SAFETY: closed exactly once.
+        let _ = unsafe { CloseHandle(grandchild) };
+        let recorded = std::fs::read_to_string(&hook_marker).ok();
+        let _ = std::fs::remove_file(&hook_marker);
+        ParentDeathOutcome {
+            exit_code,
+            after_parent_exit,
+            hook_marker: recorded,
+        }
+    }
+
+    /// A process that armed [`kill_current_process_on_parent_death`] must not
+    /// outlive its parent on Windows either — and must not die before it: it
+    /// stays alive while the parent lives, then exits with
+    /// `PARENT_DEATH_EXIT_CODE` (143) once the parent is gone.
+    #[cfg(windows)]
+    #[test]
+    fn current_process_dies_when_its_parent_exits_on_windows() {
+        let outcome = run_parent_death_scenario(None, false);
+        let code = outcome.exit_code.unwrap_or_else(|| {
+            panic!(
+                "grandchild was still running 20 s after its parent exited: the current \
+                 process is not bound to its parent's lifetime on Windows"
+            )
+        });
+        assert_eq!(
+            code, PARENT_DEATH_EXIT_CODE,
+            "grandchild exited with {code}, not the parent-death exit code (128 + SIGTERM)"
+        );
+    }
+
+    /// The hook registered with [`set_parent_death_hook`] runs before the
+    /// watcher terminates the process.
+    #[cfg(windows)]
+    #[test]
+    fn parent_death_hook_runs_before_termination_on_windows() {
+        let outcome = run_parent_death_scenario(Some("record"), false);
+        assert_eq!(
+            outcome.hook_marker.as_deref(),
+            Some("hook ran"),
+            "the registered parent-death hook did not run before the process was terminated"
+        );
+        assert_eq!(outcome.exit_code, Some(PARENT_DEATH_EXIT_CODE));
+    }
+
+    /// A parent-death hook that never returns cannot keep the process alive
+    /// past [`PARENT_DEATH_HOOK_BOUND`].
+    #[cfg(windows)]
+    #[test]
+    fn a_hung_parent_death_hook_cannot_block_termination_on_windows() {
+        let outcome = run_parent_death_scenario(Some("hang"), false);
+        assert_eq!(
+            outcome.hook_marker.as_deref(),
+            Some("hook hung"),
+            "the hung hook never started, so the bound was not exercised"
+        );
+        let code = outcome.exit_code.unwrap_or_else(|| {
+            panic!(
+                "a hung parent-death hook kept the process alive 20 s after its parent \
+                 exited, past the {PARENT_DEATH_HOOK_BOUND:?} bound"
+            )
+        });
+        assert_eq!(code, PARENT_DEATH_EXIT_CODE);
+        let slack = std::time::Duration::from_secs(8);
+        assert!(
+            outcome.after_parent_exit < PARENT_DEATH_HOOK_BOUND + slack,
+            "termination took {:?} after the parent exited, past the {PARENT_DEATH_HOOK_BOUND:?} \
+             hook bound (+{slack:?} slack)",
+            outcome.after_parent_exit
+        );
+    }
+
+    /// The escape hatch: with [`PARENT_DEATH_DISABLE_ENV`] set, an armed
+    /// process keeps running after its parent exits — the pre-1.0.18 Windows
+    /// behaviour, for spawners that legitimately return before their agent is
+    /// done (stdin EOF stays the cleanup).
+    #[cfg(windows)]
+    #[test]
+    fn a_disabled_parent_death_watch_leaves_the_process_alive_on_windows() {
+        let outcome = run_parent_death_scenario(None, true);
+        assert_eq!(
+            outcome.exit_code, None,
+            "with {PARENT_DEATH_DISABLE_ENV} set the process was still torn down \
+             when its parent exited (exit code {:?}); the escape hatch is the only \
+             way back to the pre-watcher behaviour short of downgrading",
+            outcome.exit_code
+        );
+    }
+
+    // ── a parent that exited before the arm (Windows) ─────────────
+    //
+    // A pid stays reserved while any handle to its process object is open, so
+    // a client that keeps the `Child` it spawned keeps that process's pid
+    // resolvable long after it exited. A grandchild arming under such a dead
+    // parent must not be torn down at startup: on Linux `PR_SET_PDEATHSIG`
+    // never fires for a parent that is already dead, and the topology works.
+
+    /// Env marker (value: the arm-result marker path) for the intermediate.
+    #[cfg(windows)]
+    const PRE_EXITED_INTERMEDIATE_ENV: &str = "__FUIGO_TTY_UTILS_PRE_EXITED_INTERMEDIATE";
+    /// Env marker (value: the arm-result marker path) for the grandchild.
+    #[cfg(windows)]
+    const PRE_EXITED_GRANDCHILD_ENV: &str = "__FUIGO_TTY_UTILS_PRE_EXITED_GRANDCHILD";
+    /// How long the grandchild waits before arming, so its parent is already
+    /// gone when it does.
+    #[cfg(windows)]
+    const PRE_EXITED_ARM_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    /// How long the grandchild must keep running after arming under a parent
+    /// that already exited.
+    #[cfg(windows)]
+    const PRE_EXITED_SURVIVAL: std::time::Duration = std::time::Duration::from_secs(8);
+
+    /// Grandchild: let its parent exit, arm, record what arming returned, then
+    /// live out [`PRE_EXITED_SURVIVAL`] and record that too.
+    #[cfg(windows)]
+    #[test]
+    fn pre_exited_parent_grandchild_entry() {
+        let Some(marker) = std::env::var_os(PRE_EXITED_GRANDCHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd grandchild
+        };
+        let marker = std::path::PathBuf::from(marker);
+        std::thread::sleep(PRE_EXITED_ARM_DELAY);
+        let armed = match kill_current_process_on_parent_death() {
+            Ok(()) => "ok".to_owned(),
+            Err(error) => format!("err: {error}"),
+        };
+        std::fs::write(&marker, armed).expect("write the arm marker");
+        std::thread::sleep(PRE_EXITED_SURVIVAL);
+        std::fs::write(marker.with_extension("survived"), b"survived")
+            .expect("write the survived marker");
+    }
+
+    /// Intermediate parent: spawn the grandchild, report its pid, exit at once
+    /// — the grandchild is still sleeping towards its arm.
+    #[cfg(windows)]
+    #[test]
+    fn pre_exited_parent_intermediate_entry() {
+        use std::io::Write as _;
+        let Some(marker) = std::env::var_os(PRE_EXITED_INTERMEDIATE_ENV) else {
+            return; // skip when not invoked as the re-exec'd intermediate
+        };
+        let mut cmd = reexec_single_test(
+            "tests::pre_exited_parent_grandchild_entry",
+            PRE_EXITED_GRANDCHILD_ENV,
+            &marker,
+        );
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; the driver reaps it
+        let child = cmd.spawn().expect("spawn grandchild");
+        println!("grandchild:{}", child.id());
+        std::io::stdout().flush().expect("flush stdout");
+        // The grandchild must outlive us: it arms only after we are gone.
+        std::mem::forget(child);
+    }
+
+    /// What the driver saw of a grandchild that armed under a dead parent.
+    #[cfg(windows)]
+    struct PreExitedOutcome {
+        /// What `kill_current_process_on_parent_death` returned: `ok` or `err: …`.
+        arm: String,
+        /// Whether the grandchild lived out [`PRE_EXITED_SURVIVAL`].
+        survived: bool,
+        /// Its exit code; `None` when it was still running at the deadline.
+        exit_code: Option<u32>,
+    }
+
+    /// Run the pre-exited-parent scenario. `hold_parent_handle` keeps the dead
+    /// intermediate's `Child` — and so its process handle, and so its pid —
+    /// alive, which is what a real spawning client does; dropping it instead
+    /// releases the pid.
+    #[cfg(windows)]
+    fn run_pre_exited_parent_scenario(hold_parent_handle: bool) -> PreExitedOutcome {
+        use std::io::BufRead as _;
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        };
+
+        let marker = std::env::temp_dir().join(format!(
+            "fuigo-pre-exited-{}-{hold_parent_handle}-{}.arm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let survived_marker = marker.with_extension("survived");
+        let mut cmd = reexec_single_test(
+            "tests::pre_exited_parent_intermediate_entry",
+            PRE_EXITED_INTERMEDIATE_ENV,
+            marker.as_os_str(),
+        );
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; reaped below
+        let mut intermediate = cmd.spawn().expect("spawn intermediate test process");
+
+        // Substring match: with `--nocapture` libtest prints the test header
+        // without a trailing newline, so the pid shares its line.
+        let stdout = intermediate.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut seen: Vec<String> = Vec::new();
+        let grandchild_pid: u32 = loop {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .expect("read intermediate stdout");
+            assert_ne!(
+                n, 0,
+                "intermediate exited without reporting a grandchild; stdout seen: {seen:?}"
+            );
+            if let Some(idx) = line.find("grandchild:") {
+                let digits: String = line[idx + "grandchild:".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                break digits.parse().expect("grandchild pid");
+            }
+            seen.push(line);
+        };
+
+        // Opened while the grandchild is certainly alive, so its own pid
+        // cannot be recycled under the driver.
+        // SAFETY: plain FFI call; the handle is closed below.
+        let grandchild = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                grandchild_pid,
+            )
+        }
+        .expect("open the grandchild");
+        let status = intermediate.wait().expect("reap intermediate");
+        assert!(status.success(), "intermediate failed: {status}");
+        // Kept (or released) before the grandchild arms.
+        let parent_handle = hold_parent_handle.then_some(intermediate);
+
+        let deadline =
+            PRE_EXITED_ARM_DELAY + PRE_EXITED_SURVIVAL + std::time::Duration::from_secs(10);
+        let deadline_ms = u32::try_from(deadline.as_millis()).expect("deadline fits u32");
+        // SAFETY: `grandchild` is a valid handle opened with SYNCHRONIZE.
+        let waited = unsafe { WaitForSingleObject(grandchild, deadline_ms) };
+        let exit_code = if waited == WAIT_OBJECT_0 {
+            let mut code = 0u32;
+            // SAFETY: valid handle with query access; `code` is a live out-pointer.
+            unsafe { GetExitCodeProcess(grandchild, &mut code) }.expect("GetExitCodeProcess");
+            Some(code)
+        } else {
+            // SAFETY: valid handle with PROCESS_TERMINATE.
+            let _ = unsafe { TerminateProcess(grandchild, 1) };
+            None
+        };
+        // SAFETY: closed exactly once.
+        let _ = unsafe { CloseHandle(grandchild) };
+        drop(parent_handle);
+        let arm = std::fs::read_to_string(&marker).unwrap_or_else(|_| "<never armed>".to_owned());
+        let survived = survived_marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(&survived_marker);
+        PreExitedOutcome {
+            arm,
+            survived,
+            exit_code,
+        }
+    }
+
+    /// The real topology: the client that spawned this process's parent still
+    /// holds that parent's handle, so its pid resolves and opens even though it
+    /// exited. Arming must refuse instead of firing at once — otherwise the
+    /// agent terminates itself with 143 at startup, on a topology that works on
+    /// Linux and worked before the watcher existed.
+    #[cfg(windows)]
+    #[test]
+    fn arming_refuses_a_parent_that_exited_before_the_arm_on_windows() {
+        let outcome = run_pre_exited_parent_scenario(true);
+        assert_ne!(
+            outcome.exit_code,
+            Some(PARENT_DEATH_EXIT_CODE),
+            "a process whose parent exited before it armed was terminated by its own \
+             parent-death watcher (arm returned {:?}); on Linux PR_SET_PDEATHSIG never \
+             fires for a parent that is already dead",
+            outcome.arm
+        );
+        assert!(
+            outcome.survived,
+            "the process did not outlive {PRE_EXITED_SURVIVAL:?} after arming under a \
+             dead parent (arm returned {:?}, exit code {:?})",
+            outcome.arm, outcome.exit_code
+        );
+        assert!(
+            outcome.arm.starts_with("err:"),
+            "arming under an already-exited parent returned {:?}: it must fail like a \
+             gone pid, so the caller logs it and falls back to stdin-EOF cleanup",
+            outcome.arm
+        );
+    }
+
+    /// The same topology with the dead parent's handle released, so its pid is
+    /// gone: the arm already refuses that, and both must stay one error class.
+    #[cfg(windows)]
+    #[test]
+    fn arming_refuses_a_parent_whose_pid_is_gone_on_windows() {
+        let outcome = run_pre_exited_parent_scenario(false);
+        assert_ne!(
+            outcome.exit_code,
+            Some(PARENT_DEATH_EXIT_CODE),
+            "a process whose parent's pid was already gone was terminated by its own \
+             parent-death watcher (arm returned {:?})",
+            outcome.arm
+        );
+        assert!(
+            outcome.survived,
+            "the process did not outlive {PRE_EXITED_SURVIVAL:?} after arming under a \
+             gone parent pid (arm returned {:?}, exit code {:?})",
+            outcome.arm, outcome.exit_code
+        );
+        assert!(
+            outcome.arm.starts_with("err:"),
+            "arming under a gone parent pid returned {:?}, not an error",
+            outcome.arm
+        );
+    }
+
+    // ── the parent-death escape hatch (Linux) ─────────────────────
+    //
+    // The Linux half of the same switch: with PARENT_DEATH_DISABLE_ENV set,
+    // `kill_current_process_on_parent_death` must arm no `PR_SET_PDEATHSIG`.
+    // It runs in a re-exec'd child so the driver neither arms a parent-death
+    // signal on itself nor mutates its own environment.
+
+    /// Env marker (value: the report path) for the escape-hatch child.
+    #[cfg(target_os = "linux")]
+    const DISABLE_WATCH_CHILD_ENV: &str = "__FUIGO_TTY_UTILS_DISABLE_WATCH_CHILD";
+
+    /// Child: arm the binding, then report what `PR_GET_PDEATHSIG` shows.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disable_watch_child_entry() {
+        let Some(report) = std::env::var_os(DISABLE_WATCH_CHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd child
+        };
+        let armed = match kill_current_process_on_parent_death() {
+            Ok(()) => "ok".to_owned(),
+            Err(error) => format!("err: {error}"),
+        };
+        let mut signal: libc::c_int = -1;
+        // SAFETY: PR_GET_PDEATHSIG writes one c_int through the pointer given.
+        let rc = unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &raw mut signal) };
+        std::fs::write(report, format!("arm={armed} rc={rc} pdeathsig={signal}"))
+            .expect("write the pdeathsig report");
+    }
+
+    /// Run the escape-hatch child with [`PARENT_DEATH_DISABLE_ENV`] set or
+    /// unset, and return what it reported.
+    #[cfg(target_os = "linux")]
+    fn run_disable_watch_scenario(disable_watch: bool) -> String {
+        let report = std::env::temp_dir().join(format!(
+            "fuigo-disable-watch-{}-{disable_watch}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut cmd = reexec_single_test(
+            "tests::disable_watch_child_entry",
+            DISABLE_WATCH_CHILD_ENV,
+            report.as_os_str(),
+        );
+        match disable_watch {
+            true => cmd.env(PARENT_DEATH_DISABLE_ENV, "1"),
+            false => cmd.env_remove(PARENT_DEATH_DISABLE_ENV),
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let status = cmd.status().expect("run the escape-hatch child");
+        assert!(status.success(), "escape-hatch child failed: {status}");
+        let reported = std::fs::read_to_string(&report).expect("read the pdeathsig report");
+        let _ = std::fs::remove_file(&report);
+        reported
+    }
+
+    /// Default: the binding arms, so the kernel reports SIGTERM as this
+    /// process's parent-death signal.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_parent_death_watch_is_armed_by_default_on_linux() {
+        let report = run_disable_watch_scenario(false);
+        assert!(
+            report.ends_with(&format!("pdeathsig={}", libc::SIGTERM)),
+            "with {PARENT_DEATH_DISABLE_ENV} unset the binding did not arm SIGTERM: {report:?}"
+        );
+    }
+
+    /// The escape hatch: nothing is armed, and the call still succeeds so the
+    /// caller does not log an opted-out binding as a failure.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_disabled_parent_death_watch_arms_nothing_on_linux() {
+        let report = run_disable_watch_scenario(true);
+        assert!(
+            report.starts_with("arm=ok"),
+            "opting out must not be reported as a failed arm: {report:?}"
+        );
+        assert!(
+            report.ends_with("pdeathsig=0"),
+            "with {PARENT_DEATH_DISABLE_ENV} set the binding still armed a \
+             parent-death signal: {report:?}"
+        );
     }
 }
