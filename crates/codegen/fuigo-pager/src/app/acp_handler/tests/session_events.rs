@@ -307,11 +307,14 @@
     /// The empty-response exhaustion this release exists to explain reaches the banner as
     /// "Empty response", not the generic "Request failed".
     ///
-    /// End-to-end pin for `RetryState::Exhausted.error_type`: the shell stamps the kind that ran
-    /// out of budget (`SamplingErrorKind::EmptyResponse`, asserted on the shell side by
-    /// `reasoning_only_storm_is_capped_and_mirrored_on_session_update`) and `apply_retry_state`
-    /// must hand it to `format_request_failure`. Drop the field or stop forwarding it and the
-    /// user who watched "(1/3)" and "(2/3)" climb is told only that the request failed.
+    /// The pager half of a two-ended pin on `RetryState::Exhausted.error_type`. It asserts that
+    /// `apply_retry_state` hands the kind to `format_request_failure`; the shell half
+    /// (`reasoning_only_storm_is_capped_and_mirrored_on_session_update`) asserts the shell stamps
+    /// `SamplingErrorKind::EmptyResponse` on the exhaustion it sends. No single test walks a
+    /// `retry_state` frame from one into the other -- what the pair guarantees is that NEITHER END
+    /// CAN BE DELETED SILENTLY, with `SamplingErrorKind::as_str()` as the shared vocabulary.
+    /// Drop the field or stop forwarding it and the user who watched "(1/3)" and "(2/3)" climb is
+    /// told only that the request failed.
     #[test]
     fn retry_exhausted_empty_response_headlines_the_kind_that_ran_out_of_budget() {
         use fuigo_shell::sampling::error::SamplingErrorKind;
