@@ -74,17 +74,31 @@ fn remove_nfs_worktree(worktree_path: &Path) -> Result<Option<RemoveReport>> {
                 worktree_path.display()
             );
         }
+        // Pin first, backing second, and both fail closed. A failed pin delete
+        // leaves the backing dir in place, which keeps `gc_orphan_pins` calling the
+        // id live, so nothing is half-collected between the operator's retries; a
+        // failed backing delete leaves no pin to leak, and `git update-ref -d` is a
+        // no-op on an absent ref, so the retry is clean either way.
         if let Some(src) = m.source.as_ref() {
-            {
-                let _ = src;
-                bail!("pin delete requires grove");
+            // A source repo that is no longer on disk has no refdb and therefore no
+            // pin: `git update-ref` there would fail to even spawn and strand the
+            // dest forever. Absent source = nothing pinned.
+            if src.exists() {
+                super::liveness::delete_pin_ref_gated(src, id).with_context(|| {
+                    format!(
+                        "deleting pin for {id} in {}; retaining backing and dest",
+                        src.display()
+                    )
+                })?;
             }
         }
         if let Some(data_dir) = m.data_dir.as_ref() {
-            {
-                let _ = (data_dir, id);
-                bail!("backing delete after verified unmount requires grove");
-            }
+            delete_backing_dir_gated(data_dir, id).with_context(|| {
+                format!(
+                    "deleting backing for {id} under {}; retaining dest",
+                    data_dir.display()
+                )
+            })?;
         }
     }
     if !super::dest_is_known_unmounted(worktree_path) {
@@ -102,6 +116,49 @@ fn remove_nfs_worktree(worktree_path: &Path) -> Result<Option<RemoveReport>> {
         unmounted_overlay: false,
     }))
 }
+/// Delete exactly `<data_dir>/worktree-backing/<id>`, and only after the unmount
+/// above was verified.
+///
+/// This is the deleter that runs with the daemon down, so it re-validates the id
+/// and refuses anything at that path that is not a real directory: the entry is
+/// read back with `symlink_metadata`, never `metadata`, so a symlink planted in a
+/// grove data dir cannot redirect the delete out of `worktree-backing/`. An entry
+/// that is already gone is success — `rm` is retried after a partial failure.
+///
+/// The backing dir must go: [`super::liveness::gc_orphan_pins`] treats a surviving
+/// backing dir as proof the id is live, so leaving it behind pins the worktree's
+/// objects for good even once the ref is deleted.
+fn delete_backing_dir_gated(data_dir: &Path, worktree_id: &str) -> Result<()> {
+    if !is_safe_worktree_id(worktree_id) {
+        bail!("refusing backing delete for unsafe worktree id {worktree_id:?}");
+    }
+    let backing = data_dir
+        .join(super::liveness::WORKTREE_BACKING_DIR)
+        .join(worktree_id);
+    match std::fs::symlink_metadata(&backing) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(e).context(format!("stat backing {}", backing.display()));
+        }
+        Ok(md) if md.file_type().is_symlink() => {
+            bail!(
+                "backing {} is a symlink; refusing to follow it out of {}",
+                backing.display(),
+                super::liveness::WORKTREE_BACKING_DIR
+            );
+        }
+        Ok(md) if !md.is_dir() => {
+            bail!(
+                "backing {} is not a directory; refusing delete",
+                backing.display()
+            );
+        }
+        Ok(_) => {}
+    }
+    std::fs::remove_dir_all(&backing)
+        .with_context(|| format!("removing backing {}", backing.display()))
+}
+
 /// After a successful daemon `RemoveWorktree`, dest is no longer a mount.
 /// The daemon already deleted backing/pin; a leftover dest directory must
 /// be `Ok(None)` so the caller `rm -rf`s and unregisters. When dest is fully
@@ -353,5 +410,148 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dest = tmp.path().join("gone");
         assert!(report_after_daemon_unmount(&dest).unwrap().is_some());
+    }
+
+    /// Plant a backing dir with a marker naming `dest` and return `(data, backing)`.
+    fn plant_backing(root: &Path, id: &str, dest: &Path, source: &Path) -> (PathBuf, PathBuf) {
+        let data = root.join("grove");
+        let backing = data.join(WORKTREE_BACKING_DIR).join(id);
+        std::fs::create_dir_all(&backing).unwrap();
+        let marker = BackingMarker {
+            schema: 1,
+            worktree_id: id.into(),
+            dest: dest.to_path_buf(),
+            source_repo: source.to_path_buf(),
+            pin_ref: format!("refs/fuigo/worktrees/{id}"),
+            mount_id: 3,
+            created_at: 1,
+        };
+        std::fs::write(
+            backing.join(BACKING_MARKER_FILE),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        (data, backing)
+    }
+
+    fn pin_present(repo: &Path, pin: &str) -> bool {
+        crate::git::checkout::git_command()
+            .current_dir(repo)
+            .args(["show-ref", "--verify", "--quiet", pin])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// With the daemon down, an already-unmounted grove dest must still have its
+    /// pin ref and its backing dir deleted. Before the fix both arms were the
+    /// bare block of a deleted `#[cfg]` pair and `bail!`d, so `rm` failed outright
+    /// and left `refs/fuigo/worktrees/<id>` — and every object it kept reachable —
+    /// pinned forever, with the surviving backing dir making pin GC call the id live.
+    #[test]
+    fn daemon_down_rm_deletes_pin_ref_and_backing() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        fuigo_test_utils::git::init_git_repo(&repo);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        fuigo_test_utils::git::git_commit_all(&repo, "seed");
+        let head = fuigo_test_utils::git::run_git(&repo, &["rev-parse", "HEAD"]);
+
+        let id = "wt-rm-daemon-down";
+        let pin = format!("refs/fuigo/worktrees/{id}");
+        fuigo_test_utils::git::run_git(&repo, &["update-ref", &pin, &head]);
+        assert!(pin_present(&repo, &pin), "fixture must start pinned");
+
+        let dest = tmp.path().join("wt");
+        std::fs::create_dir(&dest).unwrap();
+        let (data, backing) = plant_backing(tmp.path(), id, &dest, &repo);
+
+        let _env = crate::nfs::GROVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GROVE_DATA_DIR", &data) };
+        unsafe { std::env::set_var("GROVE_CONTROL_SOCK", tmp.path().join("absent.sock")) };
+        let out = remove_nfs_worktree(&dest);
+        unsafe { std::env::remove_var("GROVE_CONTROL_SOCK") };
+        unsafe { std::env::remove_var("GROVE_DATA_DIR") };
+
+        out.expect("daemon-down rm of an unmounted grove dest must complete");
+        assert!(
+            !pin_present(&repo, &pin),
+            "pin {pin} must be deleted, not retained"
+        );
+        assert!(
+            !backing.exists(),
+            "backing {} must be deleted after a verified unmount",
+            backing.display()
+        );
+    }
+
+    /// The daemon-down deleter must not be a weaker sibling of the daemon's own:
+    /// a symlink planted where `worktree-backing/<id>` belongs is refused, never
+    /// followed, so a poisoned grove data dir cannot turn `rm` into a deleter of
+    /// an arbitrary tree.
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_backing_entry() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        fuigo_test_utils::git::init_git_repo(&repo);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        fuigo_test_utils::git::git_commit_all(&repo, "seed");
+
+        let id = "wt-rm-symlinked";
+        let dest = tmp.path().join("wt");
+        std::fs::create_dir(&dest).unwrap();
+
+        // The marker lives in a tree outside the grove data dir, reachable only
+        // through the planted link.
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("precious")).unwrap();
+        let marker = BackingMarker {
+            schema: 1,
+            worktree_id: id.into(),
+            dest: dest.clone(),
+            source_repo: repo.clone(),
+            pin_ref: format!("refs/fuigo/worktrees/{id}"),
+            mount_id: 4,
+            created_at: 1,
+        };
+        std::fs::write(
+            elsewhere.join(BACKING_MARKER_FILE),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(data.join(WORKTREE_BACKING_DIR)).unwrap();
+        let link = data.join(WORKTREE_BACKING_DIR).join(id);
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+        let _env = crate::nfs::GROVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GROVE_DATA_DIR", &data) };
+        unsafe { std::env::set_var("GROVE_CONTROL_SOCK", tmp.path().join("absent.sock")) };
+        let out = remove_nfs_worktree(&dest);
+        unsafe { std::env::remove_var("GROVE_CONTROL_SOCK") };
+        unsafe { std::env::remove_var("GROVE_DATA_DIR") };
+
+        let err = out.expect_err("a symlinked backing entry must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("symlink"),
+            "the refusal must name the symlink, got: {msg}"
+        );
+        assert!(
+            elsewhere.join("precious").is_dir(),
+            "the symlink target must be untouched"
+        );
+        assert!(
+            link.symlink_metadata().is_ok(),
+            "the planted link itself stays for the operator to see"
+        );
     }
 }
