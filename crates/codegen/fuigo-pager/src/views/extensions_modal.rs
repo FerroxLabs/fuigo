@@ -647,8 +647,6 @@ pub enum ButtonAction {
     ReloadSkills,
     /// Refresh MCP server list (re-fetch from shell).
     RefreshMcpList,
-    /// Open grok.com connectors page (MCP tab: press `o`).
-    OpenManagedConnectors,
     /// Update (fetch latest from source) the selected plugin.
     UpdateSelectedPlugin,
     /// Uninstall the selected plugin.
@@ -1095,9 +1093,6 @@ pub const MCP_SERVERS_ACTION_KEYS: &[(char, &str)] = &[
     ('x', "remove"),
 ];
 
-/// Footer label for the MCP tab Ctrl+O shortcut (not in [`MCP_SERVERS_ACTION_KEYS`]).
-pub const MCP_SERVERS_OPEN_CONNECTORS_FOOTER: &str = "ctrl-o open";
-
 /// Map an action key character to its display string for shortcut hints.
 ///
 /// Single source of truth shared by [`render_extensions_modal`] (footer shortcuts) and [`crate::views::picker::render_picker`] (hint bar).
@@ -1110,7 +1105,6 @@ pub fn action_key_display(ch: char) -> &'static str {
         'e' => "e",
         'f' => "f",
         'i' => "i",
-        'o' => "o",
         'r' => "r",
         'u' => "u",
         'x' => "x",
@@ -1739,8 +1733,6 @@ pub struct ExtensionsModalState {
     /// `window.active_tab` (a `usize` index) is derived from this in the render path via `ExtensionsTab::ALL.position()`.
     /// Only this field should be mutated by input handlers; the window's copy is a rendering hint synced each frame.
     pub active_tab: ExtensionsTab,
-    /// Session team principal for managed-connectors deep links in section copy.
-    pub session_team_id: Option<String>,
     /// Hooks list data (fetched from shell).
     pub hooks_data: TabDataState<fuigo_hooks_plugins_types::HooksListResponse>,
     /// Plugins list data (fetched from shell).
@@ -1853,7 +1845,6 @@ impl ExtensionsModalState {
         Self {
             window: ModalWindowState::with_tabs(ExtensionsTab::ALL.len()),
             active_tab: tab,
-            session_team_id: None,
             hooks_data: TabDataState::Loading,
             plugins_data: TabDataState::Loading,
             button_areas: Vec::new(),
@@ -3170,10 +3161,7 @@ pub fn render_extensions_modal(
                         );
                         entry_labels.push(section_label(section_id, section_servers.len()));
                         entry_right_labels.push(String::new());
-                        entry_desc_lines.push(section_description_lines(
-                            section_id,
-                            state.session_team_id.as_deref(),
-                        ));
+                        entry_desc_lines.push(section_description_lines(section_id));
                         entry_summary_lines.push(vec![]);
                         entry_fields.push(vec![]);
                         entry_is_header.push(false);
@@ -3455,13 +3443,6 @@ pub fn render_extensions_modal(
                 id: 100 + orig_idx,
             });
         }
-        if state.active_tab == ExtensionsTab::McpServers {
-            shortcuts.push(Shortcut {
-                label: MCP_SERVERS_OPEN_CONNECTORS_FOOTER,
-                clickable: false,
-                id: 0,
-            });
-        }
         // `e` / Shift+e / Enter still expands and collapses (handled by the picker's built-in expandable branch)
         // The hint is omitted from the footer to save space; the cheatsheet still lists it
         // ID 99 is the close action, handled in the mouse handler
@@ -3584,20 +3565,6 @@ pub fn render_extensions_modal(
         Rect::new(content_area.x, content_area.y, content_area.width, 1)
     };
 
-    // Underline the Managed section's last description line (the connectors URL) so it reads as a link
-    let managed_section_key =
-        crate::views::mcps_modal::section_key(&crate::views::mcps_modal::McpSectionId::Managed);
-    // `underline_last_desc` and the recorded click band both assume the URL is the LAST Managed description line
-    // The debug_assert trips if that ever stops holding
-    debug_assert!(
-        crate::views::mcps_modal::section_description_lines(
-            &crate::views::mcps_modal::McpSectionId::Managed,
-            state.session_team_id.as_deref(),
-        )
-        .last()
-        .is_some_and(|l| l.starts_with('[') && l.ends_with(']')),
-        "Managed section's last description line must be the bracketed connectors URL",
-    );
     let picker_entries: Vec<picker::PickerEntry<'_>> = entry_labels
         .iter()
         .enumerate()
@@ -3631,8 +3598,6 @@ pub fn render_extensions_modal(
                     badge: entry_badge_text.get(i).map(|s| s.as_str()).unwrap_or(""),
                     badge_color: entry_badge_color.get(i).copied().flatten(),
                     collapsible: is_collapsible,
-                    underline_last_desc: state.modal_message.is_none()
-                        && group_key.is_some_and(|k| *k == managed_section_key),
                 })
             }
         })
@@ -3652,8 +3617,6 @@ pub fn render_extensions_modal(
     // That message would mislead: there are no entries because we're showing a form, not because nothing matched
     // Skip the picker render and let the input-form overlay below own the entries area instead
     let (item_rects, entry_indices) = if in_input_mode {
-        // No picker render in input mode: clear any stale recorded link band.
-        state.picker_state.link_band = None;
         (Vec::new(), Vec::new())
     } else {
         let content_hit = picker::render_picker_content_with_scrollbar_x(
@@ -3729,7 +3692,7 @@ pub fn render_extensions_modal(
                 msg_content_width,
                 msg_content_height,
             );
-            // Buffer::set_string merges styles; Style::reset clears UNDERLINED/BOLD left by the list underneath (e.g. Managed connectors URL).
+            // Buffer::set_string merges styles; Style::reset clears BOLD left by the list underneath (e.g. a highlighted description span).
             let clear_style = Style::reset().bg(theme.bg_base);
             let text_style = Style::reset().fg(theme.accent_tool).bg(theme.bg_base);
             for y in msg_area.y..msg_area.y + msg_area.height {
@@ -7030,55 +6993,25 @@ mod tests {
         );
     }
 
+    /// A `ModalMessage::Confirmation` is painted, not only stored: the remaining confirmation
+    /// tests assert state, and the render-level pin left with the removed connectors-URL test.
     #[test]
-    fn confirmation_overlay_suppresses_managed_url_underline() {
+    fn confirmation_overlay_paints_its_message_over_the_mcp_tab() {
         use crate::views::mcps_modal::McpWireSource;
 
-        // Tall list so the Managed connectors URL sits above the centered confirmation text (not only cells the message string overwrites)
-        let mut managed = Vec::new();
-        for i in 0..20 {
-            managed.push(make_mcp_server_for_rows(
-                &format!("fuigo_com_srv_{i}"),
-                McpWireSource::Managed,
-                vec![],
-            ));
-        }
-        managed.push(make_mcp_server_for_rows(
-            "local-grafana",
-            McpWireSource::Local,
-            vec![],
-        ));
-
+        let servers = vec![
+            make_mcp_server_for_rows("fuigo_com_linear", McpWireSource::Managed, vec![]),
+            make_mcp_server_for_rows("local-grafana", McpWireSource::Local, vec![]),
+        ];
         let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
-        state.mcps_data = TabDataState::Loaded(managed);
-        state.session_team_id = Some("team-1".into());
-
+        state.mcps_data = TabDataState::Loaded(servers);
         let area = Rect::new(0, 0, 100, 40);
         let mut open_buf = Buffer::empty(area);
         render_extensions_modal(&mut open_buf, area, &mut state, None, false, 0);
-
-        let underlined = |buf: &Buffer| -> usize {
-            let mut n = 0usize;
-            for y in 0..area.height {
-                for x in 0..area.width {
-                    if buf
-                        .cell((x, y))
-                        .is_some_and(|c| c.modifier.contains(Modifier::UNDERLINED))
-                    {
-                        n += 1;
-                    }
-                }
-            }
-            n
-        };
-
-        assert!(
-            underlined(&open_buf) > 0,
-            "precondition: managed connectors URL paints UNDERLINED cells"
-        );
-        assert!(
-            state.picker_state.link_band.is_some(),
-            "precondition: link hit band recorded for connectors URL"
+        assert_eq!(
+            buffer_count(&open_buf, "Remove MCP server \"local-grafana\"?"),
+            0,
+            "no confirmation painted before one is pending"
         );
 
         state.modal_message = Some(ModalMessage::Confirmation {
@@ -7088,24 +7021,12 @@ mod tests {
             },
             pending_entry_index: Some(0),
         });
-        state.picker_state.link_band = None;
-
         let mut confirm_buf = Buffer::empty(area);
         render_extensions_modal(&mut confirm_buf, area, &mut state, None, false, 0);
-
         assert_eq!(
             buffer_count(&confirm_buf, "Remove MCP server \"local-grafana\"?"),
             1,
-            "confirmation message must be painted"
-        );
-        assert_eq!(
-            underlined(&confirm_buf),
-            0,
-            "confirmation must not paint UNDERLINED under the full overlay"
-        );
-        assert!(
-            state.picker_state.link_band.is_none(),
-            "confirmation must not record a connectors link hit band"
+            "confirmation message must be painted exactly once"
         );
     }
 

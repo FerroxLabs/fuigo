@@ -1158,11 +1158,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
-        Action::OpenManagedConnectors => {
-            let url = crate::views::mcps_modal::managed_connectors_url(app.team_id.as_deref());
-            open_url_or_show(app, &url);
-            vec![]
-        }
         Action::OpenNextLink => {
             with_active_agent(app, |agent| agent.cycle_highlighted_link(true));
             vec![]
@@ -1612,7 +1607,6 @@ pub(super) fn dispatch_action_result(
                                 ),
                                 pending_entry_index,
                             });
-                        modal.picker_state.link_band = None;
                     } else {
                         modal.modal_message = Some(
                             crate::views::extensions_modal::ModalMessage::Error(outcome.message),

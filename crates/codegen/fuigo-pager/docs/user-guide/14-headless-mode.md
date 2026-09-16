@@ -612,7 +612,7 @@ Key environment variables that affect headless mode:
 | `FUIGO_LOG_FILE`                | Path to a log file (used verbatim as the path; works in headless and TUI, honors `RUST_LOG`) |
 | `RUST_LOG`                     | Log level filter (e.g. `debug`). Headless logs to stderr.     |
 
-For CI environments without browser access, set `FUIGO_API_KEY` with an API key from [console.x.ai](https://console.x.ai):
+For CI environments, set `FUIGO_API_KEY` to your FluxRouter API key (from your FluxRouter dashboard):
 
 ```bash
 export FUIGO_API_KEY="fuigo-..."

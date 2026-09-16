@@ -780,6 +780,59 @@ mod link_click_tests {
         assert!(agent.privacy_banner.hit_policy.rect.is_none());
         assert!(agent.hit_announcement_hide.rect.is_some());
     }
+    /// The banner is a Ferrox Labs consent notice, so the two legal links it arms must open
+    /// Ferrox Labs' (FluxRouter's) terms and privacy pages -- pinned by the LITERAL destinations,
+    /// because `privacy_banner_owns_slot_and_clicks_dispatch` compares against the constants and
+    /// would pass unchanged if those drifted back to the upstream vendor's legal pages. The painted
+    /// banner itself names no host at all: the links are the words "Terms" and "Privacy Policy".
+    #[test]
+    fn privacy_banner_legal_links_open_fluxrouter_pages() {
+        let reg = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.last_terminal_size = (80, 30);
+        let buf = draw_frame_privacy(&mut agent, &reg, &[], 2, 80, true);
+        let text: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.contains("Help improve Fuigo"), "banner copy painted");
+        assert!(text.contains("Terms"), "terms link word painted: {text:?}");
+        assert!(
+            text.contains("Privacy"),
+            "privacy link word painted: {text:?}"
+        );
+        for needle in ["x.ai", "grok.com"] {
+            assert!(
+                !text.contains(needle),
+                "painted banner names {needle:?}: {text:?}"
+            );
+        }
+        let terms = agent
+            .privacy_banner
+            .hit_terms
+            .rect
+            .expect("terms rect armed");
+        match agent.handle_input(&Event::Mouse(mouse_down(terms.x + 1, terms.y)), &reg) {
+            InputOutcome::Action(Action::OpenUrl(url)) => {
+                assert_eq!(url, "https://fluxrouter.ai/terms-of-service");
+            }
+            other => panic!("terms click must open the terms URL, got {other:?}"),
+        }
+        let policy = agent
+            .privacy_banner
+            .hit_policy
+            .rect
+            .expect("privacy policy rect armed");
+        match agent.handle_input(&Event::Mouse(mouse_down(policy.x + 1, policy.y)), &reg) {
+            InputOutcome::Action(Action::OpenUrl(url)) => {
+                assert_eq!(url, "https://fluxrouter.ai/privacy-policy");
+            }
+            other => panic!("policy click must open the privacy URL, got {other:?}"),
+        }
+    }
     /// Promo twin of the [hide] suppression test: the [label] CTA rect must also drop under an open dropdown.
     /// A dropdown click must not open a URL from a button that is no longer on screen.
     #[test]

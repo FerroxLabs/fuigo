@@ -1220,7 +1220,6 @@ impl CheatsheetRows {
                         badge: "",
                         badge_color: None,
                         collapsible: true,
-                        underline_last_desc: false,
                     }),
                     CheatsheetRowKind::Hint { dimmed, expand } => {
                         let is_expanded =
@@ -1243,7 +1242,6 @@ impl CheatsheetRows {
                             badge: "",
                             badge_color: None,
                             collapsible: false,
-                            underline_last_desc: false,
                         })
                     }
                     CheatsheetRowKind::Other => PickerEntry::Row(PickerRow {
@@ -1259,7 +1257,6 @@ impl CheatsheetRows {
                         badge: "",
                         badge_color: None,
                         collapsible: false,
-                        underline_last_desc: false,
                     }),
                 }
             })

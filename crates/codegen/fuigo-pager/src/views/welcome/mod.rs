@@ -1798,10 +1798,7 @@ fn render_welcome_done(
     let welcome_compact = show_picker;
 
     let in_vscode_family = welcome_in_vscode_family();
-    let (key_l, key_q) = (
-        "ctrl+l",
-        if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
-    );
+    let (key_l, key_q) = ("ctrl+l", if in_vscode_family { "ctrl+d" } else { "ctrl+q" });
 
     // Heights that don't depend on the menu, computed first so the menu builder can probe the layout to decide whether to add a Changelog row
     // Startup-warning hint height (multi-line aware). It must pick the same entry `render_startup_warnings` draws; see `startup::banner_warning`.
@@ -2426,7 +2423,6 @@ pub(crate) fn render_session_picker(
                     badge: b.badge,
                     badge_color: None,
                     collapsible: b.collapsible,
-                    underline_last_desc: false,
                 })
             })
             .collect();
@@ -2506,7 +2502,6 @@ pub(crate) fn render_session_picker(
             badge: if has_snippet { "match" } else { "" },
             badge_color: Some(theme.accent_user),
             collapsible: true,
-            underline_last_desc: false,
         }));
     }
 
@@ -4345,7 +4340,10 @@ the usual channels. "
         );
         let lower = text.to_ascii_lowercase();
         for marketed in ["supergrok", "subscription required", "upgrade subscription"] {
-            assert!(!lower.contains(marketed), "gate markets {marketed:?}:\n{text}");
+            assert!(
+                !lower.contains(marketed),
+                "gate markets {marketed:?}:\n{text}"
+            );
         }
     }
 

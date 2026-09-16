@@ -57,7 +57,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `auth.auth_token_ttl` | `number` | `yes` | `user` | Token TTL in seconds for providers that return a bare token. Also FUIGO_AUTH_TOKEN_TTL; also valid as `fuigo_com_config.auth_token_ttl`. |
 | `auth.disable_api_key_auth` | `boolean` | `pin` | `user` | Refuse API-key auth so only the deployment IdP can log in. Also FUIGO_DISABLE_API_KEY_AUTH; also valid as `fuigo_com_config.disable_api_key_auth`. |
 | `auth.force_login_team_uuid` | `string / string[]` | `pin` | `user` | Require login to this team UUID, or any of an array; empty array fails closed. Also FUIGO_FORCE_LOGIN_TEAM_ID; also valid as `fuigo_com_config.force_login_team_uuid`. |
-| `auth.fuigo_ws_origin` | `string` | `yes` | `user` | Websocket origin for grok.com. Also FUIGO_WS_ORIGIN; also valid as `fuigo_com_config.fuigo_ws_origin`. |
+| `auth.fuigo_ws_origin` | `string` | `yes` | `user` | Origin of a first-party web-login backend. Fuigo ships it empty, so no web login is offered unless an operator sets one. Also FUIGO_WS_ORIGIN; also valid as `fuigo_com_config.fuigo_ws_origin`. |
 | `auth.fuigo_ws_url` | `string` | `yes` | `user` | Relay websocket URL. Also FUIGO_WS_URL; also valid as `fuigo_com_config.fuigo_ws_url`. |
 | `auth.oauth2` | `table` | `yes` | `user` | OAuth2 provider used when enterprise OIDC is unset; also valid as `fuigo_com_config.oauth2`. |
 | `auth.oauth2.client_id` | `string` | `yes` | `user` | OAuth2 client id. Also FUIGO_OAUTH2_CLIENT_ID; also valid as `fuigo_com_config.oauth2.client_id`. |
@@ -257,7 +257,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `fuigo_com_config.auth_token_ttl` | `number` | `yes` | `user` | Token TTL in seconds for providers that return a bare token. Also FUIGO_AUTH_TOKEN_TTL. |
 | `fuigo_com_config.disable_api_key_auth` | `boolean` | `pin` | `user` | Refuse API-key auth so only the deployment IdP can log in. Also FUIGO_DISABLE_API_KEY_AUTH. |
 | `fuigo_com_config.force_login_team_uuid` | `string / string[]` | `pin` | `user` | Require login to this team UUID, or any of an array; empty array fails closed. Also FUIGO_FORCE_LOGIN_TEAM_ID. |
-| `fuigo_com_config.fuigo_ws_origin` | `string` | `yes` | `user` | Websocket origin for grok.com. Also FUIGO_WS_ORIGIN. |
+| `fuigo_com_config.fuigo_ws_origin` | `string` | `yes` | `user` | Origin of a first-party web-login backend. Fuigo ships it empty, so no web login is offered unless an operator sets one. Also FUIGO_WS_ORIGIN. |
 | `fuigo_com_config.fuigo_ws_url` | `string` | `yes` | `user` | Relay websocket URL. Also FUIGO_WS_URL. |
 | `fuigo_com_config.oauth2` | `table` | `yes` | `user` | OAuth2 provider used when enterprise OIDC is unset. |
 | `fuigo_com_config.oauth2.client_id` | `string` | `yes` | `user` | OAuth2 client id. Also FUIGO_OAUTH2_CLIENT_ID. |

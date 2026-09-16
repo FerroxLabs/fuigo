@@ -304,6 +304,85 @@ mod tests {
         }
     }
 
+    /// The one line in the whole guide allowed to spell an upstream-vendor host: the xAI
+    /// inference endpoint in the "ChatGPT and Grok subscriptions" config example. It is the
+    /// provider's wire value -- `fuigo login --provider xai` is a documented route and the
+    /// subscription credential is only attached to requests aimed at exactly this URL -- so
+    /// it is the same class as the wire-value parsers the rest of the tree keeps in the
+    /// provider's spelling. Nothing else qualifies.
+    const GUIDE_WIRE_VALUE_ALLOWLIST: &[(&str, &str)] = &[(
+        "02-authentication.md",
+        r#"base_url = "https://api.x.ai/v1""#,
+    )];
+
+    /// Every line of `content` that names an upstream-vendor host, unless it is the allowlisted wire value.
+    fn upstream_vendor_hits(filename: &str, content: &str) -> Vec<String> {
+        content
+            .lines()
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("x.ai") || lower.contains("grok.com")
+            })
+            .filter(|line| {
+                !GUIDE_WIRE_VALUE_ALLOWLIST
+                    .iter()
+                    .any(|(file, exact)| *file == filename && line.trim() == *exact)
+            })
+            .map(|line| format!("{filename}: {line}"))
+            .collect()
+    }
+
+    /// The guide is rendered in-TUI by `/docs`, extracted to `<fuigo_home>/docs/user-guide`, and
+    /// read by the model, so every sentence in it is user-reachable. It must describe Fuigo --
+    /// npm install, a FluxRouter key, FluxRouter docs -- not the upstream vendor's install
+    /// script, login host, console or docs. Checked on the embedded copies (what ships) AND on
+    /// every file in the source directory (what a future `guide!` row would embed), so a new
+    /// guide cannot bring a vendor URL back with it.
+    #[test]
+    fn user_guide_never_sends_the_user_to_the_upstream_vendor() {
+        let mut hits = Vec::new();
+        for doc in USER_GUIDE.iter().chain(REFERENCE_DOCS.iter()) {
+            hits.extend(upstream_vendor_hits(doc.filename, doc.content));
+        }
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("user-guide");
+        let mut on_disk = 0;
+        for entry in std::fs::read_dir(&dir).expect("docs/user-guide is part of the crate") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_some_and(|e| e == "md") {
+                on_disk += 1;
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let content = std::fs::read_to_string(&path).expect("guide file");
+                hits.extend(upstream_vendor_hits(&name, &content));
+            }
+        }
+        assert!(
+            on_disk >= USER_GUIDE.len(),
+            "read {on_disk} guide files from {}, fewer than the {} embedded",
+            dir.display(),
+            USER_GUIDE.len()
+        );
+        assert!(
+            hits.is_empty(),
+            "user-guide lines that send the user to the upstream vendor:\n{}",
+            hits.join("\n")
+        );
+        // The allowlist is an exact line, present exactly once in its file: a second copy, a
+        // reworded copy or a copy in another guide is a new hit, not a wire value.
+        for (file, exact) in GUIDE_WIRE_VALUE_ALLOWLIST {
+            let doc = USER_GUIDE
+                .iter()
+                .find(|d| d.filename == *file)
+                .expect("allowlisted file is embedded");
+            let copies = doc.content.lines().filter(|l| l.trim() == *exact).count();
+            assert_eq!(
+                copies, 1,
+                "{file}: {exact:?} must appear exactly once, found {copies}"
+            );
+        }
+    }
+
     #[test]
     fn user_guide_entries_have_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
