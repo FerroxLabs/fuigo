@@ -132,6 +132,13 @@ struct ExtEnvelope<T> {
     result: Option<T>,
     error: Option<serde_json::Value>,
 }
+/// The in-result `error` of an extension envelope, in words.
+///
+/// `ExtEnvelope.error` is a raw `serde_json::Value`, so printing it with `Display` dumps JSON at a CLI
+/// user -- and 1.0.18 made that dump worse by turning `data` from a string into an object.
+fn ext_envelope_error_text(err: &serde_json::Value) -> String {
+    err.to_string()
+}
 async fn ext_call<T: serde::de::DeserializeOwned>(
     tx: &fuigo_acp_lib::AcpAgentTx,
     method: &str,
@@ -145,7 +152,7 @@ async fn ext_call<T: serde::de::DeserializeOwned>(
     let envelope: ExtEnvelope<T> = serde_json::from_str(resp.0.get())
         .map_err(|e| anyhow::anyhow!("response parse error: {e}"))?;
     if let Some(err) = envelope.error {
-        bail!("ACP error: {err}");
+        bail!("ACP error: {}", ext_envelope_error_text(&err));
     }
     envelope
         .result
@@ -280,6 +287,40 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A-R8-3: `83112ed` converted this file's other renders to `data.message` and left the envelope
+    /// error printing its whole JSON value. A 1.0.18 agent answers with object `data`, so the dump is
+    /// now nested: the CLI user must get the sentence, not the envelope.
+    #[test]
+    fn envelope_error_renders_the_message_not_the_json() {
+        let text = ext_envelope_error_text(&serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"message": "worktree store is locked", "error_kind": "session_storage"},
+        }));
+        assert_eq!(text, "worktree store is locked");
+        assert!(!text.contains('{'), "{text}");
+    }
+    /// No `data`: the JSON-RPC `message` is the only readable part.
+    #[test]
+    fn envelope_error_falls_back_to_the_jsonrpc_message() {
+        let text = ext_envelope_error_text(&serde_json::json!({
+            "code": -32601,
+            "message": "Method not found",
+        }));
+        assert_eq!(text, "Method not found");
+    }
+    /// An older agent, or a foreign one, may send a bare string.
+    #[test]
+    fn envelope_error_reads_a_bare_string() {
+        let text = ext_envelope_error_text(&serde_json::json!("worktree store is locked"));
+        assert_eq!(text, "worktree store is locked");
+    }
+    /// Nothing readable anywhere: the value itself is better than an empty message.
+    #[test]
+    fn envelope_error_keeps_an_unreadable_value_verbatim() {
+        let text = ext_envelope_error_text(&serde_json::json!({"code": -32603}));
+        assert_eq!(text, r#"{"code":-32603}"#);
+    }
     #[test]
     fn ext_request_builds_list_with_filters() {
         let req = ext_request(
