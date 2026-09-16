@@ -30,6 +30,9 @@ where
 }
 
 const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
+/// A `search_replace` call: an edit, so a non-yolo permission manager always prompts for it.
+const SEARCH_REPLACE_ARGS: &str =
+    r#"{"file_path":"/tmp/permission-hook.txt","old_string":"a","new_string":"b"}"#;
 
 /// Acks like [`drain_gateway`] but keeps the hook events for the one test that asserts on them.
 fn capture_hook_events(
@@ -56,21 +59,49 @@ fn capture_hook_events(
     fired
 }
 
+/// Injects ENOSPC on the flush barrier **only**.
+///
+/// Every other must-answer `PersistenceMsg` is served normally, so the fault under test stays "the
+/// turn-end fsync hit a full disk" and does not degrade into "the persistence actor is gone".
+/// `ExecutionState` is one of those: a turn with `max_turns` set opens a durable execution record
+/// before the first model call (`SessionActor::handle_turn_input`), and dropping its oneshot fails
+/// the prompt with `Execution state could not be made durable` before the turn ever starts.
+/// It is applied against a real temp dir, the same way `execution_state::tests::fixture_actor` and
+/// the bounded-compaction fixture do.
 fn drain_persistence_flush_enospc(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
+    let execution_dir = tempfile::tempdir().expect("execution state dir");
     tokio::task::spawn_local(async move {
+        // Held for the lifetime of the drain so the execution record outlives the turn.
+        let execution_dir = execution_dir;
         while let Some(msg) = rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(Err(std::io::Error::from(std::io::ErrorKind::StorageFull)));
+            match msg {
+                PersistenceMsg::FlushAndAck { respond_to } => {
+                    let _ =
+                        respond_to.send(Err(std::io::Error::from(std::io::ErrorKind::StorageFull)));
+                }
+                PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } => {
+                    let _ = respond_to.send(
+                        crate::session::execution_state::apply(execution_dir.path(), mutation)
+                            .await,
+                    );
+                }
+                _ => {}
             }
         }
     });
 }
 
+/// `permission_gateway` installs a non-yolo permission manager and the read+edit toolset, so a
+/// scripted `search_replace` call prompts the client and the client's answer decides the turn.
 async fn actor_with_mock_sampler(
     server: &MockInferenceServer,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     gateway_tx: tokio::sync::mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
     max_turns: Option<usize>,
+    permission_gateway: Option<fuigo_acp_lib::AcpAgentGatewaySender>,
 ) -> Arc<SessionActor> {
     let sampling_cfg = fuigo_sampler::SamplerConfig {
         api_key: Some("test-key".to_string()),
@@ -97,7 +128,12 @@ async fn actor_with_mock_sampler(
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.sampler_handle = sampler_handle;
     actor.max_turns = max_turns;
-    *actor.agent.borrow_mut() = test_fuigo_build_agent_with_todo().await;
+    if let Some(gateway) = permission_gateway {
+        *actor.agent.borrow_mut() = test_agent_with_tools(read_and_edit_toolset()).await;
+        install_permission_manager(&mut actor, /* yolo */ false, gateway);
+    } else {
+        *actor.agent.borrow_mut() = test_fuigo_build_agent_with_todo().await;
+    }
 
     let mut cfg = actor
         .chat_state_handle
@@ -185,7 +221,8 @@ fn completed_turn_flush_enospc_returns_error_and_reports_stop_failure() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             drain_persistence_flush_enospc(persistence_rx);
 
-            let actor = actor_with_mock_sampler(&server, persistence_tx, gateway_tx, None).await;
+            let actor =
+                actor_with_mock_sampler(&server, persistence_tx, gateway_tx, None, None).await;
             let mut hooks = crate::extensions::hooks::ClientHooks::new();
             hooks.insert(
                 fuigo_hooks::event::HookEventName::StopFailure,
@@ -211,6 +248,39 @@ fn completed_turn_flush_enospc_returns_error_and_reports_stop_failure() {
     });
 }
 
+/// Answers the tool-call permission prompt with `Cancelled`, which is what a user pressing Esc
+/// on the prompt sends; the turn then ends `TurnOutcome::Cancelled`.
+fn drain_gateway_cancelling_permission(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
+) {
+    tokio::task::spawn_local(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                fuigo_acp_lib::AcpClientMessage::RequestPermission(args) => {
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Cancelled,
+                        )));
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+/// The turn-end flush barrier is the LAST thing a cancelled turn does, and it fails here with
+/// ENOSPC. `handle_turn_input` may only rewrite a `Completed`/`StationarityEnded` outcome into a
+/// disk-full error; a cancellation the user asked for must still come back as `Cancelled`, or the
+/// host is told its Esc failed with a storage error it cannot act on.
+///
+/// The cancellation is driven through the permission prompt rather than `max_turns`: with bounded
+/// execution (`a7a17ff`) a `max_turns` limit puts the first round in the finalization slot, so a
+/// scripted tool call is refused with `Tool call rejected during finalization` and the turn never
+/// reaches a cancelled outcome at all (see the cluster report).
 #[test]
 fn cancelled_turn_flush_enospc_still_reports_cancellation() {
     block_on_session(|| {
@@ -223,23 +293,31 @@ fn cancelled_turn_flush_enospc_still_reports_cancellation() {
                 ScriptedResponse::sse(responses_api_reasoning_then_tool_call_events(
                     "poll",
                     "disk-full-cancel-call",
-                    "todo_write",
-                    TODO_ARGS,
+                    "search_replace",
+                    SEARCH_REPLACE_ARGS,
                     "test",
                 )),
             );
 
             let (gateway_tx, gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            drain_gateway(gateway_rx);
+            let permission_gateway = fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx.clone());
+            drain_gateway_cancelling_permission(gateway_rx);
             let (persistence_tx, persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             drain_persistence_flush_enospc(persistence_rx);
 
-            let actor = actor_with_mock_sampler(&server, persistence_tx, gateway_tx, Some(0)).await;
+            let actor = actor_with_mock_sampler(
+                &server,
+                persistence_tx,
+                gateway_tx,
+                None,
+                Some(permission_gateway),
+            )
+            .await;
             let ok = run_prompt(&actor, "disk-full-cancelled")
                 .await
-                .expect("cancel/max-turns must not become a disk-full error");
+                .expect("a cancelled turn must not become a disk-full error");
             assert_eq!(ok.stop_reason, acp::StopReason::Cancelled);
         });
     });
