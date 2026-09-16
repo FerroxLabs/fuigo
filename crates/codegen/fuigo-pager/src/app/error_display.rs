@@ -653,7 +653,8 @@ mod tests {
     use super::*;
 
     /// A status-less error never proves a server fault, so a readable detail is always shown.
-    /// A 403 content-safety block reaches the pager as `api` with no status; its reason is the only useful part.
+    /// A 403 content-safety block reaches the pager as `api` with no status; its reason is the useful part,
+    /// and it is shown ahead of the class's next step rather than instead of it (A-R7-3).
     #[test]
     fn status_less_api_error_keeps_a_readable_detail() {
         let formatted = format_request_failure(
@@ -668,16 +669,49 @@ mod tests {
             "{}",
             formatted.message()
         );
+        // The next step survives with it: the branch replaces the headline and the canned `why`, not the action
         assert!(
-            !formatted
-                .message()
-                .contains("Something went wrong on our side")
+            formatted.message().contains("Wait a minute and send again"),
+            "{}",
+            formatted.message()
         );
         // Nothing readable: the generic server copy stays
         let bare = format_request_failure(None, Some(WireErrorType::Api), "");
         assert_eq!(
             bare.message(),
             "Server error: Something went wrong on our side. Wait a minute and send again."
+        );
+    }
+
+    /// A-R7-3: a status-less `api` failure that is transient and whose detail does not itself say what to
+    /// do. Before this, replacing the whole `Classified` dropped `action` with the headline, so 1.0.17's
+    /// "Server error: Something went wrong on our side. Wait a minute and send again." became
+    /// "Request failed: stream closed before the response completed." -- the reason, and no next step.
+    /// Both halves must be there.
+    #[test]
+    fn status_less_api_error_keeps_the_next_step_beside_the_detail() {
+        let formatted = format_request_failure(
+            None,
+            Some(WireErrorType::Api),
+            "stream closed before the response completed",
+        );
+        assert_eq!(formatted.headline, "Request failed");
+        assert!(
+            formatted
+                .detail
+                .contains("stream closed before the response completed"),
+            "the readable detail survives: {}",
+            formatted.detail
+        );
+        assert!(
+            formatted.detail.contains("Wait a minute and send again"),
+            "and so does the class's next step: {}",
+            formatted.detail
+        );
+        assert_eq!(
+            formatted.message(),
+            "Request failed: stream closed before the response completed. Something went wrong on our \
+             side. Wait a minute and send again."
         );
     }
 
