@@ -39,53 +39,60 @@ type Frames = Arc<std::sync::Mutex<Vec<Frame>>>;
 fn drain_frames(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
 ) -> Frames {
-    use crate::extensions::notification::{SessionNotification, SessionUpdate};
     let captured: Frames = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = captured.clone();
     tokio::task::spawn_local(async move {
         while let Some(msg) = rx.recv().await {
-            match msg {
-                fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
-                    let chunk = match &args.request.update {
-                        acp::SessionUpdate::AgentMessageChunk(chunk) => {
-                            Some((AGENT_MESSAGE, chunk))
-                        }
-                        acp::SessionUpdate::AgentThoughtChunk(chunk) => {
-                            Some((AGENT_THOUGHT, chunk))
-                        }
-                        _ => None,
-                    };
-                    if let Some((kind, chunk)) = chunk
-                        && let acp::ContentBlock::Text(text) = &chunk.content
-                    {
-                        sink.lock().unwrap().push(Frame::Standard {
-                            kind: kind.to_string(),
-                            text: text.text.clone(),
-                            retry_status: chunk
-                                .meta
-                                .as_ref()
-                                .and_then(|m| m.get(RETRY_STATUS_KEY))
-                                .cloned(),
-                        });
-                    }
-                    let _ = args.response_tx.send(Ok(()));
-                }
-                fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
-                    if args.request.method.as_ref() == "fuigo/session_notification" =>
-                {
-                    if let Ok(SessionNotification {
-                        update: SessionUpdate::RetryState(rs),
-                        ..
-                    }) = serde_json::from_str::<SessionNotification>(args.request.params.get())
-                    {
-                        sink.lock().unwrap().push(Frame::Fuigo(rs));
-                    }
-                }
-                _ => {}
+            if let Some(frame) = frame_from(msg) {
+                sink.lock().unwrap().push(frame);
             }
         }
     });
     captured
+}
+
+/// The [`Frame`] a gateway message carries, if any, acknowledging it the way a client does.
+/// Shared by [`drain_frames`] and the tests that read the gateway in line.
+fn frame_from(msg: fuigo_acp_lib::AcpClientMessage) -> Option<Frame> {
+    use crate::extensions::notification::{SessionNotification, SessionUpdate};
+    match msg {
+        fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
+            let chunk = match &args.request.update {
+                acp::SessionUpdate::AgentMessageChunk(chunk) => Some((AGENT_MESSAGE, chunk)),
+                acp::SessionUpdate::AgentThoughtChunk(chunk) => Some((AGENT_THOUGHT, chunk)),
+                _ => None,
+            };
+            let frame = if let Some((kind, chunk)) = chunk
+                && let acp::ContentBlock::Text(text) = &chunk.content
+            {
+                Some(Frame::Standard {
+                    kind: kind.to_string(),
+                    text: text.text.clone(),
+                    retry_status: chunk
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get(RETRY_STATUS_KEY))
+                        .cloned(),
+                })
+            } else {
+                None
+            };
+            let _ = args.response_tx.send(Ok(()));
+            frame
+        }
+        fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
+            if args.request.method.as_ref() == "fuigo/session_notification" =>
+        {
+            match serde_json::from_str::<SessionNotification>(args.request.params.get()) {
+                Ok(SessionNotification {
+                    update: SessionUpdate::RetryState(rs),
+                    ..
+                }) => Some(Frame::Fuigo(rs)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The standard-rail mirror of `state`: a tagged thought chunk.
@@ -1017,4 +1024,106 @@ fn a_mirror_after_reasoning_starts_its_own_paragraph() {
             );
         })
     });
+}
+
+/// A disk-full raised by the session-end writes still reaches a stock ACP client.
+///
+/// `mark_disk_full` latches on `disk_full_notified`, so the standard-rail notice fires once per
+/// episode and is never re-emitted. Queued as `SessionEvent::RetryStatusMirror`, it can be
+/// produced by the teardown writes themselves (`turn_end_queue.flush()`, the session-end memory
+/// pipeline, `turn_end_queue.drain()`) -- and those run after `run_session` has left its select,
+/// where nothing polls `event_rx` any more. Running out of disk WHILE saving the session is
+/// plausible, not exotic, and this is the one rail a stock client has.
+///
+/// The session-end hook notification is the synchronisation point: it is emitted from inside the
+/// channel-closed arm, after `turn_end_queue.flush()`, so the mirror below is queued exactly in
+/// the window the shutdown path used to swallow.
+#[tokio::test(flavor = "current_thread")]
+async fn a_mirror_queued_during_session_teardown_still_reaches_the_client() {
+    use crate::extensions::notification::{DISK_FULL_ERROR_TYPE, DISK_FULL_USER_MESSAGE};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            tokio::task::spawn_local(async move { while persistence_rx.recv().await.is_some() {} });
+            let (actor, event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            // A client hook on SessionEnd, so entering the teardown arm is observable on the gateway.
+            let mut hooks = crate::extensions::hooks::ClientHooks::new();
+            hooks.insert(
+                fuigo_hooks::event::HookEventName::SessionEnd,
+                vec![crate::extensions::hooks::ClientHookGroup {
+                    matcher: None,
+                    callback_ids: vec!["cb".to_string()],
+                    timeout: None,
+                }],
+            );
+            *actor.client_hooks.borrow_mut() = hooks;
+            let actor = Arc::new(actor);
+            let event_tx = actor.event_tx.clone();
+            let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
+            let (_chat_tx, chat_rx) = tokio::sync::mpsc::unbounded_channel();
+            let session_loop = tokio::task::spawn_local(super::run_session(
+                actor.clone(),
+                cmd_rx,
+                chat_rx,
+                event_rx,
+                None,
+                Arc::new(parking_lot::Mutex::new(
+                    fuigo_workspace::file_system::CodebaseIndexManager::new(),
+                )),
+                std::path::PathBuf::from("/tmp"),
+                crate::session::fs_watch::FsWatchCapabilities::none(),
+            ));
+
+            let mut frames: Vec<Frame> = Vec::new();
+            drop(cmd_tx);
+            loop {
+                let msg = tokio::time::timeout(Duration::from_secs(30), gateway_rx.recv())
+                    .await
+                    .expect("the session-end hook must fire")
+                    .expect("the gateway outlives the loop");
+                let entered_teardown = matches!(
+                    &msg,
+                    fuigo_acp_lib::AcpClientMessage::ExtNotification(args)
+                        if args.request.method.as_ref() == "fuigo/hooks/event"
+                );
+                if let Some(frame) = frame_from(msg) {
+                    frames.push(frame);
+                }
+                if entered_teardown {
+                    break;
+                }
+            }
+
+            let disk_full = RetryState::Failed {
+                error_type: DISK_FULL_ERROR_TYPE.to_string(),
+                message: DISK_FULL_USER_MESSAGE.to_string(),
+            };
+            // What the persistence actor does when a session-end write runs out of space.
+            event_tx
+                .send(SessionEvent::RetryStatusMirror(Box::new(disk_full.clone())))
+                .expect("the loop still owns the queue while it is tearing down");
+
+            tokio::time::timeout(Duration::from_secs(30), session_loop)
+                .await
+                .expect("the session loop must finish")
+                .expect("the session loop must not panic");
+            while let Ok(msg) = gateway_rx.try_recv() {
+                if let Some(frame) = frame_from(msg) {
+                    frames.push(frame);
+                }
+            }
+
+            assert!(
+                frames.contains(&mirror(
+                    &format!("Fuigo could not save this session: {DISK_FULL_USER_MESSAGE}\n\n"),
+                    &disk_full,
+                )),
+                "the disk-full notice raised by the teardown writes reaches the client: {frames:#?}"
+            );
+        })
+        .await;
 }
