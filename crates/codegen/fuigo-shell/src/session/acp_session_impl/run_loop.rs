@@ -485,30 +485,7 @@ pub(super) async fn run_session(
                 }
                 maybe_event = event_rx.recv() => {
                     if let Some(event) = maybe_event {
-                        match event {
-                            SessionEvent::Notification(notification) => {
-                                let out = replay_buffer.consume_chunk(notification);
-                                match out {
-                                    None => {}
-                                    Some((first, second)) => {
-                                        session.emit_buffered(first).await;
-                                        if let Some(second) = second {
-                                            session.emit_buffered(second).await;
-                                        }
-                                    }
-                                }
-                            }
-                            SessionEvent::FlushReplay { respond_to } => {
-                                if let Some(notification) = replay_buffer.flush() {
-                                    session.emit_buffered(notification).await;
-                                }
-
-                                // Always ack (independent of whether anything was buffered).
-                                if let Some(tx) = respond_to {
-                                    let _ = tx.send(());
-                                }
-                            }
-                        }
+                        session.handle_session_event(event, &mut replay_buffer).await;
                     }
                 }
                 maybe_cmd = cmd_rx.recv() => {

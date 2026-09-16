@@ -1088,3 +1088,59 @@ fn the_lifecycle_cap_has_an_escape_hatch() {
         "with the hatch open and no --timeout, the startup sends are unbounded again"
     );
 }
+
+/// A retry-status mirror chunk (`_meta["fuigo/retryStatus"]`, a live `agent_thought_chunk`) is progress for stock ACP clients.
+/// It is neither part of the headless answer nor of its reported thought.
+#[test]
+fn retry_status_mirror_chunk_is_not_part_of_the_answer() {
+    use agent_client_protocol as acp;
+    let notification = |update: acp::SessionUpdate| {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        fuigo_acp_lib::AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(acp::SessionId::new("s"), update),
+            response_tx: tx,
+        })
+    };
+    let content = |text: &str, meta: Option<serde_json::Map<String, serde_json::Value>>| {
+        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        )))
+        .meta(meta)
+    };
+    let mut tagged = serde_json::Map::new();
+    tagged.insert(
+        "fuigo/retryStatus".into(),
+        serde_json::json!({"type": "failed", "error_type": "empty_response", "message": "x"}),
+    );
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let mut pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut ttf_logged = false;
+    for msg in [
+        notification(acp::SessionUpdate::AgentThoughtChunk(content(
+            "Retrying the model (1/2): x\n\n",
+            Some(tagged),
+        ))),
+        notification(acp::SessionUpdate::AgentThoughtChunk(content(
+            "thinking", None,
+        ))),
+        notification(acp::SessionUpdate::AgentMessageChunk(content(
+            "Hello", None,
+        ))),
+    ] {
+        super::handle_headless_acp_message(
+            msg.boxed(),
+            &mut emitter,
+            std::time::Instant::now(),
+            &mut ttf_logged,
+            false,
+            &mut pending,
+            &mut completed,
+        );
+    }
+    assert_eq!(emitter.text_buffer, "Hello");
+    assert_eq!(
+        emitter.thought_buffer, "thinking",
+        "only the model's own reasoning is reported as thought"
+    );
+}

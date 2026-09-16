@@ -2,6 +2,10 @@ use super::*;
 
 impl SessionActor {
     async fn send_thought_chunk(&self, text: String, chunk_index: u64) {
+        // A retry-status mirror after this must start its own paragraph (see
+        // `SessionActor::turn_thought_text_emitted`).
+        self.turn_thought_text_emitted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.send_update(
             acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
                 acp::TextContent::new(text),

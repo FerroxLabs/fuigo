@@ -1141,6 +1141,12 @@ pub enum RetryState {
         /// Clients use this to show a user-friendly upgrade message instead of the raw `reason` string.
         #[serde(default)]
         is_rate_limited: bool,
+        /// Sampler error kind that ran out of budget (`SamplingErrorKind::as_str()`), when known.
+        /// Same vocabulary as `Retrying.error_type` and `Failed.error_type`; absent on older shells.
+        /// Without it an exhaustion the pager renders loses the kind it would have classified
+        /// (an empty-response exhaustion reads "Request failed" instead of "Empty response").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_type: Option<String>,
     },
     /// A non-retryable error occurred (e.g., auth error, invalid params)
     Failed {
@@ -1149,6 +1155,108 @@ pub enum RetryState {
         /// Human-readable error message
         message: String,
     },
+}
+
+/// Chunk `_meta` key tagging the standard-rail mirror of a [`RetryState`]; its value is the `RetryState` object as `retry_state` carries it (`type` tag, snake_case fields).
+/// The shell sends every `retry_state` twice: on `_fuigo/session_notification` for Fuigo clients, and as a live-only `session/update` `agent_thought_chunk` that stock ACP clients render.
+/// A thought, never an `agent_message_chunk`: clients such as Murage fold message chunks into the stored, forwarded answer, but show thought chunks only in the thinking area.
+/// Fuigo clients (the pager, headless mode) render retries from `retry_state` and skip chunks carrying this key.
+pub const RETRY_STATUS_META_KEY: &str = "fuigo/retryStatus";
+
+/// Progress line for the standard-rail mirror of `state`.
+///
+/// Ends with a blank line so reasoning that follows starts its own paragraph in clients
+/// that concatenate thought chunks. `after_thought_text` opens with one for the same
+/// reason when streamed reasoning came first: without it the line is glued to the end of
+/// the model's last reasoning sentence.
+///
+/// A disk-full failure is the one `retry_state` on this rail that is not about the model,
+/// so it gets its own subject instead of "The model request failed".
+///
+/// An exhaustion counts its attempts in the singular when there was only one: an
+/// empty-response budget that the configured retry budget cannot fund gives up after the
+/// first reply.
+pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String {
+    let separator = if after_thought_text { "\n\n" } else { "" };
+    if let RetryState::Failed {
+        error_type,
+        message,
+    } = state
+        && error_type == DISK_FULL_ERROR_TYPE
+    {
+        return format!("{separator}Fuigo could not save this session: {message}\n\n");
+    }
+    match state {
+        RetryState::Retrying {
+            attempt,
+            max_retries,
+            reason,
+            ..
+        } => format!("{separator}Retrying the model ({attempt}/{max_retries}): {reason}\n\n"),
+        RetryState::Exhausted {
+            attempts, reason, ..
+        } => {
+            // A budget that leaves no resend gives up after one attempt, so the count is not
+            // always plural.
+            let plural = if *attempts == 1 {
+                "attempt"
+            } else {
+                "attempts"
+            };
+            format!("{separator}The model request failed after {attempts} {plural}: {reason}\n\n")
+        }
+        RetryState::Failed { message, .. } => {
+            format!("{separator}The model request failed: {message}\n\n")
+        }
+    }
+}
+
+/// The standard `agent_thought_chunk` that mirrors `state`, tagged with [`RETRY_STATUS_META_KEY`].
+pub fn retry_status_update(state: &RetryState, after_thought_text: bool) -> acp::SessionUpdate {
+    let mut meta = serde_json::Map::new();
+    if let Ok(value) = serde_json::to_value(state) {
+        meta.insert(RETRY_STATUS_META_KEY.to_string(), value);
+    }
+    acp::SessionUpdate::AgentThoughtChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            retry_status_text(state, after_thought_text),
+        )))
+        .meta(Some(meta)),
+    )
+}
+
+/// The live-only `session/update` notification mirroring `state` for `session_id`: [`retry_status_update`] plus timestamp meta and `promptId` when known.
+/// Never an `eventId`: the mirror is not persisted, and a reconnect cursor must never point at an unpersisted line.
+pub fn retry_status_notification(
+    session_id: acp::SessionId,
+    state: &RetryState,
+    prompt_id: Option<String>,
+    after_thought_text: bool,
+) -> acp::SessionNotification {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "agentTimestampMs".to_string(),
+        chrono::Utc::now().timestamp_millis().into(),
+    );
+    if let Some(prompt_id) = prompt_id {
+        meta.insert("promptId".to_string(), prompt_id.into());
+    }
+    acp::SessionNotification::new(session_id, retry_status_update(state, after_thought_text))
+        .meta(Some(meta))
+}
+
+/// Whether `update` is a retry-status mirror (see [`RETRY_STATUS_META_KEY`]).
+/// Matches a tagged chunk of either text kind, so a client never renders a mirror as reasoning or as answer text.
+pub fn is_retry_status_update(update: &acp::SessionUpdate) -> bool {
+    let (acp::SessionUpdate::AgentThoughtChunk(chunk)
+    | acp::SessionUpdate::AgentMessageChunk(chunk)) = update
+    else {
+        return false;
+    };
+    chunk
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.contains_key(RETRY_STATUS_META_KEY))
 }
 
 /// Whether a terminal retry failure is a recoverable authentication error (expired/invalid credentials, 401).
@@ -1414,6 +1522,142 @@ pub struct RecapRequestFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every retry state mirrors onto a live `agent_thought_chunk` tagged `fuigo/retryStatus`, never onto `agent_message_chunk`.
+    /// Stock ACP clients (Murage) fold message chunks into the answer and show thought chunks only in the thinking area.
+    #[test]
+    fn retry_status_update_is_a_tagged_thought_for_every_state() {
+        let cases = [
+            (
+                RetryState::Retrying {
+                    attempt: 1,
+                    max_retries: 2,
+                    reason: "empty response from model (reasoning_only)".into(),
+                    error_type: Some("empty_response".into()),
+                },
+                "Retrying the model (1/2): empty response from model (reasoning_only)\n\n",
+            ),
+            (
+                RetryState::Exhausted {
+                    attempts: 3,
+                    reason: "429 Too Many Requests".into(),
+                    is_rate_limited: true,
+                    error_type: None,
+                },
+                "The model request failed after 3 attempts: 429 Too Many Requests\n\n",
+            ),
+            (
+                RetryState::Failed {
+                    error_type: "empty_response".into(),
+                    message: "empty response from model (reasoning_only)".into(),
+                },
+                "The model request failed: empty response from model (reasoning_only)\n\n",
+            ),
+        ];
+        for (state, text) in cases {
+            let update = retry_status_update(&state, false);
+            assert!(is_retry_status_update(&update), "{state:?}: tagged");
+            let wire = serde_json::to_value(&update).expect("update serializes");
+            assert_eq!(
+                wire["sessionUpdate"], "agent_thought_chunk",
+                "{state:?}: a thought, never answer text"
+            );
+            assert_eq!(wire["content"]["text"], text, "{state:?}: text");
+            assert_eq!(
+                wire["_meta"][RETRY_STATUS_META_KEY],
+                serde_json::to_value(&state).unwrap(),
+                "{state:?}: structured state in the chunk meta"
+            );
+        }
+        let untagged = acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new("model reasoning".to_string())),
+        ));
+        assert!(
+            !is_retry_status_update(&untagged),
+            "real reasoning is not a mirror"
+        );
+    }
+
+    /// The disk-full `retry_state` is the one failure on this rail that has nothing to do with
+    /// the model, so its mirror does not tell the user the model request failed.
+    #[test]
+    fn the_disk_full_mirror_names_the_disk_not_the_model() {
+        let state = RetryState::Failed {
+            error_type: DISK_FULL_ERROR_TYPE.to_string(),
+            message: DISK_FULL_USER_MESSAGE.to_string(),
+        };
+        assert_eq!(
+            retry_status_text(&state, false),
+            "Fuigo could not save this session: Out of disk space. Free some space and try again.\n\n"
+        );
+        assert_eq!(
+            retry_status_text(&state, true),
+            "\n\nFuigo could not save this session: Out of disk space. Free some space and try again.\n\n"
+        );
+        assert_eq!(
+            retry_status_text(
+                &RetryState::Failed {
+                    error_type: "api".to_string(),
+                    message: "upstream exploded".to_string(),
+                },
+                false
+            ),
+            "The model request failed: upstream exploded\n\n",
+            "every other failure keeps the model-request wording"
+        );
+    }
+
+    /// B-R5-2 made `attempts == 1` reachable on this line: an empty-response budget whose
+    /// configured retry budget leaves no resend gives up after its single attempt, and the
+    /// exhaustion still has to name the count. "after 1 attempts" is the wrong sentence.
+    #[test]
+    fn a_single_attempt_exhaustion_counts_in_the_singular() {
+        let one = RetryState::Exhausted {
+            attempts: 1,
+            reason: "empty response from model (reasoning_only)".into(),
+            is_rate_limited: false,
+            error_type: Some("empty_response".into()),
+        };
+        assert_eq!(
+            retry_status_text(&one, false),
+            "The model request failed after 1 attempt: empty response from model (reasoning_only)\n\n"
+        );
+        let two = RetryState::Exhausted {
+            attempts: 2,
+            reason: "empty response from model (reasoning_only)".into(),
+            is_rate_limited: false,
+            error_type: Some("empty_response".into()),
+        };
+        assert_eq!(
+            retry_status_text(&two, false),
+            "The model request failed after 2 attempts: empty response from model (reasoning_only)\n\n",
+            "every other count stays plural"
+        );
+    }
+
+    /// Clients concatenate thought chunks, so a mirror that follows streamed reasoning
+    /// opens its own paragraph instead of running into the model's last sentence.
+    #[test]
+    fn a_mirror_after_reasoning_opens_its_own_paragraph() {
+        let state = RetryState::Retrying {
+            attempt: 1,
+            max_retries: 3,
+            reason: "Server error; retrying request".into(),
+            error_type: Some("api".into()),
+        };
+        assert_eq!(
+            format!(
+                "The model is thinking.{}",
+                retry_status_text(&state, /*after_thought_text*/ true)
+            ),
+            "The model is thinking.\n\nRetrying the model (1/3): Server error; retrying request\n\n"
+        );
+        assert_eq!(
+            retry_status_text(&state, false),
+            "Retrying the model (1/3): Server error; retrying request\n\n",
+            "the turn's first thought text needs no leading blank line"
+        );
+    }
 
     #[test]
     fn http_401_needle_is_contained_in_unauthorized_needle() {
