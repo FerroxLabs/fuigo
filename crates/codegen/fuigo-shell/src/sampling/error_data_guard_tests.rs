@@ -1122,6 +1122,55 @@ fn the_no_data_scan_exempts_the_typed_constructor_module() {
     );
 }
 
+/// The body braces of the first `fn <name>` declared in `code`, or `None` when the file has no such
+/// function. Used to scope an exemption to one function instead of a whole file.
+fn fn_body_span(code: &[char], name: &str) -> Option<(usize, usize)> {
+    let needle = format!("fn {name}");
+    let mut from = 0;
+    while let Some(pos) = find(code, &needle, from) {
+        from = pos + needle.chars().count();
+        if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        if code.get(from).is_some_and(|&c| is_ident(c)) {
+            continue;
+        }
+        let mut j = from;
+        while j < code.len() && code[j] != '{' && code[j] != ';' {
+            j += 1;
+        }
+        // A trait method declaration has no body
+        if code.get(j) != Some(&'{') {
+            continue;
+        }
+        let start = j;
+        let mut depth = 0i32;
+        while j < code.len() {
+            match code[j] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((start, j));
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        return Some((start, code.len()));
+    }
+    None
+}
+
+/// The one function allowed to read a whole `data` as a string: `error_detail_from_data`, which reads
+/// both shapes so an error built by a pre-1.0.18 agent still yields its detail.
+fn legacy_string_read_exemption(rel: &str, code: &[char]) -> Option<(usize, usize)> {
+    (rel == "sampling/error.rs")
+        .then(|| fn_body_span(code, "error_detail_from_data"))
+        .flatten()
+}
+
 /// A fourth way a client-visible failure loses its reason, and the one the three scans above cannot
 /// see: not building a bad `data`, but READING a good one as if it were the bare string it used to be.
 /// `err.data.as_ref().and_then(|d| d.as_str())` yields `None` against every error the shell builds
@@ -1129,19 +1178,24 @@ fn the_no_data_scan_exempts_the_typed_constructor_module() {
 /// `<no error data>` in the compaction request artifact, `memory flush failed` in the memory-flush
 /// outcome. Both were live defects on this branch until `9432302`.
 ///
-/// `sampling/error.rs` is the one module exempt: `error_detail_from_data` reads the string shape on
-/// purpose, because a client may hand back an error built by an agent older than 1.0.18.
+/// Exactly one whole-value read in the tree is deliberate: `error_detail_from_data` in
+/// `sampling/error.rs` accepts the pre-1.0.18 string shape on purpose, because a client may hand back
+/// an error built by an agent older than 1.0.18. The exemption is THAT FUNCTION'S BODY, not the file:
+/// `sampling/error.rs` also holds `acp_error_text`, `acp_error_message`, `error_kind_str_from_error`
+/// and `http_status_from_error` -- the likeliest place a future whole-value read is added, and a
+/// file-wide exemption made every one of them invisible to this scan forever.
 fn string_shaped_data_reads(rel: &str, src: &str) -> Vec<String> {
-    if rel == "sampling/error.rs" {
-        return Vec::new();
-    }
     let mut code = code_only(src);
     strip_cfg_test_items(&mut code);
+    let exempt = legacy_string_read_exemption(rel, &code);
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(pos) = find(&code, "data", from) {
         from = pos + 4;
         if pos > 0 && is_ident(code[pos - 1]) {
+            continue;
+        }
+        if exempt.is_some_and(|(start, end)| pos > start && pos < end) {
             continue;
         }
         if code.get(pos + 4).is_some_and(|&c| is_ident(c)) {
