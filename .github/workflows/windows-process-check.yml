@@ -106,6 +106,27 @@ jobs:
           grep -F 'leader::tests::leader_spawn_gets_its_own_windowless_console ... ok' process-receipts/fuigo-shell-leader.log
           grep -F 'leader::tests::leader_spawn_flags_match_the_windows_crate ... ok' process-receipts/fuigo-shell-leader.log
           grep -F 'agent::app::tests::the_stdio_agent_entrypoint_arms_the_parent_death_binding ... ok' process-receipts/fuigo-shell-leader.log
+      # The FluxRouter cache opt-out, proved on Windows. Added at release-branch
+      # level for 1.0.18: it belongs to no cluster, and until now the ONLY run of
+      # this file was the release gate in release.yml, i.e. after the tag. The
+      # customer incident this release fixes is a cache REPLAY, and cluster D's
+      # opt-out is Fuigo's half of it, so a PR that breaks the bypass should go red
+      # before the tag, not after.
+      - name: fuigo-sampler FluxRouter cache-bypass integration test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p process-receipts
+          # fluxrouter cache bypass gate: pull-request and push, on Windows. The release-time
+          # proof stays in release.yml; this is the PR-level call site its comment anticipated.
+          # --test-threads=1 is required: the file mutates process environment per call site.
+          cargo test --locked -p fuigo-sampler --test fluxrouter_cache_bypass -- --test-threads=1 2>&1 | tee process-receipts/fluxrouter-cache-bypass.log
+          # A non-zero count, for the same reason as the suites above: `[0-9]+ passed`
+          # also matches `0 passed`, so a filter or feature change that ran nothing
+          # would keep this gate green.
+          grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fluxrouter-cache-bypass.log
+          grep -F 'ci_runs_this_integration_test_and_every_call_site_names_its_gate ... ok' process-receipts/fluxrouter-cache-bypass.log
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
