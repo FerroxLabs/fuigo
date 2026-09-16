@@ -786,11 +786,17 @@ fn small_commit_is_not_capped() {
     );
 }
 
+/// Holds the theme test lock for the whole test: the edit block's hunk painter re-reads the process-global
+/// `Theme::current()` at render time (`EditToolCallBlock::rendered_output`), and sibling tests engage the
+/// terminal-native lock under that same test lock, which turns every `diff_*_bg` into `Reset`.
+/// Read the theme unpinned and the captured bands and the painted bands come from different themes.
 #[test]
 fn committed_edit_keeps_diff_line_backgrounds() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use similar::ChangeTag;
+
+    let _theme_guard = fuigo_pager::theme::cache::pin_theme();
 
     let hunk = vec![
         DiffLine {
@@ -821,6 +827,11 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     let block = RenderBlock::edit_with_hunks("src/main.rs", vec![hunk]);
     let mut entry = ScrollbackEntry::new(block);
     let theme = Theme::current();
+    // A bandless theme would make the `== diff_*_bg` checks below match every untouched `Reset` cell, so the assertions hold vacuously
+    assert!(
+        !theme.diff_uses_line_fg(),
+        "the pinned theme must paint diff bands for this test to mean anything"
+    );
     let appearance = committed_appearance(&AppearanceConfig::default());
     entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
     let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);

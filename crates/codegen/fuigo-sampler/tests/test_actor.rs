@@ -192,7 +192,11 @@ async fn submit_emits_started_first_token_channel_completed() {
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
     server.shutdown();
 
-    assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
+    assert!(
+        matches!(events[0], SamplingEvent::StreamStarted { .. }),
+        "a submit's first event must be StreamStarted, got {:?}",
+        events[0]
+    );
     assert!(
         events
             .iter()
