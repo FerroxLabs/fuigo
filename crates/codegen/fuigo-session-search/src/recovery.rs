@@ -2,33 +2,64 @@
 //! An unusable file is classified, then quarantined under a lock so a fresh empty database can be recreated.
 //! The index layer drives the retry.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::ErrorCode;
 use fuigo_sqlite_journal::JournalMode;
+use rusqlite::ErrorCode;
 
 static HEAL_LOCK: Mutex<()> = Mutex::new(());
 
-/// Bumped each time the cache is quarantined and recreated, so callers can tell the on-disk index file was replaced.
-static CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Per cache file, bumped each time that file is quarantined and recreated, so callers can tell the on-disk index file they are using was replaced.
+/// Keyed by the caller's `db_path`: a heal of one cache says nothing about another.
+/// The shipped binary opens one cache per process, but the crate's tests open one per test in a shared process, and a process-wide counter made a sibling test's heal withhold an unrelated reindex's completion marker.
+static CACHE_EPOCHS: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(crate) fn current_epoch() -> u64 {
-    CACHE_EPOCH.load(Ordering::Acquire)
+pub(crate) fn current_epoch(db_path: &Path) -> u64 {
+    CACHE_EPOCHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(db_path)
+        .copied()
+        .unwrap_or(0)
 }
 
-/// A snapshot of the [`CACHE_EPOCH`], used to detect whether the cache was quarantined and recreated between two points in this process.
-pub(crate) struct CacheEpoch(u64);
+/// Process-wide count of heals, for sites that reset on "any cache healed" and carry no cache path (the log budgets in `db`).
+static HEAL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn heal_generation() -> u64 {
+    HEAL_GENERATION.load(Ordering::Acquire)
+}
+
+fn bump_epoch(db_path: &Path) {
+    *CACHE_EPOCHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(db_path.to_path_buf())
+        .or_insert(0) += 1;
+    HEAL_GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// A snapshot of one cache file's epoch, used to detect whether that file was quarantined and recreated between two points in this process.
+pub(crate) struct CacheEpoch {
+    db_path: PathBuf,
+    seen: u64,
+}
 
 impl CacheEpoch {
-    pub(crate) fn now() -> Self {
-        Self(CACHE_EPOCH.load(Ordering::Acquire))
+    pub(crate) fn now(db_path: &Path) -> Self {
+        Self {
+            db_path: db_path.to_path_buf(),
+            seen: current_epoch(db_path),
+        }
     }
 
     pub(crate) fn changed(&self) -> bool {
-        CACHE_EPOCH.load(Ordering::Acquire) != self.0
+        current_epoch(&self.db_path) != self.seen
     }
 }
 
@@ -157,7 +188,7 @@ pub(crate) fn heal_unusable(
         return;
     }
 
-    CACHE_EPOCH.fetch_add(1, Ordering::Release);
+    bump_epoch(db_path);
     tracing::warn!(
         db_path = %effective.display(),
         quarantine = %quarantine

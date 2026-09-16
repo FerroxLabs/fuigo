@@ -834,17 +834,33 @@ mod tests {
         assert!(taken.is_none());
     }
 
-    /// Spawn a long-sleeping child to stand in for a predecessor process.
+    /// Spawn a long-sleeping child to stand in for a predecessor process, and wait until `/proc/<pid>/cmdline` names it.
+    ///
+    /// `spawn()` returns before the new image publishes its argv: the parent resumes at the exec's `mm` switch (`CLONE_VFORK`),
+    /// and `cmdline` reads empty until the ELF loader has laid out the new stack.
+    /// A real predecessor wrote its pidfile long after that, so the takeover never sees the window; this fixture would, whenever the
+    /// child was descheduled inside it, and `PredecessorTarget::open` then declined a predecessor it could not name.
     #[cfg(target_os = "linux")]
     #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
     fn spawn_predecessor() -> Child {
-        Command::new("sleep")
+        let child = Command::new("sleep")
             .arg("300")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn sleep")
+            .expect("spawn sleep");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_name_matches(child.id(), "sleep") {
+            assert!(
+                Instant::now() < deadline,
+                "predecessor pid {} never published its argv: {:?}",
+                child.id(),
+                fs::read(format!("/proc/{}/cmdline", child.id()))
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        child
     }
 
     /// Wait (bounded) for a child to exit; returns true if it did.
@@ -858,6 +874,25 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// Every takeover test reads the stand-in's identity from `/proc/<pid>/cmdline` within microseconds of spawning it.
+    /// The fixture must hand back a child that is already identifiable, or the takeover declines a predecessor it cannot name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawned_predecessor_is_identifiable_at_once() {
+        // Many spawns: the argv publication window is tens of microseconds, so one spawn rarely lands inside it
+        for n in 0..32 {
+            let mut child = spawn_predecessor();
+            let cmdline = fs::read(format!("/proc/{}/cmdline", child.id()));
+            let target = PredecessorTarget::open(child.id(), "sleep");
+            child.kill().expect("cleanup kill");
+            let _ = child.wait();
+            assert!(
+                target.is_some(),
+                "spawn {n}: the predecessor must be identifiable as soon as the fixture returns; cmdline was {cmdline:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -996,7 +1031,12 @@ mod tests {
 
         assert!(
             wait_for_exit(&mut child, Duration::from_secs(2)),
-            "the predecessor must be terminated"
+            "the predecessor must be terminated (takeover {})",
+            if taken.is_some() {
+                "won the lock"
+            } else {
+                "declined: it never identified the predecessor"
+            }
         );
         assert!(taken.is_some());
         assert_eq!(

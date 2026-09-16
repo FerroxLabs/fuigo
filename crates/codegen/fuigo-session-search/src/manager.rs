@@ -245,7 +245,8 @@ pub async fn execute_search(
 
     manager.bootstrap_once(root_dir.to_path_buf());
 
-    let epoch = recovery::CacheEpoch::now();
+    let db_path = search_db_path(root_dir);
+    let epoch = recovery::CacheEpoch::now(&db_path);
     let deadline = tokio::time::Instant::now() + BOOTSTRAP_WAIT_TIMEOUT;
     while manager.progress.is_bootstrapping() {
         if tokio::time::Instant::now() >= deadline {
@@ -253,7 +254,6 @@ pub async fn execute_search(
         }
         tokio::time::sleep(BOOTSTRAP_POLL_INTERVAL).await;
     }
-    let db_path = search_db_path(root_dir);
     let cwd = req.cwd.clone();
     let limit = req.limit;
     let offset = req.offset;
