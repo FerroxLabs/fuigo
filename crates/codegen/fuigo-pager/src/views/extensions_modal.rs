@@ -6993,6 +6993,43 @@ mod tests {
         );
     }
 
+    /// A `ModalMessage::Confirmation` is painted, not only stored: the remaining confirmation
+    /// tests assert state, and the render-level pin left with the removed connectors-URL test.
+    #[test]
+    fn confirmation_overlay_paints_its_message_over_the_mcp_tab() {
+        use crate::views::mcps_modal::McpWireSource;
+
+        let servers = vec![
+            make_mcp_server_for_rows("fuigo_com_linear", McpWireSource::Managed, vec![]),
+            make_mcp_server_for_rows("local-grafana", McpWireSource::Local, vec![]),
+        ];
+        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        state.mcps_data = TabDataState::Loaded(servers);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut open_buf = Buffer::empty(area);
+        render_extensions_modal(&mut open_buf, area, &mut state, None, false, 0);
+        assert_eq!(
+            buffer_count(&open_buf, "Remove MCP server \"local-grafana\"?"),
+            0,
+            "no confirmation painted before one is pending"
+        );
+
+        state.modal_message = Some(ModalMessage::Confirmation {
+            message: "Remove MCP server \"local-grafana\"?".into(),
+            action: ConfirmationAction::DeleteMcpServer {
+                server_name: "local-grafana".into(),
+            },
+            pending_entry_index: Some(0),
+        });
+        let mut confirm_buf = Buffer::empty(area);
+        render_extensions_modal(&mut confirm_buf, area, &mut state, None, false, 0);
+        assert_eq!(
+            buffer_count(&confirm_buf, "Remove MCP server \"local-grafana\"?"),
+            1,
+            "confirmation message must be painted exactly once"
+        );
+    }
+
     #[test]
     fn first_selectable_index_skips_headers() {
         // Generic list with a non-selectable first row, then two selectable rows.
