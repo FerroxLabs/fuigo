@@ -3558,7 +3558,7 @@ mod wait_interrupt_tests {
     /// waits (and is therefore interruptible) unless `timeout_ms` is an explicit `0`,
     /// which is the non-blocking snapshot. Omitting `timeout_ms` blocks by default.
     #[test]
-    fn interruptible_wait_tool_only_when_timeout_positive() {
+    fn interruptible_wait_tool_unless_timeout_is_explicit_zero() {
         assert!(is_interruptible_wait_tool(
             "get_command_or_subagent_output",
             &serde_json::json!({"task_ids": ["t"], "timeout_ms": 120_000})

@@ -726,9 +726,15 @@ impl SessionActor {
                         output: self.tool_context.task_output_token_budget.as_ref().and_then(|budget| budget.remaining()),
                     }
                 };
+                // `max_tool_rounds` is the durable mirror of `--max-turns`, so it carries the SAME
+                // number: the loop spends the flag as N executable tool rounds and then stops with
+                // `MaxTurnsReached` (`next_turn > limit`, below). `Snapshot::tool_rounds` and the
+                // loop's `tool_turn_count` step together, so a mirror of N-1 refuses the last round
+                // the user paid for - at `--max-turns 1`, every round. `max_turns_bound_tests` pins
+                // both halves.
                 Some(crate::session::execution_state::Execution::open(
                     &self.notifications.persistence_tx, &self.session_info.id.to_string(), &root_id, prompt_id,
-                    max_calls, deadline_ms, self.max_turns.map(|limit| limit.saturating_sub(1) as u64), limits,
+                    max_calls, deadline_ms, self.max_turns.map(|limit| limit as u64), limits,
                     self.startup_hints.execution_parent_grant.clone(),
                 ).await.map_err(|_| acp::Error::internal_error().data("Execution state could not be made durable"))?)
             }
@@ -2599,13 +2605,23 @@ impl SessionActor {
                     let receipt = execution.terminal(false).await.map_err(|_| acp::Error::internal_error().data("Execution terminal receipt unavailable"))?;
                     return Err(acp::Error::internal_error().data(serde_json::to_value(receipt).unwrap_or_default()));
                 }
+                // `--max-turns` is deliberately NOT one of these. Every bound listed here is an
+                // internal budget (call, deadline, token, durable tool-round), and finalizing on
+                // one produces a receipt marked `partial`, which `handle_turn_input` turns into an
+                // `-32603` carrying that receipt. `--max-turns` is a user-facing flag with a stop
+                // of its own - the end-of-round `next_turn > limit` below returns
+                // `TurnOutcome::MaxTurnsReached`, which headless reports as `error_max_turns` via
+                // `MAX_TURNS_REACHED_CATEGORY`. Finalizing on it (added in `a7a17ff`) took the
+                // last round away from the user AND made that documented stop unreachable: the
+                // reserved slot ended the run either as `-32603` + partial receipt (model answered)
+                // or as `-32603 Tool call rejected during finalization` (model acted). The durable
+                // `max_tool_rounds` mirror still bounds the rounds, so nothing is unbounded here.
                 let finalizing = state.phase == crate::session::execution_state::Phase::Finalizing
                     || state.calls >= state.max_calls.saturating_sub(1)
                     || state.max_tool_rounds.is_some_and(|limit| state.tool_rounds >= limit)
                     || state.limits.total.is_some_and(|limit| state.total_tokens >= limit)
                     || state.limits.output.is_some_and(|limit| state.output_tokens >= limit)
                     || (state.unknown_usage && (state.limits.total.is_some() || state.limits.output.is_some()))
-                    || self.max_turns.is_some_and(|limit| tool_turn_count >= limit)
                     || fuigo_sampler::execution_budget::process_budget().ok().flatten().is_some_and(|b| b.working_capacity_exhausted());
                 if finalizing || finalize_recall {
                     let finalized = if finalize_recall && !finalizing {
