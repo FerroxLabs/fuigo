@@ -552,7 +552,12 @@ fn pin_exists(source: &Path, worktree_id: &str) -> Result<bool> {
 /// Delete exactly `refs/fuigo/worktrees/<id>` in `source`. Nothing else is ever
 /// a delete target, which is what keeps a planted `pin_ref` in the orphan sidecar
 /// from turning pin GC into a branch deleter.
-fn delete_pin_ref_gated(source: &Path, worktree_id: &str) -> Result<()> {
+///
+/// `git update-ref -d` on an absent ref exits 0, so a retried delete (pin GC's
+/// next cycle, or a second `rm` after a partial failure) is a no-op rather than
+/// an error. Shared with `nfs::remove` so the daemon-down `rm` path deletes pins
+/// through this same gate instead of growing a weaker sibling of it.
+pub(super) fn delete_pin_ref_gated(source: &Path, worktree_id: &str) -> Result<()> {
     let pin = pin_ref_for(worktree_id)?;
     let out = crate::git::checkout::git_command()
         .current_dir(source)
@@ -602,8 +607,8 @@ pub fn identities_from_worktree_records(recs: &[crate::db::WorktreeRecord]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+    use tempfile::TempDir;
     fn git_rev_parse(repo: &Path, rev: &str) -> String {
         let mut cmd = std::process::Command::new("git");
         fuigo_tty_utils::detach_std_command(&mut cmd);
