@@ -2997,7 +2997,8 @@ mod tests {
             String::from_utf8_lossy(&child.stderr),
         );
         assert_eq!(
-            reported, "arm_calls=1",
+            reported,
+            "arm_calls=1",
             "the stdio leader bridge must call \
              fuigo_tty_utils::kill_current_process_on_parent_death exactly once; \
              child stdout: {}; stderr: {}",
