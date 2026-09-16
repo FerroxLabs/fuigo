@@ -20,6 +20,11 @@ on:
       # with the gate never running.
       - 'Cargo.toml'
       - 'crates/codegen/fuigo-shell/Cargo.toml'
+      # The cache-bypass gate added for 1.0.18 runs fuigo-sampler's integration test, which builds
+      # through fuigo-test-support's TestSandbox. Neither was watched here, so the step could break
+      # with the gate never running -- the gap C-R6-3 closed for the manifests, in the step after it.
+      - 'crates/codegen/fuigo-sampler/**'
+      - 'crates/codegen/fuigo-test-support/**'
       - '.github/workflows/windows-process-check.yml'
   pull_request:
     paths:
@@ -37,6 +42,11 @@ on:
       # with the gate never running.
       - 'Cargo.toml'
       - 'crates/codegen/fuigo-shell/Cargo.toml'
+      # The cache-bypass gate added for 1.0.18 runs fuigo-sampler's integration test, which builds
+      # through fuigo-test-support's TestSandbox. Neither was watched here, so the step could break
+      # with the gate never running -- the gap C-R6-3 closed for the manifests, in the step after it.
+      - 'crates/codegen/fuigo-sampler/**'
+      - 'crates/codegen/fuigo-test-support/**'
       - '.github/workflows/windows-process-check.yml'
   workflow_dispatch:
 permissions:
