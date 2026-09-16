@@ -490,7 +490,6 @@ pub(super) fn dispatch_open_extensions_modal(
     // Mutual exclusivity: close agents modal when opening extensions.
     agent.agents_modal = None;
     let mut modal = ExtensionsModalState::new(tab);
-    modal.session_team_id = app.team_id.clone();
     agent.extensions_modal = Some(modal);
     log_event(fuigo_telemetry::events::ExtensionsModalOpened {
         trigger,

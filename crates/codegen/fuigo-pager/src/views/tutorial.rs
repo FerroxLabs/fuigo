@@ -480,7 +480,6 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
                 badge: if viewed { "\u{2713}" } else { "" },
                 badge_color: Some(theme.accent_success),
                 collapsible: false,
-                underline_last_desc: false,
             })
         })
         .collect();

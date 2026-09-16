@@ -351,7 +351,6 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
                 // Seed the MCP data from the read we already have (no flash)
                 // Emit the same tab fetches as a manual open so no other tab is left stuck Loading; the modal then owns the auth UX
                 let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
-                modal.session_team_id = app.team_id.clone();
                 seed_mcps_section_collapse_for_cta(
                     &mut modal.mcps_collapsed_sections,
                     &mut modal.mcps_section_collapse_initialized,
