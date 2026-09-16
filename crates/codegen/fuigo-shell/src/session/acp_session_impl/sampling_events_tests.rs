@@ -1333,6 +1333,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                     prompt_tokens: Some(128),
                     model: "fuigo-test".to_string(),
                     first_choice_seen: true,
+                    attempts: None,
                 }),
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,

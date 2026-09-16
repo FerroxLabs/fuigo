@@ -58,7 +58,7 @@ pub(crate) async fn handle(
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {
     let req: WorkspacesListRequest = serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
 
     let q = WsQuery {
         // A missing, zero, or negative `pageSize` falls back to the default instead of being forwarded verbatim to `/rest/workspaces`
@@ -83,7 +83,7 @@ pub(crate) async fn handle(
 
     ExtMethodResult::success(response)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn success_response(page: ListWorkspacesPage) -> WorkspacesListResponse {

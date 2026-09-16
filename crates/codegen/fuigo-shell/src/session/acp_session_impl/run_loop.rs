@@ -178,6 +178,36 @@ async fn shutdown_workflows(session: &SessionActor, timer: &SharedSessionEndTime
         Err(_) => tracing::warn!("workflow shutdown persistence flush timed out"),
     }
 }
+/// Deliver the `retry_state` mirrors queued after the loop left its select.
+///
+/// The session-end writes (`turn_end_queue.flush()`, the memory pipeline, `shutdown_workflows`'
+/// persistence flush, `turn_end_queue.drain()`) all run inside a teardown arm, so a disk-full they
+/// raise is queued on `event_rx` with nothing left to poll it: returning dropped the receiver and
+/// the notice died there. `PersistenceActor::mark_disk_full` latches per episode, so it is never
+/// re-emitted. The `_fuigo` rail goes straight to the gateway and was never affected; this is the
+/// only rail a stock ACP client reads.
+///
+/// Only the mirror is delivered. Every other queued event wants a loop that is already gone, and
+/// all of them were dropped on this path before this drain existed too.
+///
+/// The alternative -- sending the teardown mirror straight to the gateway, as it did before it was
+/// queued -- was rejected: the persistence actor sees only a failed write and cannot tell teardown
+/// from a live turn, so that direct send would have to come back for every disk-full, re-opening
+/// the ordering the queued mirror closed for answer text still inside the merge window.
+///
+/// Best effort at one point in time, not a barrier: a mirror the persistence actor queues after
+/// this returns is still lost. The window is now that actor's processing lag, not all of teardown.
+async fn deliver_queued_retry_status_mirrors(
+    session: &SessionActor,
+    event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    replay_buffer: &mut ReplayBuffer,
+) {
+    while let Ok(event) = event_rx.try_recv() {
+        if matches!(event, SessionEvent::RetryStatusMirror(_)) {
+            session.handle_session_event(event, replay_buffer).await;
+        }
+    }
+}
 async fn log_session_ended(session: &SessionActor) {
     let model_id = session.current_model_id().await;
     if let Some(signals) = session.signals_handle().snapshot().await {
@@ -485,30 +515,7 @@ pub(super) async fn run_session(
                 }
                 maybe_event = event_rx.recv() => {
                     if let Some(event) = maybe_event {
-                        match event {
-                            SessionEvent::Notification(notification) => {
-                                let out = replay_buffer.consume_chunk(notification);
-                                match out {
-                                    None => {}
-                                    Some((first, second)) => {
-                                        session.emit_buffered(first).await;
-                                        if let Some(second) = second {
-                                            session.emit_buffered(second).await;
-                                        }
-                                    }
-                                }
-                            }
-                            SessionEvent::FlushReplay { respond_to } => {
-                                if let Some(notification) = replay_buffer.flush() {
-                                    session.emit_buffered(notification).await;
-                                }
-
-                                // Always ack (independent of whether anything was buffered).
-                                if let Some(tx) = respond_to {
-                                    let _ = tx.send(());
-                                }
-                            }
-                        }
+                        session.handle_session_event(event, &mut replay_buffer).await;
                     }
                 }
                 maybe_cmd = cmd_rx.recv() => {
@@ -534,6 +541,12 @@ pub(super) async fn run_session(
                         finish_session_exit_feedback(&session, &end_timer).await;
                         emit_session_end_timings(&end_timer, session.startup_hints.is_subagent)
                             .await;
+                        deliver_queued_retry_status_mirrors(
+                            &session,
+                            &mut event_rx,
+                            &mut replay_buffer,
+                        )
+                        .await;
                         return;
                     };
 
@@ -1096,8 +1109,7 @@ pub(super) async fn run_session(
                                     let _ = respond_to.send(Ok(did_flush));
                                 } else {
                                     let _ = respond_to.send(Err(
-                                        acp::Error::invalid_request()
-                                            .data("memory is not enabled for this session".to_string())
+                                        crate::acp_error::invalid_request("memory is not enabled for this session".to_string())
                                     ));
                                 }
                             });
@@ -1408,8 +1420,7 @@ pub(super) async fn run_session(
                                         continue;
                                     }
                                     drop(mcp_state);
-                                    let _ = respond_to.send(Err(acp::Error::invalid_params()
-                                        .data(format!("server '{}' not found in config", server_name))));
+                                    let _ = respond_to.send(Err(crate::acp_error::invalid_params(format!("server '{}' not found in config", server_name))));
                                     continue;
                                 }
                             } else {
@@ -2151,6 +2162,12 @@ pub(super) async fn run_session(
                             finish_session_exit_feedback(&session, &end_timer).await;
                             emit_session_end_timings(&end_timer, session.startup_hints.is_subagent)
                                 .await;
+                            deliver_queued_retry_status_mirrors(
+                                &session,
+                                &mut event_rx,
+                                &mut replay_buffer,
+                            )
+                            .await;
                             return;
                         }
                     }
@@ -2177,6 +2194,12 @@ pub(super) async fn run_session(
                         finish_session_exit_feedback(&session, &end_timer).await;
                         emit_session_end_timings(&end_timer, session.startup_hints.is_subagent)
                             .await;
+                        deliver_queued_retry_status_mirrors(
+                            &session,
+                            &mut event_rx,
+                            &mut replay_buffer,
+                        )
+                        .await;
                         return;
                     };
                     // Flush any buffered turn deltas before `handle_completion` emits the durable `TurnCompleted`

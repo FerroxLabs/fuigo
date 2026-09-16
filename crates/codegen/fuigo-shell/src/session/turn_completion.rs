@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_complete_payload_stamps_error_kind_for_truncation_only() {
+    fn prompt_complete_payload_stamps_the_typed_error_kind() {
         use agent_client_protocol as acp;
 
         let sid = acp::SessionId::new("s1".to_string());
@@ -214,5 +214,33 @@ mod tests {
         let payload = prompt_complete_payload(&sid, "p3", &generic);
         assert_eq!(payload["stopReason"], "error");
         assert!(payload.get("errorKind").is_none());
+    }
+
+    /// `errorKind` is stamped for every typed failure, not only truncation.
+    /// A turn that died on an idle timeout reports `idle_timeout` on `prompt_complete` and on the durable `TurnCompleted`.
+    #[test]
+    fn prompt_complete_and_turn_completed_carry_a_non_truncation_error_kind() {
+        use agent_client_protocol as acp;
+
+        let sid = acp::SessionId::new("s1".to_string());
+        let result: std::result::Result<acp::StopReason, acp::Error> =
+            Err(crate::sampling::error::map_sampling_err_to_acp(
+                crate::sampling::error::SamplingError::IdleTimeout { elapsed_secs: 90 },
+            ));
+        let payload = prompt_complete_payload(&sid, "p4", &result);
+        assert_eq!(payload["stopReason"], "error");
+        assert_eq!(payload["errorKind"], "idle_timeout", "{payload}");
+
+        let (stop, agent_result, error_kind) =
+            crate::sampling::error::prompt_complete_fields(&result);
+        let update =
+            build_turn_completed("p4".into(), stop, agent_result, error_kind, None, Some(1));
+        assert!(
+            matches!(
+                &update,
+                SessionUpdate::TurnCompleted { error_kind: Some(k), .. } if k == "idle_timeout"
+            ),
+            "{update:?}"
+        );
     }
 }

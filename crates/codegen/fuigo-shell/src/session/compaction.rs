@@ -149,7 +149,7 @@ impl SessionActor {
         let client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "two_pass: failed to prepare sampling client");
+                tracing::warn!(error = %crate::sampling::error::acp_error_text(&e), "two_pass: failed to prepare sampling client");
                 return None;
             }
         };
@@ -588,7 +588,7 @@ impl SessionActor {
         {
             let span = tracing::Span::current();
             span.record("success", false);
-            span.record("error", e.to_string().as_str());
+            span.record("error", crate::sampling::error::acp_error_text(&e).as_str());
             let kind = crate::session::helpers::session_compact::compact_error_kind(&e)
                 .unwrap_or(crate::session::helpers::session_compact::CompactErrorKind::Failed);
             let detail =
@@ -979,7 +979,7 @@ impl SessionActor {
         let retry_delay_secs = 3u64;
         let (compaction_epoch, prompt_index_at_compaction, full_conversation) = self
             .chat_state_handle.compaction_snapshot().await
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            .map_err(|e| crate::acp_error::compaction(e.to_string()))?;
         let conv_len = full_conversation.len();
         let system_message = full_conversation.iter().find_map(|item| match item {
             ConversationItem::System(_) => Some(item.clone()),
@@ -1012,7 +1012,7 @@ impl SessionActor {
                 session_id = %self.session_info.id.0,
                 "Compaction failed: conversation is empty (ChatStateActor may have died)"
             );
-            return Err(acp::Error::internal_error().data(format!(
+            return Err(crate::acp_error::compaction(format!(
                 "{COMPACTION_FAILED_GUARD_PREFIX}conversation is empty"
             )));
         }
@@ -1024,7 +1024,7 @@ impl SessionActor {
                     conversation_len = conv_len,
                     "Compaction failed: no system message in conversation history"
                 );
-                return Err(acp::Error::internal_error().data(format!(
+                return Err(crate::acp_error::compaction(format!(
                     "{COMPACTION_FAILED_GUARD_PREFIX}no system message in conversation history"
                 )));
             }
@@ -1035,7 +1035,7 @@ impl SessionActor {
                 conversation_len = conv_len,
                 "Compaction failed: simplified conversation is empty"
             );
-            return Err(acp::Error::internal_error().data(format!(
+            return Err(crate::acp_error::compaction(format!(
                 "{COMPACTION_FAILED_GUARD_PREFIX}simplified conversation is empty"
             )));
         }
@@ -1049,7 +1049,7 @@ impl SessionActor {
                 simplified_len = simplified_messages.len(),
                 "Compaction failed: no system message in simplified conversation"
             );
-            return Err(acp::Error::internal_error().data(format!(
+            return Err(crate::acp_error::compaction(format!(
                 "{COMPACTION_FAILED_GUARD_PREFIX}no system message in simplified conversation"
             )));
         }
@@ -1156,10 +1156,9 @@ impl SessionActor {
                     break;
                 }
                 Err(fuigo_compaction::FullReplaceError::NothingToCompact) => {
-                    last_error = Some(
-                        acp::Error::internal_error()
-                            .data(format!("{COMPACT_FAILED_PREFIX}nothing to compact")),
-                    );
+                    last_error = Some(crate::acp_error::compaction(format!(
+                        "{COMPACT_FAILED_PREFIX}nothing to compact"
+                    )));
                     break;
                 }
                 Err(fuigo_compaction::FullReplaceError::EmptyResponse) => {
@@ -1168,7 +1167,7 @@ impl SessionActor {
                     } else {
                         CompactionOutcome::Transient
                     };
-                    last_error = Some(acp::Error::internal_error().data(
+                    last_error = Some(crate::acp_error::compaction(
                         observer.last_error_message().unwrap_or_else(|| {
                             format!("{COMPACT_FAILED_PREFIX}model returned empty response")
                         }),
@@ -1253,7 +1252,7 @@ impl SessionActor {
                             )
                             .await;
                         }
-                        last_error = Some(acp::Error::internal_error().data(message));
+                        last_error = Some(crate::acp_error::compaction(message));
                         break;
                     }
                     if deterministic {
@@ -1268,11 +1267,11 @@ impl SessionActor {
                             )
                             .await;
                         }
-                        last_error = Some(acp::Error::internal_error().data(message));
+                        last_error = Some(crate::acp_error::compaction(message));
                         break;
                     }
                     last_failure_outcome = CompactionOutcome::Transient;
-                    last_error = Some(acp::Error::internal_error().data(message));
+                    last_error = Some(crate::acp_error::compaction(message));
                     break;
                 }
             }
@@ -1325,7 +1324,7 @@ impl SessionActor {
                 );
                 span.record("compaction_outcome", last_failure_outcome.as_str());
                 return Err(last_error.unwrap_or_else(|| {
-                    acp::Error::internal_error().data("compaction failed: unknown error")
+                    crate::acp_error::compaction("compaction failed: unknown error")
                 }));
             }
         };
@@ -2096,7 +2095,7 @@ impl SessionActor {
             trigger_info.percentage,
         );
         if let Err(e) = self.run_compact_only(trigger_info, false).await {
-            tracing::error!(error = %e, "Model-switch compaction failed");
+            tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Model-switch compaction failed");
             if Self::is_auth_compact_error(&e) {
                 return Err(self.surface_compact_auth_failure(e).await);
             }
@@ -2188,15 +2187,15 @@ impl SessionActor {
             Err(e) => {
                 let span = tracing::Span::current();
                 span.record("success", false);
-                span.record("error", e.to_string().as_str());
+                span.record("error", crate::sampling::error::acp_error_text(&e).as_str());
+                // Every compaction error carries object `data` with the typed `kind` discriminator
+                // (`compact_error_data`), so the discriminator above is the whole test. The old
+                // text match on a bare-string `data` had nothing left to read.
                 let cancelled = self.compaction.cancel.is_cancelled()
                     || matches!(
                         crate::session::helpers::session_compact::compact_error_kind(&e),
                         Some(crate::session::helpers::session_compact::CompactErrorKind::Cancelled)
-                    )
-                    || e.data.as_ref().and_then(|d| d.as_str()).is_some_and(|s| {
-                        s.contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
-                    });
+                    );
                 if !cancelled && !self.compaction.is_suppressed() {
                     self.send_fuigo_notification(FuigoSessionUpdate::AutoCompactFailed {
                         error: Self::failure_with_retry_guidance(
@@ -2245,13 +2244,7 @@ impl SessionActor {
         } else {
             "detailed"
         };
-        let error_str = error.map(|e| {
-            e.data
-                .as_ref()
-                .and_then(|d| d.as_str())
-                .unwrap_or("<no error data>")
-                .to_owned()
-        });
+        let error_str = error.map(compaction_artifact_error_text);
         let artifact = CompactionRequestFile {
             schema_version: 2,
             request_id,
@@ -2333,7 +2326,7 @@ impl SessionActor {
                 checkpoint: file_data, activation, cancel: persist_cancel, respond_to,
             }).map_err(|_| CompactionCommitError::NotCommitted(std::io::Error::other("compaction persistence actor stopped")))?;
             ack.await.map_err(|_| CompactionCommitError::NotCommitted(std::io::Error::other("compaction persistence acknowledgement lost")))?
-        }).await.map_err(|e| acp::Error::internal_error().data(format!("compaction commit failed: {e}")))?;
+        }).await.map_err(|e| crate::acp_error::compaction(format!("compaction commit failed: {e}")))?;
         tracing::info!(
             prompt_index_at_compaction,
             "Persisted compaction checkpoint"
@@ -2341,6 +2334,53 @@ impl SessionActor {
         Ok(())
     }
 }
+/// The failure text stored in a compaction request artifact.
+/// The artifact used to copy `data` verbatim, which only ever worked while `data` was a bare string;
+/// every compaction error now carries the object, so it reads the object's `message` like the rest of
+/// the shell does (`acp_error_text`) instead of recording `<no error data>` for every failure.
+fn compaction_artifact_error_text(error: &acp::Error) -> String {
+    crate::sampling::error::acp_error_message(error)
+}
+
+#[cfg(test)]
+mod artifact_error_text_tests {
+    use super::compaction_artifact_error_text;
+    use crate::session::helpers::session_compact::{
+        COMPACT_CANCELLED_MSG, CompactErrorKind, compact_error_data, compact_error_kind,
+    };
+    use agent_client_protocol as acp;
+
+    /// The offline artifact is the only record of why a compaction failed, so it must carry the reason.
+    #[test]
+    fn the_artifact_records_the_failure_message_not_a_placeholder() {
+        let err = acp::Error::internal_error().data(compact_error_data(
+            CompactErrorKind::Failed,
+            "upstream refused the summary request",
+        ));
+        assert_eq!(
+            compaction_artifact_error_text(&err),
+            "upstream refused the summary request"
+        );
+    }
+
+    /// The auto-compaction cancel check reads the typed discriminator alone. Its old third arm matched
+    /// the cancel phrase inside a bare-string `data`, a shape no compaction error has any more.
+    #[test]
+    fn a_cancelled_compaction_is_recognised_from_typed_data_alone() {
+        let err = crate::session::helpers::session_compact::CompactFailure::cancelled_error();
+        assert!(
+            err.data.as_ref().is_some_and(|d| d.is_object()),
+            "compaction `data` is an object, so a string match on it is dead: {err:?}"
+        );
+        assert_eq!(
+            compact_error_kind(&err),
+            Some(CompactErrorKind::Cancelled),
+            "{err:?}"
+        );
+        assert_eq!(compaction_artifact_error_text(&err), COMPACT_CANCELLED_MSG);
+    }
+}
+
 #[cfg(test)]
 #[path = "compaction_inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;

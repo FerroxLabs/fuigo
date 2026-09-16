@@ -176,7 +176,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             }
             super::to_ext_response(Ok::<_, anyhow::Error>(serde_json::json!({ "ok": true })))
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

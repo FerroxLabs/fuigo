@@ -1421,7 +1421,10 @@ pub(crate) async fn run_shell_child(
     let (child_handle, mut permission_rx, _system_prompt, child_thread) = match spawn_result {
         Ok(r) => r,
         Err(e) => {
-            let msg = format!("Failed to spawn child session: {e}");
+            let msg = format!(
+                "Failed to spawn child session: {}",
+                crate::sampling::error::acp_error_text(&e)
+            );
             let result = fail_subagent(
                 &msg,
                 &subagent_id,

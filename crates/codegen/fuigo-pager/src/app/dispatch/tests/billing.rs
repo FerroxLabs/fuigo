@@ -1288,6 +1288,7 @@ fn free_usage_failure_opens_paywall_modal() {
                          subscription:free-usage-exhausted: You have used all your free usage."
                     .into(),
                 is_rate_limited: true,
+                error_type: None,
             }),
             &mut agent.session,
             &mut agent.scrollback,

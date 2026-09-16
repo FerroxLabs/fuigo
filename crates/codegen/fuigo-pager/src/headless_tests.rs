@@ -879,6 +879,42 @@ impl CapturedOut {
     }
 }
 
+/// A failed turn whose `error.data` is the shell's typed object reports its `message`, never the object as JSON.
+#[test]
+fn a_typed_prompt_error_reports_its_message_not_raw_json() {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Json,
+        true,
+        Box::new(captured.clone()),
+    );
+    let wire_error = acp::Error::internal_error().data(serde_json::json!({
+        "message": "empty response from model (reasoning_only)",
+        "error_kind": "empty_response",
+    }));
+    let err = super::finish_turn(
+        &mut emitter,
+        Some(Err(wire_error)),
+        false,
+        None,
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect_err("a failed turn exits non-zero");
+    assert_eq!(
+        err.to_string(),
+        "Internal error: empty response from model (reasoning_only)"
+    );
+    let out = captured.text();
+    let doc: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {out}"));
+    assert_eq!(doc["type"], "error");
+    assert_eq!(
+        doc["message"],
+        "Internal error: empty response from model (reasoning_only)"
+    );
+}
+
 /// Drive `finish_turn` through the hard cap with a turn that already answered, capturing stdout.
 fn capped_run_output(format: super::OutputFormat) -> String {
     let captured = CapturedOut::default();
@@ -1086,5 +1122,61 @@ fn the_lifecycle_cap_has_an_escape_hatch() {
         super::RunDeadline::start(None).budget(super::parse_lifecycle_timeout_env(Some("0"))),
         None,
         "with the hatch open and no --timeout, the startup sends are unbounded again"
+    );
+}
+
+/// A retry-status mirror chunk (`_meta["fuigo/retryStatus"]`, a live `agent_thought_chunk`) is progress for stock ACP clients.
+/// It is neither part of the headless answer nor of its reported thought.
+#[test]
+fn retry_status_mirror_chunk_is_not_part_of_the_answer() {
+    use agent_client_protocol as acp;
+    let notification = |update: acp::SessionUpdate| {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        fuigo_acp_lib::AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs {
+            request: acp::SessionNotification::new(acp::SessionId::new("s"), update),
+            response_tx: tx,
+        })
+    };
+    let content = |text: &str, meta: Option<serde_json::Map<String, serde_json::Value>>| {
+        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        )))
+        .meta(meta)
+    };
+    let mut tagged = serde_json::Map::new();
+    tagged.insert(
+        "fuigo/retryStatus".into(),
+        serde_json::json!({"type": "failed", "error_type": "empty_response", "message": "x"}),
+    );
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let mut pending = std::collections::HashSet::new();
+    let mut completed = std::collections::HashSet::new();
+    let mut ttf_logged = false;
+    for msg in [
+        notification(acp::SessionUpdate::AgentThoughtChunk(content(
+            "Retrying the model (1/2): x\n\n",
+            Some(tagged),
+        ))),
+        notification(acp::SessionUpdate::AgentThoughtChunk(content(
+            "thinking", None,
+        ))),
+        notification(acp::SessionUpdate::AgentMessageChunk(content(
+            "Hello", None,
+        ))),
+    ] {
+        super::handle_headless_acp_message(
+            msg.boxed(),
+            &mut emitter,
+            std::time::Instant::now(),
+            &mut ttf_logged,
+            false,
+            &mut pending,
+            &mut completed,
+        );
+    }
+    assert_eq!(emitter.text_buffer, "Hello");
+    assert_eq!(
+        emitter.thought_buffer, "thinking",
+        "only the model's own reasoning is reported as thought"
     );
 }

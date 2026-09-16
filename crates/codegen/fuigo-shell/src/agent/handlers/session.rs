@@ -35,7 +35,7 @@ pub(crate) async fn handle(
         m if m.starts_with("fuigo/session_summaries/") => {
             handle_session_summaries(agent, args).await
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -49,7 +49,7 @@ async fn handle_roster_list(
     let sessions = agent.build_roster().await;
     ExtMethodResult::success(crate::agent::roster::RosterListResponse { sessions })
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -68,7 +68,7 @@ async fn handle_session_info(
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {
     let req: SessionInfoRequest = serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
 
     let session_id = req.session_id.or_else(|| {
         agent
@@ -81,14 +81,14 @@ async fn handle_session_info(
     let Some(session_id) = session_id else {
         return ExtMethodResult::success(serde_json::json!({}))
             .to_ext_response()
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()));
     };
 
     let sid = acp::SessionId::new(session_id.clone());
     let Some(session) = agent.resident_handle(&sid) else {
         return ExtMethodResult::success(serde_json::json!({}))
             .to_ext_response()
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()));
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -130,7 +130,7 @@ async fn handle_session_info(
 
     ExtMethodResult::success(serde_json::to_value(&response).unwrap_or_default())
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 async fn handle_session_close(
@@ -144,7 +144,7 @@ async fn handle_session_close(
     }
 
     let req: CloseRequest = serde_json::from_str(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
 
     let sid = acp::SessionId::new(req.session_id);
     let outcome = agent.close_active_session(&sid).await;
@@ -160,7 +160,7 @@ async fn handle_session_close(
         "outcome": outcome.wire_str(),
     }))
     .to_ext_response()
-    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+    .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 async fn handle_session_summaries(
@@ -169,13 +169,13 @@ async fn handle_session_summaries(
 ) -> Result<acp::ExtResponse, acp::Error> {
     match args.method.as_ref() {
         "fuigo/session_summaries/session_list" => {
-            let req = serde_json::from_str::<SessionListRequest>(args.params.get())?;
+            let req = crate::extensions::parse_params_str::<SessionListRequest>(args.params.get())?;
             let cwd = req.workspace_directory.to_string_lossy().to_string();
 
             let _timer = crate::instrumentation_timer!("session.list_sessions_for_workspace");
 
             let mut summaries = list_summaries(Some(&cwd)).await.map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to list sessions: {e}"))
+                crate::acp_error::session_storage(format!("failed to list sessions: {e}"))
             })?;
             for s in &mut summaries {
                 backfill_session_summary(s);
@@ -192,24 +192,27 @@ async fn handle_session_summaries(
         }
         "fuigo/session_summaries/workspace_list" => {
             tracing::debug!("fuigo/session_summaries/workspace_list is working");
-            let _req = serde_json::from_str::<AllSessionOverviewRequest>(args.params.get())?;
+            let _req = crate::extensions::parse_params_str::<AllSessionOverviewRequest>(
+                args.params.get(),
+            )?;
 
             let _timer = crate::instrumentation_timer!("session.list_sessions_for_load");
 
             let summaries = list_summaries(None).await.map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to list workspaces: {e}"))
+                crate::acp_error::internal_error(format!("failed to list workspaces: {e}"))
             })?;
 
             summaries_to_overview_response(summaries)
         }
         "fuigo/session_summaries/workspace_list_recent" => {
-            let req = serde_json::from_str::<RecentSessionsRequest>(args.params.get())?;
+            let req =
+                crate::extensions::parse_params_str::<RecentSessionsRequest>(args.params.get())?;
 
             let _timer = crate::instrumentation_timer!("session.list_sessions_recent");
 
             let limit = req.limit.min(10_000);
             let mut summaries = list_recent_summaries(limit).await.map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to list workspaces: {e}"))
+                crate::acp_error::internal_error(format!("failed to list workspaces: {e}"))
             })?;
             for s in &mut summaries {
                 backfill_session_summary(s);
@@ -222,7 +225,7 @@ async fn handle_session_summaries(
 
             Ok(acp::ExtResponse::new(value))
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -256,7 +259,7 @@ async fn handle_session_list(
 
     // Under chat mode `parse_list_req` rewrites `kind` to conversations unless `local-workspace` is compiled in and the client sent chat or build
     let req = unified_list::parse_list_req(args.params.get())
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {e}")))?;
     tracing::debug!(
         chat_mode_forced_kind = crate::agent::chat_modes::process_chat_mode_enabled(),
         "session/list"
@@ -273,7 +276,7 @@ async fn handle_session_list(
 
     ExtMethodResult::success(unified_list::ext_list_response(result))
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 /// Build sessions in exactly the requested directory.
@@ -286,7 +289,9 @@ pub(crate) async fn handle_list_sessions(
 
     // Chat mode also withholds the session capabilities at initialize, so refuse the method here to match
     if crate::agent::chat_modes::process_chat_mode_enabled() {
-        return Err(acp::Error::method_not_found());
+        return Err(crate::acp_error::method_not_found(
+            "session/list is not available in chat mode",
+        ));
     }
 
     let additional_directories = args.additional_directories.len();

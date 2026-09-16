@@ -1,4 +1,5 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
+use fuigo_shell::sampling::error::acp_error_text;
 use std::path::Path;
 use agent_client_protocol as acp;
 use tokio::task::JoinSet;
@@ -68,7 +69,7 @@ pub(super) fn log_prompt_result(
             ulog::error(
                 "agent response failed",
                 Some(sid),
-                Some(serde_json::json!({"error": e.to_string()})),
+                Some(serde_json::json!({"error": acp_error_text(e)})),
             )
         }
     }
@@ -113,7 +114,7 @@ pub(super) async fn fetch_plugin_cta_mcps(
                 .map_err(|_| "couldn't load server list".to_string())
         }
         Err(e) => Err(sanitize_user_error(&format!(
-            "couldn't load server list: {e}"
+            "couldn't load server list: {}", acp_error_text(&e)
         ))),
     };
     TaskResult::PluginCtaMcpsLoaded {
@@ -140,13 +141,17 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
     }
     let raw = error_data_detail(err)
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| err.to_string());
+        .unwrap_or_else(|| acp_error_text(err));
     crate::app::error_display::format_request_failure(
             http_status_from_error(err),
             crate::app::error_display::wire_error_kind(error_kind_str_from_error(err)),
             &raw,
         )
         .message()
+}
+/// One-line user text for an `acp::Error` shown outside the request-failure banner (session setup, list and action toasts).
+pub(crate) fn acp_error_user_text(err: &acp::Error) -> String {
+    sanitize_user_error(&acp_error_text(err))
 }
 /// Detail string carried in the error's `data` payload, if any.
 fn error_data_detail(err: &acp::Error) -> Option<String> {
@@ -164,7 +169,7 @@ pub(crate) fn compact_error_message(err: &acp::Error) -> String {
     let raw = if err.data.is_some() {
         error_data_detail(err).unwrap_or_default()
     } else {
-        err.to_string()
+        acp_error_text(err)
     };
     sanitize_user_error(&raw)
 }
@@ -901,7 +906,7 @@ pub(super) async fn send_logout(tx: &AcpAgentTx) {
             .into(),
     );
     if let Err(e) = acp_send(req, tx).await {
-        tracing::warn!(error = %e, "logout failed");
+        tracing::warn!(error = %acp_error_text(&e), "logout failed");
     }
 }
 /// Best-effort `fuigo/auth/cancel`: stops the shell's device/loopback wait so a later login is single-flight.
@@ -917,7 +922,7 @@ pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskR
             .into(),
     );
     if let Err(e) = acp_send(req, tx).await {
-        tracing::debug!(error = %e, "auth cancel ext request failed (ignored)");
+        tracing::debug!(error = %acp_error_text(&e), "auth cancel ext request failed (ignored)");
     }
     TaskResult::AuthCancelComplete
 }
@@ -942,13 +947,13 @@ pub(super) async fn send_check_subscription(
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "check_subscription failed");
+            tracing::warn!(error = %acp_error_text(&e), "check_subscription failed");
             crate::unified_log::warn(
                 "subscription.check.rpc_failed",
                 None,
                 Some(serde_json::json!({
                     "verify": verify,
-                    "error": e.to_string(),
+                    "error": acp_error_text(&e),
                 })),
             );
             TaskResult::CheckSubscriptionComplete {
@@ -982,7 +987,7 @@ pub(super) async fn send_credit_limit_recheck(
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "credit_limit_recheck failed");
+            tracing::warn!(error = %acp_error_text(&e), "credit_limit_recheck failed");
             TaskResult::CreditLimitRecheckComplete {
                 agent_id,
                 meta: None,
@@ -1014,7 +1019,7 @@ pub(super) async fn send_authenticate(
             }
         }
         Err(e) => {
-            let error = sanitize_user_error(&e.to_string());
+            let error = sanitize_user_error(&acp_error_text(&e));
             ulog::error(
                 "auth failed",
                 None,
@@ -1472,7 +1477,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
                 .into(),
         );
         if let Err(e) = acp_send(notification, &tx).await {
-            tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
+            tracing::warn!("Failed to send yolo_mode_changed notification: {}", acp_error_text(&e));
         }
     }
     route_permission_mode_result(disk_outcome, persist, config_str)

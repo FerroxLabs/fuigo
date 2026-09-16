@@ -3,6 +3,7 @@
 //! A thin `tokio::select!` loop. All input routing, rendering, and state management is delegated to [`AppView`].
 //! The event loop only handles IO: terminal events, the ACP channel, spawned task results, animation ticks, and hot-reloadable config changes.
 
+use fuigo_shell::sampling::error::acp_error_text;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -2966,13 +2967,13 @@ pub(crate) async fn run(
                                         "clientVersion": PAGER_CLIENT_VERSION,
                                     }).as_object().cloned());
                                 if let Err(e) = acp_send(init_req, &acp_tx).await {
-                                    tracing::error!(error = %e, "reconnect: re-initialize failed");
+                                    tracing::error!(error = %acp_error_text(&e), "reconnect: re-initialize failed");
                                     return None;
                                 }
 
                                 let auth_req = acp::AuthenticateRequest::new(acp::AuthMethodId::new(crate::obf::auth::CACHED_TOKEN!()));
                                 if let Err(e) = acp_send(auth_req, &acp_tx).await {
-                                    tracing::warn!(error = %e, "reconnect: re-authenticate failed");
+                                    tracing::warn!(error = %acp_error_text(&e), "reconnect: re-authenticate failed");
                                 }
 
                                 let mut loads = Vec::with_capacity(load_plans.len());
@@ -2999,7 +3000,7 @@ pub(crate) async fn run(
                                             });
                                         }
                                         Err(e) => {
-                                            tracing::error!(error = %e, "reconnect: reload session failed");
+                                            tracing::error!(error = %acp_error_text(&e), "reconnect: reload session failed");
                                             // Keep restoring the remaining sessions: one broken session must not doom the rest
                                             loads.push(AgentLoadOutcome {
                                                 agent_id,
