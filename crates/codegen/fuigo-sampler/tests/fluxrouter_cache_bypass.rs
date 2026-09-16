@@ -466,7 +466,13 @@ fn cache_paragraph() -> String {
     let path = repo_root().join("crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md");
     let guide =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    cache_paragraph_of(&guide)
+    // Git checks this file out with CRLF on Windows (core.autocrlf), so the paragraph split on a bare
+    // "\n\n" found nothing and the whole file came back as "the paragraph" — the pin then compared a
+    // 2 KB paragraph against the entire guide and reported a difference at line 1, column 1
+    // (windows-latest / windows-11-arm, 2026-09-16). Normalising the line endings compares the same
+    // text on every platform; it does not loosen the golden-text pin, which still requires an exact
+    // match of the paragraph itself.
+    cache_paragraph_of(&guide.replace("\r\n", "\n"))
 }
 
 /// Sentences of the paragraph. A surface and the verdict it is given have to share one.
