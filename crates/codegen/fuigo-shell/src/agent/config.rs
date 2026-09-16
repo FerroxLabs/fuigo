@@ -5710,8 +5710,13 @@ impl ModelSwitchIncompatibleAgentError {
              Start a new session to use this model.",
             self.model_id, self.required_agent_type, self.active_agent_type,
         );
-        acp::Error::new(acp::ErrorCode::InvalidRequest.into(), message)
-            .data(serde_json::to_value(&self).ok())
+        acp::Error::new(acp::ErrorCode::InvalidRequest.into(), message.clone()).data(
+            crate::acp_error::error_data_with_fields(
+                crate::acp_error::AcpErrorKind::InvalidRequest,
+                message,
+                serde_json::to_value(&self).unwrap_or_default(),
+            ),
+        )
     }
     /// Try to parse from an `acp::Error.data` field.
     pub fn from_acp_error(err: &acp::Error) -> Option<Self> {

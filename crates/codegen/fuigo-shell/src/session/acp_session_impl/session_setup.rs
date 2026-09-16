@@ -26,7 +26,7 @@ impl SessionActor {
                     "error": format!("{err}"),
                 })),
             );
-            return acp::Error::auth_required().data(msg);
+            return crate::acp_error::auth_required(msg);
         }
         map_sampling_err_to_acp(err)
     }

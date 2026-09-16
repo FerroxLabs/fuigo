@@ -392,8 +392,8 @@ fn expired_external_credential_routes_to_the_provider_login_flow() {
         .await
         .expect("prompt timed out");
         let error = outcome.expect_err("the mock 401s every inference request");
-        // `error_data_with_status` carries a bare string when the sampler had no HTTP status to attach, and an object when it did
-        // A 401 that classifies as `SamplingErrorKind::Auth` is routinely the former
+        // Turn errors carry object `data` (`message`, `error_kind`, `http_status` when known) since 1.0.18
+        // Read `message` but accept a bare string too, the shape older agents sent for status-less failures
         let data = error.data.as_ref().expect("a failed turn explains itself");
         let message = data
             .get("message")

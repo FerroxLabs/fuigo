@@ -879,6 +879,42 @@ impl CapturedOut {
     }
 }
 
+/// A failed turn whose `error.data` is the shell's typed object reports its `message`, never the object as JSON.
+#[test]
+fn a_typed_prompt_error_reports_its_message_not_raw_json() {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Json,
+        true,
+        Box::new(captured.clone()),
+    );
+    let wire_error = acp::Error::internal_error().data(serde_json::json!({
+        "message": "empty response from model (reasoning_only)",
+        "error_kind": "empty_response",
+    }));
+    let err = super::finish_turn(
+        &mut emitter,
+        Some(Err(wire_error)),
+        false,
+        None,
+        &acp::SessionId::new("sess-1"),
+        false,
+    )
+    .expect_err("a failed turn exits non-zero");
+    assert_eq!(
+        err.to_string(),
+        "Internal error: empty response from model (reasoning_only)"
+    );
+    let out = captured.text();
+    let doc: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {out}"));
+    assert_eq!(doc["type"], "error");
+    assert_eq!(
+        doc["message"],
+        "Internal error: empty response from model (reasoning_only)"
+    );
+}
+
 /// Drive `finish_turn` through the hard cap with a turn that already answered, capturing stdout.
 fn capped_run_output(format: super::OutputFormat) -> String {
     let captured = CapturedOut::default();

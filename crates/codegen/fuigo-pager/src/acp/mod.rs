@@ -22,6 +22,7 @@ pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
     )
 }
 
+use fuigo_shell::sampling::error::acp_error_text;
 use fuigo_telemetry::process_info::{
     Entrypoint, Interactivity, LeaderMode, ProcessIdentity, set_identity,
 };
@@ -588,7 +589,9 @@ async fn initialize(
 
     let resp: acp::InitializeResponse = {
         let _timer = fuigo_telemetry::instrumentation::timer("acp_init.initialize_roundtrip");
-        acp_send(req, tx).await?
+        acp_send(req, tx)
+            .await
+            .map_err(|e| anyhow::anyhow!(acp_error_text(&e)))?
     };
 
     let is_fuigo_shell = resp
@@ -859,8 +862,9 @@ async fn authenticate(
         })),
     );
 
-    let resp: acp::AuthenticateResponse =
-        acp_send(acp::AuthenticateRequest::new(method_id), tx).await?;
+    let resp: acp::AuthenticateResponse = acp_send(acp::AuthenticateRequest::new(method_id), tx)
+        .await
+        .map_err(|e| anyhow::anyhow!(acp_error_text(&e)))?;
     Ok(resp.meta.map(serde_json::Value::Object))
 }
 

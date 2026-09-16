@@ -38,7 +38,7 @@ pub use crate::extensions::routing::{ClientId, NotificationMeta, RequestMeta, Ta
 
 fn parse<T: for<'de> Deserialize<'de>>(s: &str) -> Result<T, acp::Error> {
     serde_json::from_str::<T>(s)
-        .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {}", e)))
+        .map_err(|e| crate::acp_error::invalid_params(format!("invalid params: {}", e)))
 }
 
 /// Resolve the search root, preferring an explicit `cwd` over a `sessionId` lookup.
@@ -55,12 +55,15 @@ fn resolve_cwd(
         if let Some(cwd) = agent.get_session_cwd(session_id) {
             return Ok(cwd);
         }
-        return Err(
-            acp::Error::invalid_params().data(format!("session not found: {}", session_id.0))
-        );
+        return Err(crate::acp_error::invalid_params(format!(
+            "session not found: {}",
+            session_id.0
+        )));
     }
 
-    Err(acp::Error::invalid_params().data("either cwd or sessionId is required"))
+    Err(crate::acp_error::invalid_params(
+        "either cwd or sessionId is required",
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,9 +127,9 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let session_id = req.session_id.map(|s| s.0.to_string());
             let target_client_id = req.meta.map(|m| m.client_id).unwrap_or_default();
 
-            let ops = agent
-                .resolve_workspace_ops()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            let ops = agent.resolve_workspace_ops().map_err(|e| {
+                crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+            })?;
             let search_id = ops
                 .dispatch(
                     &FuzzyOpenReq {
@@ -139,7 +142,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
             let response = FuzzyOpenResponse {
                 session_id: session_id.unwrap_or_else(|| "agent".to_string()),
@@ -147,13 +150,13 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             };
             ExtMethodResult::success(response)
                 .to_ext_response()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))
         }
         "fuigo/search/fuzzy/change" => {
             let req: FuzzyChangeRequest = parse(args.params.get())?;
-            let ops = agent
-                .resolve_workspace_ops()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            let ops = agent.resolve_workspace_ops().map_err(|e| {
+                crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+            })?;
             // The workspace owns the manager and spawns the status driver, which streams `fuigo/search/fuzzy/status` through the client sink
             let found = ops
                 .dispatch(
@@ -166,11 +169,13 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
             if !found {
-                return Err(acp::Error::invalid_params()
-                    .data(format!("search not found: {}", req.search_id)));
+                return Err(crate::acp_error::invalid_params(format!(
+                    "search not found: {}",
+                    req.search_id
+                )));
             }
 
             let response = FuzzyChangeResponse {
@@ -179,13 +184,13 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             };
             ExtMethodResult::success(response)
                 .to_ext_response()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))
         }
         "fuigo/search/fuzzy/close" => {
             let req: FuzzyCloseRequest = parse(args.params.get())?;
-            let ops = agent
-                .resolve_workspace_ops()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            let ops = agent.resolve_workspace_ops().map_err(|e| {
+                crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+            })?;
             let closed = ops
                 .dispatch(
                     &FuzzyCloseReq {
@@ -194,7 +199,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
             let response = FuzzyCloseResponse {
                 session_id: "agent".to_string(),
@@ -203,7 +208,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             };
             ExtMethodResult::success(response)
                 .to_ext_response()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))
         }
         "fuigo/search/content" => {
             let req: ContentSearchRequest = parse(args.params.get())?;
@@ -213,9 +218,9 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 .as_ref()
                 .map(|s| s.0.to_string())
                 .unwrap_or_else(|| "agent".to_string());
-            let ops = agent
-                .resolve_workspace_ops()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            let ops = agent.resolve_workspace_ops().map_err(|e| {
+                crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+            })?;
 
             // The workspace runs the streaming search and emits `fuigo/search/content/status` batches through the client sink
             let mut op = req.params;
@@ -224,13 +229,13 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let data = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
             ExtMethodResult::success(data)
                 .to_ext_response()
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

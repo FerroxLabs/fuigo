@@ -65,7 +65,7 @@ impl From<fuigo_shell::sampling::error::SamplingErrorKind> for WireErrorType {
             K::RateLimited => Self::RateLimited,
             K::EmptyResponse => Self::EmptyResponse,
             K::MaxTokensTruncation => Self::MaxTokensTruncation,
-            K::DoomLoopDetected => Self::Other,
+            K::DoomLoopDetected | K::Cancelled => Self::Other,
         }
     }
 }
@@ -178,9 +178,21 @@ pub(crate) fn format_request_failure(
     });
     let wire = refine_untyped_wire(wire, untyped, status, raw);
     let extracted = extract_error_detail(raw);
-    let class = classify(status, wire);
+    let mut class = classify(status, wire);
+    // A status-less `api` error proves no server fault (a 403 content-safety block arrives this way): its readable detail is the message
+    if status.is_none()
+        && wire == WireErrorType::Api
+        && let Some(detail) = extracted.as_deref()
+        && !is_headline_echo(detail, &class.headline)
+    {
+        class = Classified {
+            headline: "Request failed".to_string(),
+            action: None,
+            default_why: None,
+        };
+    }
     let why = extracted
-        .filter(|d| !is_server_fault(status, wire) && !is_headline_echo(d, &class.headline))
+        .filter(|d| !is_server_fault(status) && !is_headline_echo(d, &class.headline))
         .or_else(|| class.default_why.map(str::to_string));
     let detail = compose_detail(why.as_deref(), class.action);
     FormattedRequestFailure {
@@ -371,14 +383,11 @@ fn compose_detail(why: Option<&str>, action: Option<&str>) -> String {
     }
 }
 
-/// Server-fault responses (5xx and their wire equivalents) carry internal detail ("upstream exploded") users can't act on, so always use our copy.
+/// Server-fault responses (5xx) carry internal detail ("upstream exploded") users can't act on, so always use our copy.
 /// 429 stays client-side: its body may explain plan limits.
-fn is_server_fault(status: Option<u16>, wire: WireErrorType) -> bool {
-    match status {
-        Some(code) => code >= 500,
-        // The wire type `classify` headlines as "Server error".
-        None => wire == WireErrorType::Api,
-    }
+/// A status-less error is never a proven server fault: its readable detail (a content-safety reason, a stream error) is kept.
+fn is_server_fault(status: Option<u16>) -> bool {
+    status.is_some_and(|code| code >= 500)
 }
 
 /// The server body restates the headline (e.g. "Not Found" under a 404).
@@ -642,6 +651,35 @@ fn is_noise_detail(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A status-less error never proves a server fault, so a readable detail is always shown.
+    /// A 403 content-safety block reaches the pager as `api` with no status; its reason is the only useful part.
+    #[test]
+    fn status_less_api_error_keeps_a_readable_detail() {
+        let formatted = format_request_failure(
+            None,
+            Some(WireErrorType::Api),
+            "Content violates usage guidelines.",
+        );
+        assert!(
+            formatted
+                .message()
+                .contains("Content violates usage guidelines"),
+            "{}",
+            formatted.message()
+        );
+        assert!(
+            !formatted
+                .message()
+                .contains("Something went wrong on our side")
+        );
+        // Nothing readable: the generic server copy stays
+        let bare = format_request_failure(None, Some(WireErrorType::Api), "");
+        assert_eq!(
+            bare.message(),
+            "Server error: Something went wrong on our side. Wait a minute and send again."
+        );
+    }
 
     #[test]
     fn formats_500_json_dump() {

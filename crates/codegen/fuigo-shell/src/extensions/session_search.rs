@@ -93,8 +93,8 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let kind_index = std::sync::Arc::new(
                 tokio::task::spawn_blocking(crate::session::persistence::SessionKindIndex::load)
                     .await
-                    .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
-                    .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
+                    .map_err(|error| crate::acp_error::internal_error(error.to_string()))?
+                    .map_err(|error| crate::acp_error::internal_error(error.to_string()))?,
             );
             let decision = agent.search_index();
             let root_dir = crate::util::fuigo_home::fuigo_home();
@@ -145,7 +145,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
             super::to_ext_response(result)
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -157,7 +157,7 @@ const WALK_BATCH: usize = 50;
 
 fn validate_search_window(limit: usize, offset: usize) -> Result<(), acp::Error> {
     if limit == 0 || limit > MAX_SEARCH_RESULTS || offset > MAX_FILTERED_OFFSET {
-        return Err(acp::Error::invalid_params().data(format!(
+        return Err(crate::acp_error::invalid_params(format!(
             "session search limit must be 1..={MAX_SEARCH_RESULTS} and offset <= {MAX_FILTERED_OFFSET}"
         )));
     }

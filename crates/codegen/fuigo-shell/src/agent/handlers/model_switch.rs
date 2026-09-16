@@ -46,7 +46,7 @@ pub(crate) async fn apply(
     let handle = agent
         .session_handle_waiting_for_load(&session_id)
         .await
-        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
     let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
     let model = agent.resolve_model_id(&model_id)?;
@@ -215,7 +215,7 @@ pub(crate) async fn apply(
             });
         let rebuild_result = rebuild_rx
             .await
-            .map_err(|_| acp::Error::internal_error().data("rebuild_agent: actor closed"))?;
+            .map_err(|_| crate::acp_error::session_unavailable("rebuild_agent: actor closed"))?;
         match rebuild_result {
             Ok(()) => true,
             Err(e) => {
@@ -263,7 +263,7 @@ pub(crate) async fn apply(
     });
     let updated_model = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
+        .map_err(|_| crate::acp_error::session_unavailable("failed to set session model"))??;
     agent.with_resident_mut(&session_id, |handle| {
         handle.model_id = model_id.clone();
         handle.reasoning_effort = applied_effort;
@@ -318,20 +318,20 @@ pub(crate) async fn apply_reasoning_effort(
     let handle = agent
         .session_handle_waiting_for_load(&session_id)
         .await
-        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
     let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
     let model_id = handle.model_id.clone();
     let effort = agent
         .resolve_reasoning_effort_value(&session_id, &model_id, value_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("unknown reasoning_effort value"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("unknown reasoning_effort value"))?;
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetReasoningEffort {
         effort,
         responds_to: tx,
     });
     rx.await
-        .map_err(|_| acp::Error::internal_error().data("failed to set reasoning effort"))??;
+        .map_err(|_| crate::acp_error::session_unavailable("failed to set reasoning effort"))??;
     agent.with_resident_mut(&session_id, |handle| {
         handle.reasoning_effort = Some(effort);
     });

@@ -43,9 +43,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // An interjection racing a reconnect-replayed `session/load` (leader restart) waits for the load instead of failing
     let session_handle = agent.session_handle_waiting_for_load(&sid).await;
     let Some(session) = session_handle else {
-        return Err(
-            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
-        );
+        return Err(crate::acp_error::invalid_params(format!(
+            "session not found: {}",
+            req.session_id
+        )));
     };
 
     let (text_override, images) = split_content(req.content);

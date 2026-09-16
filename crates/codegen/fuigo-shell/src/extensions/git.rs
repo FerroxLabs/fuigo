@@ -229,17 +229,25 @@ async fn resolve_git_root(
                 )
                 .await
                 .map_err(|e| {
-                    acp::Error::invalid_params()
-                        .data(format!("cannot find git root from session cwd: {}", e))
+                    crate::acp_error::invalid_params(format!(
+                        "cannot find git root from session cwd: {}",
+                        e
+                    ))
                 })?;
             return result.ok_or_else(|| {
-                acp::Error::invalid_params()
-                    .data("cannot find git root from session cwd: not a git repository")
+                crate::acp_error::invalid_params(
+                    "cannot find git root from session cwd: not a git repository",
+                )
             });
         }
-        return Err(acp::Error::invalid_params().data(format!("session not found: {}", sid.0)));
+        return Err(crate::acp_error::invalid_params(format!(
+            "session not found: {}",
+            sid.0
+        )));
     }
-    Err(acp::Error::invalid_params().data("either gitRoot or sessionId is required"))
+    Err(crate::acp_error::invalid_params(
+        "either gitRoot or sessionId is required",
+    ))
 }
 /// Try to extract a git_root from the request params (best-effort, for jj routing).
 async fn try_resolve_git_root(
@@ -297,7 +305,9 @@ pub async fn handle(
     match args.method.as_ref() {
         "fuigo/git/git_repo_root" => {
             let req: git::GitRepoRequest = parse_params(args)?;
-            let response = git::is_git_repo(&req).await?;
+            let response = git::is_git_repo(&req)
+                .await
+                .map_err(crate::acp_error::internal_from)?;
             super::to_raw_response(&response)
         }
         "fuigo/git/serialize_changes" => {
@@ -326,9 +336,9 @@ pub async fn handle(
             let response = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             let result = response.data.ok_or_else(|| {
-                acp::Error::internal_error().data("git_status_ext returned no structured data")
+                crate::acp_error::internal_error("git_status_ext returned no structured data")
             })?;
             to_ext_response(Ok(result))
         }
@@ -345,7 +355,7 @@ pub async fn handle(
             let result = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(result))
         }
         "fuigo/git/diffs" => {
@@ -367,12 +377,12 @@ pub async fn handle(
             let data = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             if let Err(err) = check_diff_size_limits(&data, max_bytes, max_lines) {
                 let ext_result = ExtMethodResult::<GitDiffsData>::failure(err.message());
                 ext_result
                     .to_ext_response()
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                    .map_err(|e| crate::acp_error::internal_error(e.to_string()))
             } else {
                 to_ext_response(Ok(data))
             }
@@ -389,7 +399,7 @@ pub async fn handle(
             let result = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(result))
         }
         "fuigo/git/stage/content" => {
@@ -404,7 +414,7 @@ pub async fn handle(
             };
             ops.dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
         "fuigo/git/unstage" => {
@@ -418,7 +428,7 @@ pub async fn handle(
             };
             ops.dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
         "fuigo/git/discard" => {
@@ -434,7 +444,7 @@ pub async fn handle(
             };
             ops.dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
         "fuigo/git/commit" => {
@@ -454,7 +464,7 @@ pub async fn handle(
             let commit_result = ops
                 .dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response_partial(Ok(commit_result.data), commit_result.warning)
         }
         "fuigo/git/checkout" => {
@@ -469,7 +479,7 @@ pub async fn handle(
             };
             ops.dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
         "fuigo/git/stash" => {
@@ -483,7 +493,7 @@ pub async fn handle(
             };
             ops.dispatch(&op, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(Empty {}))
         }
         "fuigo/git/info" => {
@@ -494,7 +504,7 @@ pub async fn handle(
             let result = ops
                 .dispatch(&GitInfoReq { git_root }, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(result))
         }
         "fuigo/git/branches" => {
@@ -505,7 +515,7 @@ pub async fn handle(
             let result = ops
                 .dispatch(&GitBranchesReq { git_root }, None)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(result))
         }
         "fuigo/git/current_commit" => {
@@ -517,7 +527,7 @@ pub async fn handle(
                 Some(git_root) => ops
                     .dispatch(&GitCurrentCommitReq { git_root }, None)
                     .await
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?,
+                    .map_err(|e| crate::acp_error::internal_error(e.to_string()))?,
                 None => None,
             };
             to_ext_response(Ok(result))
@@ -536,17 +546,20 @@ pub async fn handle(
                 .await
                 .unwrap_or(fuigo_workspace::session::git::VcsKind::Git);
             if vcs_kind.is_jj() {
-                return Err(acp::Error::invalid_request()
-                    .data("checkout_session_head is not supported in jj repositories"));
+                return Err(crate::acp_error::invalid_request(
+                    "checkout_session_head is not supported in jj repositories",
+                ));
             }
             let summary =
                 crate::session::persistence::find_summary_by_session_id(&req.session_id.0)
                     .ok_or_else(|| {
-                        acp::Error::invalid_params()
-                            .data(format!("session {} not found", req.session_id.0))
+                        crate::acp_error::invalid_params(format!(
+                            "session {} not found",
+                            req.session_id.0
+                        ))
                     })?;
             let head_commit = summary.head_commit.ok_or_else(|| {
-                acp::Error::invalid_params().data(format!(
+                crate::acp_error::invalid_params(format!(
                     "session {} has no persisted HEAD commit",
                     req.session_id.0
                 ))
@@ -562,7 +575,7 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(format!("checkout failed: {e}")))?;
+                .map_err(|e| crate::acp_error::internal_error(format!("checkout failed: {e}")))?;
             super::to_raw_response(&result)
         }
         "fuigo/git/checkout_commit" => {
@@ -579,7 +592,7 @@ pub async fn handle(
                 .await
                 .unwrap_or(fuigo_workspace::session::git::VcsKind::Git);
             if vcs_kind.is_jj() {
-                return Err(acp::Error::invalid_request().data(
+                return Err(crate::acp_error::invalid_request(
                     "checkout_commit is not supported in jj repos; use `jj new` or `jj edit`",
                 ));
             }
@@ -594,9 +607,9 @@ pub async fn handle(
                     None,
                 )
                 .await
-                .map_err(|e| acp::Error::internal_error().data(format!("checkout failed: {e}")))?;
+                .map_err(|e| crate::acp_error::internal_error(format!("checkout failed: {e}")))?;
             super::to_raw_response(&result)
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }

@@ -52,10 +52,12 @@ pub(crate) async fn try_handle(
         }
 
         // Operations that don't apply to jj
-        "fuigo/git/checkout" => Some(Err(acp::Error::invalid_params()
-            .data("checkout is not supported in jj repos; use `jj new` or `jj edit`"))),
-        "fuigo/git/stash" => Some(Err(acp::Error::invalid_params()
-            .data("stash is not supported in jj repos; changes are always committed"))),
+        "fuigo/git/checkout" => Some(Err(crate::acp_error::invalid_params(
+            "checkout is not supported in jj repos; use `jj new` or `jj edit`",
+        ))),
+        "fuigo/git/stash" => Some(Err(crate::acp_error::invalid_params(
+            "stash is not supported in jj repos; changes are always committed",
+        ))),
 
         // Everything else (diffs, files, serialize_changes) falls through to git
         _ => None,

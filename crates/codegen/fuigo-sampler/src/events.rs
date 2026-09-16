@@ -256,6 +256,9 @@ pub enum SamplingErrorKind {
     EmptyResponse,
     MaxTokensTruncation,
     DoomLoopDetected,
+    /// The request was cancelled client-side (turn cancel, rewind, a superseded request id, sampler shutdown) before it produced a result.
+    /// Not an upstream failure: no status, never retried, and the wire tag is `cancelled`.
+    Cancelled,
 }
 
 impl SamplingErrorKind {
@@ -272,6 +275,7 @@ impl SamplingErrorKind {
             SamplingErrorKind::EmptyResponse => "empty_response",
             SamplingErrorKind::MaxTokensTruncation => "max_tokens_truncation",
             SamplingErrorKind::DoomLoopDetected => "doom_loop_detected",
+            SamplingErrorKind::Cancelled => "cancelled",
         }
     }
 }
@@ -295,9 +299,18 @@ impl std::str::FromStr for SamplingErrorKind {
             "empty_response" => Self::EmptyResponse,
             "max_tokens_truncation" => Self::MaxTokensTruncation,
             "doom_loop_detected" => Self::DoomLoopDetected,
+            "cancelled" => Self::Cancelled,
             _ => return Err(UnknownSamplingErrorKind),
         })
     }
+}
+
+/// Message of the completion error a cancelled request resolves with (see [`request_cancelled_error`]).
+pub use fuigo_sampling_types::error::REQUEST_CANCELLED_MESSAGE;
+
+/// The completion error a cancelled request resolves with: [`SamplingError::Cancelled`], classified [`SamplingErrorKind::Cancelled`].
+pub fn request_cancelled_error() -> SamplingError {
+    SamplingError::Cancelled
 }
 
 impl From<&SamplingError> for SamplingErrorInfo {
@@ -340,6 +353,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::DoomLoopDetected { .. } => {
                 (SamplingErrorKind::DoomLoopDetected, None, None, None)
             }
+            SamplingError::Cancelled => (SamplingErrorKind::Cancelled, None, None, None),
         };
 
         let empty_response_context = match err {
@@ -565,6 +579,28 @@ mod tests {
         assert!(info.message.contains("300s"));
     }
 
+    /// A cancelled request's completion error must classify as `Cancelled`, not `Auth`.
+    /// As `Auth` it would reach the client as an auth failure (and could drive auth recovery) for a request nobody rejected.
+    #[test]
+    fn request_cancelled_completion_classifies_as_cancelled() {
+        let info = SamplingErrorInfo::from(&request_cancelled_error());
+        assert_eq!(info.kind, SamplingErrorKind::Cancelled);
+        assert_eq!(info.kind.as_str(), "cancelled");
+        assert_eq!(info.status_code, None);
+        assert!(!info.is_retryable);
+        assert_eq!(info.message, REQUEST_CANCELLED_MESSAGE);
+        // A real auth rejection that happens to carry a different message stays Auth
+        let auth = SamplingErrorInfo::from(&SamplingError::auth_unknown("token expired"));
+        assert_eq!(auth.kind, SamplingErrorKind::Auth);
+    }
+
+    /// Cancellation is its own variant, never inferred from text: a provider auth rejection whose body reads "request cancelled" is still an auth failure.
+    #[test]
+    fn auth_error_whose_message_reads_request_cancelled_stays_auth() {
+        let info = SamplingErrorInfo::from(&SamplingError::auth_unknown(REQUEST_CANCELLED_MESSAGE));
+        assert_eq!(info.kind, SamplingErrorKind::Auth);
+    }
+
     #[test]
     fn error_kind_wire_string_round_trips_for_every_variant() {
         use SamplingErrorKind::*;
@@ -578,6 +614,7 @@ mod tests {
             EmptyResponse,
             MaxTokensTruncation,
             DoomLoopDetected,
+            Cancelled,
         ];
         for kind in all {
             // Exhaustive match, no `_` arm: a new variant refuses to compile this test until an arm is added
@@ -585,7 +622,7 @@ mod tests {
             // Only variants listed in `all` are round-trip-checked; the compiler cannot force those two edits
             match kind {
                 Auth | Http | Api | Serialization | IdleTimeout | RateLimited | EmptyResponse
-                | MaxTokensTruncation | DoomLoopDetected => {}
+                | MaxTokensTruncation | DoomLoopDetected | Cancelled => {}
             }
             assert_eq!(kind.as_str().parse(), Ok(kind));
         }

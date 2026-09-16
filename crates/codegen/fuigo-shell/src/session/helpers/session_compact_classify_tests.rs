@@ -278,7 +278,12 @@ fn classifier_preserves_acp_error_data() {
     }) else {
         panic!("expected Deterministic for 400");
     };
-    let data = err.data.as_ref().and_then(|d| d.as_str()).unwrap();
+    assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
+    let data = err
+        .data
+        .as_ref()
+        .and_then(|d| d["message"].as_str())
+        .unwrap();
     assert!(data.contains("compact failed"));
     assert!(data.contains("bad payload"));
 
@@ -292,7 +297,12 @@ fn classifier_preserves_acp_error_data() {
     }) else {
         panic!("expected Transient for 500");
     };
-    let data = err.data.as_ref().and_then(|d| d.as_str()).unwrap();
+    assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
+    let data = err
+        .data
+        .as_ref()
+        .and_then(|d| d["message"].as_str())
+        .unwrap();
     assert!(data.contains("upstream blip"));
 
     let CompactFailure::Overflow(err) = classify_sampling_error(api_error(
@@ -301,7 +311,12 @@ fn classifier_preserves_acp_error_data() {
     )) else {
         panic!("expected Overflow for 413");
     };
-    let data = err.data.as_ref().and_then(|d| d.as_str()).unwrap();
+    assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
+    let data = err
+        .data
+        .as_ref()
+        .and_then(|d| d["message"].as_str())
+        .unwrap();
     assert!(data.contains("compact failed"));
     assert!(data.contains("Request failed (HTTP 413)."));
 }

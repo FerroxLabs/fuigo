@@ -341,6 +341,7 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 triggers.join(", ")
             )
         }
+        SamplingError::Cancelled => format!("{}Request cancelled.", retry_prefix),
     }
 }
 
@@ -395,6 +396,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             triggers: triggers.clone(),
             aborted_at_chunk: *aborted_at_chunk,
         },
+        SamplingError::Cancelled => SamplingError::Cancelled,
     }
 }
 
