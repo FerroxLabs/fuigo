@@ -19,5 +19,9 @@ auth and metadata dispatch consult it before network contact. Fuigo installs its
 TLS/redirect/destination policy before GCS credential discovery. Clients retain
 their upstream timeouts, credential modes and payloads; construction is fallible.
 Standalone SDK use without hook installation retains its default transport.
+Guarded dispatch also changes which error variant a failed metadata request
+produces, so `gcloud-metadata-1.0.2/tests/test.rs` matches
+`Error::TransportPolicy(transport::Error::Http(_))` where upstream matched
+`Error::HttpError(_)`; that is the only change to an imported test file.
 Focused verification and final acceptance are pending. The local-modification
 notices are included in the root THIRD-PARTY-NOTICES packaged with future releases.
