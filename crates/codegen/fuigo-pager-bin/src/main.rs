@@ -1397,6 +1397,21 @@ async fn run_agent_command(
             fs_write: false,
             status_line: false,
         };
+        // Bind this bridge to its parent before the leader connect, not after:
+        // a cold leader spawn takes seconds, and a client that dies inside that
+        // window would otherwise leave the bridge running with nothing to
+        // notice. Linux: PR_SET_PDEATHSIG. Windows: the parent-handle watcher
+        // (hook, telemetry flush, then terminate). macOS: stdin EOF only.
+        // `ClientMode::Stdio` only — a headless run owns its own lifetime.
+        if matches!(mode, ClientMode::Stdio)
+            && let Err(error) = fuigo_tty_utils::kill_current_process_on_parent_death()
+        {
+            tracing::warn!(
+                %error,
+                "failed to bind to parent death; stdio bridge will not die \
+                 with its parent — stdin EOF remains the only cleanup"
+            );
+        }
         let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();
         let (status_tx, _status_rx) = LeaderReconnector::status_channel();
@@ -1410,13 +1425,6 @@ async fn run_agent_command(
         let cancel = CancellationToken::new();
         match mode {
             ClientMode::Stdio => {
-                if let Err(error) = fuigo_tty_utils::kill_current_process_on_parent_death() {
-                    tracing::warn!(
-                        %error,
-                        "failed to bind to parent death; stdio bridge will not die \
-                         with its parent — stdin EOF remains the only cleanup"
-                    );
-                }
                 let replay_state = Arc::new(std::sync::Mutex::new(StdioReplayState::default()));
                 let leader_tx = Arc::new(TokioMutex::new(tx));
                 let leader_tx_stdin = leader_tx.clone();
@@ -2877,6 +2885,125 @@ mod tests {
             "running the real agent entrypoint left no parent-death hook of this \
              binary registered ({reported:?}): a Windows agent would be terminated \
              by the watcher with no log line and no telemetry flush"
+        );
+    }
+    /// Env marker (value: the report path) for the re-exec'd child that runs
+    /// the real leader-bridge entrypoint.
+    const STDIO_BRIDGE_ARM_CHILD_ENV: &str = "__FUIGO_PAGER_BIN_STDIO_BRIDGE_ARM_CHILD";
+
+    /// Child: run [`run_agent_command`] as `fuigo agent --leader stdio` — the
+    /// real entrypoint — and report whether the leader bridge armed the
+    /// parent-death binding.
+    ///
+    /// The bridge never returns on its own (it pumps stdio until its client or
+    /// its leader goes away), so the observation runs on this thread while the
+    /// entrypoint runs on another, and the process exits as soon as the answer
+    /// is known. A no-op when run as an ordinary test of this suite.
+    #[test]
+    fn stdio_leader_bridge_arm_child_entry() {
+        let Some(report) = std::env::var_os(STDIO_BRIDGE_ARM_CHILD_ENV) else {
+            return; // skip when not invoked as the re-exec'd child
+        };
+        let args = PagerArgs::try_parse_from(["fuigo", "agent", "--leader", "stdio"])
+            .expect("parse `fuigo agent --leader stdio`");
+        let Some(Command::Agent(agent_args)) = args.command else {
+            panic!("`fuigo agent --leader stdio` did not parse as the agent subcommand");
+        };
+        let before = fuigo_tty_utils::parent_death_arm_calls();
+        std::thread::Builder::new()
+            .name("stdio-bridge-entry".into())
+            .spawn(move || {
+                let update_config = build_update_config();
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("multi-thread runtime");
+                let _ = runtime.block_on(run_agent_command(
+                    agent_args,
+                    None,
+                    None,
+                    None,
+                    false,
+                    true,
+                    false,
+                    &update_config,
+                ));
+            })
+            .expect("spawn the entrypoint thread");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let armed = loop {
+            let calls = fuigo_tty_utils::parent_death_arm_calls().saturating_sub(before);
+            if calls > 0 || std::time::Instant::now() >= deadline {
+                break calls;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        std::fs::write(report, format!("arm_calls={armed}")).expect("write the arm report");
+        // The entrypoint thread is still bringing the bridge up; nothing there
+        // is worth draining, and the answer is already on disk.
+        std::process::exit(0);
+    }
+
+    /// The `ClientMode::Stdio` leader bridge must bind itself to its parent's
+    /// lifetime: it is the second of the two production lines that arm the
+    /// Windows parent-death watcher (the other is `run_stdio_agent`), and
+    /// deleting it is invisible to every other test — the bridge would then
+    /// outlive a killed client with no watcher and no log line. Pinned through
+    /// the real entrypoint, so moving the call under a dead branch, or renaming
+    /// it, fails here too.
+    #[test]
+    fn the_stdio_leader_bridge_arms_the_parent_death_binding() {
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let report = std::env::temp_dir().join(format!("fuigo-bridge-arm-{unique}.txt"));
+        let home = std::env::temp_dir().join(format!("fuigo-bridge-arm-home-{unique}"));
+        std::fs::create_dir_all(&home).expect("create the child's FUIGO_HOME");
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg("tests::stdio_leader_bridge_arm_child_entry")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(STDIO_BRIDGE_ARM_CHILD_ENV, &report)
+            .env("FUIGO_HOME", &home)
+            .env("FUIGO_DISABLE_AUTOUPDATER", "1")
+            // The arm under test must really run: it is what binds the child to
+            // this test process, so the child cannot outlive the suite either.
+            .env_remove(fuigo_tty_utils::PARENT_DEATH_DISABLE_ENV)
+            // A process execution budget refuses leader mode outright.
+            .env_remove("FUIGO_MAX_MODEL_CALLS")
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = cmd.output().expect("run the leader-bridge child");
+        let reported = std::fs::read_to_string(&report).unwrap_or_default();
+        let _ = std::fs::remove_file(&report);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            child.status.success(),
+            "the leader-bridge child failed ({}); stdout: {}; stderr: {}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
+        );
+        assert_eq!(
+            reported,
+            "arm_calls=1",
+            "the stdio leader bridge must call \
+             fuigo_tty_utils::kill_current_process_on_parent_death exactly once; \
+             child stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr),
         );
     }
     #[test]
