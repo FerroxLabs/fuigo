@@ -26,6 +26,17 @@
 //! crate and a new CI job, and this release ships days after a customer incident; the textual scan closes the
 //! same hole for every shape the crate writes today.
 //!
+//! TODO(1.0.19), same root cause and the same vendored copy, so do them together: the schema crate's OTHER
+//! implicit conversion, `impl From<serde_json::Error> for acp::Error`, also fires during request DECODE, before
+//! any shell code runs. Malformed params on a core ACP method (`session/prompt`, `session/new`, `session/load`,
+//! `session/set_mode`, `session/set_model`, `authenticate`) therefore answer `-32602` with a bare-string `data`
+//! that no scan in this file can see, because the call site is in the schema crate. 1.0.17 answers identically,
+//! so it is not a regression -- but `session/prompt` is sent every turn, and a content-block shape skew between
+//! a client's ACP version and this build's lands there, which is the exact silence 1.0.18 exists to kill.
+//! Fix: decode core requests through a wrapper that re-shapes the rejection into object `data` with
+//! `error_kind: "invalid_request"`. 1.0.18 documents the shape instead (`15-agent-mode.md`, fourth note on the
+//! class), because a decode wrapper reaches every core method days before a customer-incident release.
+//!
 //! A third way to reach a client with nothing readable is to build an error and give it NO `data` at all:
 //! `acp::Error::method_not_found()` answers `data: null`, which a client that renders only object-shaped `data`
 //! shows as a blank. Mutating `err.message` in place has the same effect and hides from both scans above,
