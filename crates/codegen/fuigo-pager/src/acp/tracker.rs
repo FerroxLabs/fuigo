@@ -878,6 +878,11 @@ impl AcpUpdateTracker {
         meta: &NotificationMeta,
         scrollback: &mut ScrollbackState,
     ) -> bool {
+        // The shell's standard-rail mirror of `retry_state` is for stock ACP clients
+        // The pager renders retries from `retry_state` itself, so the mirror must neither print nor clear that indicator
+        if fuigo_shell::extensions::notification::is_retry_status_update(&update) {
+            return false;
+        }
         if !meta.is_replay {
             debug!(
                 target: crate::tracing::ACP_UPDATE_TARGET,

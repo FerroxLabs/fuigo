@@ -107,7 +107,7 @@ pub(crate) fn reject_direct_hub_cloud_meta(
     session_meta: Option<&acp::Meta>,
 ) -> Result<(), acp::Error> {
     if session_meta.and_then(|m| m.get("fuigo/cloud_server_id")).is_some() {
-        return Err(acp::Error::invalid_params().data(DIRECT_HUB_CLOUD_REMOVED_MSG));
+        return Err(crate::acp_error::invalid_params(DIRECT_HUB_CLOUD_REMOVED_MSG));
     }
     Ok(())
 }
@@ -340,8 +340,7 @@ fn reject_chat_kind_without_feature(meta: Option<&acp::Meta>) -> Result<(), acp:
     {
         if wants_chat_session_kind(meta) {
             return Err(
-                acp::Error::invalid_params()
-                    .data("session kind \"chat\" requires a chat-enabled binary"),
+                crate::acp_error::invalid_params("session kind \"chat\" requires a chat-enabled binary"),
             );
         }
         Ok(())
@@ -2462,7 +2461,7 @@ async fn handle_synthetic_turn_trace(
                 input_tokens: None,
                 cached_input_tokens: None,
                 output_tokens: None,
-                error: Some(e.to_string()),
+                error: Some(crate::sampling::error::acp_error_text(e)),
                 finished_at: chrono::Utc::now().to_rfc3339(),
                 signals: None,
                 turn_delta: None,

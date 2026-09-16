@@ -165,7 +165,10 @@ pub(super) fn reduce_prompt_turn_result(
             result.error = Some(if was_cancelled {
                 "Subagent was cancelled".to_string()
             } else {
-                format!("Session error: {error}")
+                format!(
+                    "Session error: {}",
+                    crate::sampling::error::acp_error_text(&error)
+                )
             });
             result.output = Arc::from(final_text);
             result.output_usage_incomplete = true;

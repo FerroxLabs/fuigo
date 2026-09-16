@@ -43,6 +43,7 @@ use crate::extensions::notification::{
     SessionNotification as FuigoSessionNotification, SessionUpdate as FuigoSessionUpdate,
 };
 use crate::session::info::Info;
+use crate::session::replay_events::SessionEvent;
 use tokio::sync::{mpsc, watch};
 
 /// - Version 0: Legacy ChatRequestMessage format (default for old sessions)
@@ -1211,11 +1212,21 @@ mod head_fields_tests;
 #[path = "persistence_generated_title_tests.rs"]
 mod generated_title_tests;
 
+/// The session actor's ordered event queue, installed on the persistence actor once the session
+/// that owns it exists (see [`PersistenceHandle::install_retry_status_mirror`]).
+///
+/// `OnceLock` rather than a constructor argument because the handle is built before the session:
+/// `persistence::new` is awaited and its handle passed into `SessionActor`, which is where
+/// `event_tx` is created.
+pub(crate) type RetryStatusMirrorSlot =
+    Arc<std::sync::OnceLock<mpsc::UnboundedSender<crate::session::replay_events::SessionEvent>>>;
+
 #[derive(Clone)]
 pub struct PersistenceHandle {
     pub tx: mpsc::UnboundedSender<PersistenceMsg>,
     noop: bool,
     disk_full_rx: watch::Receiver<bool>,
+    retry_status_mirror: RetryStatusMirrorSlot,
 }
 
 fn actor_channel() -> (
@@ -1223,16 +1234,19 @@ fn actor_channel() -> (
     mpsc::UnboundedReceiver<PersistenceMsg>,
     mpsc::WeakUnboundedSender<PersistenceMsg>,
     watch::Sender<bool>,
+    RetryStatusMirrorSlot,
 ) {
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     let (disk_full_tx, disk_full_rx) = watch::channel(false);
+    let retry_status_mirror: RetryStatusMirrorSlot = Default::default();
     let weak = tx.downgrade();
     let handle = PersistenceHandle {
         tx,
         noop: false,
         disk_full_rx,
+        retry_status_mirror: retry_status_mirror.clone(),
     };
-    (handle, rx, weak, disk_full_tx)
+    (handle, rx, weak, disk_full_tx, retry_status_mirror)
 }
 
 #[derive(Debug)]
@@ -1275,10 +1289,22 @@ impl PersistenceHandle {
         tx: mpsc::UnboundedSender<PersistenceMsg>,
         disk_full_rx: watch::Receiver<bool>,
     ) -> Self {
+        Self::from_parts_for_test_with_mirror(tx, disk_full_rx, Default::default())
+    }
+
+    /// [`Self::from_parts_for_test`] sharing the actor's retry-status mirror slot, so a test can
+    /// install a session queue on an actor it built itself.
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_test_with_mirror(
+        tx: mpsc::UnboundedSender<PersistenceMsg>,
+        disk_full_rx: watch::Receiver<bool>,
+        retry_status_mirror: RetryStatusMirrorSlot,
+    ) -> Self {
         Self {
             tx,
             noop: false,
             disk_full_rx,
+            retry_status_mirror,
         }
     }
 
@@ -1288,7 +1314,20 @@ impl PersistenceHandle {
             tx,
             noop: true,
             disk_full_rx: watch::channel(false).1,
+            retry_status_mirror: Default::default(),
         }
+    }
+
+    /// Give the actor the session's ordered event queue so its disk-full `retry_state` mirror
+    /// rides the same path as every other mirror (flush the replay buffer, then send) instead of
+    /// going straight to the gateway, where it could overtake answer text already generated.
+    ///
+    /// First caller wins; the session that owns this handle installs its queue once, at spawn.
+    pub(crate) fn install_retry_status_mirror(
+        &self,
+        event_tx: mpsc::UnboundedSender<crate::session::replay_events::SessionEvent>,
+    ) {
+        let _ = self.retry_status_mirror.set(event_tx);
     }
 
     pub fn is_noop(&self) -> bool {
@@ -1370,6 +1409,16 @@ struct SessionPersistence {
     search_index: crate::session::storage::search::SharedSearchIndex,
     disk_full_tx: watch::Sender<bool>,
     disk_full_notified: bool,
+    /// The owning session's ordered event queue, once it exists.
+    ///
+    /// EVERY session installs one at spawn, subagents included: a subagent's persistence handle is
+    /// built in `agent::subagent::handle_request` and handed to the same `spawn_session_actor`,
+    /// which calls [`PersistenceHandle::install_retry_status_mirror`] unconditionally.
+    /// So this is empty only before that call: a write that fails between `persistence::new` /
+    /// `load_light` returning and spawn reaching the install (`init_session` and the early writes
+    /// happen in that window), a [`PersistenceHandle::noop`], and tests that run the actor with no
+    /// session.
+    retry_status_mirror: RetryStatusMirrorSlot,
     /// Files that took buffered writes since the last successful sync barrier.
     /// Atomic-rename writes are durable at write time and never enter the set.
     dirty_files: crate::session::storage::SessionFileSet,
@@ -1559,12 +1608,13 @@ impl SessionPersistence {
         let Some(gateway) = &self.gateway else {
             return;
         };
+        let state = RetryState::Failed {
+            error_type: DISK_FULL_ERROR_TYPE.to_string(),
+            message: DISK_FULL_USER_MESSAGE.to_string(),
+        };
         let notification = FuigoSessionNotification {
             session_id: self.info.id.clone(),
-            update: FuigoSessionUpdate::RetryState(RetryState::Failed {
-                error_type: DISK_FULL_ERROR_TYPE.to_string(),
-                message: DISK_FULL_USER_MESSAGE.to_string(),
-            }),
+            update: FuigoSessionUpdate::RetryState(state.clone()),
             meta: None,
         };
         if let Ok(params) = serde_json::value::to_raw_value(&notification) {
@@ -1572,6 +1622,31 @@ impl SessionPersistence {
                 "fuigo/session_notification",
                 params.into(),
             ));
+        }
+        // The standard-rail mirror every `retry_state` gets, so stock ACP clients see why the turn failed.
+        // This actor is the one mirror producer outside the session: a write fails while the session
+        // is streaming, so the mirror takes the session's ordered queue like the others rather than
+        // racing that text to the gateway, and the session stamps the paragraph separator and the
+        // prompt id, which are its state and not this task's.
+        let queued = self.retry_status_mirror.get().is_some_and(|event_tx| {
+            event_tx
+                .send(SessionEvent::RetryStatusMirror(Box::new(state.clone())))
+                .is_ok()
+        });
+        if !queued {
+            // No queue is installed yet -- the write failed before spawn reached
+            // `install_retry_status_mirror`, or this is a `noop`/test handle -- or the session loop
+            // is gone. A subagent is NOT one of these: it installs a queue like every other
+            // session. In each of those cases nothing can be queued ahead of the mirror, so send it
+            // directly and open no paragraph of its own.
+            gateway.forward_fire_and_forget(
+                crate::extensions::notification::retry_status_notification(
+                    self.info.id.clone(),
+                    &state,
+                    None,
+                    /*after_thought_text*/ false,
+                ),
+            );
         }
     }
 
@@ -2524,12 +2599,16 @@ pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
             }
         }
     };
-    acp::Error::new(acp::ErrorCode::InternalError.into(), message.to_string()).data(Some(
-        serde_json::json!({
-            "code": code,
-            "detail": e.to_string(),
-        }),
-    ))
+    acp::Error::new(acp::ErrorCode::InternalError.into(), message.to_string()).data(
+        crate::acp_error::error_data_with_fields(
+            crate::acp_error::AcpErrorKind::SessionStorage,
+            message,
+            serde_json::json!({
+                "code": code,
+                "detail": e.to_string(),
+            }),
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -2624,7 +2703,7 @@ pub(crate) async fn new(
         summary.current_model_id = model_id;
     }
 
-    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx, retry_status_mirror) = actor_channel();
 
     let info_clone = info.clone();
     let title_session_id = info.id.to_string();
@@ -2653,6 +2732,7 @@ pub(crate) async fn new(
             search_index,
             disk_full_tx,
             disk_full_notified: false,
+            retry_status_mirror,
             dirty_files: Default::default(),
             pending_write_error: None,
             last_usage_live: None,
@@ -2705,7 +2785,7 @@ pub(crate) async fn new_with_explicit_dir(
         summary.current_model_id = model_id;
     }
 
-    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx, retry_status_mirror) = actor_channel();
 
     let info_clone = info.clone();
     let title_session_id = info.id.to_string();
@@ -2735,6 +2815,7 @@ pub(crate) async fn new_with_explicit_dir(
             search_index: crate::session::storage::search::SharedSearchIndex::never_indexed(),
             disk_full_tx,
             disk_full_notified: false,
+            retry_status_mirror,
             dirty_files: Default::default(),
             pending_write_error: None,
             last_usage_live: None,
@@ -2851,7 +2932,7 @@ pub(crate) async fn load_light(
         workflow_runs: persisted.workflow_runs,
     };
 
-    let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
+    let (handle, rx, summary_tx, disk_full_tx, retry_status_mirror) = actor_channel();
 
     let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
@@ -2884,6 +2965,7 @@ pub(crate) async fn load_light(
             search_index,
             disk_full_tx,
             disk_full_notified: false,
+            retry_status_mirror,
             dirty_files: Default::default(),
             pending_write_error: None,
             last_usage_live: None,

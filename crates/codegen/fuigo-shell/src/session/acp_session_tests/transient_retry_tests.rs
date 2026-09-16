@@ -278,6 +278,52 @@ async fn empty_response_stays_terminal_with_full_budget() {
         .await;
 }
 
+/// A status-less terminal failure reaches the client as an object with `message` and `error_kind`.
+/// Before 1.0.18 every such kind (empty_response, idle_timeout, http, cancelled, ...) went out as a bare string that JSON clients drop.
+#[tokio::test(flavor = "current_thread")]
+async fn status_less_terminal_failures_reach_the_client_as_typed_objects() {
+    use fuigo_sampler::SamplingErrorKind as K;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor().await;
+            for kind in [
+                K::EmptyResponse,
+                K::IdleTimeout,
+                K::Http,
+                K::Api,
+                K::Serialization,
+                K::DoomLoopDetected,
+                K::Cancelled,
+                K::RateLimited,
+            ] {
+                let result = actor
+                    .handle_sampling_failure(
+                        error_of_kind(kind, None),
+                        0,
+                        // Transient retries disabled so the eligible kinds take the terminal arm too
+                        transient_state(0, false),
+                        false,
+                        crate::session::acp_session::TurnParkState::Fresh,
+                    )
+                    .await;
+                let Err(err) = result else {
+                    panic!("{kind:?} must be terminal here");
+                };
+                let wire = serde_json::to_value(&err).expect("serialize acp error");
+                let data = &wire["data"];
+                assert!(
+                    data.is_object(),
+                    "{kind:?}: error.data must be an object, got {wire}"
+                );
+                assert_eq!(data["error_kind"], kind.as_str(), "{kind:?}: {wire}");
+                assert_eq!(data["message"], "test sampling failure", "{kind:?}: {wire}");
+                assert!(data.get("http_status").is_none(), "{kind:?}: {wire}");
+            }
+        })
+        .await;
+}
+
 /// The cumulative per-prompt cap holds even with a fresh per-step budget: long agentic prompts must not multiply retries by round count.
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_total_cap_vetoes_even_with_fresh_step_budget() {

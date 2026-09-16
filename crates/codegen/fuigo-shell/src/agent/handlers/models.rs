@@ -19,5 +19,5 @@ pub(crate) async fn handle(
     };
     ExtMethodResult::success(state)
         .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }

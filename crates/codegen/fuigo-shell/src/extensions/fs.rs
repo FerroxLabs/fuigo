@@ -133,9 +133,14 @@ fn resolve_path(
         if let Some(cwd) = agent.get_session_cwd(sid) {
             return Ok(cwd.join(p));
         }
-        return Err(acp::Error::invalid_params().data(format!("session not found: {}", sid.0)));
+        return Err(crate::acp_error::invalid_params(format!(
+            "session not found: {}",
+            sid.0
+        )));
     }
-    Err(acp::Error::invalid_params().data("sessionId is required for relative paths"))
+    Err(crate::acp_error::invalid_params(
+        "sessionId is required for relative paths",
+    ))
 }
 /// Confine `path` to the workspace root, falling back to the session cwd for worktree sessions (rooted outside it).
 /// Returns the resolved path and an optional confining walk root.
@@ -147,7 +152,7 @@ async fn confine_local(
 ) -> Result<(PathBuf, Option<PathBuf>), acp::Error> {
     let ops = agent.resolve_workspace_ops()?;
     let handle = ops.workspace_handle().ok_or_else(|| {
-        acp::Error::internal_error().data("no local workspace handle for fs confinement")
+        crate::acp_error::internal_error("no local workspace handle for fs confinement")
     })?;
     let workspace_err = match handle.confine_to_workspace_root(path).await {
         Ok(confined) => return Ok(confined),
@@ -159,7 +164,7 @@ async fn confine_local(
     {
         return Ok(confined);
     }
-    Err(acp::Error::invalid_params().data(workspace_err.to_string()))
+    Err(crate::acp_error::invalid_params(workspace_err.to_string()))
 }
 pub(crate) fn is_fs_method(method: &str) -> bool {
     method.starts_with("fuigo/fs/")
@@ -216,7 +221,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                         let ext_result: ExtMethodResult<FsReadFileData> = err.into();
                         ext_result
                             .to_ext_response()
-                            .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+                            .map_err(|e| crate::acp_error::internal_error(e.to_string()))
                     } else {
                         to_ext_response(Ok(data))
                     }
@@ -240,6 +245,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let result = fs::delete_file(&path).await.map(|_| Empty {});
             to_ext_response(result)
         }
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }

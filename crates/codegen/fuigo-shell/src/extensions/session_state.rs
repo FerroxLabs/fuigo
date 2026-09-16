@@ -38,7 +38,7 @@ struct StateRequest {
 fn validate_session_uuid(session_id: &str) -> Result<(), acp::Error> {
     uuid::Uuid::try_parse(session_id)
         .map(|_| ())
-        .map_err(|_| acp::Error::invalid_params().data("sessionId must be a UUID"))
+        .map_err(|_| crate::acp_error::invalid_params("sessionId must be a UUID"))
 }
 
 /// `fuigo/session/state`: return metadata columns keyed by logical name.
@@ -48,7 +48,7 @@ pub(crate) async fn handle_state(args: &acp::ExtRequest) -> ExtResult {
     validate_session_uuid(&request.session_id)?;
 
     let Some(dir) = resolve_session_dir(&request.session_id, &request.cwd) else {
-        return Err(acp::Error::invalid_params().data("session not found"));
+        return Err(crate::acp_error::invalid_params("session not found"));
     };
     let mut state = serde_json::Map::new();
     for (column, rel) in COLUMNS {
@@ -90,25 +90,27 @@ pub(crate) async fn handle_import(args: &acp::ExtRequest) -> ExtResult {
     let has_local_session = resolve_session_dir(&request.session_id, &request.cwd).is_some();
     if !has_local_session {
         let Some(summary_value) = request.state.get_mut(SUMMARY_COLUMN) else {
-            return Err(
-                acp::Error::invalid_params().data("session/import requires a summary column")
-            );
+            return Err(crate::acp_error::invalid_params(
+                "session/import requires a summary column",
+            ));
         };
         let Some(summary) = summary_value.as_object_mut() else {
-            return Err(
-                acp::Error::invalid_params().data("session/import summary must be an object")
-            );
+            return Err(crate::acp_error::invalid_params(
+                "session/import summary must be an object",
+            ));
         };
         sanitize_summary_for_host(summary, &request.session_id, &request.cwd);
         // Reject a summary that would not load rather than persist one that makes the session unloadable and blocks re-import
         if Summary::deserialize(&*summary_value).is_err() {
-            return Err(acp::Error::invalid_params().data("summary column is not a valid summary"));
+            return Err(crate::acp_error::invalid_params(
+                "summary column is not a valid summary",
+            ));
         }
         // Write the `.cwd` sidecar for hash-based (long-path) dirs so the session stays recoverable by id, not just by (id, cwd)
         crate::util::fuigo_home::ensure_sessions_cwd_dir(&request.cwd)
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
         write_import(&dir, &request.state, &request.updates, &request.session_id)
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
     }
     super::to_raw_response(&json!({ "imported": !has_local_session }))
 }

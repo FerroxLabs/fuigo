@@ -81,6 +81,11 @@ tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "u
 
 [dev-dependencies]
 serial_test = { workspace = true }
+# `registered_parent_death_hook`, so a test can observe that the real agent
+# entrypoint registered this binary's parent-death hook. Dev-only: the
+# accessor is absent from every shipped build (resolver 2 keeps dev-dependency
+# features out of non-test builds).
+fuigo-tty-utils = { workspace = true, features = ["testing"] }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).
 clap = { workspace = true, features = ["derive"] }

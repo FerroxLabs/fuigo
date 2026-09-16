@@ -80,7 +80,8 @@ pub async fn list_models(
             ),
         acp_tx,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!(crate::sampling::error::acp_error_text(&e)))?;
     fetch_model_state(acp_tx).await
 }
 /// Fetch model state via `fuigo/models/list` over an initialized channel.
@@ -90,7 +91,8 @@ pub async fn fetch_model_state(acp_tx: &AcpAgentTx) -> Result<acp::SessionModelS
         acp::ExtRequest::new("fuigo/models/list", params.into()),
         acp_tx,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!(crate::sampling::error::acp_error_text(&e)))?;
     parse_models_list_response(resp.0.get())
 }
 /// Parse an `fuigo/models/list` payload; a handler error wins over a missing result.

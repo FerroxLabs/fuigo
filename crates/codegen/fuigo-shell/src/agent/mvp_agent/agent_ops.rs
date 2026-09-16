@@ -960,13 +960,7 @@ impl MvpAgent {
         };
         if self.local_workspace_already_bound(session_id) {
             return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        serde_json::json!({
-                "code": "local_workspace_already_bound",
-                "message": "local workspace already bound; remove is not supported until session end",
-            }),
-                    ),
+                crate::acp_error::invalid_params_with_code("local_workspace_already_bound", "local workspace already bound; remove is not supported until session end"),
             );
         }
         self.mark_local_workspace_bound(session_id.clone());
@@ -977,13 +971,7 @@ impl MvpAgent {
         };
         let Some(intent) = parse_local_workspace_intent(meta.as_ref()) else {
             return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        serde_json::json!({
-                "code": "local_workspace_intent_missing",
-                "message": "fuigo/local_workspace intent required for mid-session add",
-            }),
-                    ),
+                crate::acp_error::invalid_params_with_code("local_workspace_intent_missing", "fuigo/local_workspace intent required for mid-session add"),
             );
         };
         let mode = match &intent {
@@ -1013,13 +1001,7 @@ impl MvpAgent {
                 }
                 Self::ensure_attach_fs_only_advertised_tools()
                     .map_err(|msg| {
-                        acp::Error::invalid_params()
-                            .data(
-                                serde_json::json!({
-                        "code": "local_workspace_fs_only_required",
-                        "message": msg,
-                    }),
-                            )
+                        crate::acp_error::invalid_params_with_code("local_workspace_fs_only_required", msg)
                     })?;
                 None
             }
@@ -1027,13 +1009,7 @@ impl MvpAgent {
         let sessions = resolve_session_computer_sessions(meta.as_ref())?;
         let Some(sessions) = sessions.filter(|s| !s.is_empty()) else {
             return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        serde_json::json!({
-                "code": "local_workspace_stamp_failed",
-                "message": "failed to resolve existing_workspace stamp for mid-session add",
-            }),
-                    ),
+                crate::acp_error::invalid_params_with_code("local_workspace_stamp_failed", "failed to resolve existing_workspace stamp for mid-session add"),
             );
         };
         if !sessions
@@ -1041,13 +1017,7 @@ impl MvpAgent {
             .any(|s| matches!(s, ComputerSession::ExistingWorkspace { .. }))
         {
             return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        serde_json::json!({
-                "code": "local_workspace_stamp_failed",
-                "message": "mid-session add did not produce existing_workspace",
-            }),
-                    ),
+                crate::acp_error::invalid_params_with_code("local_workspace_stamp_failed", "mid-session add did not produce existing_workspace"),
             );
         }
         #[cfg(unix)]
@@ -1060,13 +1030,7 @@ impl MvpAgent {
         }
         let Some(bridge) = self.gateway_bridge_for(session_id) else {
             return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        serde_json::json!({
-                "code": "gateway_bridge_missing",
-                "message": "session has no gateway bridge for session.update computer_sessions",
-            }),
-                    ),
+                crate::acp_error::invalid_params_with_code("gateway_bridge_missing", "session has no gateway bridge for session.update computer_sessions"),
             );
         };
         match tokio::time::timeout(BRIDGE_READY_TIMEOUT, bridge.wait_until_ready()).await
@@ -1077,8 +1041,7 @@ impl MvpAgent {
             }
             Err(_) => {
                 return Err(
-                    acp::Error::internal_error()
-                        .data(
+                    crate::acp_error::internal_error(
                             "gateway bridge not ready for mid-session add_local_workspace",
                         ),
                 );
@@ -1091,8 +1054,7 @@ impl MvpAgent {
             }
             _ => {
                 return Err(
-                    acp::Error::internal_error()
-                        .data("expected existing_workspace as first computer session"),
+                    crate::acp_error::internal_error("expected existing_workspace as first computer session"),
                 );
             }
         };
@@ -1232,7 +1194,7 @@ impl MvpAgent {
                 self.request_session_shutdown(session_id);
                 self.remove_session(session_id);
                 Err(
-                    acp::Error::internal_error().data("gateway bridge connect timed out"),
+                    crate::acp_error::internal_error("gateway bridge connect timed out"),
                 )
             }
         }
@@ -1276,7 +1238,7 @@ impl MvpAgent {
                     "failed to create local WorkspaceHandle"
                 );
                 return Err(
-                    acp::Error::internal_error().data("workspace not initialized"),
+                    crate::acp_error::internal_error("workspace not initialized"),
                 );
             }
         };
@@ -1366,7 +1328,7 @@ impl MvpAgent {
                 }),
                 ),
             );
-            return Err(acp::Error::auth_required().data(msg));
+            return Err(crate::acp_error::auth_required(msg));
         };
         let meta = if method_id.0.as_ref() == auth_method::FUIGO_COM_METHOD_ID {
             serde_json::json!({ "use_oauth": true }).as_object().cloned()
@@ -1941,7 +1903,7 @@ impl MvpAgent {
                 model_count = models.len(),
                 "resolve_model_id: unknown model id (not in models() by key or .model field)"
             );
-            return Err(acp::Error::invalid_params().data("unknown model id"));
+            return Err(crate::acp_error::invalid_params("unknown model id"));
         };
         let entry = models
             .get(catalog_key.0.as_ref())
@@ -4250,8 +4212,7 @@ impl MvpAgent {
         let workspace_ops = self
             .resolve_workspace_ops()
             .map_err(|_| {
-                acp::Error::internal_error()
-                    .data(
+                crate::acp_error::internal_error(
                         "Local workspace initialization failed; cannot create session. \
                  Check that a Tokio runtime is available.",
                     )
@@ -4285,7 +4246,7 @@ impl MvpAgent {
         let sampling_config = self
             .resolve_sampling_config_for_model(&session_model_id, origin_client.clone());
         if self.auth_method_id.load().is_none() {
-            return Err(acp::Error::auth_required().data("no auth method id provided"));
+            return Err(crate::acp_error::auth_required("no auth method id provided"));
         }
         let auth_method_id = std::sync::Arc::clone(&self.auth_method_id);
         tracing::info!(
@@ -4441,8 +4402,7 @@ impl MvpAgent {
                 let file_tools = effective
                     .tool_configs(&cfg.toolset.hashline)
                     .map_err(|e| {
-                        acp::Error::invalid_params()
-                            .data(format!("invalid [toolset.hashline] config: {e}"))
+                        crate::acp_error::invalid_params(format!("invalid [toolset.hashline] config: {e}"))
                     })?;
                 agent_definition.override_file_tools(file_tools);
             }

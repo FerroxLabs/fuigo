@@ -10,9 +10,9 @@ pub(crate) fn require_fuigo_auth(
 ) -> Result<FuigoAuth, acp::Error> {
     let auth = auth_manager
         .current_or_expired()
-        .ok_or_else(|| acp::Error::auth_required().data(missing_message))?;
+        .ok_or_else(|| crate::acp_error::auth_required(missing_message))?;
     if !auth.is_fuigo_auth() {
-        return Err(acp::Error::auth_required().data(non_fuigo_message));
+        return Err(crate::acp_error::auth_required(non_fuigo_message));
     }
     Ok(auth)
 }

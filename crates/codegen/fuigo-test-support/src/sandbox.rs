@@ -310,8 +310,8 @@ fn baseline_env_from_parent(
 ) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
     for key in platform_allowlist() {
-        if let Some(value) = parent_env.get(OsStr::new(key)) {
-            env.insert((*key).into(), value.to_owned());
+        if let Some(value) = lookup_parent_var(parent_env, key) {
+            env.insert((*key).into(), value);
         }
     }
     apply_hermetic_git_env(&mut env, parent_cwd, parent_env);
@@ -388,6 +388,35 @@ fn apply_hermetic_git_env(
     env.insert("GIT_BIN_PATH".into(), git_bin.into_os_string());
     env.insert("GIT_EXEC_PATH".into(), parent.into_os_string());
     env.insert("PATH".into(), path);
+}
+
+/// Look an allowlisted variable up in the parent environment.
+///
+/// Windows environment variable names are CASE-INSENSITIVE: `std::env::var_os("SystemRoot")` finds a
+/// variable the OS spells `SYSTEMROOT`, but a `BTreeMap<OsString, _>` keyed on the parent's own
+/// spelling does not. The allowlist writes `"SystemRoot"`; GitHub's Windows runners expose
+/// `SYSTEMROOT`; the exact lookup missed, and every `TestSandbox` child on Windows was spawned with
+/// no `SystemRoot` at all. That is not a cosmetic miss — winsock and the crypto providers need it, so
+/// affected children could not make HTTPS requests and the tests that drove them saw zero traffic
+/// (`fluxrouter_cache_bypass` on windows-latest / windows-11-arm, 2026-09-16). The failure is silent
+/// on every other Windows suite that spawns a child, which is why it survived this long.
+///
+/// Unix environment names ARE case-sensitive, so the exact lookup is correct there and is kept.
+fn lookup_parent_var(parent_env: &BTreeMap<OsString, OsString>, key: &str) -> Option<OsString> {
+    if let Some(value) = parent_env.get(OsStr::new(key)) {
+        return Some(value.to_owned());
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    parent_env
+        .iter()
+        .find(|(candidate, _)| {
+            candidate
+                .to_str()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(key))
+        })
+        .map(|(_, value)| value.to_owned())
 }
 
 fn platform_allowlist() -> &'static [&'static str] {

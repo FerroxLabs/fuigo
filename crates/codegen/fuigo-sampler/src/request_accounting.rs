@@ -79,19 +79,52 @@ impl Attempt {
     /// Settle only a definitive provider completion. A failure to persist keeps
     /// the debit conservative and is surfaced separately from provider usage.
     pub(crate) async fn settle_execution(&self) -> Result<(), String> {
-        let (admission, id, dispatched, usage) = {
-            let receipt = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            (
-                receipt.execution_admission.clone(),
-                receipt.attempt_id.clone(),
-                receipt.dispatched,
-                receipt.usage.clone(),
-            )
-        };
+        let (admission, id, dispatched, usage) = self.execution_settlement();
         if dispatched && let Some(admission) = admission {
             admission.settle(id, usage).await?;
         }
         Ok(())
+    }
+
+    /// Settle an attempt its own resend takes over. The retry continues the same
+    /// logical call, so the attempt is finished work: leaving it unresolved makes an
+    /// execution that recovered on the retry report a partial terminal receipt, and
+    /// the turn then fails with `-32603` even though the model answered.
+    pub(crate) async fn supersede_execution(&self) -> Result<(), String> {
+        let (admission, id, dispatched, usage) = self.execution_settlement();
+        if dispatched && let Some(admission) = admission {
+            admission.supersede(id, usage).await?;
+        }
+        Ok(())
+    }
+
+    /// Mark an attempt no resend of this request takes over. It stays unresolved work
+    /// unless the caller resubmits the same logical call (the shell's transient, auth
+    /// and rate-limit resubmits), which supersedes it then.
+    pub(crate) async fn abandon_execution(&self) -> Result<(), String> {
+        let (admission, id, dispatched, _) = self.execution_settlement();
+        if dispatched && let Some(admission) = admission {
+            admission.abandon(id).await?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn execution_settlement(
+        &self,
+    ) -> (
+        Option<Arc<dyn fuigo_sampling_types::ExecutionAdmission>>,
+        String,
+        bool,
+        Option<TokenUsage>,
+    ) {
+        let receipt = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            receipt.execution_admission.clone(),
+            receipt.attempt_id.clone(),
+            receipt.dispatched,
+            receipt.usage.clone(),
+        )
     }
 
     pub(crate) fn finish(&self, outcome: Outcome, usage: Option<TokenUsage>, cost: Option<i64>) {

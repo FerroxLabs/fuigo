@@ -7049,10 +7049,11 @@ mod direct_hub_cloud_removed {
     fn assert_direct_hub_error(err: agent_client_protocol::Error) {
         assert_eq!(
             err.data.as_ref(),
-            Some(&serde_json::Value::String(
-                DIRECT_HUB_CLOUD_REMOVED_MSG.to_string()
-            )),
-            "error data must be the exact D8 message, got: {err:?}"
+            Some(&serde_json::json!({
+                "message": DIRECT_HUB_CLOUD_REMOVED_MSG,
+                "error_kind": "invalid_request",
+            })),
+            "error data must be the exact D8 message, typed, got: {err:?}"
         );
         assert_eq!(
             err.code,
@@ -7706,5 +7707,59 @@ fn stock_no_subagents_profile_strips_spawn_from_replacing_harness() {
         let mut def = fuigo_agent::AgentDefinition::codex();
         carry_stock_profile_subagent_choice(&mut def, profile);
         assert_eq!(spawns(&def), keeps, "profile {profile:?}");
+    }
+}
+
+/// The same contract through the REAL `authenticate` entry point, not just the helper.
+/// The api-key kill switch is the one refused login reachable without a browser or a network, so it is
+/// what pins that the method itself answers with the typed object instead of `data: null`.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn authenticate_answers_a_refused_login_with_typed_object_data() {
+    use crate::agent::auth_method::FUIGO_API_KEY_METHOD_ID;
+    use acp::Agent as _;
+    let agent = build_agent_with_api_key_auth_disabled();
+    let err = agent
+        .authenticate(acp::AuthenticateRequest::new(FUIGO_API_KEY_METHOD_ID))
+        .await
+        .expect_err("api-key auth is disabled by the kill switch");
+    assert_eq!(i32::from(err.code), -32000, "{err:?}");
+    let data = err
+        .data
+        .as_ref()
+        .expect("authenticate answered a refused login with no `data` at all");
+    assert_eq!(data["error_kind"], "auth", "{data}");
+    assert!(
+        data["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("disabled by your administrator")),
+        "the reply must say why the login was refused, got {data}"
+    );
+}
+
+/// A failed or cancelled login must answer with typed object `data`, like every other error the agent
+/// sends. `authenticate` is the one method every embedding client calls on connect, and a client that
+/// renders only object-shaped `data` shows the user NOTHING for `{ "message": "...", "data": null }`.
+#[test]
+fn a_failed_login_answers_with_typed_data_not_a_bare_message() {
+    for reason in [
+        "Authentication cancelled",
+        "provider rejected the credentials",
+    ] {
+        let err = super::acp_agent::auth_flow_error(&anyhow::anyhow!("{reason}"));
+        assert_eq!(i32::from(err.code), -32000, "{reason}");
+        let data = err
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("{reason}: authenticate answered with no `data` at all"));
+        assert_eq!(data["message"], reason, "{reason}: {data}");
+        assert_eq!(data["error_kind"], "auth", "{reason}: {data}");
+        // A-R7-4: the move put the reason in `data.message` and left `message` as the class name.
+        // That is a reduction for a client that reads only `message`, on the method every embedding
+        // client calls on connect, so it is recorded in 15-agent-mode.md's notes on the class.
+        assert_eq!(
+            err.message, "Authentication required",
+            "{reason}: `message` is the class name; the reason lives in `data.message`"
+        );
     }
 }

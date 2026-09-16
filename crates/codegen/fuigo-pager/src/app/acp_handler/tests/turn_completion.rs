@@ -2035,6 +2035,49 @@
         ));
     }
 
+    /// The TurnFailed marker keeps a status-less `api` error's detail on every rail: live wake, busy-wake pierce, and replay.
+    /// The class's next step stays beside it (A-R7-3): the detail replaces the generic headline, not the guidance.
+    #[test]
+    fn status_less_api_turn_failed_marker_keeps_the_provider_detail() {
+        use crate::app::agent::AgentState;
+
+        let detail = "Content violates usage guidelines.";
+        let check = |app: &AppView, rail: &str| {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            match last_session_event(&agent.scrollback) {
+                Some(SessionEvent::TurnFailed { error, .. }) => {
+                    assert!(error.contains("Content violates usage guidelines"), "{rail}: {error:?}");
+                    assert!(error.starts_with("Request failed:"), "{rail}: {error:?}");
+                    assert!(error.contains("Wait a minute and send again"), "{rail}: {error:?}");
+                }
+                other => panic!("{rail}: expected TurnFailed, got {other:?}"),
+            }
+        };
+
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle_ext_notification(
+            &fuigo_turn_completed_failed_with_error_kind("sess-wake", "task-completed-bg1", detail, "api", false),
+            &mut app,
+        );
+        check(&app, "wake");
+
+        let mut app = make_app_with_agent("sess-wake");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+        let _ = handle_ext_notification(
+            &fuigo_turn_completed_failed_with_error_kind("sess-wake", "task-completed-bg1", detail, "api", false),
+            &mut app,
+        );
+        check(&app, "busy wake");
+
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &fuigo_turn_completed_failed_with_error_kind("sess-1", "p1", detail, "api", true),
+            &mut app,
+        );
+        check(&app, "replay");
+    }
+
     #[test]
     fn replay_failed_error_kind_renders_truncation_copy() {
         let mut app = make_app_with_agent("sess-1");

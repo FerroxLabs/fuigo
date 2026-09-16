@@ -702,7 +702,7 @@ impl SessionActor {
         // Bind the existing logical goal, or this explicit prompt, before title
         // generation or normal inference can consume its completion capacity.
         let budget = fuigo_sampler::execution_budget::process_budget()
-            .map_err(|message| acp::Error::internal_error().data(message))?;
+            .map_err(crate::acp_error::internal_error)?;
         let active_goal = self.goal_tracker.lock().status()
             == Some(crate::session::goal_tracker::GoalStatus::Active);
         let _execution = if crate::session::execution_state::should_track_execution(
@@ -739,7 +739,7 @@ impl SessionActor {
                     &self.notifications.persistence_tx, &self.session_info.id.to_string(), &root_id, prompt_id,
                     max_calls, deadline_ms, self.max_turns.map(|limit| limit as u64), limits,
                     self.startup_hints.execution_parent_grant.clone(),
-                ).await.map_err(|_| acp::Error::internal_error().data("Execution state could not be made durable"))?)
+                ).await.map_err(|_| crate::acp_error::session_storage("Execution state could not be made durable"))?)
             }
         } else { None };
         let mut chunk_meta = serde_json::Map::new();
@@ -1004,7 +1004,7 @@ impl SessionActor {
                     },
                 )
                 .map_err(|e| {
-                    acp::Error::internal_error().data(format!("failed to create session dir: {e}"))
+                    crate::acp_error::session_storage(format!("failed to create session dir: {e}"))
                 })?;
                 crate::session::image_describe::persist_and_prepend_image_files(
                     &session_dir,
@@ -1012,8 +1012,9 @@ impl SessionActor {
                     &user_message,
                 )
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to save user images to assets dir: {e}"))
+                    crate::acp_error::session_storage(format!(
+                        "failed to save user images to assets dir: {e}"
+                    ))
                 })?
             };
             let attached_image_refs = if self.is_cursor_harness() {
@@ -1162,6 +1163,11 @@ impl SessionActor {
                         &mut salvage,
                     )
                     .await;
+                // One single-line record per failed turn, inside this prompt's span
+                // The turn functions no longer use `#[instrument(err)]`: its `Display` spread an object `data` over several lines, twice
+                if let Err(e) = &round {
+                    crate::sampling::error::log_turn_error(e);
+                }
                 if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
                     break round;
                 }
@@ -1518,7 +1524,7 @@ impl SessionActor {
                 .await;
             }
             Err(err) => {
-                let message = err.to_string();
+                let message = crate::sampling::error::acp_error_text(err);
                 let input = fuigo_agent_lifecycle::TurnErrorInput { message: &message };
                 for contributor in self.extension_registry.turn_lifecycle_contributors() {
                     contributor.on_turn_error(&input).await;
@@ -1528,16 +1534,16 @@ impl SessionActor {
         let usage = self.freeze_prompt_usage(prompt_id).await;
         self.persist_live_usage().await;
         if let Some(execution) = &_execution {
-            let state = execution.snapshot().await.map_err(|_| acp::Error::internal_error().data("Execution state unavailable"))?;
+            let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution state unavailable"))?;
             let goal_active = self.goal_tracker.lock().status() == Some(crate::session::goal_tracker::GoalStatus::Active);
             let succeeded = matches!(&result, Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }));
             if crate::session::execution_state::should_terminalize(goal_active, succeeded, state.phase) {
                 execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await
-                    .map_err(|_| acp::Error::internal_error().data("Execution evidence not durable"))?;
+                    .map_err(|_| crate::acp_error::session_storage("Execution evidence not durable"))?;
                 let receipt = execution.terminal(succeeded).await
-                    .map_err(|_| acp::Error::internal_error().data("Execution terminal receipt not durable"))?;
+                    .map_err(|_| crate::acp_error::session_storage("Execution terminal receipt not durable"))?;
                 if receipt.partial && matches!(&result, Ok(TurnOutcome::Completed { .. })) {
-                    result = Err(acp::Error::internal_error().data(serde_json::to_value(receipt).unwrap_or_default()));
+                    result = Err(crate::acp_error::execution_receipt_error(&receipt));
                 }
             }
         }
@@ -1854,7 +1860,6 @@ impl SessionActor {
     #[tracing::instrument(
         name = "session.process_conversation_turn_with_recovery",
         skip_all,
-        err,
         fields(req_id = %req_id, session_id = %self.session_info.id.0)
     )]
     pub(super) async fn process_conversation_turn_with_recovery(
@@ -1865,6 +1870,9 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
+        // A new turn's first retry-status mirror has no reasoning in front of it.
+        self.turn_thought_text_emitted
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             crate::session::compaction_config::SUPPRESS_TURN,
             crate::session::compaction_config::SUPPRESS_NONE,
@@ -2285,7 +2293,6 @@ impl SessionActor {
     #[tracing::instrument(
         name = "session.process_conversation_turn",
         skip_all,
-        err,
         fields(
             session_id = %self.session_info.id.0,
             model_id,
@@ -2572,7 +2579,7 @@ impl SessionActor {
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
                 && let Err(e) = self.run_compact_only(trigger_info, false).await
             {
-                tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
+                tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Pre-sampling auto-compaction failed");
                 if Self::is_auth_compact_error(&e) {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
@@ -2603,10 +2610,10 @@ impl SessionActor {
                     recall_only_tools,
                 );
             let finalize_execution = if let Some(execution) = &execution {
-                let state = execution.snapshot().await.map_err(|_| acp::Error::internal_error().data("Execution state unavailable"))?;
+                let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution state unavailable"))?;
                 if state.phase == crate::session::execution_state::Phase::Terminal || state.completion_admitted {
-                    let receipt = execution.terminal(false).await.map_err(|_| acp::Error::internal_error().data("Execution terminal receipt unavailable"))?;
-                    return Err(acp::Error::internal_error().data(serde_json::to_value(receipt).unwrap_or_default()));
+                    let receipt = execution.terminal(false).await.map_err(|_| crate::acp_error::session_storage("Execution terminal receipt unavailable"))?;
+                    return Err(crate::acp_error::execution_receipt_error(&receipt));
                 }
                 // `--max-turns` is deliberately NOT one of these. Every bound listed here is an
                 // internal budget (call, deadline, token, durable tool-round), and finalizing on
@@ -2641,7 +2648,7 @@ impl SessionActor {
                     } else {
                         execution.finalize().await
                     };
-                    finalized.map_err(|_| acp::Error::internal_error().data("Execution finalization not durable"))?;
+                    finalized.map_err(|_| crate::acp_error::session_storage("Execution finalization not durable"))?;
                 }
                 finalizing
             } else { false };
@@ -2715,9 +2722,9 @@ impl SessionActor {
                 let (respond_to, receive) = tokio::sync::oneshot::channel();
                 self.notifications.persistence_tx.send(crate::session::persistence::PersistenceMsg::PresentationHints {
                     hints: hints.clone(), respond_to,
-                }).map_err(|_| acp::Error::internal_error().data("Presentation persistence channel closed"))?;
-                receive.await.map_err(|_| acp::Error::internal_error().data("Presentation persistence acknowledgment lost"))?
-                    .map_err(|error| acp::Error::internal_error().data(format!("Presentation persistence failed: {error}")))?;
+                }).map_err(|_| crate::acp_error::session_storage("Presentation persistence channel closed"))?;
+                receive.await.map_err(|_| crate::acp_error::session_storage("Presentation persistence acknowledgment lost"))?
+                    .map_err(|error| crate::acp_error::session_storage(format!("Presentation persistence failed: {error}")))?;
                 self.tool_metadata_snapshot.lock().unwrap().native_presentation.checkpoint_saved(hints);
             }
             // OpenAI-family models on the Responses backend get the request profile Codex uses: freeform
@@ -2758,6 +2765,19 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
+            // This submission takes over every attempt the sampler abandoned on this turn:
+            // a shell-level resubmit (transient retry, auth refresh, rate-limit wait) continues
+            // the same logical call, so those attempts are finished work, not unresolved work.
+            // Without this the terminal receipt is partial and a recovered turn fails with -32603.
+            if let Some(execution) = execution.as_ref()
+                && execution.supersede_pending_attempts().await.is_err()
+            {
+                fuigo_telemetry::unified_log::warn(
+                    "shell.turn.superseded_attempts_not_durable",
+                    Some(self.session_info.id.0.as_ref()),
+                    None,
+                );
+            }
             request.execution_admission = execution.clone().map(|e| e as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
             if finalize_response { request.purpose = fuigo_sampling_types::RequestPurpose::Completion; }
             request.x_fuigo_session_id = Some(self.session_info.id.to_string());
@@ -2803,12 +2823,12 @@ impl SessionActor {
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
-                .map_err(|message| acp::Error::internal_error().data(message))?;
+                .map_err(crate::acp_error::internal_error)?;
             if let Some(execution) = &execution {
-                let state = execution.snapshot().await.map_err(|_| acp::Error::internal_error().data("Execution token state unavailable"))?;
+                let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution token state unavailable"))?;
                 if let Some(limit) = state.limits.output {
                     let remaining = u32::try_from(limit.saturating_sub(state.output_tokens)).unwrap_or(u32::MAX);
-                    if remaining == 0 { return Err(acp::Error::internal_error().data("Execution output-token budget exhausted")); }
+                    if remaining == 0 { return Err(crate::acp_error::execution_incomplete("Execution output-token budget exhausted")); }
                     request.max_output_tokens = Some(request.max_output_tokens.map_or(remaining, |configured| configured.min(remaining)));
                 }
             }
@@ -3222,10 +3242,10 @@ impl SessionActor {
                 for call in &tool_calls {
                     if let Some(expected) = deferred_native.get(&call.name) {
                         if !advertised_native.contains(&call.name) {
-                            return Err(acp::Error::internal_error().data("Native tool was not advertised in this request; discover its schema with search_tool scope=native before calling it"));
+                            return Err(crate::acp_error::internal_error("Native tool was not advertised in this request; discover its schema with search_tool scope=native before calling it"));
                         }
                         if !current.iter().any(|tool| tool.name == call.name && crate::session::tool_presentation::fingerprint(tool) == *expected) {
-                            return Err(acp::Error::internal_error().data("Native tool schema changed during inference; refresh discovery before execution"));
+                            return Err(crate::acp_error::internal_error("Native tool schema changed during inference; refresh discovery before execution"));
                         }
                     }
                 }
@@ -3236,8 +3256,7 @@ impl SessionActor {
                     .iter()
                     .any(|call| !structured_output_tool || call.name != STRUCTURED_OUTPUT_TOOL)
             {
-                return Err(acp::Error::internal_error()
-                    .data("Tool call rejected during finalization"));
+                return Err(crate::acp_error::internal_error("Tool call rejected during finalization"));
             }
             let over_cap = self.media_gen_over_cap(&tool_calls);
             if fuigo_tools::media_gen_limits::should_resample_egregious(
@@ -3632,13 +3651,13 @@ impl SessionActor {
             };
             let execution_tool_ids = tool_call_responses.iter().map(|call| call.id.clone()).collect::<Vec<_>>();
             if let Some(execution) = &execution {
-                execution.tools(execution_tool_ids.clone()).await.map_err(|_| acp::Error::internal_error().data("Tool execution admission not durable or finalizing"))?;
+                execution.tools(execution_tool_ids.clone()).await.map_err(|_| crate::acp_error::session_storage("Tool execution admission not durable or finalizing"))?;
             }
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
             if execute_tool_calls_result.is_ok()
                 && !matches!(&execute_tool_calls_result, Ok(ToolLoop::Cancelled))
                 && let Some(execution) = &execution {
-                execution.tools_settled(execution_tool_ids).await.map_err(|_| acp::Error::internal_error().data("Tool execution settlement not durable"))?;
+                execution.tools_settled(execution_tool_ids).await.map_err(|_| crate::acp_error::session_storage("Tool execution settlement not durable"))?;
             }
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
@@ -3691,7 +3710,7 @@ impl SessionActor {
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {
                 if let Err(e) = self.run_compact_only(trigger_info, false).await {
-                    tracing::error!(error = %e, "Preflight overflow compaction failed");
+                    tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Preflight overflow compaction failed");
                     if Self::is_auth_compact_error(&e) {
                         return Err(self.surface_compact_auth_failure(e).await);
                     }

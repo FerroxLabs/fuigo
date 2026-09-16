@@ -394,6 +394,27 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// FluxRouter's request-body opt-out of its response cache, sent as `"cache": {"no-cache": true, "no-store": true}`.
+/// FluxRouter answers byte-identical requests from an exact-match cache, which replayed one empty model reply to every retry of an agent turn.
+/// Agent turns are never safely replayable, and a header (`Cache-Control`) does not bypass that cache; this body field does.
+#[derive(Serialize)]
+struct CacheBypass {
+    #[serde(rename = "no-cache")]
+    no_cache: bool,
+    #[serde(rename = "no-store")]
+    no_store: bool,
+}
+
+/// A request body as sent: the wire payload, plus [`CacheBypass`] under `cache` for FluxRouter only.
+/// Strict providers reject the unknown field with a 400, so it is absent everywhere else.
+#[derive(Serialize)]
+struct RequestBody<'a, T: Serialize> {
+    #[serde(flatten)]
+    inner: &'a T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache: Option<CacheBypass>,
+}
+
 fn append_response_includes(body: &mut serde_json::Value, extra_includes: &[String]) {
     if extra_includes.is_empty() {
         return;
@@ -467,6 +488,8 @@ pub struct SamplingClient {
     header_injector: Option<crate::config::SharedHeaderInjector>,
     /// Endpoint URL builder, resolved once from `base_url` and `query_params`.
     endpoint: EndpointTemplate,
+    /// Whether every request body carries [`CacheBypass`]: only for FluxRouter's API host, and never on a subscription transport.
+    fluxrouter_cache_bypass: bool,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -803,6 +826,8 @@ impl SamplingClient {
         };
 
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
+        let fluxrouter_cache_bypass = config.subscription.is_none()
+            && fuigo_extra_ca::fluxrouter::is_fluxrouter_url(&config.base_url);
 
         Ok(Self {
             subscription: config.subscription,
@@ -815,6 +840,7 @@ impl SamplingClient {
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
             endpoint,
+            fluxrouter_cache_bypass,
         })
     }
 
@@ -1006,6 +1032,17 @@ impl SamplingClient {
         self.endpoint.url_for_path(path)
     }
 
+    /// The body to send for `inner`: every dispatch serializes through here so FluxRouter's cache bypass cannot miss a wire format.
+    fn body<'a, T: Serialize>(&self, inner: &'a T) -> RequestBody<'a, T> {
+        RequestBody {
+            inner,
+            cache: self.fluxrouter_cache_bypass.then_some(CacheBypass {
+                no_cache: true,
+                no_store: true,
+            }),
+        }
+    }
+
     fn apply_defaults(&self, mut request: ChatCompletionRequest) -> Result<ChatCompletionRequest> {
         if request.model.is_none() {
             request.model = Some(self.defaults.model.clone());
@@ -1107,7 +1144,7 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("chat/completions"));
-        let http_request = fuigo_headers.apply(builder).json(&payload);
+        let http_request = fuigo_headers.apply(builder).json(&self.body(&payload));
 
         let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
@@ -1165,7 +1202,7 @@ impl SamplingClient {
         let http_request = fuigo_headers
             .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&streaming_request);
+            .json(&self.body(&streaming_request));
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1382,7 +1419,7 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("responses"));
-        let http_request = fuigo_headers.apply(builder).json(&request_body);
+        let http_request = fuigo_headers.apply(builder).json(&self.body(&request_body));
 
         let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
@@ -1524,7 +1561,7 @@ impl SamplingClient {
                     DEFAULT_EXACT_REPETITION_MIN_TOKENS.to_string(),
                 );
         }
-        let http_request = http_request.json(&request_body);
+        let http_request = http_request.json(&self.body(&request_body));
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1717,7 +1754,9 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("messages"));
-        let http_request = fuigo_headers.apply(builder).json(&request.inner);
+        let http_request = fuigo_headers
+            .apply(builder)
+            .json(&self.body(&request.inner));
 
         let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
@@ -1826,7 +1865,7 @@ impl SamplingClient {
         let http_request = fuigo_headers
             .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&request.inner);
+            .json(&self.body(&request.inner));
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -2487,6 +2526,58 @@ mod tests {
 
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
+    }
+
+    /// The body wrapper is inert without the bypass: every wire payload leaves byte-for-byte as before, so a non-FluxRouter provider sees no change at all.
+    /// With it, the payload's own bytes still lead and only `cache` is appended.
+    #[test]
+    fn request_body_wrapper_changes_no_payload_byte_and_appends_only_cache() {
+        let chat =
+            ChatCompletionRequest::new("test-model", vec![ChatRequestMessage::user("hello")]);
+        let streaming = StreamingChatRequest {
+            inner: &chat,
+            stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
+        };
+        let responses = serde_json::json!({"model": "test-model", "input": "hello", "include": ["reasoning.encrypted_content"], "stream": true});
+        let messages = messages::MessagesRequest {
+            model: "test-model".into(),
+            messages: vec![messages::Message {
+                role: messages::MessageRole::User,
+                content: messages::MessageContent::Text("hello".into()),
+            }],
+            max_tokens: 1024,
+            stream: Some(true),
+            ..Default::default()
+        };
+        let other = SamplingClient::new(SamplerConfig {
+            base_url: "https://api.openai.com/v1".into(),
+            ..minimal_config()
+        })
+        .unwrap();
+        let flux = SamplingClient::new(SamplerConfig {
+            base_url: "https://api.fluxrouter.ai/v1".into(),
+            ..minimal_config()
+        })
+        .unwrap();
+        fn check<T: Serialize>(other: &SamplingClient, flux: &SamplingClient, payload: &T) {
+            let plain = serde_json::to_string(payload).unwrap();
+            assert_eq!(plain, serde_json::to_string(&other.body(payload)).unwrap());
+            let bypassed = serde_json::to_string(&flux.body(payload)).unwrap();
+            assert_eq!(
+                bypassed,
+                format!(
+                    "{},\"cache\":{{\"no-cache\":true,\"no-store\":true}}}}",
+                    plain.strip_suffix('}').unwrap()
+                )
+            );
+        }
+        check(&other, &flux, &chat);
+        check(&other, &flux, &streaming);
+        check(&other, &flux, &responses);
+        check(&other, &flux, &messages);
     }
 
     async fn capture_response_body(streaming: bool) -> serde_json::Value {

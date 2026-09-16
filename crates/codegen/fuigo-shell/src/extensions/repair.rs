@@ -63,7 +63,7 @@ impl RepairSessionResponse {
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "fuigo/session/repair" => handle_session_repair(agent, args).await,
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -81,11 +81,11 @@ async fn handle_session_repair(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
                 dry_run: req.dry_run,
                 respond_to: tx,
             })
-            .map_err(|_| acp::Error::internal_error().data("failed to send repair command"))?;
+            .map_err(|_| crate::acp_error::session_unavailable("failed to send repair command"))?;
         let report = rx
             .await
-            .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
-            .map_err(|e| acp::Error::internal_error().data(format!("repair failed: {e}")))?;
+            .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
+            .map_err(|e| crate::acp_error::internal_error(format!("repair failed: {e}")))?;
         return to_raw_response(&RepairSessionResponse::new(report, req.dry_run, true));
     }
 
@@ -111,7 +111,7 @@ async fn repair_on_disk(
         &fuigo_root.join("sessions"),
     )
     .ok_or_else(|| {
-        acp::Error::resource_not_found(Some(format!("session not found: {session_id}")))
+        crate::acp_error::resource_not_found(format!("session not found: {session_id}"))
     })?;
     let info = summary.info.clone();
 
@@ -120,7 +120,7 @@ async fn repair_on_disk(
         .load_session_without_updates(&info)
         .await
         .map_err(|e| {
-            acp::Error::internal_error().data(format!("failed to load session history: {e}"))
+            crate::acp_error::session_storage(format!("failed to load session history: {e}"))
         })?
         .chat_history;
 
@@ -131,7 +131,7 @@ async fn repair_on_disk(
             .replace_chat_history(&info, &chat_history)
             .await
             .map_err(|e| {
-                acp::Error::internal_error().data(format!("failed to write repaired history: {e}"))
+                crate::acp_error::session_storage(format!("failed to write repaired history: {e}"))
             })?;
         tracing::warn!(
             session_id,

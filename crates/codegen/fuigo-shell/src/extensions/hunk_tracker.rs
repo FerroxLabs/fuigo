@@ -234,11 +234,11 @@ fn get_hunk_tracker(
     session_id: Option<&acp::SessionId>,
 ) -> Result<HunkTrackerContext, acp::Error> {
     let session_id = session_id.ok_or_else(|| {
-        acp::Error::invalid_params().data("sessionId is required for hunk tracker operations")
+        crate::acp_error::invalid_params("sessionId is required for hunk tracker operations")
     })?;
 
     let handle = agent.get_session_handle(session_id).ok_or_else(|| {
-        acp::Error::invalid_params().data(format!("session not found: {}", session_id.0))
+        crate::acp_error::invalid_params(format!("session not found: {}", session_id.0))
     })?;
 
     Ok(HunkTrackerContext {
@@ -370,7 +370,7 @@ pub async fn handle(
             let mut files: Vec<FileContentEntry> = ops
                 .dispatch(&HunkGetAllFileContentsReq {}, sid)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?
                 .into_iter()
                 .map(file_content_entry_from_wire)
                 .collect();
@@ -395,7 +395,7 @@ pub async fn handle(
             let result = ops
                 .dispatch(&HunkGetSessionSummaryReq {}, sid)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
             to_ext_response(Ok(result))
         }
 
@@ -409,9 +409,9 @@ pub async fn handle(
                 "accept" => HunkActionKind::Accept,
                 "reject" => HunkActionKind::Reject,
                 other => {
-                    return Err(
-                        acp::Error::invalid_params().data(format!("unknown action: {other}"))
-                    );
+                    return Err(crate::acp_error::invalid_params(format!(
+                        "unknown action: {other}"
+                    )));
                 }
             };
             let op = HunkSingleActionReq {
@@ -445,9 +445,9 @@ pub async fn handle(
                 "accept" => HunkActionKind::Accept,
                 "reject" => HunkActionKind::Reject,
                 other => {
-                    return Err(
-                        acp::Error::invalid_params().data(format!("unknown action: {other}"))
-                    );
+                    return Err(crate::acp_error::invalid_params(format!(
+                        "unknown action: {other}"
+                    )));
                 }
             };
             let op = HunkFileActionReq {
@@ -476,9 +476,9 @@ pub async fn handle(
                 "accept" => HunkActionKind::Accept,
                 "reject" => HunkActionKind::Reject,
                 other => {
-                    return Err(
-                        acp::Error::invalid_params().data(format!("unknown action: {other}"))
-                    );
+                    return Err(crate::acp_error::invalid_params(format!(
+                        "unknown action: {other}"
+                    )));
                 }
             };
             let op = HunkTurnActionReq {
@@ -507,9 +507,9 @@ pub async fn handle(
                 "accept" => HunkActionKind::Accept,
                 "reject" => HunkActionKind::Reject,
                 other => {
-                    return Err(
-                        acp::Error::invalid_params().data(format!("unknown action: {other}"))
-                    );
+                    return Err(crate::acp_error::invalid_params(format!(
+                        "unknown action: {other}"
+                    )));
                 }
             };
             let op = HunkAllActionReq {
@@ -530,7 +530,7 @@ pub async fn handle(
             }
         }
 
-        _ => Err(acp::Error::method_not_found()),
+        _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 

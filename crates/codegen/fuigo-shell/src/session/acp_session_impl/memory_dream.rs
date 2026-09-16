@@ -386,7 +386,7 @@ impl SessionActor {
             Ok(Err(e)) => {
                 tracing::warn!(
                     target: fuigo_telemetry::memory_log::TARGET,
-                    error = %e,
+                    error = %crate::sampling::error::acp_error_text(&e),
                     "{log_prefix}: model call failed"
                 );
                 self.memory.record_dream_result(false);
@@ -537,7 +537,7 @@ impl SessionActor {
             .conversation_collect(request)
             .await
             .map_err(|e| {
-                acp::Error::internal_error().data(format!("dream model call failed: {e}"))
+                crate::acp_error::internal_error(format!("dream model call failed: {e}"))
             })?;
         Ok(response.assistant_text())
     }
@@ -673,10 +673,9 @@ impl SessionActor {
             handle
                 .await
                 .map_err(|e| {
-                    acp::Error::internal_error()
-                        .data(format!("flush stream task panicked: {e}"))
+                    crate::acp_error::internal_error(format!("flush stream task panicked: {e}"))
                 })?
-                .map_err(|e| acp::Error::internal_error().data(e))
+                .map_err(crate::acp_error::internal_error)
         }
         .await;
 
@@ -791,12 +790,8 @@ impl SessionActor {
                 }
             }
             Err(e) => {
-                let detail = e
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("memory flush failed");
-                tracing::warn!(error = detail, "memory flush failed, skipping");
+                let detail = memory_flush_error_detail(&e);
+                tracing::warn!(error = %detail, "memory flush failed, skipping");
                 (format!("skipped: {detail}"), 0, 0, false, None)
             }
         };
@@ -881,10 +876,12 @@ impl SessionActor {
             ));
         }
 
-        let sampling_client = self
-            .prepare_chat_completion(false)
-            .await
-            .map_err(|e| format!("failed to prepare client: {e}"))?;
+        let sampling_client = self.prepare_chat_completion(false).await.map_err(|e| {
+            format!(
+                "failed to prepare client: {}",
+                crate::sampling::error::acp_error_text(&e)
+            )
+        })?;
 
         let system = "You are a memory note formatter. Rewrite the user's note into \
             well-structured markdown suitable for a persistent MEMORY.md file. The note should be:\n\
@@ -934,5 +931,62 @@ impl SessionActor {
                 Err(format!("rewrite inference failed: {e}"))
             }
         }
+    }
+}
+
+/// Why a memory flush failed.
+///
+/// Not only the `warn` record: the detail is formatted into `skipped: {detail}`, which becomes the
+/// flush `outcome` the client is sent as `FuigoSessionUpdate::MemoryFlushCompleted { result }` on
+/// `_fuigo/session_notification`, and which headless runs print as `AcpLine::MemoryFlushCompleted`.
+/// So this is a client-visible surface, not a log line.
+///
+/// It used to read `data` as a string, which is a shape no shell error has carried since 1.0.18 typed
+/// every `data` as an object -- so every failure told the user `memory flush failed` and nothing else.
+fn memory_flush_error_detail(err: &acp::Error) -> String {
+    crate::sampling::error::acp_error_message(err)
+}
+
+#[cfg(test)]
+mod memory_flush_error_detail_tests {
+    use super::memory_flush_error_detail;
+    use agent_client_protocol as acp;
+
+    /// The skip record is what the client is shown -- `skipped: {detail}` on
+    /// `_fuigo/session_notification` and in headless output -- so it has to name the failure.
+    #[test]
+    fn a_failed_flush_records_why_not_a_placeholder() {
+        let err = crate::acp_error::internal_error("empty response from model (reasoning_only)");
+        assert_eq!(
+            memory_flush_error_detail(&err),
+            "empty response from model (reasoning_only)"
+        );
+    }
+
+    /// An error with no `data` at all still reads as words, never as an empty string.
+    #[test]
+    fn an_error_without_data_falls_back_to_its_json_rpc_message() {
+        assert_eq!(
+            memory_flush_error_detail(&acp::Error::internal_error()),
+            "Internal error"
+        );
+    }
+
+    /// The detail is not a log line. It is formatted into the flush `outcome` and sent to the client,
+    /// so pin it on the wire shape the client actually receives.
+    #[test]
+    fn the_skip_outcome_reaches_the_client_carrying_the_reason() {
+        let err = crate::acp_error::internal_error("empty response from model (reasoning_only)");
+        let detail = memory_flush_error_detail(&err);
+        let update = crate::extensions::notification::SessionUpdate::MemoryFlushCompleted {
+            result: format!("skipped: {detail}"),
+            path: None,
+        };
+        let wire = serde_json::to_value(&update).expect("serialize the notification");
+        assert_eq!(wire["sessionUpdate"], "memory_flush_completed");
+        assert_eq!(
+            wire["result"], "skipped: empty response from model (reasoning_only)",
+            "the client is told why the flush was skipped: {wire}"
+        );
     }
 }

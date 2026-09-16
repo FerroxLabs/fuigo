@@ -40,6 +40,12 @@ impl AcpChannelFailure {
     /// kind. Namespaced so it can never collide with other `with_data` payloads.
     const DATA_KEY: &'static str = "fuigoAcpChannelFailure";
 
+    /// `error_kind` every channel-closed error carries, matching the engine's
+    /// `session_unavailable` tag (`fuigo_shell::acp_error`): the peer could not be
+    /// reached, or never answered. Kept as a literal because this crate sits below
+    /// the shell and must not depend on it; the string is frozen wire format.
+    const ERROR_KIND: &'static str = "session_unavailable";
+
     const fn tag(self) -> &'static str {
         match self {
             Self::SendFailed => "send_failed",
@@ -60,11 +66,21 @@ impl AcpChannelFailure {
 /// with a typed [`AcpChannelFailure`] discriminant in `data`. The error `code`
 /// stays `INTERNAL_ERROR`, so this is purely additive for callers that just
 /// propagate the error.
+///
+/// `data` also carries `message` and `error_kind`, like every other typed
+/// `acp::Error` the engine builds: a `data` object that only carries a machine tag
+/// has nothing a text renderer can show, and `acp::Error`'s `Display` then
+/// pretty-prints the object itself into the user's terminal.
 pub(crate) fn acp_channel_failure_error(
     message: impl Into<String>,
     kind: AcpChannelFailure,
 ) -> acp::Error {
-    acp_internal_error(message).data(serde_json::json!({ AcpChannelFailure::DATA_KEY: kind.tag() }))
+    let message = message.into();
+    acp_internal_error(message.clone()).data(serde_json::json!({
+        "message": message,
+        "error_kind": AcpChannelFailure::ERROR_KIND,
+        AcpChannelFailure::DATA_KEY: kind.tag(),
+    }))
 }
 
 /// Recover the [`AcpChannelFailure`] kind from an error, or `None` if the error
@@ -111,5 +127,24 @@ mod channel_failure_tests {
             acp_channel_failure(&acp::Error::invalid_params().data("unknown session id")),
             None
         );
+    }
+
+    /// The `data` object must describe itself: a reader that looks for `message` (every other
+    /// typed constructor sets one, and the TUI renders it) found only the tag here, so the whole
+    /// object was pretty-printed into the user's terminal.
+    #[test]
+    fn channel_failure_data_carries_the_human_message() {
+        for kind in [AcpChannelFailure::SendFailed, AcpChannelFailure::RecvFailed] {
+            let err = acp_channel_failure_error("unable to send 'x' request, channel closed", kind);
+            let data = err.data.as_ref().expect("typed data");
+            assert_eq!(
+                data["message"], "unable to send 'x' request, channel closed",
+                "{data}"
+            );
+            assert_eq!(data["error_kind"], "session_unavailable", "{data}");
+            assert_eq!(data[AcpChannelFailure::DATA_KEY], kind.tag(), "{data}");
+            // The tag still round-trips, so callers that switch on the kind are unaffected.
+            assert_eq!(acp_channel_failure(&err), Some(kind));
+        }
     }
 }
