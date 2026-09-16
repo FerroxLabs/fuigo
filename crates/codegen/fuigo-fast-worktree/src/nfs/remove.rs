@@ -3,12 +3,15 @@
 //! Never `umount -f`. Unverifiable unmount retains backing + pin. With the
 //! daemon down, the pin is deleted through `liveness::delete_pin_ref_gated`
 //! (the gate pin GC deletes through as well) and the backing dir through
-//! `confined::delete_backing_dir_confined`, whose only caller this is — so
-//! neither delete has a weaker sibling here. A grove record with no known
-//! backing location fails closed before either runs.
+//! `confined::open_backing_dir_confined` + `ConfinedBackingDir::delete`, whose
+//! only caller this is — so neither delete has a weaker sibling here. The
+//! backing dir is opened (and every confinement refusal taken) BEFORE the pin
+//! is touched. A grove record with no VERIFIED backing location — no recorded
+//! `grove.backing` whose marker names this dest, and no marker under any
+//! candidate data dir naming it — fails closed before either runs.
 use super::NfsWorktreeOpts;
 use super::client::NfsWorktreeClient;
-use super::confined::{delete_backing_dir_confined, is_safe_worktree_id};
+use super::confined::{is_safe_worktree_id, open_backing_dir_confined};
 use super::liveness::{BACKING_MARKER_FILE, BackingMarker};
 use super::mount_table::{dest_is_mountpoint, dest_is_projected_mount};
 use crate::RemoveReport;
@@ -80,26 +83,53 @@ fn remove_nfs_worktree(worktree_path: &Path) -> Result<Option<RemoveReport>> {
             );
         }
         // The backing dir is the worktree's actual content; dest is only the
-        // mount view of it. Without a known backing location — no `grove.backing`
-        // in the DB row and no marker under any candidate data dir naming this
-        // dest — proceeding would delete the pin, let the caller `rm -rf` dest and
-        // unregister the record, and leave that content on disk with nothing
-        // tracking it (and nothing to GC it: the daemon owns backing dirs). So
-        // fail closed here, BEFORE the pin is touched, and let the daemon-up
-        // retry do it; the daemon knows where its backing lives.
+        // mount view of it. Without a VERIFIED backing location — no
+        // `grove.backing` in the DB row whose marker names this dest, and no
+        // marker under any candidate data dir naming it — proceeding would
+        // delete the pin, let the caller `rm -rf` dest and unregister the record,
+        // and leave that content on disk with nothing tracking it (and nothing
+        // to GC it: the daemon owns backing dirs). So fail closed here, BEFORE
+        // the pin is touched, and let the daemon-up retry do it; the daemon
+        // knows where its backing lives.
         let Some(data_dir) = m.data_dir.as_ref() else {
+            let why = match m.stale_backing.as_ref() {
+                None => "no recorded backing path and no marker names it".to_string(),
+                Some(StaleBacking::Absent(p)) => format!(
+                    "recorded backing {} does not exist and no marker names it",
+                    p.display()
+                ),
+                Some(StaleBacking::Unmarked(p)) => format!(
+                    "recorded backing {} carries no marker for this dest and no \
+                     marker names it",
+                    p.display()
+                ),
+            };
             bail!(
-                "unmounted dest {} has grove metadata for {id} but no backing \
-                 location (no recorded backing path and no marker names it); \
-                 retaining pin and dest — rm again with the grove daemon running",
+                "unmounted dest {} has grove metadata for {id} but no usable backing \
+                 location ({why}); retaining pin and dest — rm again with the grove \
+                 daemon running",
                 worktree_path.display()
             );
         };
+        // Open the backing dir first: every confinement refusal (a data dir or
+        // backing root that does not exist, a symlink on any component, a
+        // non-directory) is taken here, before the pin is touched, so a refused
+        // `rm` leaves pin, backing and dest exactly as they were. `None` is the
+        // one shape that proceeds without a backing dir to delete: `<id>` is
+        // already gone from a previous partial `rm`.
+        let backing = open_backing_dir_confined(data_dir, id).with_context(|| {
+            format!(
+                "opening backing for {id} under {}; retaining pin and dest",
+                data_dir.display()
+            )
+        })?;
         // Pin first, backing second, and both fail closed. A failed pin delete
         // leaves the backing dir in place, which keeps `gc_orphan_pins` calling the
         // id live, so nothing is half-collected between the operator's retries; a
         // failed backing delete leaves no pin to leak, and `git update-ref -d` is a
-        // no-op on an absent ref, so the retry is clean either way.
+        // no-op on an absent ref, so the retry is clean either way. The backing
+        // delete goes through the fds opened above, so no rename of a component
+        // above `<id>` between the open and the delete can redirect it.
         if let Some(src) = m.source.as_ref() {
             // A source repo that is no longer on disk has no refdb and therefore no
             // pin: `git update-ref` there would fail to even spawn and strand the
@@ -113,12 +143,15 @@ fn remove_nfs_worktree(worktree_path: &Path) -> Result<Option<RemoveReport>> {
                 })?;
             }
         }
-        delete_backing_dir_confined(data_dir, id).with_context(|| {
-            format!(
-                "deleting backing for {id} under {}; retaining dest",
-                data_dir.display()
-            )
-        })?;
+        if let Some(backing) = backing {
+            let shown = backing.shown().to_path_buf();
+            backing.delete().with_context(|| {
+                format!(
+                    "deleting backing {} for {id}; retaining dest",
+                    shown.display()
+                )
+            })?;
+        }
     }
     if !super::dest_is_known_unmounted(worktree_path) {
         bail!(
@@ -187,10 +220,45 @@ fn plain_umount(dest: &Path) -> Result<()> {
 const MAX_MARKER_BYTES: u64 = 64 * 1024;
 struct NfsRemoveMeta {
     worktree_id: Option<String>,
+    /// A data dir whose `worktree-backing/<id>` was seen to carry a marker
+    /// naming dest — either read through the DB-recorded `grove.backing`, or the
+    /// candidate data dir a marker was found under. Never a bare recorded path.
     data_dir: Option<PathBuf>,
     source: Option<PathBuf>,
     control_sock: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
+    /// The DB-recorded `grove.backing` when it could NOT be trusted, for the
+    /// refusal message.
+    stale_backing: Option<StaleBacking>,
+}
+/// Why a DB-recorded `grove.backing` was not used as the backing location.
+#[derive(Debug)]
+enum StaleBacking {
+    /// The recorded backing dir does not exist (the operator moved
+    /// `GROVE_DATA_DIR`, or the row outlived the data dir).
+    Absent(PathBuf),
+    /// The recorded backing dir exists but carries no marker naming this dest
+    /// and this id, so nothing proves it is this worktree's content.
+    Unmarked(PathBuf),
+}
+/// Whether `backing` (a DB-recorded `<data_dir>/worktree-backing/<id>`) carries
+/// a marker that names this `id` and `dest`. Only then is the row's location
+/// trusted for a delete: the marker is what the daemon writes into every
+/// backing dir it owns, and it is the same proof `lookup_from_markers` demands.
+fn recorded_backing_names_dest(backing: &Path, id: &str, dest: &Path) -> Result<(), StaleBacking> {
+    if backing.symlink_metadata().is_err() {
+        return Err(StaleBacking::Absent(backing.to_path_buf()));
+    }
+    let named = backing.file_name().and_then(|n| n.to_str()) == Some(id);
+    let marker_ok = named
+        && read_backing_marker(backing).is_some_and(|m| {
+            m.worktree_id == id && super::mount_table::dest_paths_equivalent(&m.dest, dest)
+        });
+    if marker_ok {
+        Ok(())
+    } else {
+        Err(StaleBacking::Unmarked(backing.to_path_buf()))
+    }
 }
 fn lookup_nfs_meta(worktree_path: &Path) -> Option<NfsRemoveMeta> {
     #[cfg(feature = "metadata")]
@@ -208,17 +276,37 @@ fn lookup_nfs_meta(worktree_path: &Path) -> Option<NfsRemoveMeta> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from);
-            let data_dir = backing
-                .as_ref()
-                .and_then(|b| b.parent())
-                .and_then(|p| p.parent())
-                .map(Path::to_path_buf);
+            // The row's location is trusted only once its marker has been read:
+            // a recorded path that no longer exists, or that holds no marker
+            // naming this dest, is a "known but wrong" location, and deleting
+            // relative to it (or calling its absence success) is how the pin got
+            // deleted and dest unregistered while the REAL backing — found by
+            // its marker under the live data dir — survived untracked.
+            let (data_dir, stale_backing) = match backing.as_ref() {
+                None => (None, None),
+                Some(b) => match recorded_backing_names_dest(b, &rec.id, worktree_path) {
+                    Ok(()) => (
+                        b.parent().and_then(Path::parent).map(Path::to_path_buf),
+                        None,
+                    ),
+                    Err(stale) => {
+                        tracing::warn!(
+                            dest = %worktree_path.display(),
+                            recorded = %b.display(),
+                            reason = ?stale,
+                            "recorded grove backing path not trusted; falling back to markers"
+                        );
+                        (None, Some(stale))
+                    }
+                },
+            };
             let from_db = NfsRemoveMeta {
                 worktree_id: Some(rec.id),
                 data_dir,
                 source: Some(rec.source_repo),
                 control_sock: std::env::var_os("GROVE_CONTROL_SOCK").map(PathBuf::from),
                 runtime_dir: None,
+                stale_backing,
             };
             if from_db.data_dir.is_some() {
                 return Some(from_db);
@@ -230,6 +318,7 @@ fn lookup_nfs_meta(worktree_path: &Path) -> Option<NfsRemoveMeta> {
                     source: from_marker.source.or(from_db.source),
                     control_sock: from_db.control_sock.or(from_marker.control_sock),
                     runtime_dir: from_db.runtime_dir.or(from_marker.runtime_dir),
+                    stale_backing: from_db.stale_backing,
                 });
             }
             return Some(from_db);
@@ -262,6 +351,7 @@ fn lookup_from_markers(worktree_path: &Path) -> Option<NfsRemoveMeta> {
                     source: Some(marker.source_repo),
                     control_sock: std::env::var_os("GROVE_CONTROL_SOCK").map(PathBuf::from),
                     runtime_dir: None,
+                    stale_backing: None,
                 });
             }
         }
@@ -279,8 +369,8 @@ fn nfs_opts_from_env_and_meta(meta: Option<&NfsRemoveMeta>) -> NfsWorktreeOpts {
         ..NfsWorktreeOpts::default()
     }
 }
-/// Read a backing marker from an already-open backing dir (tests / rebuild).
-#[allow(dead_code)]
+/// Read a backing marker from a backing dir (`rm`'s DB-row verification, tests,
+/// rebuild). Capped at `MAX_MARKER_BYTES`; anything larger or unparsable is `None`.
 pub fn read_backing_marker(backing: &Path) -> Option<BackingMarker> {
     let file = std::fs::File::open(backing.join(BACKING_MARKER_FILE)).ok()?;
     let mut buf = Vec::new();
@@ -565,7 +655,7 @@ mod tests {
         fuigo_test_utils::require_git!();
         let tmp = TempDir::new().unwrap();
         let id = "wt-rm-escape";
-        let (repo, _pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
         let (data, link, target) = plant_escape(tmp.path(), id, &dest, &repo, which);
         assert!(
             target.join("precious").is_dir(),
@@ -605,6 +695,12 @@ mod tests {
             link.symlink_metadata()
                 .is_ok_and(|m| m.file_type().is_symlink()),
             "{which:?}: the planted link itself stays for the operator to see"
+        );
+        // The backing dir is opened, and every refusal taken, before the pin is
+        // touched, so a refused rm leaves the pin exactly as it was.
+        assert!(
+            pin_present(&repo, &pin),
+            "{which:?}: a refused rm must leave the pin in place"
         );
     }
 
@@ -725,5 +821,452 @@ mod tests {
             db.get(&dest.to_string_lossy()).unwrap().is_some(),
             "try_nfs_remove never touches the registry"
         );
+    }
+
+    // ---- round 4: spelling-independence of the data dir gate ------------------
+
+    /// `try_nfs_remove` with `GROVE_DATA_DIR` set to an ARBITRARY byte string
+    /// (so a trailing `/`, `/.` or `//` survives into the env), daemon down.
+    fn daemon_down_rm_spelled(
+        dest: &Path,
+        raw_data: &std::ffi::OsStr,
+        tmp: &Path,
+    ) -> Result<Option<RemoveReport>> {
+        with_daemon_down(Path::new(raw_data), tmp, || try_nfs_remove(dest))
+    }
+
+    /// `data` with `suffix` appended byte-for-byte: `Path::join` would normalise
+    /// the spelling away, which is the whole point of these tests.
+    fn spelled(data: &Path, suffix: &str) -> std::ffi::OsString {
+        let mut raw = data.as_os_str().to_os_string();
+        raw.push(suffix);
+        raw
+    }
+
+    /// The `Linked` escape arrangement with the data dir spelled `<data><suffix>`.
+    /// POSIX resolves a trailing `/` (or `/.`) as "the directory this names" and
+    /// FOLLOWS a symlink there even under `O_NOFOLLOW` — `open("<link>/",
+    /// O_DIRECTORY|O_NOFOLLOW)` opens the target on Linux 6.8 and macOS 25 —
+    /// so before the fix `GROVE_DATA_DIR=<link>/` went through the symlinked data
+    /// dir the bare `<link>` spelling refuses, and deleted the out-of-tree target.
+    fn assert_escape_refused_spelled(which: Linked, suffix: &str) {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-escape";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let (data, link, target) = plant_escape(tmp.path(), id, &dest, &repo, which);
+        let raw = spelled(&data, suffix);
+
+        let out = daemon_down_rm_spelled(&dest, &raw, tmp.path());
+
+        let err = match out {
+            Err(e) => e,
+            Ok(report) => panic!(
+                "{which:?} spelled {raw:?}: a symlinked component must be refused \
+                 however the data dir is spelled; got {report:?}, the out-of-tree \
+                 target {} {}, pin {}",
+                target.display(),
+                if target.join("precious").is_dir() {
+                    "survived"
+                } else {
+                    "WAS DELETED"
+                },
+                if pin_present(&repo, &pin) {
+                    "present"
+                } else {
+                    "WAS DELETED"
+                }
+            ),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("symlink"),
+            "{which:?} spelled {raw:?}: the refusal must name the symlink, got: {msg}"
+        );
+        assert!(
+            target.join("precious").is_dir() && target.join(BACKING_MARKER_FILE).is_file(),
+            "{which:?} spelled {raw:?}: nothing behind the link may be deleted"
+        );
+        assert!(
+            pin_present(&repo, &pin),
+            "{which:?} spelled {raw:?}: a refused rm leaves the pin in place"
+        );
+        assert!(
+            link.symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink()),
+            "{which:?} spelled {raw:?}: the planted link itself stays"
+        );
+    }
+
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_data_dir_spelled_with_trailing_slash() {
+        assert_escape_refused_spelled(Linked::DataDir, "/");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_data_dir_spelled_with_trailing_dot() {
+        assert_escape_refused_spelled(Linked::DataDir, "/.");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_data_dir_spelled_with_double_slash() {
+        assert_escape_refused_spelled(Linked::DataDir, "//");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_worktree_backing_dir_spelled_with_trailing_slash() {
+        assert_escape_refused_spelled(Linked::BackingRoot, "/");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_worktree_backing_dir_spelled_with_trailing_dot() {
+        assert_escape_refused_spelled(Linked::BackingRoot, "/.");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_worktree_backing_dir_spelled_with_double_slash() {
+        assert_escape_refused_spelled(Linked::BackingRoot, "//");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_backing_entry_spelled_with_trailing_slash() {
+        assert_escape_refused_spelled(Linked::Id, "/");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_backing_entry_spelled_with_trailing_dot() {
+        assert_escape_refused_spelled(Linked::Id, "/.");
+    }
+    #[test]
+    fn daemon_down_rm_refuses_a_symlinked_backing_entry_spelled_with_double_slash() {
+        assert_escape_refused_spelled(Linked::Id, "//");
+    }
+
+    /// `GROVE_DATA_DIR=<link>/worktree-backing/..`: the kernel resolves `..`
+    /// physically, through the link, so this spelling names the link's TARGET
+    /// and would be followed while `<link>` is refused. The gate refuses the
+    /// spelling itself, so it is spelling-independent rather than merely
+    /// trailing-slash-proof.
+    #[test]
+    fn daemon_down_rm_refuses_a_data_dir_spelled_with_parent_dir() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-escape";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let (data, _link, target) = plant_escape(tmp.path(), id, &dest, &repo, Linked::DataDir);
+        let raw = spelled(&data, &format!("/{WORKTREE_BACKING_DIR}/.."));
+
+        let out = daemon_down_rm_spelled(&dest, &raw, tmp.path());
+
+        let err = match out {
+            Err(e) => e,
+            Ok(report) => panic!(
+                "spelled {raw:?}: `..` must be refused, not resolved through the \
+                 link; got {report:?}, target {} {}, pin {}",
+                target.display(),
+                if target.join("precious").is_dir() {
+                    "survived"
+                } else {
+                    "WAS DELETED"
+                },
+                if pin_present(&repo, &pin) {
+                    "present"
+                } else {
+                    "WAS DELETED"
+                }
+            ),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(".."),
+            "the refusal must name the spelling, got: {msg}"
+        );
+        assert!(
+            target.join("precious").is_dir(),
+            "nothing behind the link is deleted"
+        );
+        assert!(
+            pin_present(&repo, &pin),
+            "a refused rm leaves the pin in place"
+        );
+    }
+
+    /// The other half of spelling-independence: a REAL data dir spelled with a
+    /// trailing slash (what shell tab-completion writes) is allowed exactly as
+    /// the bare spelling is — the normalisation refuses spellings of a symlink,
+    /// not spellings as such.
+    #[test]
+    fn daemon_down_rm_accepts_a_real_data_dir_spelled_with_trailing_slash() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-spelled-real";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let (data, backing) = plant_backing(tmp.path(), id, &dest, &repo);
+        let raw = spelled(&data, "/");
+
+        let out = daemon_down_rm_spelled(&dest, &raw, tmp.path());
+
+        let report = out.expect("a real data dir is allowed however it is spelled");
+        assert!(
+            report.is_none(),
+            "dest still exists, so the caller removes it"
+        );
+        assert!(!pin_present(&repo, &pin), "pin deleted");
+        assert!(!backing.exists(), "backing {} deleted", backing.display());
+        assert!(
+            data.join(WORKTREE_BACKING_DIR).is_dir(),
+            "only `<id>` goes; `worktree-backing` stays"
+        );
+    }
+
+    // ---- round 4: a DB-recorded backing path is trusted only through its marker ----
+
+    /// Register `dest` as a grove worktree whose row records `backing` (if any),
+    /// under the fixture's isolated registry, then point grove lookup at `data`
+    /// with the daemon down. Returns the fixture (it owns the env for its
+    /// lifetime) and the open DB.
+    #[cfg(feature = "metadata")]
+    fn register_grove_row(
+        dest: &Path,
+        id: &str,
+        repo: &Path,
+        pin: &str,
+        backing: Option<&Path>,
+        data: &Path,
+        tmp: &Path,
+    ) -> (crate::db::FuigoHomeFixture, crate::db::WorktreeDb) {
+        let mut fx = crate::db::FuigoHomeFixture::new();
+        let db = crate::db::WorktreeDb::open(&fx.home).unwrap();
+        let mut grove = serde_json::json!({
+            "transport": "nfs", "mount_id": 7, "source_pin": pin
+        });
+        if let Some(b) = backing {
+            grove["backing"] = serde_json::Value::String(b.display().to_string());
+        }
+        // `WorktreeDb::get` canonicalises a path before lookup, so the record
+        // is stored the way a real registration would be found.
+        let registered = dunce::canonicalize(dest).unwrap();
+        db.register(&crate::db::WorktreeRecord {
+            source_repo: repo.to_path_buf(),
+            creation_mode: crate::worktree::STRATEGY_GROVE_NFS.to_string(),
+            metadata: Some(serde_json::json!({ "grove": grove })),
+            ..crate::test_support::worktree_record(id, registered)
+        })
+        .unwrap();
+        fx.set_grove_env(data, &tmp.join("absent.sock"));
+        (fx, db)
+    }
+
+    /// The operator moved `GROVE_DATA_DIR`. The DB row still records the OLD
+    /// backing path, which no longer exists; the REAL backing, with a marker
+    /// naming this dest, sits under the live data dir. Before the fix the row
+    /// was trusted without reading a marker and the absent data dir was
+    /// "success": pin deleted, dest handed to the caller's `rm -rf`, record
+    /// unregistered, and the real content left on disk with nothing tracking it.
+    /// A stale row must fall through to the markers exactly as no row does.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn daemon_down_rm_with_stale_db_backing_path_finds_the_real_backing_by_marker() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-stale-db";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let (data, backing) = plant_backing(tmp.path(), id, &dest, &repo);
+        std::fs::create_dir_all(backing.join("objects")).unwrap();
+        std::fs::write(backing.join("objects/blob"), b"content").unwrap();
+        let stale = tmp
+            .path()
+            .join("old-grove")
+            .join(WORKTREE_BACKING_DIR)
+            .join(id);
+        let (_fx, _db) =
+            register_grove_row(&dest, id, &repo, &pin, Some(&stale), &data, tmp.path());
+
+        let out = try_nfs_remove(&dest);
+
+        let report = out.unwrap_or_else(|e| {
+            panic!(
+                "a stale row must fall through to the marker, not refuse: {e:#}; \
+                 real backing present={}",
+                backing.exists()
+            )
+        });
+        assert!(
+            report.is_none(),
+            "dest still exists, so the caller removes it"
+        );
+        assert!(
+            !backing.exists(),
+            "the REAL backing {} must be found via its marker and deleted, not left \
+             untracked behind a 'success' (pin {})",
+            backing.display(),
+            if pin_present(&repo, &pin) {
+                "present"
+            } else {
+                "WAS DELETED"
+            }
+        );
+        assert!(!pin_present(&repo, &pin), "pin deleted with the backing");
+    }
+
+    /// The stale row again, but this time NO marker anywhere names dest. The
+    /// only right answer is a refusal that leaves pin, dest and registry alone
+    /// — never "success" with the pin gone.
+    #[cfg(feature = "metadata")]
+    fn assert_untrusted_row_refused(stale: &Path, expect_in_msg: &str, tag: &str) {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-stale-db-nomark";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(data.join(WORKTREE_BACKING_DIR)).unwrap();
+        let stale = tmp.path().join(stale);
+        let (_fx, db) = register_grove_row(&dest, id, &repo, &pin, Some(&stale), &data, tmp.path());
+
+        let out = try_nfs_remove(&dest);
+
+        let err = match out {
+            Err(e) => e,
+            Ok(report) => panic!(
+                "{tag}: an untrusted recorded backing path must be refused; got \
+                 {report:?}, pin {pin} {}, dest {}",
+                if pin_present(&repo, &pin) {
+                    "present"
+                } else {
+                    "WAS DELETED"
+                },
+                if dest.is_dir() { "present" } else { "gone" }
+            ),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("backing") && msg.contains("retaining pin and dest"),
+            "{tag}: the refusal must say what is retained and why, got: {msg}"
+        );
+        assert!(
+            msg.contains(expect_in_msg),
+            "{tag}: the refusal must say why the recorded path was not trusted \
+             (expected {expect_in_msg:?}), got: {msg}"
+        );
+        assert!(
+            pin_present(&repo, &pin),
+            "{tag}: the pin must survive a refusal"
+        );
+        assert!(
+            dest.is_dir(),
+            "{tag}: dest must survive for the daemon-up retry"
+        );
+        assert!(
+            db.get(&dest.to_string_lossy()).unwrap().is_some(),
+            "{tag}: try_nfs_remove never touches the registry"
+        );
+    }
+
+    /// Recorded data dir absent (moved away), no marker anywhere.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn daemon_down_rm_with_stale_db_backing_path_and_no_marker_retains_pin_and_dest() {
+        assert_untrusted_row_refused(
+            &Path::new("old-grove")
+                .join(WORKTREE_BACKING_DIR)
+                .join("wt-rm-stale-db-nomark"),
+            "does not exist",
+            "absent data dir",
+        );
+    }
+
+    /// Recorded data dir exists but has no `worktree-backing` under it.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn daemon_down_rm_with_db_backing_root_absent_retains_pin_and_dest() {
+        // `grove` exists (it is the live data dir); the row names a backing
+        // under a sibling that exists but was never a data dir.
+        assert_untrusted_row_refused(
+            &Path::new("repo")
+                .join(WORKTREE_BACKING_DIR)
+                .join("wt-rm-stale-db-nomark"),
+            "does not exist",
+            "absent backing root",
+        );
+    }
+
+    /// A DB-recorded `grove.backing` that exists — outside every candidate data
+    /// dir — but carries no marker for this dest. Before the fix the fd walk
+    /// confined the delete to whatever `worktrees.db` said and removed it. The
+    /// marker is the proof the directory is this worktree's; without it the row
+    /// is not trusted and the directory is left alone.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn daemon_down_rm_refuses_a_db_backing_path_without_a_marker_for_dest() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-foreign-db";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(data.join(WORKTREE_BACKING_DIR)).unwrap();
+        let foreign = tmp
+            .path()
+            .join("foreign")
+            .join(WORKTREE_BACKING_DIR)
+            .join(id);
+        std::fs::create_dir_all(foreign.join("precious")).unwrap();
+        // A marker for ANOTHER dest with the same id must not count either.
+        write_marker(&foreign, id, &tmp.path().join("someone-elses-wt"), &repo);
+        let (_fx, _db) =
+            register_grove_row(&dest, id, &repo, &pin, Some(&foreign), &data, tmp.path());
+
+        let out = try_nfs_remove(&dest);
+
+        let err = match out {
+            Err(e) => e,
+            Ok(report) => panic!(
+                "a recorded backing path with no marker for this dest must be \
+                 refused; got {report:?}, {} {}, pin {}",
+                foreign.display(),
+                if foreign.join("precious").is_dir() {
+                    "survived"
+                } else {
+                    "WAS DELETED"
+                },
+                if pin_present(&repo, &pin) {
+                    "present"
+                } else {
+                    "WAS DELETED"
+                }
+            ),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("carries no marker") && msg.contains("retaining pin and dest"),
+            "the refusal must say the recorded path is unproven, got: {msg}"
+        );
+        assert!(
+            foreign.join("precious").is_dir(),
+            "the unproven directory is untouched"
+        );
+        assert!(pin_present(&repo, &pin), "the pin survives a refusal");
+    }
+
+    /// The legitimate moved-data-dir case: the row records a backing that is
+    /// outside every candidate data dir, and it DOES carry a marker naming this
+    /// dest. That is this worktree's content wherever it lives, and the row is
+    /// the only pointer to it, so it is deleted — confined to the data dir the
+    /// row names, which the marker has just proven is the right one.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn daemon_down_rm_deletes_a_marked_db_backing_path_outside_the_candidate_data_dirs() {
+        fuigo_test_utils::require_git!();
+        let tmp = TempDir::new().unwrap();
+        let id = "wt-rm-moved-db";
+        let (repo, pin, dest) = pinned_repo_and_dest(tmp.path(), id);
+        let data = tmp.path().join("grove");
+        std::fs::create_dir_all(data.join(WORKTREE_BACKING_DIR)).unwrap();
+        let old = tmp.path().join("old-grove");
+        let backing = old.join(WORKTREE_BACKING_DIR).join(id);
+        write_marker(&backing, id, &dest, &repo);
+        std::fs::write(backing.join("blob"), b"content").unwrap();
+        let (_fx, _db) =
+            register_grove_row(&dest, id, &repo, &pin, Some(&backing), &data, tmp.path());
+
+        let out = try_nfs_remove(&dest);
+
+        let report = out.expect("a marker-proven recorded backing is this worktree's");
+        assert!(report.is_none());
+        assert!(!backing.exists(), "backing {} deleted", backing.display());
+        assert!(old.join(WORKTREE_BACKING_DIR).is_dir(), "only `<id>` goes");
+        assert!(!pin_present(&repo, &pin), "pin deleted with the backing");
     }
 }
