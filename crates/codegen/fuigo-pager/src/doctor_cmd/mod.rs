@@ -81,9 +81,20 @@ fn configured_report_for_terminal(
 fn collect_report_with(
     snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
 ) -> DiagnosticReport {
-    let mut report = crate::diagnostics::view(snapshot.into());
+    let mut report = compose_report(snapshot);
     crate::diagnostics::apply_voice_probe(&mut report, true);
     report
+}
+
+/// The snapshot composed through the shared view, with no host probe of its
+/// own. [`collect_report_with`] adds the voice probe on top, and that probe
+/// reads the machine's real audio devices: on a host with no input device it
+/// appends an issue finding, which is a fact about the host rather than about
+/// the composition. Tests that count findings drive this half.
+fn compose_report(
+    snapshot: crate::diagnostics::probes::StandaloneDiagnosticSnapshot<'_>,
+) -> DiagnosticReport {
+    crate::diagnostics::view(snapshot.into())
 }
 
 fn write_report(

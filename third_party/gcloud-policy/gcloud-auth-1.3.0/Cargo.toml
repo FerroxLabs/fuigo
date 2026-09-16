@@ -32,9 +32,19 @@ license = "MIT"
 repository = "https://github.com/yoshidan/google-cloud-rust/tree/main/foundation/auth"
 
 [features]
+# Fuigo local modification: upstream's default is `jwt-aws-lc-rs`. Fuigo links
+# this crate into the same process as `fuigo-shell`, which depends on
+# `jsonwebtoken` directly with `rust_crypto`. Cargo unifies features, so the
+# upstream default compiled BOTH `jsonwebtoken/aws_lc_rs` and
+# `jsonwebtoken/rust_crypto` into one binary; `CryptoProvider::from_crate_features`
+# (jsonwebtoken-10.3.0 crypto/mod.rs:105-129) then matches neither cfg arm and
+# returns the instance whose `signer_factory` is `panic!(NOT_INSTALLED_ERROR)`,
+# so the first service-account JWT the shipped binary signs aborts the process.
+# One backend per process, and it is the one `fuigo-shell` already installs.
+# `jwt-aws-lc-rs` is still offered for standalone SDK use.
 default = [
     "rustls-tls",
-    "jwt-aws-lc-rs",
+    "jwt-rust-crypto",
 ]
 external-account = [
     "sha2",

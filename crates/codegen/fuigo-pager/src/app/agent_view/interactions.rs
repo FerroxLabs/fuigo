@@ -2120,7 +2120,7 @@ mod permission_scope_key_tests {
 }
 #[cfg(test)]
 mod question_no_freeform_tests {
-    //! Freeform ("Other") gating for `no_freeform` question modals, e.g. the SuperGrok upsell.
+    //! Freeform ("Other") gating for `no_freeform` question modals, e.g. the usage-limit notice.
     //! Regression tests for the bug where clicking under the last option of the upsell selected the (hidden) freeform row.
     //! That let the user type into a modal that offers no free text.
     use super::super::test_fixtures::make_agent;
@@ -2145,8 +2145,8 @@ mod question_no_freeform_tests {
         Question {
             question: "You hit your free usage limit.".into(),
             options: vec![
-                opt("Upgrade to SuperGrok", "For everyday coding"),
-                opt("Upgrade to SuperGrok Heavy", "Highest usage limits"),
+                opt("Open billing", "Manage credits"),
+                opt("Try again", "Resubmit the prompt"),
             ],
             multi_select: Some(false),
             id: None,

@@ -28,6 +28,12 @@ fn install_sh_path() -> Option<PathBuf> {
     script_path("install.sh")
 }
 
+/// The desktop app's installer, which lives in the upstream monorepo's
+/// `frontend/` tree. This repository is the Rust workspace only — `frontend/`
+/// has never been tracked here (`git log --all -- frontend` is empty) — so the
+/// path resolves to `None` and the desktop installer is simply absent from the
+/// matrix, exactly like `install-enterprise.sh` is when it is not vendored.
+/// If the desktop app is ever vendored, every assertion below covers it too.
 fn desktop_install_sh_path() -> Option<PathBuf> {
     dunce::canonicalize(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -35,6 +41,23 @@ fn desktop_install_sh_path() -> Option<PathBuf> {
     )
     .ok()
     .filter(|p| p.exists())
+}
+
+/// Every installer script this repository actually ships, in the order the
+/// proxy-URL matrices expect: pager `install.sh`, then `install-enterprise.sh`,
+/// then the desktop installer — each included only when it resolves.
+fn installer_scripts() -> Vec<(&'static str, PathBuf)> {
+    let mut scripts: Vec<(&'static str, PathBuf)> = Vec::new();
+    if let Some(p) = script_path("install.sh") {
+        scripts.push(("install.sh", p));
+    }
+    if let Some(p) = script_path("install-enterprise.sh") {
+        scripts.push(("install-enterprise.sh", p));
+    }
+    if let Some(p) = desktop_install_sh_path() {
+        scripts.push(("desktop install.sh", p));
+    }
+    scripts
 }
 
 fn host_platform() -> String {
@@ -459,19 +482,10 @@ fn assert_no_credentialed_proxy_request(label: &str, proxy_url: &str, urls: &str
 
 #[test]
 fn install_scripts_refuse_bad_proxy_url_for_deployment_key() {
-    let Some(pager_install) = script_path("install.sh") else {
-        eprintln!("skipping: install.sh not found relative to crate; run under cargo");
+    let scripts = installer_scripts();
+    if scripts.is_empty() {
+        eprintln!("skipping: no installer script found relative to crate; run under cargo");
         return;
-    };
-    let desktop = desktop_install_sh_path()
-        .expect("desktop install.sh must resolve when pager install.sh is present");
-
-    let mut scripts: Vec<(&str, PathBuf)> = vec![
-        ("install.sh", pager_install),
-        ("desktop install.sh", desktop),
-    ];
-    if let Some(enterprise) = script_path("install-enterprise.sh") {
-        scripts.insert(1, ("install-enterprise.sh", enterprise));
     }
 
     for (label, script_file) in &scripts {
@@ -541,19 +555,10 @@ fn install_sh_rejects_hostile_fuigo_channel() {
 
 #[test]
 fn install_scripts_allow_custom_https_proxy_url() {
-    let Some(pager_install) = script_path("install.sh") else {
-        eprintln!("skipping: install.sh not found relative to crate; run under cargo");
+    let scripts = installer_scripts();
+    if scripts.is_empty() {
+        eprintln!("skipping: no installer script found relative to crate; run under cargo");
         return;
-    };
-    let desktop = desktop_install_sh_path()
-        .expect("desktop install.sh must resolve when pager install.sh is present");
-
-    let mut scripts: Vec<(&str, PathBuf)> = vec![
-        ("install.sh", pager_install),
-        ("desktop install.sh", desktop),
-    ];
-    if let Some(enterprise) = script_path("install-enterprise.sh") {
-        scripts.insert(1, ("install-enterprise.sh", enterprise));
     }
     for (label, script_file) in &scripts {
         for proxy_url in GOOD_PROXY_URLS {
@@ -581,7 +586,7 @@ fn install_scripts_rosetta_shell_installs_arm64() {
             return;
         };
         assert!(
-            urls.contains("grok-0.1.181-macos-aarch64"),
+            urls.contains("fuigo-0.1.181-macos-aarch64"),
             "{script}: Rosetta shell must request the arm64 artifact, urls:\n{urls}"
         );
         assert!(
@@ -599,7 +604,7 @@ fn install_scripts_intel_mac_keeps_x86_64() {
             return;
         };
         assert!(
-            urls.contains("grok-0.1.181-macos-x86_64"),
+            urls.contains("fuigo-0.1.181-macos-x86_64"),
             "{script}: Intel Mac must keep the x86_64 artifact, urls:\n{urls}"
         );
     }

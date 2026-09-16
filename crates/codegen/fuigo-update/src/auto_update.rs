@@ -994,7 +994,7 @@ fn tmp_download_path(dest: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Unique temp path `<base>.{pid}-{seq}.{ext}`, appended to the full name.
-/// A versioned base like `grok-0.1.181` would collide via `with_extension`, which treats everything after the last dot as the extension.
+/// A versioned base like `fuigo-0.1.181` would collide via `with_extension`, which treats everything after the last dot as the extension.
 /// The PID and a per-process counter keep racing updaters from clobbering each other.
 fn unique_temp_sibling(base: &std::path::Path, ext: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1670,8 +1670,8 @@ async fn regenerate_completions(binary: &std::path::Path, fuigo_home: &std::path
 /// Compute a relative symlink target from `link` to `target`.
 ///
 /// When both paths share a grandparent (e.g. `~/.fuigo/bin/fuigo` and
-/// `~/.fuigo/downloads/grok-0.1.203-linux-x86_64`), returns a relative path
-/// like `../downloads/grok-0.1.203-linux-x86_64`. When they share the same parent directory, returns just the filename.
+/// `~/.fuigo/downloads/fuigo-0.1.203-linux-x86_64`), returns a relative path
+/// like `../downloads/fuigo-0.1.203-linux-x86_64`. When they share the same parent directory, returns just the filename.
 /// Falls back to the absolute `target` path for any other layout.
 ///
 /// Relative symlinks survive Docker bind-mounts where `~/.fuigo/` is mapped
@@ -1682,7 +1682,7 @@ fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> 
     let (Some(target_parent), Some(link_parent)) = (target.parent(), link.parent()) else {
         return target.to_path_buf();
     };
-    // Same directory: just the filename (e.g. fuigo-latest -> grok-0.1.203-…)
+    // Same directory: just the filename (e.g. fuigo-latest -> fuigo-0.1.203-…)
     if target_parent == link_parent
         && let Some(name) = target.file_name()
     {
@@ -2160,7 +2160,7 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
             continue;
         }
         // Extract the version portion via the shared parser
-        // It handles the internal `grok-0.1.150-macos-aarch64`, pre-release, and npm `grok-0.1.150` layouts
+        // It handles the internal `fuigo-0.1.150-macos-aarch64`, pre-release, and npm `fuigo-0.1.150` layouts
         let Some(ver_str) = crate::version::version_from_versioned_binary_name(&name, bin_prefix)
         else {
             continue;

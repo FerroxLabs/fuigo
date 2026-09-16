@@ -990,10 +990,18 @@ mod tests {
             );
         }
     }
-    /// `parse_list_req` forces the conversations-only `kind` exactly when process chat mode is on; otherwise the client request is untouched.
+    /// `parse_list_req` never forces the conversations-only `kind` while process chat mode is hard-off: the
+    /// client request is untouched, whatever `FUIGO_CHAT_MODE` says.
+    ///
+    /// The force-rewrite was "exactly when process chat mode is on", and `process_chat_mode_enabled()` is
+    /// hard-off (the pager's `--chat` flag is gone: `PagerArgs::chat()` is a constant `false`), so that currently
+    /// means **never**: every `_meta` shape the client sends survives `parse_list_req` byte for byte, including
+    /// the malformed ones. Each case below pins that pass-through exactly, so re-enabling the lane — which must
+    /// flip `force_kind_chat` back on — fails here first instead of silently rewriting a client's `kind` filter.
+    /// (The test was named `..._forces_kind_under_process_chat_mode_only` while its body pinned the opposite.)
     #[test]
     #[serial_test::serial]
-    fn parse_list_req_forces_kind_under_process_chat_mode_only() {
+    fn parse_list_req_never_forces_kind_while_process_chat_mode_is_hard_off() {
         use crate::agent::chat_modes::FUIGO_CHAT_MODE_ENV;
         let raw = serde_json::json!({
             "_meta": { "fuigo/facetFilters": { "kind": ["build"], "starred": [true] } },
@@ -1011,17 +1019,16 @@ mod tests {
         }
         {
             let _on = fuigo_test_support::EnvGuard::set(FUIGO_CHAT_MODE_ENV, "1");
+            assert!(
+                !crate::agent::chat_modes::process_chat_mode_enabled(),
+                "chat mode is hard-off; the env var cannot turn the force-rewrite back on"
+            );
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected_build = if cfg!(feature = "local-workspace") {
-                Some(&vec![serde_json::json!("build")])
-            } else {
-                Some(&vec![serde_json::json!("build")])
-            };
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                expected_build,
-                "client kind=build under process chat mode"
+                Some(&vec![serde_json::json!("build")]),
+                "chat mode hard-off: client kind=build is not rewritten"
             );
             assert_eq!(
                 parsed.facet_filters.get("starred"),
@@ -1030,23 +1037,31 @@ mod tests {
             );
             let req = parse_list_req("{}").expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected = None;
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                expected,
-                "absent client kind still forces chat under process chat mode"
+                None,
+                "absent client kind stays absent: nothing is forced"
             );
-            for bad in [
-                serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": [] } } }),
-                serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": null } } }),
-                serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": ["other"] } } }),
+            for (bad, expected) in [
+                (
+                    serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": [] } } }),
+                    Vec::<serde_json::Value>::new(),
+                ),
+                (
+                    serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": null } } }),
+                    vec![serde_json::Value::Null],
+                ),
+                (
+                    serde_json::json!({ "_meta": { "fuigo/facetFilters": { "kind": ["other"] } } }),
+                    vec![serde_json::json!("other")],
+                ),
             ] {
                 let req = parse_list_req(&bad.to_string()).expect("parse");
                 let parsed = ParsedMeta::parse(req.meta.as_ref());
                 assert_eq!(
                     parsed.facet_filters.get(KIND_FACET_KEY),
-                    expected,
-                    "empty/null/unknown kind must still force chat: {bad}"
+                    Some(&expected),
+                    "empty/null/unknown kind reaches the facet layer verbatim: {bad}"
                 );
             }
         }

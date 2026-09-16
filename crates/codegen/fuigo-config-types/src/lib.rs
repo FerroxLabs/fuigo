@@ -802,7 +802,7 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub image_gen_enabled: Option<bool>,
     /// Remote settings flag: optional Imagine model override for `image_gen`.
-    /// When present and non-empty, `image_gen` uses this model slug (e.g. `fuigo-imagine-image`) instead of the default `fuigo-imagine-image-quality`.
+    /// When present and non-empty, `image_gen` uses this model slug (e.g. `grok-imagine-image`) instead of the default `grok-imagine-image-quality`. These are the provider's model ids on the wire.
     /// Absent or empty uses the default model.
     #[serde(default)]
     pub image_gen_model_override: Option<String>,
@@ -882,7 +882,7 @@ pub struct RemoteSettings {
     pub sharing_enabled: Option<bool>,
     /// Voice mode (STT dictation). The client default is on when absent.
     /// `Some(false)` is a remote kill switch; `Some(true)` forces on.
-    /// `FUIGO_VOICE_MODE` overrides it locally. The free-tier SuperGrok upsell is a separate client tier gate.
+    /// `FUIGO_VOICE_MODE` overrides it locally. The free-tier availability notice is a separate client tier gate.
     #[serde(default)]
     pub voice_mode_enabled: Option<bool>,
     /// Whether ZDR (Zero Data Retention) users are allowed to use the product.
@@ -945,10 +945,10 @@ pub struct RemoteSettings {
     pub subscription_tier: Option<String>,
     #[serde(default)]
     pub gate_message: Option<String>,
-    #[serde(default)]
-    pub gate_url: Option<String>,
-    #[serde(default)]
-    pub gate_label: Option<String>,
+    // `gate_url` / `gate_label` used to ride alongside `gate_message` to paint a clickable upgrade
+    // CTA on the gate screen. That CTA was the competitor-subscription funnel; with it gone the two
+    // fields reached no reader, so they are removed rather than left as config that does nothing.
+    // Unknown keys are ignored by serde, so a server still sending them is handled as before.
     /// A usable `id`, non-empty `body` and positive `version` turn it on; anything else fails open.
     #[serde(default, deserialize_with = "deserialize_tolerant")]
     pub consent_gate: Option<ConsentGate>,

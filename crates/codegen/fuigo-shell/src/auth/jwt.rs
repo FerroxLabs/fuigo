@@ -6,22 +6,22 @@ use serde::Deserialize;
 /// Install a JWT crypto provider exactly once per process.
 ///
 /// `jsonwebtoken` 10 panics rather than erroring when it cannot pick a provider
-/// from its own features, and in this workspace BOTH are enabled: `fuigo-shell`
-/// asks for `rust_crypto`, while `fuigo-file-utils -> gcloud-storage ->
-/// gcloud-auth` turns on `jsonwebtoken/aws_lc_rs`. Cargo unifies the two, so the
-/// choice becomes ambiguous and every JWT call is a panic waiting for whoever
-/// touches a token first.
+/// from its own features, so exactly one of `rust_crypto` and `aws_lc_rs` must
+/// be enabled in a process. Until the `jwt-rust-crypto` change to
+/// `[workspace.dependencies] gcloud-storage` and to the vendored
+/// `gcloud-auth-1.3.0` manifest, BOTH were: `fuigo-shell` asked for
+/// `rust_crypto` while `fuigo-file-utils -> gcloud-storage -> gcloud-auth`
+/// turned on `jsonwebtoken/aws_lc_rs`. Cargo unified them,
+/// `CryptoProvider::from_crate_features` matched neither `cfg` arm, and every
+/// signature -- including the service-account JWT the GCS upload path signs in
+/// the shipped binary -- hit its panicking placeholder provider.
 ///
-/// The binary gets away with it by accident: `warm_async_http_client` runs at
-/// boot and installs a provider through `fuigo_extra_ca`. Nothing guarantees
-/// that ordering, and unit tests -- which never boot -- hit the panic directly.
-/// Upstream had already patched two individual test helpers with this same call
-/// rather than fixing the ordering.
-///
-/// Installing here makes it order-independent. `install_default` returns Err if
-/// a provider is already installed, which is the normal case and is ignored:
-/// first install wins, and either provider decodes these tokens.
-pub fn ensure_jwt_crypto_provider() {
+/// The feature choice now makes `from_crate_features` resolve to `rust_crypto`
+/// on its own, so this call is no longer what stands between a token and a
+/// panic. It is kept because it is explicit and free: `install_default` returns
+/// Err if a provider is already installed, which is ignored -- first install
+/// wins, and it installs the same backend the features select.
+pub(super) fn ensure_jwt_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();

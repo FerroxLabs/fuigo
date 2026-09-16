@@ -165,7 +165,6 @@ impl AppView {
         );
         fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::SubscriptionActivated {
             auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
-            upsell_shown_this_session: self.access_gate_shown_logged,
         });
         vec![Effect::CheckSubscription { verify: None }]
     }
@@ -227,8 +226,6 @@ mod tests {
     fn watch_gate() -> fuigo_shell::auth::GateInfo {
         fuigo_shell::auth::GateInfo {
             message: "Subscribe".into(),
-            url: None,
-            label: None,
         }
     }
 
@@ -391,8 +388,6 @@ mod tests {
         gated.gate = Some(watch_gate());
         let new_copy = fuigo_shell::auth::GateInfo {
             message: "New copy".into(),
-            url: None,
-            label: None,
         };
         assert!(gated.impose_gate(new_copy).is_empty());
         assert_eq!(gated.gate.as_ref().unwrap().message, "New copy");

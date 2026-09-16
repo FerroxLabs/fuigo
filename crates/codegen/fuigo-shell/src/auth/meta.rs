@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Access gate from `fuigo_build_access_gate`.
+///
+/// Message only. It used to carry `url` and `label` for a clickable CTA on the gate screen; that
+/// CTA was the competitor-subscription funnel and is gone, so the two fields were read by nothing.
+/// They are not `#[serde(skip)]`-ed placeholders: an operator who still sets them would get silent
+/// no-ops, and a dead field is how a funnel gets rewired. Serde ignores unknown wire keys, so a
+/// server that still sends them is accepted exactly as before.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateInfo {
     pub message: String,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub label: Option<String>,
 }
 
 /// Typed auth metadata passed from the shell to the pager via ACP.

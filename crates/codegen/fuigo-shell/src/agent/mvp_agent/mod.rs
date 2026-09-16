@@ -165,12 +165,17 @@ pub(crate) fn resolve_subscription_tier_for_telemetry(
 /// The post-unblock catalog refresh must not treat *any* present claim as enough.
 /// An older paid claim (e.g. `x_basic`) can remain on the access token while `/user` already reports a newly qualifying tier (e.g. `SuperGrokPro`).
 /// In that case `/v1/models` would still be targeted at the stale level (the "stale JWT tier skips retry" bug).
+///
+/// The left-hand side of every arm is the PROVIDER's `/user` `subscriptionTier` spelling and must
+/// never be rebranded: the provider cannot send a string carrying our name. The 1.0.1 mechanical
+/// rebrand rewrote `"GrokPro"` to `"FuigoPro"`, so the tier-1 wire value silently fell through to
+/// the numeric arm and never matched. The right-hand side is our own [`jwt_tier_claim`] label.
 pub(crate) fn jwt_claim_matches_user_subscription_tier(
     jwt_claim: &str,
     user_subscription_tier: &str,
 ) -> bool {
     match user_subscription_tier {
-        "FuigoPro" => jwt_claim == "superfuigo",
+        "GrokPro" => jwt_claim == "superfuigo",
         "XBasic" => jwt_claim == "x_basic",
         "XPremium" => jwt_claim == "x_premium",
         "XPremiumPlus" => jwt_claim == "x_premium_plus",
@@ -600,8 +605,6 @@ struct SettingsUpdateNotification {
     /// So a `/model` pick can record a remote campaign's dismissal even when the TUI's own startup prefetch missed.
     campaigns: Option<Vec<crate::util::config::CampaignOverride>>,
     gate_message: Option<String>,
-    gate_url: Option<String>,
-    gate_label: Option<String>,
     allow_access: Option<bool>,
     consent_gate: Option<crate::util::config::ConsentGate>,
     subscription_tier_display: Option<String>,
@@ -1956,8 +1959,6 @@ impl MvpAgent {
                 .filter(|m| !m.is_empty())
                 .map(|message| crate::auth::GateInfo {
                     message: message.clone(),
-                    url: rs.and_then(|s| s.gate_url.clone()),
-                    label: rs.and_then(|s| s.gate_label.clone()),
                 });
             let subscription_tier = rs.and_then(|s| s.subscription_tier_display.clone());
             (rs.and_then(|s| s.show_resolved_model), gate, subscription_tier)
@@ -2104,8 +2105,6 @@ impl MvpAgent {
                 announcements: rs.and_then(|s| s.announcements.clone()),
                 campaigns: rs.map(|s| s.campaigns.clone()),
                 gate_message: rs.and_then(|s| s.gate_message.clone()),
-                gate_url: rs.and_then(|s| s.gate_url.clone()),
-                gate_label: rs.and_then(|s| s.gate_label.clone()),
                 allow_access: rs.and_then(|s| s.allow_access),
                 consent_gate: rs.and_then(|s| s.consent_gate.clone()),
                 subscription_tier_display: rs

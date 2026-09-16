@@ -6,7 +6,7 @@
 //! (id → `refs/fuigo/worktrees/<id>` only).
 use super::confined::is_safe_worktree_id;
 use super::mount_table::{dest_is_mountpoint, dest_is_nfs_mount};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -517,17 +517,61 @@ fn read_marker_capped(path: &Path) -> Option<Vec<u8>> {
     }
     Some(buf)
 }
+/// The one ref shape pin GC is allowed to read or delete: id -> `refs/fuigo/worktrees/<id>`.
+/// The id is re-validated here so a poisoned `mounts.toml`/marker/journal row can never
+/// widen the ref into another namespace (`refs/heads/...`) or smuggle in newlines.
+fn pin_ref_for(worktree_id: &str) -> Result<String> {
+    anyhow::ensure!(
+        is_safe_worktree_id(worktree_id),
+        "refusing pin ref for unsafe worktree id {worktree_id:?}"
+    );
+    Ok(format!("refs/fuigo/worktrees/{worktree_id}"))
+}
+/// Whether `refs/fuigo/worktrees/<id>` still resolves in `source`.
+///
+/// `git show-ref --verify --quiet` exits 0 when the ref exists and 1 when it does
+/// not. Any other status (missing repo, unreadable refdb, no git) is an error, not
+/// a "no": [`gc_orphan_pins`] must age such an id rather than forget it.
 fn pin_exists(source: &Path, worktree_id: &str) -> Result<bool> {
-    {
-        let _ = (source, worktree_id);
-        Ok(false)
+    let pin = pin_ref_for(worktree_id)?;
+    let out = crate::git::checkout::git_command()
+        .current_dir(source)
+        .args(["show-ref", "--verify", "--quiet", &pin])
+        .output()
+        .with_context(|| format!("git show-ref {pin} in {}", source.display()))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!(
+            "git show-ref {pin} in {} failed: {}",
+            source.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
     }
 }
-fn delete_pin_ref_gated(source: &Path, worktree_id: &str) -> Result<()> {
-    {
-        let _ = (source, worktree_id);
-        anyhow::bail!("pin delete requires grove")
+/// Delete exactly `refs/fuigo/worktrees/<id>` in `source`. Nothing else is ever
+/// a delete target, which is what keeps a planted `pin_ref` in the orphan sidecar
+/// from turning pin GC into a branch deleter.
+///
+/// `git update-ref -d` on an absent ref exits 0, so a retried delete (pin GC's
+/// next cycle, or a second `rm` after a partial failure) is a no-op rather than
+/// an error. Shared with `nfs::remove` so the daemon-down `rm` path deletes pins
+/// through this same gate instead of growing a weaker sibling of it.
+pub(super) fn delete_pin_ref_gated(source: &Path, worktree_id: &str) -> Result<()> {
+    let pin = pin_ref_for(worktree_id)?;
+    let out = crate::git::checkout::git_command()
+        .current_dir(source)
+        .args(["update-ref", "-d", &pin])
+        .output()
+        .with_context(|| format!("git update-ref -d {pin} in {}", source.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git update-ref -d {pin} in {} failed: {}",
+            source.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
+    Ok(())
 }
 #[cfg(feature = "metadata")]
 pub fn identities_from_worktree_records(recs: &[crate::db::WorktreeRecord]) -> Vec<NfsIdentity> {
@@ -563,8 +607,8 @@ pub fn identities_from_worktree_records(recs: &[crate::db::WorktreeRecord]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+    use tempfile::TempDir;
     fn git_rev_parse(repo: &Path, rev: &str) -> String {
         let mut cmd = std::process::Command::new("git");
         fuigo_tty_utils::detach_std_command(&mut cmd);

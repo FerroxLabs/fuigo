@@ -6,7 +6,6 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
 use crate::scrollback::block::RenderBlock;
-use fuigo_telemetry::events::{SuperGrokUpsell, SuperGrokUpsellClicked};
 use fuigo_telemetry::session_ctx::log_event;
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 *
 ///
 /// Upstream this matched the tier string against xAI's top plan and returned
 /// `false` for anything else, which routed the user into a Q&A modal offering
-/// an upgrade at `grok.com/supergrok`. Fuigo has no tiers to be below and no
+/// an upgrade on the upstream vendor's own subscription page. Fuigo has no tiers to be below and no
 /// upgrade to sell, and the egress guard refuses that host anyway -- so the
 /// honest answer is that nobody is under-provisioned, and the upsell paths
 /// downstream of this simply never fire.
@@ -107,7 +106,7 @@ struct CreditLimitCopy {
 /// Open the credit-limit upsell Q&A on the given agent.
 ///
 /// Non-max-tier: Upgrade tier + buy-credits (or PAYG) + Try Again.
-/// Max-tier (SuperGrok Heavy): buy-credits (or PAYG) + Try Again — no
+/// Max-tier (always true in Fuigo): buy-credits (or PAYG) + Try Again — no
 /// upgrade option. URL options carry the target in `id` so the submit
 /// handler is position-independent.
 pub(super) fn open_credit_limit_upsell(
@@ -206,22 +205,22 @@ pub(super) fn open_credit_limit_upsell(
 /// Each option's `id` carries its target URL so the submit handler is position-independent.
 ///
 /// Only the driver can reach this: the PromptResponse handler calls it, and viewers never receive that response.
-/// `auth_method` feeds the `SuperGrokUpsellShown` funnel event.
+/// `auth_method` is accepted for call-site symmetry; no funnel event is emitted.
 pub(super) fn open_free_usage_upsell(agent: &mut AgentView, auth_method: Option<String>) {
-    open_superfuigo_upsell(agent, UpsellReason::FreeUsageLimit, auth_method);
+    open_usage_limit_notice(agent, UpsellReason::FreeUsageLimit, auth_method);
 }
 
-/// Open the SuperGrok upsell for a tier-restricted slash command (`/usage`, `/imagine`, …).
+/// Tell the user a tier-restricted slash command (`/usage`, `/imagine`, …) is unavailable, and offer our own billing page.
 /// Returns whether the modal opened (`false` when another question modal is already up).
 /// The caller uses that to decide whether to consume the input that triggered it.
 pub(super) fn open_restricted_command_upsell(
     agent: &mut AgentView,
     auth_method: Option<String>,
 ) -> bool {
-    open_superfuigo_upsell(agent, UpsellReason::RestrictedCommand, auth_method)
+    open_usage_limit_notice(agent, UpsellReason::RestrictedCommand, auth_method)
 }
 
-/// Which situation opened the SuperGrok upsell modal; it controls the heading and the telemetry source.
+/// Which situation opened the limit modal; it controls the heading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UpsellReason {
     /// Free-usage quota exhausted (429 paywall).
@@ -231,11 +230,12 @@ pub(super) enum UpsellReason {
 }
 
 /// Shared builder behind [`open_free_usage_upsell`] and [`open_restricted_command_upsell`]: a Q&A modal in the [`open_credit_limit_upsell`] style.
-/// Upgrade options carry their target URL in the option `id`, so submit handling does not depend on option position.
-fn open_superfuigo_upsell(
+/// The option carries its target URL in the option `id`, so submit handling does not depend on option position.
+/// `auth_method` is unused: the competitor-subscription funnel this modal used to feed was removed.
+fn open_usage_limit_notice(
     agent: &mut AgentView,
     reason: UpsellReason,
-    auth_method: Option<String>,
+    _auth_method: Option<String>,
 ) -> bool {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
@@ -246,45 +246,22 @@ fn open_superfuigo_upsell(
         return false;
     }
 
-    let (heading, source, modal_id_prefix) = match reason {
-        UpsellReason::FreeUsageLimit => (
-            "You hit your free usage limit.",
-            SuperGrokUpsell::FreeUsagePaywall,
-            "free-usage-upsell",
-        ),
+    let (heading, modal_id_prefix) = match reason {
+        UpsellReason::FreeUsageLimit => ("You hit your free usage limit.", "free-usage-limit"),
         UpsellReason::RestrictedCommand => (
-            "Unlock all features with SuperGrok.",
-            SuperGrokUpsell::RestrictedCommand,
-            "restricted-command-upsell",
+            "This command is not available for your account.",
+            "restricted-command",
         ),
     };
 
-    log_event(fuigo_telemetry::events::SuperGrokUpsellShown {
-        source,
-        auth_method,
-    });
-
-    // /superfuigo lists all plans; every upgrade option lands there.
-    let options = vec![
-        QuestionOption {
-            label: "Upgrade to SuperGrok".into(),
-            description: "For everyday coding and productivity tasks".into(),
-            preview: None,
-            id: Some(UPSELL_URL_UPGRADE.into()),
-        },
-        QuestionOption {
-            label: "Upgrade to SuperGrok Plus".into(),
-            description: "Significantly higher usage and rate limits".into(),
-            preview: None,
-            id: Some(UPSELL_URL_UPGRADE.into()),
-        },
-        QuestionOption {
-            label: "Upgrade to SuperGrok Heavy".into(),
-            description: "Get the most out of Fuigo. Highest usage limits.".into(),
-            preview: None,
-            id: Some(UPSELL_URL_UPGRADE.into()),
-        },
-    ];
+    // One option, pointing at OUR billing page. The user is told they hit a limit and where their own
+    // credits live; nothing here markets anybody else's subscription.
+    let options = vec![QuestionOption {
+        label: "Open billing".into(),
+        description: "Manage credits and spending limits".into(),
+        preview: None,
+        id: Some(UPSELL_URL_UPGRADE.into()),
+    }];
     let question = Question {
         question: heading.into(),
         options,
@@ -298,7 +275,7 @@ fn open_superfuigo_upsell(
         vec![question],
         stashed,
     )
-    .with_local_kind(LocalQuestionKind::FreeUsageUpsell { source })
+    .with_local_kind(LocalQuestionKind::FreeUsageUpsell)
     .with_no_freeform();
     agent.question_view = Some(state);
     agent.prompt.set_text("");
@@ -548,22 +525,3 @@ pub(super) fn dispatch_retry_credit_limit_prompt(app: &mut AppView) -> Vec<Effec
     drain.effects
 }
 
-// Action handlers.
-
-pub(super) fn dispatch_open_superfuigo_url(app: &mut AppView) -> Vec<Effect> {
-    log_event(SuperGrokUpsellClicked {
-        source: SuperGrokUpsell::WelcomeScreen,
-        auth_method: app.login_method_id.as_ref().map(|id| id.0.to_string()),
-    });
-    let url = app
-        .gate
-        .as_ref()
-        .and_then(|g| g.url.as_deref())
-        .unwrap_or("https://grok.com/supergrok?referrer=grok-build");
-    // Funnel attribution: tag SuperGrok upsell clicks from the CLI with `referrer=fuigo-build`, matching the OAuth consent flow and fuigo/cli links
-    // It applies even when the URL came from remote settings's `gate_url`, so nothing depends on the remote flag being configured correctly
-    // If the URL already specifies a referrer it's left alone
-    let url = crate::app::link_opener::ensure_query_param(url, "referrer", "fuigo-build");
-    super::ctx::open_url_or_show(app, &url);
-    vec![]
-}

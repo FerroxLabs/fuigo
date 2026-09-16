@@ -466,25 +466,40 @@ pub fn resolve_fuigo_home() -> Result<PathBuf> {
 /// Serializes tests that mutate the process-global `FUIGO_HOME` env var so they
 /// don't clobber each other under `cargo test`, where tests share one process
 /// (nextest isolates per-process, but the suite must also pass under `cargo test`).
+///
+/// This lock covers `FUIGO_HOME` only. The grove env (`GROVE_DATA_DIR`, and the
+/// `XDG_DATA_HOME` / `HOME` that `candidate_data_dirs` reads next to it) is
+/// guarded by `crate::nfs::GROVE_ENV_LOCK`, which [`FuigoHomeFixture`] takes as
+/// well — one lock per process-global, or two tests holding two different locks
+/// still interleave their writes. Lock order: this one first, then
+/// `GROVE_ENV_LOCK`; `nfs::GroveEnvGuard` takes only the second.
 #[cfg(test)]
 static FUIGO_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Test-only isolation for code that resolves the DB via `open_default()`.
 ///
-/// Holds [`FUIGO_HOME_ENV_LOCK`] (serializing concurrent setters), points
-/// `FUIGO_HOME` at a fresh private tmp dir, and restores the prior value on drop.
-/// Use instead of hand-rolling the lock + restore guard + tmp dir per test.
+/// Holds [`FUIGO_HOME_ENV_LOCK`] and `nfs::GROVE_ENV_LOCK`, points `FUIGO_HOME`
+/// at a fresh private tmp dir, and confines everything `candidate_data_dirs()`
+/// reads — `GROVE_DATA_DIR`, `XDG_DATA_HOME`, `HOME` — to that same tmp dir, so
+/// a GC or rebuild pass under the fixture can neither scan the developer's real
+/// `~/.local/share/grove` nor pick up the `GROVE_DATA_DIR` another test set
+/// (`auto_gc::prune_removes_stale_registration_alive_and_dead_source` counted a
+/// concurrent `nfs::remove` test's markers as its own dead records before this
+/// was unconditional). All four are restored on drop, while both locks are
+/// still held, so no waiting setter ever sees a half-restored environment.
 ///
-/// `Drop` restores `FUIGO_HOME` before `_lock` releases, so the env is correct
-/// before another waiting setter proceeds.
+/// Use instead of hand-rolling the lock + restore guard + tmp dir per test.
 #[cfg(test)]
 pub(crate) struct FuigoHomeFixture {
     _lock: std::sync::MutexGuard<'static, ()>,
+    /// The same lock every other test writer of `GROVE_DATA_DIR` takes
+    /// (`nfs::GroveEnvGuard`), held for the fixture's whole lifetime.
+    _grove_lock: std::sync::MutexGuard<'static, ()>,
     prev: Option<std::ffi::OsString>,
     prev_xdg_data_home: Option<std::ffi::OsString>,
     prev_grove_data_dir: Option<std::ffi::OsString>,
     prev_home: Option<std::ffi::OsString>,
-    touched_grove_env: bool,
+    prev_control_sock: Option<std::ffi::OsString>,
     /// The isolated fuigo home; pass to `WorktreeDb::open` to read the same DB
     /// `open_default()` writes to.
     pub home: PathBuf,
@@ -494,7 +509,12 @@ pub(crate) struct FuigoHomeFixture {
 #[cfg(test)]
 impl FuigoHomeFixture {
     pub(crate) fn new() -> Self {
-        let lock = FUIGO_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = FUIGO_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let grove_lock = crate::nfs::GROVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path().join("fuigo-home");
         std::fs::create_dir_all(&home).unwrap();
@@ -504,39 +524,57 @@ impl FuigoHomeFixture {
         // until FUIGO_HOME points here); set_journal_mode's retry is the actual
         // race fix.
         let _ = WorktreeDb::open(&home);
+        // A private, empty grove data dir: `candidate_data_dirs()` puts the env
+        // override first, so nothing under the fixture ever scans the host's.
+        let grove_data = tmp.path().join("grove-data");
+        std::fs::create_dir_all(&grove_data).unwrap();
+        let xdg = tmp.path().join("xdg-data");
+        std::fs::create_dir_all(&xdg).unwrap();
         let prev = std::env::var_os("FUIGO_HOME");
-        // SAFETY: the fixture holds the FUIGO_HOME env lock for its whole
-        // lifetime, so no other test thread reads or writes the environment.
-        unsafe { std::env::set_var("FUIGO_HOME", &home) };
+        let prev_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        let prev_grove_data_dir = std::env::var_os("GROVE_DATA_DIR");
+        let prev_home = std::env::var_os("HOME");
+        let prev_control_sock = std::env::var_os("GROVE_CONTROL_SOCK");
+        // SAFETY: the fixture holds both env locks for its whole lifetime, and
+        // every test writer of these variables takes one of them.
+        unsafe {
+            std::env::set_var("FUIGO_HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", &xdg);
+            std::env::set_var("GROVE_DATA_DIR", &grove_data);
+            std::env::set_var("HOME", tmp.path());
+        }
         Self {
             _lock: lock,
+            _grove_lock: grove_lock,
             prev,
-            prev_xdg_data_home: None,
-            prev_grove_data_dir: None,
-            prev_home: None,
-            touched_grove_env: false,
+            prev_xdg_data_home,
+            prev_grove_data_dir,
+            prev_home,
+            prev_control_sock,
             home,
             _tmp: tmp,
         }
     }
 
-    /// Point grove lookup at `$XDG_DATA_HOME/grove` with `GROVE_DATA_DIR` unset
-    /// and `HOME` confined to this fixture so pin-GC cannot touch the host.
-    pub(crate) fn isolate_xdg_grove_data(&mut self) -> PathBuf {
-        if !self.touched_grove_env {
-            self.prev_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
-            self.prev_grove_data_dir = std::env::var_os("GROVE_DATA_DIR");
-            self.prev_home = std::env::var_os("HOME");
-            self.touched_grove_env = true;
-        }
-        let xdg = self._tmp.path().join("xdg-data");
-        let grove = xdg.join("grove");
-        std::fs::create_dir_all(&grove).unwrap();
+    /// Point `GROVE_DATA_DIR` at `data` and `GROVE_CONTROL_SOCK` at `sock` for
+    /// the rest of the fixture's lifetime — the daemon-down `rm` shape, with the
+    /// registry isolated too. Restored on drop with the rest.
+    pub(crate) fn set_grove_env(&mut self, data: &Path, sock: &Path) {
+        // SAFETY: both env locks are held by this fixture.
         unsafe {
-            std::env::set_var("XDG_DATA_HOME", &xdg);
-            std::env::remove_var("GROVE_DATA_DIR");
-            std::env::set_var("HOME", self._tmp.path());
+            std::env::set_var("GROVE_DATA_DIR", data);
+            std::env::set_var("GROVE_CONTROL_SOCK", sock);
         }
+    }
+
+    /// Point grove lookup at the production shape, `$XDG_DATA_HOME/grove`, with
+    /// `GROVE_DATA_DIR` unset (`XDG_DATA_HOME` and `HOME` are already confined
+    /// to this fixture by `new`). Returns that grove dir, created.
+    pub(crate) fn isolate_xdg_grove_data(&mut self) -> PathBuf {
+        let grove = self._tmp.path().join("xdg-data").join("grove");
+        std::fs::create_dir_all(&grove).unwrap();
+        // SAFETY: both env locks are held by this fixture.
+        unsafe { std::env::remove_var("GROVE_DATA_DIR") };
         grove
     }
 }
@@ -544,26 +582,29 @@ impl FuigoHomeFixture {
 #[cfg(test)]
 impl Drop for FuigoHomeFixture {
     fn drop(&mut self) {
-        // SAFETY: the fixture still holds the FUIGO_HOME env lock here, so no
-        // other test thread reads or writes the environment during restore.
+        // SAFETY: the fixture still holds both env locks here (fields drop after
+        // this body), so no other test thread reads or writes the environment
+        // during restore.
         unsafe {
             match self.prev.take() {
                 Some(p) => std::env::set_var("FUIGO_HOME", p),
                 None => std::env::remove_var("FUIGO_HOME"),
             }
-            if self.touched_grove_env {
-                match self.prev_xdg_data_home.take() {
-                    Some(p) => std::env::set_var("XDG_DATA_HOME", p),
-                    None => std::env::remove_var("XDG_DATA_HOME"),
-                }
-                match self.prev_grove_data_dir.take() {
-                    Some(p) => std::env::set_var("GROVE_DATA_DIR", p),
-                    None => std::env::remove_var("GROVE_DATA_DIR"),
-                }
-                match self.prev_home.take() {
-                    Some(p) => std::env::set_var("HOME", p),
-                    None => std::env::remove_var("HOME"),
-                }
+            match self.prev_xdg_data_home.take() {
+                Some(p) => std::env::set_var("XDG_DATA_HOME", p),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match self.prev_grove_data_dir.take() {
+                Some(p) => std::env::set_var("GROVE_DATA_DIR", p),
+                None => std::env::remove_var("GROVE_DATA_DIR"),
+            }
+            match self.prev_home.take() {
+                Some(p) => std::env::set_var("HOME", p),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.prev_control_sock.take() {
+                Some(p) => std::env::set_var("GROVE_CONTROL_SOCK", p),
+                None => std::env::remove_var("GROVE_CONTROL_SOCK"),
             }
         }
     }

@@ -195,7 +195,6 @@ pub(crate) fn test_app() -> AppView {
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,
         usage_billing_redirect_url: None,
-        access_gate_shown_logged: false,
         announcement_cta_impressions_logged: Default::default(),
         gate: None,
         subscription_tier: None,
@@ -228,7 +227,6 @@ pub(crate) fn test_app() -> AppView {
         welcome_announcement: WelcomeAnnouncementState::default(),
         welcome_auth_fallback_rect: None,
         welcome_refresh_rect: None,
-        welcome_gate_url_rect: None,
         welcome_upgrade_cta_rect: None,
         welcome_privacy_banner_opt_in_rect: None,
         welcome_privacy_banner_opt_out_rect: None,
@@ -1729,8 +1727,6 @@ fn apply_auth_meta_clears_gate_on_subscription() {
     let mut app = test_app();
     app.gate = Some(fuigo_shell::auth::GateInfo {
         message: "Subscribe to use Fuigo".into(),
-        url: Some("https://grok.com/supergrok?referrer=grok-build".into()),
-        label: None,
     });
     assert!(app.is_access_blocked());
     let meta = fuigo_shell::auth::AuthMeta::default();
@@ -1743,8 +1739,6 @@ fn apply_auth_meta_gate_unchanged_when_still_gated() {
     let mut app = test_app();
     let gate = fuigo_shell::auth::GateInfo {
         message: "Subscribe".into(),
-        url: None,
-        label: None,
     };
     app.gate = Some(gate.clone());
     let meta = fuigo_shell::auth::AuthMeta {
@@ -6825,4 +6819,57 @@ fn welcome_ctrl_e_ignored_when_zdr_blocked() {
         WelcomeWorkspaceMode::Sandbox,
         "Ctrl+E must not cycle mode on ZDR-blocked welcome"
     );
+}
+
+// --- Access gate: what the removed competitor-subscription funnel left behind ---
+// The gate screen used to carry an "Upgrade Subscription" row at index 0 that opened
+// `grok.com/supergrok?referrer=…`, reachable by ctrl+g and by clicking a painted URL line.
+// The funnel is gone; these four pins exist so it cannot come back unnoticed.
+
+/// The gate menu is exactly `[Logout, Quit]`. Index 0 used to be the upsell CTA.
+#[test]
+fn access_gate_menu_has_exactly_logout_and_quit() {
+    assert!(matches!(
+        dispatch_access_gate_menu_action(0),
+        InputOutcome::Action(Action::Logout)
+    ));
+    assert!(matches!(
+        dispatch_access_gate_menu_action(1),
+        InputOutcome::Action(Action::Quit)
+    ));
+    for absent in [2usize, 3, 99] {
+        assert!(
+            matches!(
+                dispatch_access_gate_menu_action(absent),
+                InputOutcome::Unchanged
+            ),
+            "the gate menu has two rows; row {absent} must not dispatch anything"
+        );
+    }
+}
+
+/// `g` (with or without ctrl) raises nothing on the gate screen: it was the upsell shortcut.
+#[test]
+fn access_gate_screen_leaves_g_unbound() {
+    for mods in [KeyModifiers::CONTROL, KeyModifiers::NONE] {
+        let mut app = test_app();
+        app.gate = Some(fuigo_shell::auth::GateInfo {
+            message: "This account does not have access.".into(),
+        });
+        assert!(!app.has_access());
+        let outcome = app.handle_input(&key_event(KeyCode::Char('g'), mods));
+        assert!(
+            matches!(outcome, InputOutcome::Unchanged),
+            "`g` must raise no action on the gate screen, got {outcome:?}"
+        );
+    }
+    // The rows that do exist still answer, so the assertion above is about `g`, not about a dead screen.
+    let mut app = test_app();
+    app.gate = Some(fuigo_shell::auth::GateInfo {
+        message: "This account does not have access.".into(),
+    });
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+        InputOutcome::Action(Action::Logout)
+    ));
 }

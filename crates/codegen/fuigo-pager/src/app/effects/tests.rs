@@ -118,7 +118,10 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     let rpm_body = "You are sending requests too quickly. Please slow down, or upgrade to a Fuigo subscription for higher limits: https://grok.com/supergrok";
     let rpm = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
         .data(format!("API error (status 429 Too Many Requests): {rpm_body}"));
-    assert!(format_acp_error(&rpm, false).contains("grok.com/supergrok"));
+    // The provider's consumer-subscription pitch is suppressed in every auth mode, not just API key.
+    // This line used to assert `contains("grok.com/supergrok")` for the default (non-API-key) user.
+    assert_eq!(format_acp_error(&rpm, false), RATE_LIMITED_USER_MESSAGE_OAUTH);
+    assert!(!format_acp_error(&rpm, false).contains("grok.com/supergrok"));
     assert_eq!(format_acp_error(&rpm, true), RATE_LIMITED_USER_MESSAGE_API_KEY);
     let empty = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited");
     assert_eq!(format_acp_error(&empty, false), RATE_LIMITED_USER_MESSAGE_OAUTH);
