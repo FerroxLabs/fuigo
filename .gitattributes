@@ -1,0 +1,17 @@
+# Recorded protobuf FileDescriptorSet fixtures (fuigo-proto-build's debug_redact
+# tests decode these bytes instead of shelling out to an ambient protoc).
+#
+# Git's diff/merge classifier decides "binary" by looking for a NUL byte in the
+# first 8000 bytes and nothing else. A small descriptor set can legitimately
+# contain none — test_data/debug_redact_plain.pbbin is 58 bytes with no NUL — so
+# git calls it text and will line-merge it: a divergent regeneration on two
+# branches either auto-merges the two descriptors into a third that neither side
+# produced, or writes `<<<<<<<` / `=======` / `>>>>>>>` ASCII into the middle of
+# the descriptor. Its NUL-bearing sibling debug_redact_test.pbbin gets "Cannot
+# merge binary files" and a clean conflict, which is the behaviour we want for
+# both.
+#
+# `binary` is git's macro for `-diff -merge -text`: it also pins the EOL
+# behaviour off, so no core.autocrlf / core.eol setting on any platform can
+# rewrite a 0x0A inside these bytes.
+*.pbbin binary
