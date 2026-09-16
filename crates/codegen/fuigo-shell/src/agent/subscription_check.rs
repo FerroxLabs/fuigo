@@ -173,19 +173,38 @@ pub(crate) async fn single_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The paid `subscriptionTier` strings exactly as the provider's `/user` sends them.
+    /// These are wire values: they keep the provider's spelling, never ours.
+    const PROVIDER_PAID_TIERS: &[&str] = &[
+        "SuperGrokPro",
+        "SuperGrokPlus",
+        "GrokPro",
+        "SuperGrokLite",
+        "XPremiumPlus",
+        "XPremium",
+        "XBasic",
+    ];
     #[test]
     fn all_paid_tiers_qualify() {
-        for tier in &[
-            "SuperGrokPro",
-            "SuperGrokPlus",
-            "FuigoPro",
-            "SuperGrokLite",
-            "XPremiumPlus",
-            "XPremium",
-            "XBasic",
-        ] {
+        for tier in PROVIDER_PAID_TIERS {
             assert!(is_qualifying_tier(tier), "{tier} must qualify");
         }
+    }
+    /// The 1.0.1 mechanical rebrand rewrote the tier-1 value `GrokPro` to `FuigoPro` here and in
+    /// `jwt_claim_matches_user_subscription_tier`. The provider cannot send a string carrying our
+    /// name, so a wire-value list that contains it is testing a tier that never arrives.
+    #[test]
+    fn provider_tier_names_carry_the_providers_spelling_not_ours() {
+        for tier in PROVIDER_PAID_TIERS {
+            assert!(
+                !tier.to_ascii_lowercase().contains("fuigo"),
+                "{tier} is not a provider wire value; the provider never sends our name"
+            );
+        }
+        assert!(
+            PROVIDER_PAID_TIERS.contains(&"GrokPro"),
+            "the tier-1 wire value is `GrokPro`"
+        );
     }
     #[test]
     fn free_and_empty_tiers_are_not_qualifying() {

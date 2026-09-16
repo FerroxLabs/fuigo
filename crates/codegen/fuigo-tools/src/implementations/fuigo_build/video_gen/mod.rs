@@ -34,7 +34,8 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-const FUIGO_VIDEO_MODEL: &str = "fuigo-imagine-video-1.5";
+/// Wire model id (the request's `model`): the provider's spelling, never rebranded.
+pub(crate) const FUIGO_VIDEO_MODEL: &str = "grok-imagine-video-1.5";
 const VIDEO_START_TIMEOUT_SECS: u64 = 60;
 const VIDEO_GEN_TIMEOUT_SECS: u64 = 300;
 const VIDEO_POLL_INTERVAL_SECS: u64 = 5;

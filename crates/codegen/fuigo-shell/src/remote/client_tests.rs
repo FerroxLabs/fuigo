@@ -201,6 +201,9 @@ async fn settings_fetch_maps_status_to_outcome() {
 #[derive(Debug, Default, Clone)]
 struct SeenHeaders {
     authorization: Option<String>,
+    /// The provider's `X-XAI-Token-Auth` routing hint, a wire value: the mock looks it up under
+    /// the provider's spelling so the `None` assertions below are real. (The rebrand had rewritten
+    /// this lookup to `x-fuigo-token-auth`, which nothing sends, making them vacuous.)
     token_auth: Option<String>,
     user_id: Option<String>,
     email: Option<String>,
@@ -240,7 +243,7 @@ async fn start_bundle_server(
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_owned),
                         token_auth: headers
-                            .get("x-fuigo-token-auth")
+                            .get("x-xai-token-auth")
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_owned),
                         user_id: headers
@@ -276,7 +279,7 @@ async fn start_bundle_server(
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_owned),
                         token_auth: headers
-                            .get("x-fuigo-token-auth")
+                            .get("x-xai-token-auth")
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_owned),
                         user_id: headers
@@ -363,11 +366,14 @@ async fn fetch_subagent_bundle_success() {
     let headers = seen_headers.lock().unwrap();
     let headers = headers.last().unwrap();
     assert_eq!(headers.authorization.as_deref(), Some("Bearer token"));
-    // `X-XAI-Token-Auth` is injected only for a TRUSTED first-party proxy, and
-    // `is_trusted_cli_chat_proxy_url` compares against the (now empty)
-    // PROD_CLI_CHAT_PROXY_BASE_URL, so it never matches. The header is an
-    // upstream nginx routing hint; Fuigo has no such tier.
-    assert_eq!(headers.token_auth.as_deref(), None);
+    // A user-token bundle fetch carries the provider's `X-XAI-Token-Auth: xai-grok-cli`
+    // routing hint: `FuigoAuthCredentials::apply` adds it unconditionally with the bearer,
+    // exactly as upstream did (there is no trusted-proxy gate in this tree). The proxy is
+    // opt-in and empty by default, so nothing is sent anywhere until an operator points
+    // `cli_chat_proxy_base_url` at a host that expects this header. An earlier round
+    // asserted `None` here on the belief that a gate suppressed it; that only held because
+    // the mock looked the header up under a rebranded name nothing sends.
+    assert_eq!(headers.token_auth.as_deref(), Some("xai-grok-cli"));
     assert_eq!(headers.user_id.as_deref(), Some("user-1"));
     assert_eq!(headers.email.as_deref(), Some("test@example.com"));
     assert_eq!(headers.alpha_test_key, None);

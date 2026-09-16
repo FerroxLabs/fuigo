@@ -29,8 +29,12 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Default Imagine model for `image_gen`. Used unless an explicit
 /// `model_override` is supplied via `ImageGenConfig::Enabled`.
-const FUIGO_IMAGINE_MODEL: &str = "fuigo-imagine-image-quality";
-// Some Imagine models (e.g. `fuigo-imagine-image`, selectable via `model_override`)
+///
+/// This is a model id ON THE WIRE (the `model` field of the request), so it keeps the
+/// provider's spelling. The 1.0.1 mechanical rebrand rewrote it to `fuigo-imagine-image-quality`,
+/// a model no provider serves. (Its protect rule covered only `grok-<digit>` ids.)
+const FUIGO_IMAGINE_MODEL: &str = "grok-imagine-image-quality";
+// Some Imagine models (e.g. `grok-imagine-image`, selectable via `model_override`)
 // expand the prompt then generate, and the proxy buffers
 // the whole image before sending any bytes — so the client may receive nothing
 // for well over a minute. Keep these generous so a slow-but-progressing
@@ -674,14 +678,14 @@ mod tests {
             extra_headers: indexmap::IndexMap::new(),
             image_gen_enabled: false,
             image_edit_enabled: true,
-            model_override: Some("fuigo-imagine-image".into()),
+            model_override: Some("grok-imagine-image".into()),
             edit_model_override: None,
             tier_restricted: false,
         };
         assert!(cfg.has_credentials());
         assert!(!cfg.image_gen_enabled());
         assert!(cfg.image_edit_enabled());
-        assert_eq!(cfg.model_override(), Some("fuigo-imagine-image"));
+        assert_eq!(cfg.model_override(), Some("grok-imagine-image"));
 
         assert!(!ImageGenConfig::Disabled.has_credentials());
     }
@@ -787,11 +791,37 @@ mod tests {
         );
         // Override → that exact model slug.
         assert_eq!(
-            ImageGenClient::new(&mk(Some("fuigo-imagine-image")), None)
+            ImageGenClient::new(&mk(Some("grok-imagine-image")), None)
                 .unwrap()
                 .model,
-            "fuigo-imagine-image"
+            "grok-imagine-image"
         );
+    }
+
+    /// The default model slugs are sent verbatim as the request's `model`, so they are the
+    /// provider's spelling. The 1.0.1 mechanical rebrand rewrote them to `fuigo-imagine-*`, ids
+    /// no provider serves, so every default `/imagine` request named a model that does not exist.
+    #[test]
+    fn default_imagine_model_slugs_carry_the_providers_spelling() {
+        assert_eq!(FUIGO_IMAGINE_MODEL, "grok-imagine-image-quality");
+        assert_eq!(
+            super::super::image_edit::FUIGO_IMAGINE_EDIT_MODEL,
+            "grok-imagine-image-quality"
+        );
+        assert_eq!(
+            super::super::video_gen::FUIGO_VIDEO_MODEL,
+            "grok-imagine-video-1.5"
+        );
+        for slug in [
+            FUIGO_IMAGINE_MODEL,
+            super::super::image_edit::FUIGO_IMAGINE_EDIT_MODEL,
+            super::super::video_gen::FUIGO_VIDEO_MODEL,
+        ] {
+            assert!(
+                !slug.contains("fuigo"),
+                "{slug}: a wire model id can never carry our name"
+            );
+        }
     }
 
     #[test]
@@ -816,8 +846,8 @@ mod tests {
                 .edit_model(),
             super::super::image_edit::FUIGO_IMAGINE_EDIT_MODEL
         );
-        let client = ImageGenClient::new(&mk(Some("fuigo-imagine-image-v2")), None).unwrap();
-        assert_eq!(client.edit_model(), "fuigo-imagine-image-v2");
+        let client = ImageGenClient::new(&mk(Some("grok-imagine-image-v2")), None).unwrap();
+        assert_eq!(client.edit_model(), "grok-imagine-image-v2");
         assert_eq!(client.model, FUIGO_IMAGINE_MODEL);
     }
 

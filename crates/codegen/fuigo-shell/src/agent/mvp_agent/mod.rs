@@ -165,12 +165,17 @@ pub(crate) fn resolve_subscription_tier_for_telemetry(
 /// The post-unblock catalog refresh must not treat *any* present claim as enough.
 /// An older paid claim (e.g. `x_basic`) can remain on the access token while `/user` already reports a newly qualifying tier (e.g. `SuperGrokPro`).
 /// In that case `/v1/models` would still be targeted at the stale level (the "stale JWT tier skips retry" bug).
+///
+/// The left-hand side of every arm is the PROVIDER's `/user` `subscriptionTier` spelling and must
+/// never be rebranded: the provider cannot send a string carrying our name. The 1.0.1 mechanical
+/// rebrand rewrote `"GrokPro"` to `"FuigoPro"`, so the tier-1 wire value silently fell through to
+/// the numeric arm and never matched. The right-hand side is our own [`jwt_tier_claim`] label.
 pub(crate) fn jwt_claim_matches_user_subscription_tier(
     jwt_claim: &str,
     user_subscription_tier: &str,
 ) -> bool {
     match user_subscription_tier {
-        "FuigoPro" => jwt_claim == "superfuigo",
+        "GrokPro" => jwt_claim == "superfuigo",
         "XBasic" => jwt_claim == "x_basic",
         "XPremium" => jwt_claim == "x_premium",
         "XPremiumPlus" => jwt_claim == "x_premium_plus",

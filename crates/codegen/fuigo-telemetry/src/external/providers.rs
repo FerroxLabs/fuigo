@@ -1069,7 +1069,9 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("abc")
         );
-        for forbidden in ["x-fuigo-token-auth", "x-userid", "x-teamid"] {
+        // `x-xai-token-auth` is the provider's wire spelling of the auth routing hint; the
+        // forbidden list must name what a leak would actually be called.
+        for forbidden in ["x-xai-token-auth", "x-userid", "x-teamid"] {
             assert!(metadata.get(forbidden).is_none());
         }
     }

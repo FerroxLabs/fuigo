@@ -25,7 +25,8 @@ use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 
-pub(crate) const FUIGO_IMAGINE_EDIT_MODEL: &str = "fuigo-imagine-image-quality";
+/// Wire model id (the request's `model`): the provider's spelling, never rebranded.
+pub(crate) const FUIGO_IMAGINE_EDIT_MODEL: &str = "grok-imagine-image-quality";
 
 /// Size/dimension limits for reference images sent to the Imagine API.
 /// Tighter than the vision path; the backend returns 400 when exceeded.

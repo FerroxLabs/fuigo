@@ -2803,7 +2803,7 @@ impl Config {
             .resolve()
     }
     /// Precedence: env `FUIGO_IMAGE_GEN_MODEL_OVERRIDE` > `[features] image_gen_model_override` config > remote settings `image_gen_model_override`.
-    /// `None` falls back to the default model (`fuigo-imagine-image-quality`).
+    /// `None` falls back to the default model (`grok-imagine-image-quality`, the provider's wire id).
     pub(crate) fn resolve_image_gen_model_override(&self) -> Option<String> {
         resolve_string_flag(
             None,
@@ -4826,7 +4826,7 @@ pub struct Features {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_gen: Option<bool>,
     /// `image_gen` Imagine model override.
-    /// `None`/empty defers to remote settings (`image_gen_model_override`) / env / default (`fuigo-imagine-image-quality`).
+    /// `None`/empty defers to remote settings (`image_gen_model_override`) / env / default (`grok-imagine-image-quality`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_gen_model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
