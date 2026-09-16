@@ -226,8 +226,6 @@ mod tests {
     fn watch_gate() -> fuigo_shell::auth::GateInfo {
         fuigo_shell::auth::GateInfo {
             message: "Subscribe".into(),
-            url: None,
-            label: None,
         }
     }
 
@@ -390,8 +388,6 @@ mod tests {
         gated.gate = Some(watch_gate());
         let new_copy = fuigo_shell::auth::GateInfo {
             message: "New copy".into(),
-            url: None,
-            label: None,
         };
         assert!(gated.impose_gate(new_copy).is_empty());
         assert_eq!(gated.gate.as_ref().unwrap().message, "New copy");

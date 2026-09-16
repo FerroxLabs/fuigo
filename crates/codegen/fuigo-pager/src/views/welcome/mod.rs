@@ -4323,4 +4323,65 @@ the usual channels. "
             }
         }
     }
+
+    // --- Access gate: the removed competitor-subscription funnel ---
+    // The gate used to paint a clickable link line under the message, defaulting to the upstream
+    // vendor's own plan page with a referral tag, and to headline "SuperGrok subscription required"
+    // when the server sent no copy. Both are gone; these pin that they stay gone.
+
+    /// With no server gate copy the screen states the block in our own words and names no product.
+    #[test]
+    fn access_gate_default_message_states_the_block_and_sells_nothing() {
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+        let mut params = render_params(&auth, &trust, None);
+        params.has_access = false;
+        params.gate = None;
+
+        let text = render_done_text(&params);
+        assert!(
+            text.contains("This account does not have access."),
+            "{text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        for marketed in ["supergrok", "subscription required", "upgrade subscription"] {
+            assert!(!lower.contains(marketed), "gate markets {marketed:?}:\n{text}");
+        }
+    }
+
+    /// The gate paints no URL line — not the vendor default it used to, and not one a server sends.
+    #[test]
+    fn access_gate_paints_no_url_line() {
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+        let gate = fuigo_shell::auth::GateInfo {
+            message: "Your account is not enabled for this workspace.".into(),
+        };
+        let mut params = render_params(&auth, &trust, None);
+        params.has_access = false;
+        params.gate = Some(&gate);
+
+        let text = render_done_text(&params);
+        assert!(text.contains("Your account is not enabled"), "{text}");
+        for url_ish in ["http://", "https://", "grok.com", ".com/"] {
+            assert!(
+                !text.contains(url_ish),
+                "gate screen painted a link ({url_ish:?}):\n{text}"
+            );
+        }
+    }
+
+    /// The gate menu offers Logout and Quit and nothing else; ctrl+g is not advertised.
+    #[test]
+    fn access_gate_menu_offers_only_logout_and_quit() {
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+        let mut params = render_params(&auth, &trust, None);
+        params.has_access = false;
+
+        let text = render_done_text(&params);
+        assert!(text.contains("Logout"), "{text}");
+        assert!(text.contains("Quit"), "{text}");
+        assert!(!text.contains("ctrl+g"), "{text}");
+    }
 }

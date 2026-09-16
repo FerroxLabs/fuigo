@@ -945,10 +945,10 @@ pub struct RemoteSettings {
     pub subscription_tier: Option<String>,
     #[serde(default)]
     pub gate_message: Option<String>,
-    #[serde(default)]
-    pub gate_url: Option<String>,
-    #[serde(default)]
-    pub gate_label: Option<String>,
+    // `gate_url` / `gate_label` used to ride alongside `gate_message` to paint a clickable upgrade
+    // CTA on the gate screen. That CTA was the competitor-subscription funnel; with it gone the two
+    // fields reached no reader, so they are removed rather than left as config that does nothing.
+    // Unknown keys are ignored by serde, so a server still sending them is handled as before.
     /// A usable `id`, non-empty `body` and positive `version` turn it on; anything else fails open.
     #[serde(default, deserialize_with = "deserialize_tolerant")]
     pub consent_gate: Option<ConsentGate>,

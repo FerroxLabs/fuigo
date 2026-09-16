@@ -1425,8 +1425,6 @@ impl AppView {
         }
         Some(fuigo_shell::auth::GateInfo {
             message: msg.clone(),
-            url: rs.gate_url.clone(),
-            label: rs.gate_label.clone(),
         })
     }
     /// Apply typed auth metadata from the shell.

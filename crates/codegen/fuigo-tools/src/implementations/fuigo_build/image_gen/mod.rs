@@ -875,7 +875,15 @@ mod tests {
 
         match result {
             ToolOutput::Text(t) => {
-                assert_eq!(t.text, TIER_RESTRICTED_UPSELL);
+                // Spelled out rather than compared to the constant: `assert_eq!(t.text,
+                // TIER_RESTRICTED_UPSELL)` is satisfied by any edit to the constant, so it could
+                // not have caught the competitor pitch this copy replaced.
+                assert_eq!(
+                    t.text,
+                    "Image generation is not available with the current API key or provider. \
+                     Let the user know their key's provider does not grant access to image \
+                     generation. Do not retry this tool."
+                );
                 // It must never market anybody else's subscription, nor carry a referral tag.
                 assert!(!t.text.contains("SuperGrok"), "got: {}", t.text);
                 assert!(!t.text.contains("referrer="), "got: {}", t.text);
