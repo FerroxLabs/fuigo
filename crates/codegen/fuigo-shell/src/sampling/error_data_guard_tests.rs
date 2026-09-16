@@ -13,7 +13,18 @@
 //! Its reach is textual: it sees the error type where the expression names it (`serde_json::…`, `anyhow!`,
 //! `.context(..)`). A `?` on a crate-local helper that returns `anyhow::Result` names nothing, so those were
 //! enumerated once by compiling the tree against a schema crate with `impl From<anyhow::Error> for acp::Error`
-//! deleted; keep new helpers of that shape out of `acp::Error`-returning functions.
+//! deleted. That enumeration was a one-time act, not a gate, so a second scan now covers the same shape from
+//! the other end: collect every `fn .. -> anyhow::Result<..>` declared in the crate, then reject a call to one
+//! under `?` inside an `acp::Error`-returning function (`crate_local_anyhow_try_sites`). It is WEAKER THAN
+//! COMPILING AGAINST A STRIPPED SCHEMA CRATE -- it reads declarations textually, so it misses a helper whose
+//! return type is spelled `Result<T>` behind `use anyhow::Result`, one reached as a method or a trait call, and
+//! one declared in another crate. Keep new helpers of that shape out of `acp::Error`-returning functions.
+//!
+//! TODO(1.0.19): replace that scan with the durable check -- a CI job that builds the tree against a schema
+//! crate with `impl From<anyhow::Error> for acp::Error` deleted and fails on the type errors, which is the
+//! enumeration above, automated. Deferred out of 1.0.18 because it needs a patched vendored copy of the schema
+//! crate and a new CI job, and this release ships days after a customer incident; the textual scan closes the
+//! same hole for every shape the crate writes today.
 //!
 //! A third way to reach a client with nothing readable is to build an error and give it NO `data` at all:
 //! `acp::Error::method_not_found()` answers `data: null`, which a client that renders only object-shaped `data`
@@ -453,10 +464,69 @@ fn implicit_conversion_source(chain: &str) -> Option<&'static str> {
 /// `into_internal_error`, which puts a BARE STRING in `data`, and the call names no error type, so the
 /// `implicit_conversion_source` scan above cannot see it. Map it through `crate::acp_error` instead.
 ///
-/// Red first: the gate is a stub here, so the tests above it fail; the next commit implements it.
-fn crate_local_anyhow_try_sites(_rel: &str, _src: &str, _helpers: &[String]) -> Vec<String> {
-    // TDD red: the gate does not exist yet.
-    Vec::new()
+/// This gate is WEAKER THAN COMPILING AGAINST A STRIPPED SCHEMA CRATE (the one-off enumeration that
+/// found the sites this branch fixed: build the tree with `impl From<anyhow::Error> for acp::Error`
+/// deleted and read the type errors). It sees only helpers DECLARED in this crate, only where the
+/// declaration spells `anyhow::Result` / `Result<.., anyhow::Error>`, and only where the `?` is applied
+/// to a direct call by name -- not to a method on a value, a trait method, or a helper from another
+/// crate. It is a real gate in the pattern already here; the durable replacement is a 1.0.19 item
+/// (see the module header).
+fn crate_local_anyhow_try_sites(rel: &str, src: &str, helpers: &[String]) -> Vec<String> {
+    let mut code = code_only(src);
+    strip_cfg_test_items(&mut code);
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for (start, end) in acp_error_fn_bodies(&code) {
+        for q in start..end {
+            if code[q] != '?' {
+                continue;
+            }
+            if code[q + 1..end.min(q + 8)]
+                .iter()
+                .collect::<String>()
+                .trim_start()
+                .starts_with("Sized")
+            {
+                continue;
+            }
+            let chain = try_chain(&code, q);
+            // A chain that already went through `map_err` produced an `acp::Error` itself
+            if chain.contains(".map_err(") {
+                continue;
+            }
+            let Some(helper) = helpers.iter().find(|h| calls_by_name(&chain, h)) else {
+                continue;
+            };
+            let line = line_of(&code, q);
+            out.push(format!(
+                "{rel}:{line}: `?` on the crate-local `anyhow::Result` helper `{helper}` converts \
+                 implicitly into a bare-string `data`: {}",
+                lines.get(line - 1).map(|l| l.trim()).unwrap_or("")
+            ));
+        }
+    }
+    out
+}
+
+/// Does `chain` call `name` as a function -- the whole identifier, followed by `(` or a turbofish?
+/// `foo(..)`, `crate::x::foo(..)` and `self.foo(..)` all count; `foobar(..)` and `NAME_FOO` do not.
+fn calls_by_name(chain: &str, name: &str) -> bool {
+    let bytes: Vec<char> = chain.chars().collect();
+    let needle: Vec<char> = name.chars().collect();
+    if needle.is_empty() {
+        return false;
+    }
+    (0..bytes.len().saturating_sub(needle.len() - 1)).any(|i| {
+        if !bytes[i..].starts_with(&needle) {
+            return false;
+        }
+        if i > 0 && is_ident(bytes[i - 1]) {
+            return false;
+        }
+        let after: String = bytes[i + needle.len()..].iter().collect();
+        let after = after.trim_start();
+        after.starts_with('(') || after.starts_with("::<")
+    })
 }
 
 /// Offending sites in one file, as `rel:line: reason`.
