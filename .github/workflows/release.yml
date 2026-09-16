@@ -335,6 +335,13 @@ jobs:
           cargo test --locked -p fuigo-sampler --lib actor::request_task::tests -- --test-threads=1
           cargo test --locked -p fuigo-memory -p fuigo-config-types --lib -- --test-threads=1
           cargo test --locked -p fuigo-sampler --lib execution_budget -- --test-threads=1
+          # fluxrouter cache bypass gate: release only. This workflow runs on a v* tag push and on
+          # workflow_dispatch, so this is the release-time proof that Fuigo still sends Flux Router's
+          # cache opt-out. There is no pull-request run of it: dispatch-policy.yml is the only
+          # pull_request workflow and it runs no fuigo-sampler tests. A PR-level call site added later
+          # must carry its own `# fluxrouter cache bypass gate:` line -- the test in
+          # crates/codegen/fuigo-sampler/tests/fluxrouter_cache_bypass.rs requires one per call site.
+          cargo test --locked -p fuigo-sampler --test fluxrouter_cache_bypass -- --test-threads=1
           cargo test --locked -p fuigo-shell --lib recall_finalization_tests -- --test-threads=1
           cargo test --locked -p fuigo-shell --lib settled_recall_can_complete -- --test-threads=1
           python3 -m unittest discover -s scripts/memory-bench -p test_stream_parser.py

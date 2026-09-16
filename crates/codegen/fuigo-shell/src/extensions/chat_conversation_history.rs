@@ -7,6 +7,6 @@ use agent_client_protocol as acp;
 pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     {
         let _ = (agent, args);
-        Err(acp::Error::method_not_found())
+        Err(crate::acp_error::unknown_ext_method(&args.method))
     }
 }

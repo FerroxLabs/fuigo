@@ -58,7 +58,9 @@ fn resume_refuses_additional_directories_it_cannot_honor() {
             .await
             .expect_err("resume must refuse roots it drops");
         assert_eq!(err.code, acp::Error::invalid_params().code);
-        assert_eq!(err.data, Some(json!(RESUME_REFUSES_EXTRA_DIRS)));
+        let data = err.data.expect("typed data");
+        assert_eq!(data["message"], RESUME_REFUSES_EXTRA_DIRS);
+        assert_eq!(data["error_kind"], "invalid_request");
     });
 }
 /// Every input is crossed with both methods, because the interesting cases are the interactions.

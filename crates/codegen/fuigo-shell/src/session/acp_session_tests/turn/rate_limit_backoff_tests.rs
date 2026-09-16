@@ -12,7 +12,7 @@ pub(super) enum SessionKind {
     Subagent,
 }
 
-fn rate_limited_reply(retry_after_secs: u64) -> ScriptedResponse {
+pub(super) fn rate_limited_reply(retry_after_secs: u64) -> ScriptedResponse {
     let mut reply = ScriptedResponse::text(429, "concurrent sampling cap exceeded");
     reply
         .headers
@@ -53,11 +53,26 @@ pub(super) fn drain_gateway(
     captured
 }
 
+/// Serves the persistence messages a turn depends on: flush acks, and the durable
+/// execution-state mutations an [`crate::session::execution_state::Execution`] makes
+/// (admission, settlement, terminal receipt), against a temporary state directory.
+/// Tests that never open an execution see no mutations, so the directory stays unused.
 pub(super) fn drain_persistence(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
     tokio::task::spawn_local(async move {
+        let dir = tempfile::tempdir().expect("execution-state fixture directory");
         while let Some(msg) = rx.recv().await {
-            if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                let _ = respond_to.send(Ok(()));
+            match msg {
+                PersistenceMsg::FlushAndAck { respond_to } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } => {
+                    let _ = respond_to
+                        .send(crate::session::execution_state::apply(dir.path(), mutation).await);
+                }
+                _ => {}
             }
         }
     });
@@ -85,6 +100,112 @@ pub(super) async fn actor_under_test(
     retry_policy: fuigo_sampler::RetryPolicy,
     transient_retry_enabled: bool,
 ) -> (Arc<SessionActor>, CapturedRetries) {
+    actor_under_test_with_gateway(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain_gateway,
+    )
+    .await
+}
+
+/// [`actor_under_test`] with a caller-supplied consumer for the client gateway, for tests that assert on more than `RetryState`.
+/// The session event queue is not drained, so buffered updates (the model's answer chunks) never reach the gateway.
+pub(super) async fn actor_under_test_with_gateway<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+) -> (Arc<SessionActor>, T) {
+    let (actor, captured, _event_rx) = build_actor_under_test(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain,
+        None,
+    )
+    .await;
+    (actor, captured)
+}
+
+/// [`actor_under_test_with_gateway`] under a session id of the caller's choosing.
+///
+/// Every other test actor answers to `test-actor`, and the live-execution registry has one
+/// slot per session id: a test that registers an `Execution` under the shared id is visible
+/// to every test that resolves a side call through `Execution::current`. Its own id removes
+/// the collision instead of serialising against part of it.
+pub(super) async fn actor_under_test_for_session<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+    session_id: &str,
+) -> (Arc<SessionActor>, T) {
+    let (actor, captured, _event_rx) = build_actor_under_test(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain,
+        Some(session_id),
+    )
+    .await;
+    (actor, captured)
+}
+
+/// [`actor_under_test_with_gateway`] whose session event queue is drained through [`SessionActor::handle_session_event`], as `run_session` does.
+/// Answer chunks and every other queued update reach the gateway in the order the client would see them.
+pub(super) async fn actor_under_test_with_event_pump<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+) -> (Arc<SessionActor>, T) {
+    let (actor, captured, mut event_rx) = build_actor_under_test(
+        server,
+        session,
+        retry_policy,
+        transient_retry_enabled,
+        drain,
+        None,
+    )
+    .await;
+    let pump = actor.clone();
+    tokio::task::spawn_local(async move {
+        let mut replay_buffer =
+            crate::agent::update_chunk_merge::ReplayBuffer::new(pump.buffering_settings.clone());
+        while let Some(event) = event_rx.recv().await {
+            pump.handle_session_event(event, &mut replay_buffer).await;
+            if event_rx.is_empty() {
+                // The loop's periodic flush, so nothing stays held once the queue is idle
+                pump.handle_session_event(
+                    SessionEvent::FlushReplay { respond_to: None },
+                    &mut replay_buffer,
+                )
+                .await;
+            }
+        }
+    });
+    (actor, captured)
+}
+
+async fn build_actor_under_test<T>(
+    server: &MockInferenceServer,
+    session: SessionKind,
+    retry_policy: fuigo_sampler::RetryPolicy,
+    transient_retry_enabled: bool,
+    drain: impl FnOnce(tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> T,
+    session_id: Option<&str>,
+) -> (
+    Arc<SessionActor>,
+    T,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let sampler_max_retries = retry_policy.max_retries;
     let sampling_cfg = fuigo_sampler::SamplerConfig {
         base_url: server.url(),
@@ -101,12 +222,16 @@ pub(super) async fn actor_under_test(
         fuigo_sampler::SamplerActor::spawn(sampling_cfg, retry_policy, sampler_event_tx);
 
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-    let captured_retries = drain_gateway(gateway_rx);
+    let captured = drain(gateway_rx);
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     drain_persistence(persistence_rx);
 
-    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, event_rx) =
+        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.sampler_handle = sampler_handle;
+    if let Some(session_id) = session_id {
+        actor.session_info.id = agent_client_protocol::SessionId::new(session_id);
+    }
     actor.startup_hints.is_subagent = matches!(session, SessionKind::Subagent);
     actor.transient_retry_enabled = transient_retry_enabled;
     // The per-turn config push carries the shell's max_retries; mirror the policy.
@@ -133,7 +258,7 @@ pub(super) async fn actor_under_test(
             }
         });
     }
-    (actor, captured_retries)
+    (actor, captured, event_rx)
 }
 
 pub(super) async fn conversation_request(actor: &Arc<SessionActor>) -> ConversationRequest {

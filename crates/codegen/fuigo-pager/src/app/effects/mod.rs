@@ -2,6 +2,7 @@
 //! This module takes [`Effect`] values produced by [`super::dispatch`] and spawns them as async tasks on a [`JoinSet`].
 //! When tasks complete, the event loop converts their output into [`TaskResult`] and feeds it back through dispatch.
 mod helpers;
+use fuigo_shell::sampling::error::acp_error_text;
 use super::actions;
 use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
@@ -231,7 +232,7 @@ pub(crate) fn execute(
                             }
                         }
                         Err(e) => {
-                            let error = e.to_string();
+                            let error = acp_error_text(&e);
                             ulog::error(
                                 "session.create.failed",
                                 None,
@@ -244,7 +245,7 @@ pub(crate) fn execute(
                             );
                             TaskResult::SessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(&error),
+                                error: acp_error_user_text(&e),
                             }
                         }
                     }
@@ -336,14 +337,14 @@ pub(crate) fn execute(
                                 tracing::warn!(
                                 session_id = %sid,
                                 elapsed_ms = resume_started.elapsed().as_millis() as u64,
-                                error = %e,
+                                error = %acp_error_text(&e),
                                 "worktree resume_session: ACP call failed"
                             );
                                 return TaskResult::WorktreeSessionFailed {
                                     agent_id,
                                     error: worktree_resume_failure_message(
                                         local_miss,
-                                        &sanitize_user_error(&e.to_string()),
+                                        &acp_error_user_text(&e),
                                     ),
                                 };
                             }
@@ -436,7 +437,7 @@ pub(crate) fn execute(
                             return TaskResult::WorktreeSessionFailed {
                                 agent_id,
                                 error: sanitize_user_error(
-                                    &format!("couldn't create worktree: {e}"),
+                                    &format!("couldn't create worktree: {}", acp_error_text(&e)),
                                 ),
                             };
                         }
@@ -542,7 +543,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 error: sanitize_user_error(
                                     &format!(
-                            "couldn't create session in worktree: {e}"
+                            "couldn't create session in worktree: {}", acp_error_text(&e)
                         ),
                                 ),
                             }
@@ -621,7 +622,7 @@ pub(crate) fn execute(
                             }
                         }
                         Err(e) => {
-                            let error = e.to_string();
+                            let error = acp_error_text(&e);
                             ulog::error(
                                 "session.load.failed",
                                 Some(&acp_session_id.0),
@@ -632,7 +633,7 @@ pub(crate) fn execute(
                             TaskResult::SessionLoadFailed {
                                 agent_id,
                                 session_id: acp_session_id,
-                                error: sanitize_user_error(&error),
+                                error: acp_error_user_text(&e),
                             }
                         }
                     }
@@ -824,7 +825,7 @@ pub(crate) fn execute(
                             TaskResult::SessionListFailed {
                                 host,
                                 generation,
-                                error: sanitize_user_error(&format!("{e}")),
+                                error: sanitize_user_error(&acp_error_text(&e)),
                                 seq,
                                 query,
                             }
@@ -878,7 +879,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             TaskResult::RosterFailed {
-                                error: sanitize_user_error(&format!("{e}")),
+                                error: sanitize_user_error(&acp_error_text(&e)),
                             }
                         }
                     }
@@ -1436,7 +1437,7 @@ pub(crate) fn execute(
                         ),
                     );
                     if let Err(e) = result {
-                        tracing::warn!("Failed to send cancel notification: {e}");
+                        tracing::warn!("Failed to send cancel notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1455,7 +1456,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send toggle_plan_mode notification: {e}");
+                        tracing::warn!("Failed to send toggle_plan_mode notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1476,7 +1477,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/remove notification: {e}");
+                        tracing::warn!("Failed to send queue/remove notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1496,7 +1497,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/reorder notification: {e}");
+                        tracing::warn!("Failed to send queue/reorder notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1515,7 +1516,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/clear notification: {e}");
+                        tracing::warn!("Failed to send queue/clear notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1536,7 +1537,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/edit notification: {e}");
+                        tracing::warn!("Failed to send queue/edit notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1556,7 +1557,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/hold_edit notification: {e}");
+                        tracing::warn!("Failed to send queue/hold_edit notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1576,7 +1577,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/release_edit notification: {e}");
+                        tracing::warn!("Failed to send queue/release_edit notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1600,7 +1601,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/interject notification: {e}");
+                        tracing::warn!("Failed to send queue/interject notification: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1611,7 +1612,7 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let req = acp::SetSessionModeRequest::new(session_id, mode_id);
                     if let Err(e) = acp_send(req, &tx).await {
-                        tracing::warn!("Failed to set session mode: {e}");
+                        tracing::warn!("Failed to set session mode: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1634,7 +1635,7 @@ pub(crate) fn execute(
                         mode_id,
                     );
                     if let Err(e) = acp_send(mode_req, &tx).await {
-                        tracing::warn!("Failed to set session mode: {e}");
+                        tracing::warn!("Failed to set session mode: {}", acp_error_text(&e));
                     }
                     ulog::info(
                         "prompt submitted",
@@ -1721,7 +1722,7 @@ pub(crate) fn execute(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to fetch prompt history: {e}");
+                            tracing::warn!("Failed to fetch prompt history: {}", acp_error_text(&e));
                             TaskResult::PromptHistoryLoaded {
                                 agent_id,
                                 prompts: Vec::new(),
@@ -1759,7 +1760,7 @@ pub(crate) fn execute(
                             TaskResult::BgTaskKillFailed {
                                 session_id: sid,
                                 task_id,
-                                error: sanitize_user_error(&e.to_string()),
+                                error: sanitize_user_error(&acp_error_text(&e)),
                             }
                         }
                     }
@@ -1782,7 +1783,7 @@ pub(crate) fn execute(
                     let outcome = match acp_send(req, &tx).await {
                         Ok(resp) => parse_subagent_kill_outcome(resp.0.get()),
                         Err(e) => {
-                            tracing::warn!("Failed to cancel subagent: {e}");
+                            tracing::warn!("Failed to cancel subagent: {}", acp_error_text(&e));
                             SubagentKillOutcome::RpcFailed
                         }
                     };
@@ -1808,7 +1809,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(req, &tx).await {
-                        tracing::warn!(task_id, "Failed to delete scheduled task: {e}");
+                        tracing::warn!(task_id, "Failed to delete scheduled task: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1828,7 +1829,7 @@ pub(crate) fn execute(
                             .into(),
                     );
                     if let Err(e) = acp_send(req, &tx).await {
-                        tracing::warn!("Failed to send background request: {e}");
+                        tracing::warn!("Failed to send background request: {}", acp_error_text(&e));
                     }
                     TaskResult::CancelComplete
                 });
@@ -1873,7 +1874,7 @@ pub(crate) fn execute(
                                     prev_model_id: prev_model_id.clone(),
                                 }
                             } else {
-                                SwitchModelError::Other(sanitize_user_error(&e.to_string()))
+                                SwitchModelError::Other(sanitize_user_error(&acp_error_text(&e)))
                             }
                         });
                     TaskResult::SwitchModelComplete {
@@ -2138,7 +2139,7 @@ pub(crate) fn execute(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, %notice_id, "consent record not filed");
+                            tracing::warn!(error = %acp_error_text(&e), %notice_id, "consent record not filed");
                             TaskResult::CancelComplete
                         }
                     }
@@ -2312,7 +2313,7 @@ pub(crate) fn execute(
                             }
                         }
                         Err(e) => {
-                            let error = e.to_string();
+                            let error = acp_error_text(&e);
                             ulog::error(
                                 "auth failed",
                                 None,
@@ -2351,7 +2352,7 @@ pub(crate) fn execute(
                             false,
                         ).await,
                         Err(e) => {
-                            let error = e.to_string();
+                            let error = acp_error_text(&e);
                             ulog::error(
                                 "storing api key failed",
                                 None,
@@ -2393,7 +2394,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't load server list: {e}"
+                        "couldn't load server list: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -2460,7 +2461,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("authentication failed: {e}")),
+                                sanitize_user_error(&format!("authentication failed: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -2508,7 +2509,7 @@ pub(crate) fn execute(
                                 Err(detail)
                             }
                         }
-                        Err(e) => Err(sanitize_user_error(&format!("setup failed: {e}"))),
+                        Err(e) => Err(sanitize_user_error(&format!("setup failed: {}", acp_error_text(&e)))),
                     };
                     TaskResult::McpSetupSubmitDone {
                         agent_id,
@@ -2544,7 +2545,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("couldn't load hooks: {e}")),
+                                sanitize_user_error(&format!("couldn't load hooks: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -2581,7 +2582,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("couldn't load plugins: {e}")),
+                                sanitize_user_error(&format!("couldn't load plugins: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -2621,7 +2622,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't complete hooks action: {e}"
+                        "couldn't complete hooks action: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -2663,7 +2664,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't complete plugins action: {e}"
+                        "couldn't complete plugins action: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -2704,7 +2705,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't load marketplace: {e}"
+                        "couldn't load marketplace: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -2745,7 +2746,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't load marketplace: {e}"
+                        "couldn't load marketplace: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -2786,7 +2787,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("couldn't load skills: {e}")),
+                                sanitize_user_error(&format!("couldn't load skills: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -2825,7 +2826,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't load workflows: {e}"
+                        "couldn't load workflows: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -2879,7 +2880,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("couldn't toggle skill: {e}")),
+                                sanitize_user_error(&format!("couldn't toggle skill: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -3035,7 +3036,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't complete marketplace action: {e}"
+                        "couldn't complete marketplace action: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -3094,7 +3095,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't complete marketplace action: {e}"
+                        "couldn't complete marketplace action: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -3137,7 +3138,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't complete plugins action: {e}"
+                        "couldn't complete plugins action: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -3206,7 +3207,7 @@ pub(crate) fn execute(
                             Err(
                                 sanitize_user_error(
                                     &format!(
-                        "couldn't save server config: {e}"
+                        "couldn't save server config: {}", acp_error_text(&e)
                     ),
                                 ),
                             )
@@ -3241,7 +3242,7 @@ pub(crate) fn execute(
                         Ok(_) => Ok(()),
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("couldn't delete server: {e}")),
+                                sanitize_user_error(&format!("couldn't delete server: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -3303,7 +3304,7 @@ pub(crate) fn execute(
                         Ok(_) => Ok(()),
                         Err(e) => {
                             Err(
-                                sanitize_user_error(&format!("couldn't toggle tool: {e}")),
+                                sanitize_user_error(&format!("couldn't toggle tool: {}", acp_error_text(&e))),
                             )
                         }
                     };
@@ -3366,7 +3367,7 @@ pub(crate) fn execute(
                             TaskResult::ShareSessionFailed {
                                 agent_id,
                                 error: sanitize_user_error(
-                                    &format!("couldn't share session: {e}"),
+                                    &format!("couldn't share session: {}", acp_error_text(&e)),
                                 ),
                             }
                         }
@@ -3555,7 +3556,7 @@ pub(crate) fn execute(
                                 source,
                                 session_id,
                                 error: sanitize_user_error(
-                                    &format!("couldn't delete session: {e}"),
+                                    &format!("couldn't delete session: {}", acp_error_text(&e)),
                                 ),
                             }
                         }
@@ -3623,7 +3624,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::CodingDataSharingFailed {
                                 agent_id,
-                                error: format!("{e}"),
+                                error: acp_error_text(&e),
                                 rollback_to_opted_in,
                                 seq,
                             }
@@ -3730,7 +3731,7 @@ pub(crate) fn execute(
                             TaskResult::FeedbackFailed {
                                 agent_id,
                                 error: sanitize_user_error(
-                                    &format!("couldn't send feedback: {e}"),
+                                    &format!("couldn't send feedback: {}", acp_error_text(&e)),
                                 ),
                             }
                         }
@@ -3781,7 +3782,7 @@ pub(crate) fn execute(
                         Ok(Err(e)) => {
                             TaskResult::FeedbackTraceUploaded {
                                 agent_id,
-                                error: Some(sanitize_user_error(&format!("{e}"))),
+                                error: Some(sanitize_user_error(&acp_error_text(&e))),
                             }
                         }
                         Err(_) => {
@@ -3938,7 +3939,7 @@ pub(crate) fn execute(
                             TaskResult::RecapRequested {
                                 session_id,
                                 auto,
-                                error: Some(format!("recap request failed: {e}")),
+                                error: Some(format!("recap request failed: {}", acp_error_text(&e))),
                             }
                         }
                     }
@@ -3976,7 +3977,7 @@ pub(crate) fn execute(
                             TaskResult::InterjectFailed {
                                 agent_id,
                                 error: sanitize_user_error(
-                                    &format!("couldn't send interjection: {e}"),
+                                    &format!("couldn't send interjection: {}", acp_error_text(&e)),
                                 ),
                                 text,
                                 blocks,
@@ -4033,7 +4034,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::CatalogEntryFailed {
                                 error: sanitize_user_error(
-                                    &format!("couldn't load entry: {e}"),
+                                    &format!("couldn't load entry: {}", acp_error_text(&e)),
                                 ),
                             }
                         }
@@ -4091,7 +4092,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::BundleStatusFailed {
                                 error: sanitize_user_error(
-                                    &format!("couldn't fetch bundle status: {e}"),
+                                    &format!("couldn't fetch bundle status: {}", acp_error_text(&e)),
                                 ),
                             }
                         }
@@ -4126,7 +4127,7 @@ pub(crate) fn execute(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("commands/list refresh failed: {e}");
+                            tracing::warn!("commands/list refresh failed: {}", acp_error_text(&e));
                             TaskResult::AvailableCommandsRefreshed {
                                 agent_id,
                                 commands: vec![],
@@ -4188,7 +4189,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::RewindPointsFailed {
                                 agent_id,
-                                error: sanitize_user_error(&e.to_string()),
+                                error: sanitize_user_error(&acp_error_text(&e)),
                             }
                         }
                     }
@@ -4239,7 +4240,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::RewindExecuteFailed {
                                 agent_id,
-                                error: sanitize_user_error(&e.to_string()),
+                                error: sanitize_user_error(&acp_error_text(&e)),
                             }
                         }
                     }
@@ -4300,7 +4301,7 @@ pub(crate) fn execute(
                                 }
                             }
                             Ok(Err(e)) => {
-                                tracing::warn!("deep search failed: {e}");
+                                tracing::warn!("deep search failed: {}", acp_error_text(&e));
                                 break;
                             }
                             Err(_) => {
@@ -4386,7 +4387,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::ForkSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(&format!("fork failed: {e}")),
+                                error: sanitize_user_error(&format!("fork failed: {}", acp_error_text(&e))),
                             }
                         }
                     }
@@ -4459,7 +4460,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             return TaskResult::BillingError {
                                 agent_id,
-                                error: sanitize_user_error(&format!("{e}")),
+                                error: sanitize_user_error(&acp_error_text(&e)),
                                 silent,
                                 nonce,
                             };
@@ -4720,7 +4721,7 @@ async fn fetch_session_info(
     );
     let resp = acp_send(request, tx)
         .await
-        .map_err(|e| sanitize_user_error(&format!("couldn't fetch session info: {e}")))?;
+        .map_err(|e| sanitize_user_error(&format!("couldn't fetch session info: {}", acp_error_text(&e))))?;
     let envelope: ExtMethodResult<SessionInfoResponse> = serde_json::from_str(
             resp.0.get(),
         )
@@ -4755,7 +4756,7 @@ async fn fetch_session_usage(
             if i32::from(e.code) == i32::from(acp::Error::method_not_found().code) {
                 "not supported by this agent version".to_string()
             } else {
-                sanitize_user_error(&e.to_string())
+                sanitize_user_error(&acp_error_text(&e))
             }
         })?;
     let parsed: fuigo_shell::extensions::usage::SessionUsageResponse = serde_json::from_str(
@@ -4796,7 +4797,7 @@ async fn session_rename_rpc(
             }
             Ok(())
         }
-        Err(e) => Err(sanitize_user_error(&format!("couldn't {verb}: {e}"))),
+        Err(e) => Err(sanitize_user_error(&format!("couldn't {verb}: {}", acp_error_text(&e)))),
     }
 }
 /// Session title from local persistence: loads only this session's summary, never the all-sessions list.

@@ -130,6 +130,66 @@ Communication follows the JSON-RPC 2.0 format. A typical session lifecycle:
 4. **Receive updates** -- agent sends `session/update` notifications with streamed content
 5. **Handle permissions** -- agent may request tool execution approval (or allow or deny based on permission mode)
 
+### Errors
+
+A failed request gets a JSON-RPC error reply. `code` is the error class and `message` is usually only the class name (for example `Internal error`), so never show `message` on its own. The detail is in `data`.
+
+Every error reply the agent itself produces carries `data` as an object. The exceptions are rejections the protocol layer makes before any agent code runs; they are listed in the notes on the class below, and they are the only replies this table does not describe:
+
+| `data` field  | Present                         | Meaning                                                                                  |
+| ------------- | ------------------------------- | ---------------------------------------------------------------------------------------- |
+| `message`     | always, in an agent-built reply | What went wrong, in words. Show this to the user.                                        |
+| `error_kind`  | always, in an agent-built reply | Stable machine tag for the failure (see below).                                          |
+| `http_status` | when the provider returned one  | Upstream HTTP status, for example `503`.                                                 |
+| `promptUsage` | when usage was recorded         | Tokens and spend the failed prompt still consumed.                                       |
+| `code`        | on some failures                | A finer machine code a client can match on, for example `local_workspace_chat_only` or `FS_DISK_QUOTA_EXCEEDED`. |
+
+Some failures add more structured fields next to these, for example the execution receipt (`partial`, `reason`, `pending_tool_calls`, ...) when a budgeted execution ends early.
+
+`error_kind` values for a failed model request: `empty_response` (the model returned no visible output, for example reasoning only), `idle_timeout` (the model stopped streaming), `http` (transport failure), `api` (the provider rejected the request), `auth`, `rate_limited`, `serialization`, `max_tokens_truncation`, `doom_loop_detected`, and `cancelled` (the request was cancelled before it produced a result).
+
+`error_kind` values for failures inside the agent:
+
+| `error_kind`           | Meaning                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `session_unavailable`  | The agent could not hand the request to its session or to the peer, or it never answered.      |
+| `invalid_request`      | The request itself is wrong: bad or missing parameters, an unknown session or method, an unsupported operation. |
+| `not_found`            | The named resource, for example a session, does not exist.                                       |
+| `session_storage`      | Reading or writing the session's files failed (session directory, history, durable execution state). |
+| `compaction`           | Context compaction failed.                                                                       |
+| `execution_incomplete` | A budgeted execution (a workflow child, a goal) stopped before its work finished.                |
+| `internal`             | Any other failure inside the agent.                                                              |
+
+New values can be added in later releases, so treat an unknown `error_kind` as a generic failure.
+
+`code` stays the JSON-RPC class: `-32603` internal error, `-32000` authentication required, `-32602` invalid params, `-32600` invalid request, `-32601` method not found, `-32002` resource not found, `-32003` rate limited, `-32800` request cancelled.
+
+Four notes on the class:
+
+- A `fuigo/*` extension method this build does not implement answers `-32601` with the object above, naming the method in `data.message` exactly as you sent it, `_` prefix included (`unknown ACP extension method: _fuigo/skills/whatever`), so you can match it against your own request string. Before 1.0.18 the name came back without the `_`. Two kinds of request are rejected by the protocol layer before the agent sees them, and both still come back as `-32601 Method not found` with no `data`, because no part of the agent runs: an unknown top-level JSON-RPC method, one that is not an extension call, and `session/cancel` -- a notification-only method -- sent as a request instead of as a notification. Sent the way the protocol specifies, as a notification, `session/cancel` cancels the turn normally.
+- Since 1.0.18 a failure to serialize the agent's OWN data answers `-32603` (`internal`) where it used to answer `-32602` (`invalid params`). The parameters the client sent were fine; the fault was inside the agent, so the class now says so. Five replies changed class, in two files: the agent's tool input while a prompt is running (`fuigo-shell` `session/acp_session_impl/tool_calls.rs`, two sites) and the `fuigo/commands/list` response (`fuigo-shell` `extensions/session_admin.rs`, three sites). Nothing the client sends can reach them; a malformed request still answers `-32602`.
+- Since 1.0.18 a failed `authenticate` puts its reason in `data.message` and leaves `message` as the class name `Authentication required`. Before 1.0.18 the reply carried no `data` at all and `message` held the reason (`bad credentials`, `Authentication cancelled`), so a client that renders only object-shaped `data` showed the user nothing on a failed login. The class and the code (`-32000`) are unchanged. Every embedding client calls `authenticate` on connect, so a client that reads only `message` sees the class name where it used to see the reason: read `data.message`.
+- Malformed parameters on a **core** ACP method are rejected by the protocol layer while the request is still being decoded, before any agent code runs, so they do not follow the table above: the reply is `-32602 Invalid params` with `data` as a **bare string** -- the deserializer's own complaint, for example `unknown variant`. Measured on 1.0.18 this covers `initialize`, `session/prompt`, `session/new`, `session/load`, `session/set_mode`, `session/set_model` and `authenticate` -- `initialize` included, which is the first request every client sends; 1.0.17 answers identically, so nothing changed here. It matters because it is the one `data` shape a live client can provoke by accident: a content-block shape your ACP client version sends and this build's schema does not accept lands here, and a client that renders only object `data` shows the user `Invalid params` and nothing else. Read `data` as a string when it is one, and fall back to `message` when it is neither a string nor an object. A code fix (decoding requests through a wrapper that re-shapes the rejection) is planned for 1.0.19.
+
+A prompt that failed on an empty model response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "error": {
+    "code": -32603,
+    "message": "Internal error",
+    "data": {
+      "message": "empty response from model (reasoning_only)",
+      "error_kind": "empty_response"
+    }
+  }
+}
+```
+
+Before 1.0.18 most of these failures sent `data` as a bare string. A client that also talks to older agents should read `data.message` when `data` is an object and show `data` itself when it is a string.
+
 ### Architecture
 
 ```
@@ -163,6 +223,10 @@ ACP streams structured events. Each `session/update` notification carries a `ses
 | `plan`                | The agent's execution plan.                           |
 
 Each update names its type, so a client can render distinct panels for reasoning, tool calls, and response text.
+
+**Retry progress.** While a model request is being retried, and once when it finally fails, the agent also sends a live-only `agent_thought_chunk` such as `Retrying the model (1/3): empty response from model (reasoning_only)`, `The model request failed after 3 attempts: ...` when a retry budget ran out, or `The model request failed: ...` for a terminal failure with no budget behind it. (A failure that is not the model's - running out of disk while saving the session - names its own subject instead.) Clients that render only the standard updates therefore show progress in their thinking area instead of silence, and the text never becomes part of the answer: retry progress is never sent as `agent_message_chunk`. It arrives in order with the rest of the stream, after any answer text generated before the retry, and opens its own paragraph when it follows streamed reasoning. The chunk's `_meta["fuigo/retryStatus"]` holds the structured retry state (the same object as the `retry_state` session notification). A client that already renders `fuigo/session_notification` retry state should skip chunks carrying that key. These chunks are never persisted, so they do not replay on `session/load`.
+
+An empty reply from the model (reasoning tokens but no text or tool call, or nothing at all) is resent at most twice, 2 s apart, on one budget of three attempts shared by every empty reply of a request, far below `max_retries`, because resending the identical request rarely answers differently and each resend is billed. The progress line's denominator is that cap, lowered when the configured retry budget cannot fund it, and spending it closes with the exhaustion line naming the attempts made (`The model request failed after 3 attempts: ...`), as a spent rate-limit budget does.
 
 ---
 

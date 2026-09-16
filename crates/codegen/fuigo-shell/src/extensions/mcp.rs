@@ -368,7 +368,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Some(McpRoute::ToggleTool) => handle_toggle_tool(agent, args).await,
         Some(McpRoute::Upsert) => handle_upsert(agent, args).await,
         Some(McpRoute::Delete) => handle_delete(agent, args).await,
-        None => Err(acp::Error::method_not_found()),
+        None => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
 
@@ -1102,7 +1102,7 @@ async fn handle_call(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let handle = agent
                 .session_handle_waiting_for_load(&acp_id)
                 .await
-                .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+                .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
             handle
                 .call_mcp_tool(req.server, req.server_url, req.tool, req.arguments)
                 .await
@@ -1121,7 +1121,7 @@ async fn handle_call(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .await
         }
     }
-    .map_err(|e| acp::Error::internal_error().data(e))?;
+    .map_err(crate::acp_error::internal_error)?;
 
     to_ext_response(Ok(result))
 }
@@ -1135,7 +1135,7 @@ async fn handle_read_resource(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         let handle = agent
             .session_handle_waiting_for_load(&acp_id)
             .await
-            .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+            .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
         handle
             .read_mcp_resource(req.server.clone(), req.uri.clone())
             .await
@@ -1144,7 +1144,7 @@ async fn handle_read_resource(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         ensure_agent_pool_initialized(&mcp_state).await;
         read_mcp_resource(&mcp_state, &req.server, &req.uri).await
     }
-    .map_err(|e| acp::Error::internal_error().data(e))?;
+    .map_err(crate::acp_error::internal_error)?;
 
     to_ext_response(Ok(result))
 }
@@ -1405,7 +1405,7 @@ async fn handle_auth_status(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResu
     let acp_id = acp::SessionId::new(req.session_id);
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
     let entries = handle.mcp_auth_status().await;
     to_ext_response(Ok(McpAuthStatusResponse { servers: entries }))
 }
@@ -1432,7 +1432,7 @@ async fn handle_auth_trigger(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
     let acp_id = acp::SessionId::new(req.session_id);
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
     let cwd = agent
         .get_session_cwd(&acp_id)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -1500,7 +1500,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let acp_id = acp::SessionId::new(req.session_id.clone());
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
     let cwd = agent
         .get_session_cwd(&acp_id)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -1511,12 +1511,12 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     );
     let entry = setup_entries
         .get(&req.server_name)
-        .ok_or_else(|| acp::Error::invalid_params().data("server setup not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("server setup not found"))?;
     let setup = entry
         .config
         .setup
         .as_ref()
-        .ok_or_else(|| acp::Error::invalid_params().data("server setup not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("server setup not found"))?;
 
     // Only schema field ids (never arbitrary client keys).
     let filtered_values: HashMap<String, String> = setup
@@ -1537,16 +1537,16 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match entry.config.resolve_setup(Some(&pending_preferences)) {
         crate::util::config::McpSetupResolution::Resolved(_) => {}
         crate::util::config::McpSetupResolution::Required(_) => {
-            return Err(acp::Error::invalid_params().data("setup values incomplete"));
+            return Err(crate::acp_error::invalid_params("setup values incomplete"));
         }
         crate::util::config::McpSetupResolution::Invalid(reason) => {
-            return Err(acp::Error::invalid_params().data(reason));
+            return Err(crate::acp_error::invalid_params(reason));
         }
     }
 
     let load = crate::util::config::load_mcp_preferences();
     if !load.is_writable() {
-        return Err(acp::Error::internal_error().data(
+        return Err(crate::acp_error::internal_error(
             "MCP preferences file is unreadable; fix or remove mcp_preferences.json before saving",
         ));
     }
@@ -1557,7 +1557,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .insert(req.server_name.clone(), pending_preferences);
     crate::util::config::save_mcp_preferences(&prefs)
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     let rollback_prefs = || async {
         let _ = crate::util::config::restore_mcp_preference_server(
@@ -1579,14 +1579,16 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         crate::session::managed_mcp::discover_mcp_definitions_ignoring_disable(&discovery);
     let Some(probe) = discovered.get(&req.server_name) else {
         rollback_prefs().await;
-        return Err(acp::Error::internal_error().data("server did not resolve after setup"));
+        return Err(crate::acp_error::internal_error(
+            "server did not resolve after setup",
+        ));
     };
     let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
     if !allowlist.is_server_allowed(probe) {
         rollback_prefs().await;
         let reason =
             crate::session::managed_mcp::McpDisabledReason::for_blocked_server(allowlist, probe);
-        return Err(acp::Error::invalid_params().data(reason.to_string()));
+        return Err(crate::acp_error::invalid_params(reason.to_string()));
     }
 
     // Clear disable only after resolve succeeds, then merge for a spawnable transport
@@ -1597,7 +1599,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             Ok(paths) => paths,
             Err(e) => {
                 rollback_prefs().await;
-                return Err(acp::Error::internal_error().data(format!(
+                return Err(crate::acp_error::internal_error(format!(
                     "failed to clear disabled MCP server entry after setup resolve: {e}"
                 )));
             }
@@ -1643,7 +1645,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Some(s) if s.disabled_reason.is_none() => s.server,
         Some(s) => {
             rollback_after_enable().await;
-            return Err(acp::Error::invalid_params().data(
+            return Err(crate::acp_error::invalid_params(
                 s.disabled_reason
                     .map(|r| r.to_string())
                     .unwrap_or_else(|| "blocked by organization policy".into()),
@@ -1651,7 +1653,9 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
         None => {
             rollback_after_enable().await;
-            return Err(acp::Error::internal_error().data("server did not resolve after setup"));
+            return Err(crate::acp_error::internal_error(
+                "server did not resolve after setup",
+            ));
         }
     };
 
@@ -1660,7 +1664,9 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .await
     {
         rollback_after_enable().await;
-        return Err(acp::Error::internal_error().data(e.to_string()));
+        return Err(crate::acp_error::internal_error(
+            crate::sampling::error::acp_error_text(&e),
+        ));
     }
 
     to_ext_response(Ok(McpSetupResponse { ok: true }))
@@ -1686,7 +1692,7 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
 
     let gateway_connector_id = managed_gateway_connector_id(&req.server_name);
 
@@ -1708,7 +1714,9 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             handle
                 .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), true)
                 .await
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                .map_err(|e| {
+                    crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+                })?;
             return to_ext_response(Ok(McpToggleResponse { ok: true }));
         }
         if let Err(e) =
@@ -1747,13 +1755,15 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     ) => source.display().to_string(),
                     None => String::new(),
                 };
-                return Err(acp::Error::invalid_params().data(format!(
+                return Err(crate::acp_error::invalid_params(format!(
                     "The server {capitalized} can't be enabled due to an organization policy ({path}).",
                 )));
             }
             None => {
-                return Err(acp::Error::invalid_params()
-                    .data(format!("server '{}' not found in config", req.server_name)));
+                return Err(crate::acp_error::invalid_params(format!(
+                    "server '{}' not found in config",
+                    req.server_name
+                )));
             }
             _ => {}
         }
@@ -1762,7 +1772,9 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         handle
             .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), false)
             .await
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            .map_err(|e| {
+                crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+            })?;
         return to_ext_response(Ok(McpToggleResponse { ok: true }));
     } else {
         None
@@ -1771,7 +1783,9 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     handle
         .toggle_mcp_server(req.server_name, req.enabled, server_config)
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| {
+            crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+        })?;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
@@ -1792,7 +1806,7 @@ async fn handle_toggle_tool(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResu
 
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
 
     // `managed_gateway:` is reserved, so route by prefix alone
     // Never consult the catalog, or a stale tool toggle would fall back to the local path
@@ -1812,7 +1826,7 @@ async fn handle_toggle_tool(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResu
             .toggle_mcp_tool(req.server_name, req.tool_name, req.enabled)
             .await
     }
-    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    .map_err(|e| crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e)))?;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
@@ -1834,23 +1848,25 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Persist to config.toml first.
     crate::util::config::save_mcp_server_config(&req.server_name, &req.config)
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     // Build the ACP server config for live addition.
     let server_config = req
         .config
         .to_acp_mcp_server(&req.server_name)
-        .ok_or_else(|| acp::Error::invalid_params().data("server config is disabled"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("server config is disabled"))?;
 
     // Reuse the toggle path: enable=true with the built config.
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
 
     handle
         .toggle_mcp_server(req.server_name, true, Some(server_config))
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| {
+            crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+        })?;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
@@ -1870,10 +1886,10 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Verify the server exists in local config (not managed).
     let existed = crate::util::config::delete_mcp_server_config(&req.server_name)
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     if !existed {
-        return Err(acp::Error::invalid_params().data(format!(
+        return Err(crate::acp_error::invalid_params(format!(
             "server '{}' not found in config.toml (only locally-configured servers can be deleted)",
             req.server_name
         )));
@@ -1882,12 +1898,14 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Live teardown: disable the server in the running session.
     let handle = agent
         .get_session_handle(&acp_id)
-        .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
+        .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
 
     handle
         .toggle_mcp_server(req.server_name.clone(), false, None)
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|e| {
+            crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+        })?;
 
     // The toggle path spawns a task that adds the server to `disabled_mcp_servers`
     // Clear the user list only; leave any project-level disable in place

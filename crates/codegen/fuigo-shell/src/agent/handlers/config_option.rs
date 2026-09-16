@@ -17,9 +17,9 @@ pub(crate) async fn apply(
 
     match config_id.0.as_ref() {
         CONFIG_ID_MODEL => {
-            let value_id = value.as_value_id().ok_or_else(|| {
-                acp::Error::invalid_params().data("model requires a string value")
-            })?;
+            let value_id = value
+                .as_value_id()
+                .ok_or_else(|| crate::acp_error::invalid_params("model requires a string value"))?;
             let request = acp::SetSessionModelRequest::new(
                 session_id.clone(),
                 acp::ModelId::new(value_id.0.clone()),
@@ -28,7 +28,7 @@ pub(crate) async fn apply(
         }
         CONFIG_ID_REASONING_EFFORT => {
             let value_id = value.as_value_id().ok_or_else(|| {
-                acp::Error::invalid_params().data("reasoning_effort requires a string value")
+                crate::acp_error::invalid_params("reasoning_effort requires a string value")
             })?;
             // The selector is resolved inside `apply_reasoning_effort` under the config lock, so
             // it is validated against the model the effort will actually run on.
@@ -41,9 +41,9 @@ pub(crate) async fn apply(
             .await?;
         }
         other => {
-            return Err(
-                acp::Error::invalid_params().data(format!("unknown config option: {other}"))
-            );
+            return Err(crate::acp_error::invalid_params(format!(
+                "unknown config option: {other}"
+            )));
         }
     }
 

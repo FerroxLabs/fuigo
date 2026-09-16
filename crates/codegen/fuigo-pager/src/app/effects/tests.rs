@@ -56,6 +56,52 @@ fn format_acp_error_typed_truncation_kind_renders_truncation_copy() {
             "Request failed: a future failure quoting: response truncated by max_tokens. Try sending again."
         );
 }
+/// A session/new or session/load failure shows the typed `data.message` on one line, never `acp::Error`'s pretty-printed JSON.
+#[test]
+fn session_setup_failure_renders_the_data_message_not_raw_json() {
+    let err = acp::Error::internal_error().data(serde_json::json!({
+        "message": "http client init failed: invalid proxy url",
+        "error_kind": "api"
+    }));
+    let text = acp_error_user_text(&err);
+    assert_eq!(text, "Internal error: http client init failed: invalid proxy url");
+    assert!(!text.contains('{') && !text.contains('\n'), "{text:?}");
+}
+/// The agent process dying mid-prompt is the first failure most users ever see.
+/// `fuigo_acp_lib::acp_send` tags that error's `data` with its channel-failure discriminant, and the
+/// TUI renders it through `acp_error_user_text` — which must print words, never the `data` object.
+#[tokio::test]
+async fn dead_agent_channel_failure_renders_one_line_not_raw_json() {
+    use fuigo_acp_lib::{AcpAgentMessage, AcpChannelFailure, acp_channel_failure, acp_send};
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
+    let request = acp::ExtRequest::new(
+        "session/prompt",
+        serde_json::value::to_raw_value(&serde_json::json!({})).expect("raw params").into(),
+    );
+    // The peer takes the request and goes away without answering: the real `recv_failed` shape.
+    let (err, ()) = tokio::join!(
+        async { acp_send(request, &tx).await.expect_err("the peer never answers") },
+        async { drop(rx.recv().await); },
+    );
+    assert_eq!(acp_channel_failure(&err), Some(AcpChannelFailure::RecvFailed));
+    let text = acp_error_user_text(&err);
+    assert!(!text.contains('{') && !text.contains('\n'), "raw JSON reached the TUI: {text:?}");
+    assert!(text.contains("channel closed"), "{text:?}");
+}
+/// /btw renders its failure through `format_acp_error`.
+/// A status-less `api` error (a 403 content-safety block reaches the pager without `http_status`) must keep the provider's words.
+#[test]
+fn btw_status_less_api_failure_keeps_the_provider_detail() {
+    let err = acp::Error::internal_error().data(serde_json::json!({
+        "message": "Content violates usage guidelines.",
+        "error_kind": "api"
+    }));
+    let text = format_acp_error(&err, false);
+    assert!(text.contains("Content violates usage guidelines"), "{text:?}");
+    // A-R7-3: the headline gives way to the detail, the "what to do" line does not
+    assert!(text.contains("Request failed:"), "{text:?}");
+    assert!(text.contains("Wait a minute and send again"), "{text:?}");
+}
 #[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     use fuigo_shell::sampling::error::{

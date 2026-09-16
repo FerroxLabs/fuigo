@@ -173,6 +173,11 @@ impl WebSearchClient {
                 filters["excluded_domains"] = serde_json::json!(excluded);
             }
         }
+        // FluxRouter only: opt out of its exact-match response cache (see `fuigo_extra_ca::fluxrouter`).
+        // Strict providers reject the unknown field with a 400.
+        if fuigo_extra_ca::fluxrouter::is_fluxrouter_url(&self.base_url) {
+            body["cache"] = serde_json::json!({"no-cache": true, "no-store": true});
+        }
         Ok(body)
     }
     /// Wire a 401-attribution callback into this client. Idempotent;
@@ -496,6 +501,63 @@ mod tests {
         let filters = &body["tools"][0]["filters"];
         assert_eq!(filters["allowed_domains"], serde_json::json!(["docs.x.ai"]));
         assert!(filters.get("excluded_domains").is_none());
+    }
+    /// A client whose only variable is the configured endpoint.
+    fn client_for_base(base_url: &str) -> WebSearchClient {
+        let config = WebSearchConfig::Enabled {
+            api_key: "test-key".to_string(),
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+            allowed_domains: None,
+            excluded_domains: None,
+        };
+        WebSearchClient::new(&config, None).expect("client should build")
+    }
+    /// FluxRouter replays byte-identical requests from its response cache;
+    /// the body opt-out must ride every search sent to it, however the host is spelled.
+    #[test]
+    fn fluxrouter_web_search_requests_carry_the_cache_bypass() {
+        for base in [
+            "https://api.fluxrouter.ai/v1",
+            "https://api.fluxrouter.ai./v1",
+            "HTTPS://API.FLUXROUTER.AI/v1",
+            "https://api.fluxrouter.ai:443/v1",
+        ] {
+            let body = client_for_base(base)
+                .build_request_json("q", None, Some(v(&["reddit.com"])))
+                .expect("request json builds");
+            assert_eq!(
+                body.get("cache"),
+                Some(&serde_json::json!({"no-cache": true, "no-store": true})),
+                "{base} must receive FluxRouter's cache bypass"
+            );
+        }
+    }
+    /// Strict providers 400 on unknown body fields, so no other endpoint may see it.
+    #[test]
+    fn other_web_search_endpoints_never_receive_the_cache_bypass() {
+        for base in [
+            "https://api.x.ai/v1",
+            "https://api.openai.com/v1",
+            "https://api.anthropic.com/v1",
+            "https://gateway.example.com/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://localhost:8080/v1",
+            "https://fluxrouter.ai/v1",
+            "https://api.fluxrouter.ai.evil.example/v1",
+            "https://evil.example/api.fluxrouter.ai/v1",
+            "not a url",
+        ] {
+            let body = client_for_base(base)
+                .build_request_json("q", None, None)
+                .expect("request json builds");
+            assert!(
+                body.get("cache").is_none(),
+                "{base} must not receive FluxRouter's cache bypass: {body}"
+            );
+        }
     }
     #[test]
     fn test_new_client_uses_configured_model() {

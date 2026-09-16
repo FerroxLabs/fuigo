@@ -176,7 +176,7 @@ impl MvpAgent {
                 },
                 Ok(Err(e)) => {
                     // A disconnect or transport error is not a decision: release the key so a later session can re-prompt
-                    tracing::debug!(error = %e, "folder trust: client trust request failed");
+                    tracing::debug!(error = %crate::sampling::error::acp_error_text(&e), "folder trust: client trust request failed");
                     prompted.borrow_mut().remove(&key);
                     return;
                 }
