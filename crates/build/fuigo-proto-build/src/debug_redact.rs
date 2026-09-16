@@ -188,6 +188,44 @@ mod tests {
     const TEST_FDS: &[u8] = include_bytes!("../test_data/debug_redact_test.pbbin");
     const PLAIN_FDS: &[u8] = include_bytes!("../test_data/debug_redact_plain.pbbin");
 
+    // Recorded bytes cannot notice that their `.proto` moved on. Editing a fixture
+    // `.proto` without re-running the command above leaves these tests decoding a
+    // stale descriptor and quietly passing on the old shape. Pin each source so that
+    // drift fails here instead. FNV-1a/64 over the source with CR stripped: no new
+    // dependency, and no false failure on a CRLF checkout of the `.proto` (which,
+    // unlike the `.pbbin`, really is text). Update the constant in the same commit
+    // that regenerates the `.pbbin`.
+    const TEST_PROTO: &str = include_str!("../test_data/debug_redact_test.proto");
+    const PLAIN_PROTO: &str = include_str!("../test_data/debug_redact_plain.proto");
+    const TEST_PROTO_FNV1A: u64 = 0xa74a_cb03_a7f2_48fe;
+    const PLAIN_PROTO_FNV1A: u64 = 0xfade_b05e_d15c_4c55;
+
+    fn fnv1a64_no_cr(src: &str) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in src.bytes().filter(|b| *b != b'\r') {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// The `.pbbin` fixtures are recordings; this fails when their source drifts.
+    #[test]
+    fn recorded_descriptor_sets_still_match_their_protos() {
+        for (name, src, expected) in [
+            ("debug_redact_test.proto", TEST_PROTO, TEST_PROTO_FNV1A),
+            ("debug_redact_plain.proto", PLAIN_PROTO, PLAIN_PROTO_FNV1A),
+        ] {
+            assert_eq!(
+                fnv1a64_no_cr(src),
+                expected,
+                "{name} changed since its .pbbin was recorded: regenerate the \
+                 descriptor sets with the protoc command above and update the \
+                 matching *_PROTO_FNV1A constant"
+            );
+        }
+    }
+
     fn field(name: &str) -> FieldDescriptor {
         let pool = decode_descriptor_pool(TEST_FDS).unwrap();
         pool.get_message_by_name("t.M")
