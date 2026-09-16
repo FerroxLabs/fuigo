@@ -72,14 +72,26 @@ fn capture_hook_events(
 /// bounded-execution state machine meaningless. It is applied against a real temp dir, the same way
 /// `execution_state::tests::fixture_actor` and the bounded-compaction fixture do.
 pub(super) fn spawn_persistence_stub(
+    rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    flush: fn() -> std::io::Result<()>,
+) {
+    spawn_persistence_stub_observing(rx, flush, |_| {});
+}
+
+/// [`spawn_persistence_stub`] that also shows every message to `observe` before serving it, for
+/// a test that watches the write stream (`slash_authority_turn_tests` counts user-message
+/// chunks) without having to keep a second, drifting copy of the responder table.
+pub(super) fn spawn_persistence_stub_observing(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     flush: fn() -> std::io::Result<()>,
+    mut observe: impl FnMut(&PersistenceMsg) + 'static,
 ) {
     let execution_dir = tempfile::tempdir().expect("execution state dir");
     tokio::task::spawn_local(async move {
         // Held for the lifetime of the drain so the execution record outlives the turn.
         let execution_dir = execution_dir;
         while let Some(msg) = rx.recv().await {
+            observe(&msg);
             match msg {
                 PersistenceMsg::FlushAndAck { respond_to } => {
                     let _ = respond_to.send(flush());
@@ -128,10 +140,21 @@ fn drain_persistence_flush_enospc(rx: tokio::sync::mpsc::UnboundedReceiver<Persi
     });
 }
 
+/// `session_id` must be unique per test. The turn loop does not use the execution record
+/// `handle_turn_input` opened; it re-resolves it from the process-global registry with
+/// `Execution::for_prompt(session_id, prompt_id)`, which is `CURRENT[session_id]` filtered by
+/// prompt id, and `Execution::open` overwrites `CURRENT[session_id]`. `create_test_actor` hands
+/// every test the same `test-actor`, so two of these actors alive on different test threads
+/// would have the later `open` evict the earlier test's record: that test's loop then runs with
+/// `execution = None` - no finalization trigger, no durable mirror, no admission - and a test
+/// meant to fail on the broken product passes instead (`max_turns_bound_tests` did, 2 of 3 in
+/// every run at `--test-threads=16`, until each actor got its own session id).
+///
 /// `permission_gateway` installs a non-yolo permission manager and the read+edit toolset, so a
 /// scripted `search_replace` call prompts the client and the client's answer decides the turn.
 pub(super) async fn actor_with_mock_sampler(
     server: &MockInferenceServer,
+    session_id: &str,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     gateway_tx: tokio::sync::mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
     max_turns: Option<usize>,
@@ -160,6 +183,7 @@ pub(super) async fn actor_with_mock_sampler(
     );
 
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    actor.session_info.id = acp::SessionId::new(session_id);
     actor.sampler_handle = sampler_handle;
     actor.max_turns = max_turns;
     if let Some(gateway) = permission_gateway {
@@ -255,8 +279,15 @@ fn completed_turn_flush_enospc_returns_error_and_reports_stop_failure() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             drain_persistence_flush_enospc(persistence_rx);
 
-            let actor =
-                actor_with_mock_sampler(&server, persistence_tx, gateway_tx, None, None).await;
+            let actor = actor_with_mock_sampler(
+                &server,
+                "disk-full-completed",
+                persistence_tx,
+                gateway_tx,
+                None,
+                None,
+            )
+            .await;
             let mut hooks = crate::extensions::hooks::ClientHooks::new();
             hooks.insert(
                 fuigo_hooks::event::HookEventName::StopFailure,
@@ -346,6 +377,7 @@ fn cancelled_turn_flush_enospc_still_reports_cancellation() {
 
             let actor = actor_with_mock_sampler(
                 &server,
+                "disk-full-cancelled",
                 persistence_tx,
                 gateway_tx,
                 None,

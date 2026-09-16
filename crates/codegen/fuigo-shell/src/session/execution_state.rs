@@ -441,7 +441,24 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                 return Err(denied("parent execution actions unavailable"));
             }
             if !grant.optional {
-                transition(state, Change::Tools { ids }, now_ms)?;
+                // A foreground child's actions are the parent's LIABILITIES, not the parent's
+                // TOOL ROUNDS. They go on `pending_tools` (scoped by grant, see
+                // `ChildGrant::scoped_ids`) so a terminal receipt issued while the child is
+                // still acting is `partial`, and `tools_settled` clears them through the same
+                // grant. They do not step `tool_rounds`: `max_tool_rounds` is the durable mirror
+                // of the parent's own `--max-turns`, whose unit is the parent's agentic turns
+                // (`docs/user-guide/14-headless-mode.md`: subagent sampler calls do not count on
+                // that counter family), and the child inherits the same bound for rounds of its
+                // own (`resolve_subagent_max_turns`) which its own record enforces. Routing this
+                // through `Change::Tools` charged every child round to the parent, so a child
+                // inheriting N was denied its last round with "execution actions unavailable"
+                // and the parent's next round became a finalize slot - `-32603` for both, on a
+                // documented flag. `foreground_child_rounds_are_liabilities_not_parent_rounds`
+                // and `tests/max_turns_foreground_child_acp.rs` pin this.
+                if ids.iter().any(|id| state.pending_tools.contains(id)) {
+                    return Err(denied("execution actions unavailable"));
+                }
+                state.pending_tools.extend(ids);
             }
         }
     }
@@ -606,7 +623,15 @@ impl Execution {
         if let Some(parent) = &self.parent_grant {
             parent.tools(ids.clone()).await?;
         }
-        self.change(Change::Tools { ids }).await.map(|_| ())
+        let admitted = self.change(Change::Tools { ids: ids.clone() }).await.map(|_| ());
+        // A round this record refuses (its own bound, phase or deadline) never runs, so it must
+        // not stay registered on the parent as a liability: `tools_settled` is only reached after
+        // the calls execute, and an unsettled entry would mark the parent's receipt `partial`
+        // for work that never started.
+        if admitted.is_err() && let Some(parent) = &self.parent_grant {
+            let _ = Box::pin(parent.parent.tools_settled(parent.scoped_ids(ids))).await;
+        }
+        admitted
     }
     pub(crate) async fn tools_settled(&self, ids: Vec<String>) -> io::Result<()> {
         if let Some(parent) = &self.parent_grant {
@@ -852,6 +877,87 @@ mod tests {
         let repeated = next.terminal(false).await.unwrap();
         assert_eq!(serde_json::to_value(&receipt).unwrap(), serde_json::to_value(&repeated).unwrap());
         next.release(&session);
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// A foreground child inheriting `--max-turns N` gets N rounds of its own, and the parent
+    /// keeps every one of ITS N: the child's actions are the parent's liabilities (pending until
+    /// settled, `partial` on a receipt issued while they run) but never the parent's tool rounds.
+    ///
+    /// Before this pin, `Change::ChildTools` on a non-optional grant ran `Change::Tools` on the
+    /// parent, so with N = 2 the parent's spawn round plus the child's first round exhausted the
+    /// parent's mirror: the child's second round was denied ("execution actions unavailable" ->
+    /// `-32603 Tool execution admission not durable or finalizing` on the child prompt) and the
+    /// parent's next round was a finalize slot (`-32603` again). The full turn-loop shape is
+    /// `tests/max_turns_foreground_child_acp.rs`; this is the same sequence at the records.
+    #[tokio::test]
+    async fn foreground_child_rounds_are_liabilities_not_parent_rounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, actor) = fixture_actor(dir.path().to_owned());
+        let parent_session = uuid::Uuid::new_v4().to_string();
+        let child_session = uuid::Uuid::new_v4().to_string();
+        let parent = Execution::open(&tx, &parent_session, "parent-root", "parent-prompt", 99, None, Some(2), TokenLimits::default(), None).await.unwrap();
+        // Round 1 of 2: the parent spawns the child. The spawn call stays pending until the
+        // child returns, exactly as a blocking `spawn_subagent` does in the turn loop.
+        parent.tools(vec!["spawn".into()]).await.unwrap();
+        let grant = parent.grant_child("child", None, /* optional */ false).await.unwrap();
+        let child = Execution::open(&tx, &child_session, "child-root", "child-prompt", 99, None, Some(2), TokenLimits::default(), Some(grant)).await.unwrap();
+
+        for round in ["c1", "c2"] {
+            child.tools(vec![round.into()]).await.unwrap_or_else(|e| {
+                panic!("child round {round} is inside the child's own bound of 2 and must be admitted: {e}")
+            });
+            let mid = parent.snapshot().await.unwrap();
+            assert!(
+                mid.pending_tools.contains(&format!("child:{round}")),
+                "a foreground child's action is pending on the parent while it runs: {:?}",
+                mid.pending_tools
+            );
+            child.tools_settled(vec![round.into()]).await.unwrap();
+        }
+        assert!(
+            child.tools(vec!["c3".into()]).await.is_err(),
+            "the child's OWN record bounds it at 2 rounds"
+        );
+
+        let after_child = parent.snapshot().await.unwrap();
+        assert_eq!(
+            (after_child.tool_rounds, after_child.max_tool_rounds),
+            (1, Some(2)),
+            "the child's two rounds are not the parent's: the parent has spent one round (the spawn)"
+        );
+        assert!(
+            after_child.pending_tools.iter().all(|id| id == "spawn"),
+            "settled child actions, and the refused third one that never ran, are not parent \
+             liabilities: {:?}",
+            after_child.pending_tools
+        );
+        // Round 2 of 2 for the parent, after the child came back.
+        parent.tools_settled(vec!["spawn".into()]).await.unwrap();
+        parent.tools(vec!["second".into()]).await.expect("the parent's own second round");
+        parent.tools_settled(vec!["second".into()]).await.unwrap();
+        assert!(parent.tools(vec!["third".into()]).await.is_err(), "the parent's bound still holds");
+
+        parent.release(&parent_session);
+        child.release(&child_session);
+
+        // The receipt contract is unchanged: a foreground child's action still pending when the
+        // parent goes terminal makes the parent's receipt `partial`, with nothing of the
+        // parent's own outstanding.
+        let parent_session = uuid::Uuid::new_v4().to_string();
+        let child_session = uuid::Uuid::new_v4().to_string();
+        let parent = Execution::open(&tx, &parent_session, "parent-root", "parent-prompt", 99, None, Some(2), TokenLimits::default(), None).await.unwrap();
+        parent.tools(vec!["spawn".into()]).await.unwrap();
+        parent.tools_settled(vec!["spawn".into()]).await.unwrap();
+        let grant = parent.grant_child("child", None, false).await.unwrap();
+        let child = Execution::open(&tx, &child_session, "child-root", "child-prompt", 99, None, Some(2), TokenLimits::default(), Some(grant)).await.unwrap();
+        child.tools(vec!["unsettled".into()]).await.unwrap();
+        let receipt = parent.terminal(true).await.unwrap();
+        assert!(receipt.partial, "an unsettled foreground child action is unresolved work");
+        assert_eq!(receipt.pending_tool_calls, vec!["child:unsettled".to_string()]);
+        parent.release(&parent_session);
+        child.release(&child_session);
         drop(tx);
         actor.await.unwrap();
     }

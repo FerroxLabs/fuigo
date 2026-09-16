@@ -990,16 +990,18 @@ mod tests {
             );
         }
     }
-    /// `parse_list_req` forces the conversations-only `kind` exactly when process chat mode is on; otherwise the client request is untouched.
+    /// `parse_list_req` never forces the conversations-only `kind` while process chat mode is hard-off: the
+    /// client request is untouched, whatever `FUIGO_CHAT_MODE` says.
     ///
-    /// `process_chat_mode_enabled()` is hard-off (the pager's `--chat` flag is gone: `PagerArgs::chat()` is a
-    /// constant `false`), so "exactly when chat mode is on" currently means **never**: every `_meta` shape the
-    /// client sends survives `parse_list_req` byte for byte, including the malformed ones. Each case below pins
-    /// that pass-through exactly, so re-enabling the lane — which must flip `force_kind_chat` back on — fails here
-    /// first instead of silently rewriting a client's `kind` filter.
+    /// The force-rewrite was "exactly when process chat mode is on", and `process_chat_mode_enabled()` is
+    /// hard-off (the pager's `--chat` flag is gone: `PagerArgs::chat()` is a constant `false`), so that currently
+    /// means **never**: every `_meta` shape the client sends survives `parse_list_req` byte for byte, including
+    /// the malformed ones. Each case below pins that pass-through exactly, so re-enabling the lane — which must
+    /// flip `force_kind_chat` back on — fails here first instead of silently rewriting a client's `kind` filter.
+    /// (The test was named `..._forces_kind_under_process_chat_mode_only` while its body pinned the opposite.)
     #[test]
     #[serial_test::serial]
-    fn parse_list_req_forces_kind_under_process_chat_mode_only() {
+    fn parse_list_req_never_forces_kind_while_process_chat_mode_is_hard_off() {
         use crate::agent::chat_modes::FUIGO_CHAT_MODE_ENV;
         let raw = serde_json::json!({
             "_meta": { "fuigo/facetFilters": { "kind": ["build"], "starred": [true] } },

@@ -112,32 +112,29 @@ fn spawn_gateway_drain(
     hook_rx
 }
 
+/// Every persistence write succeeds - `spawn_persistence_stub` answers all eleven
+/// responder-carrying `PersistenceMsg` variants (bounded execution, `a7a17ff`, made the
+/// compaction commit one of them: `/compact` waits for `CommitCompactionAndAck` and fails the
+/// turn with "compaction persistence acknowledgement lost" if the oneshot is dropped). This
+/// module used to keep its own two-arm copy whose comment made the same claim; it now shares
+/// the stub and only taps the stream for user-message chunks.
 fn spawn_persistence_drain(
-    mut persistence_rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    persistence_rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
     let (user_chunk_tx, user_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::task::spawn_local(async move {
-        while let Some(message) = persistence_rx.recv().await {
-            match message {
-                PersistenceMsg::FlushAndAck { respond_to } => {
-                    let _ = respond_to.send(Ok(()));
-                }
-                // Bounded execution (`a7a17ff`) made the compaction commit a persistence
-                // round-trip: `/compact` now waits for this ack and fails the turn with
-                // "compaction persistence acknowledgement lost" if the oneshot is dropped.
-                // This drain's contract is "every write succeeds", so it acks.
-                PersistenceMsg::CommitCompactionAndAck { respond_to, .. } => {
-                    let _ = respond_to.send(Ok(()));
-                }
-                PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
-                    notification,
-                )) if matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_)) => {
-                    let _ = user_chunk_tx.send(());
-                }
-                _ => {}
+    super::disk_full_tests::spawn_persistence_stub_observing(
+        persistence_rx,
+        || Ok(()),
+        move |message| {
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
+                notification,
+            )) = message
+                && matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
+            {
+                let _ = user_chunk_tx.send(());
             }
-        }
-    });
+        },
+    );
     user_chunk_rx
 }
 

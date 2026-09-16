@@ -731,7 +731,10 @@ impl SessionActor {
                 // `MaxTurnsReached` (`next_turn > limit`, below). `Snapshot::tool_rounds` and the
                 // loop's `tool_turn_count` step together, so a mirror of N-1 refuses the last round
                 // the user paid for - at `--max-turns 1`, every round. `max_turns_bound_tests` pins
-                // both halves.
+                // both halves. Both counters are THIS session's: a foreground child inherits the
+                // bound for rounds of its own (`resolve_subagent_max_turns`) and its actions are
+                // this record's liabilities (`Change::ChildTools`), not its rounds, so a parent
+                // that spawned a child still has every one of its N rounds when the child returns.
                 Some(crate::session::execution_state::Execution::open(
                     &self.notifications.persistence_tx, &self.session_info.id.to_string(), &root_id, prompt_id,
                     max_calls, deadline_ms, self.max_turns.map(|limit| limit as u64), limits,
@@ -2616,6 +2619,15 @@ impl SessionActor {
                 // reserved slot ended the run either as `-32603` + partial receipt (model answered)
                 // or as `-32603 Tool call rejected during finalization` (model acted). The durable
                 // `max_tool_rounds` mirror still bounds the rounds, so nothing is unbounded here.
+                //
+                // One path is deliberately excluded from that: `should_finalize_memory_recall`
+                // (`6b345f5`, in `finalize_recall` above) still reserves round N as the answer slot
+                // when round N-1 was memory-recall-only, so recall finishes inside the budget. That
+                // is a recall finalization, whose receipt is not `partial`, so the model answering
+                // there is an ordinary completion; but a model that calls a tool in that slot on a
+                // backend that keeps the tool list constant (the OpenAI-Responses profile) is still
+                // rejected with `Tool call rejected during finalization`. `MaxTurnsReached` is not
+                // reached on that path; it is bounded, pre-existing and unchanged here.
                 let finalizing = state.phase == crate::session::execution_state::Phase::Finalizing
                     || state.calls >= state.max_calls.saturating_sub(1)
                     || state.max_tool_rounds.is_some_and(|limit| state.tool_rounds >= limit)
