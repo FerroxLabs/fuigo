@@ -132,8 +132,6 @@ pub struct WelcomeRenderResult {
     pub auth_fallback_rect: Option<Rect>,
     /// Hit-test rect for the "[Refresh]" button on the paywall tier line.
     pub refresh_rect: Option<Rect>,
-    /// Hit-test rect for the gate URL link (click to open in browser).
-    pub gate_url_rect: Option<Rect>,
     /// Hit-test rects for the inline links, tagged with their index, one per row a link wraps to.
     pub consent_link_rects: Vec<(usize, Rect)>,
     /// `None` when this frame did not paint the notice.
@@ -1799,13 +1797,8 @@ fn render_welcome_done(
     // Plain compact mode keeps the normal welcome layout
     let welcome_compact = show_picker;
 
-    let cta = p
-        .gate
-        .and_then(|g| g.label.as_deref())
-        .unwrap_or("Upgrade Subscription");
     let in_vscode_family = welcome_in_vscode_family();
-    let (key_g, key_l, key_q) = (
-        "ctrl+g",
+    let (key_l, key_q) = (
         "ctrl+l",
         if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
     );
@@ -1848,10 +1841,10 @@ fn render_welcome_done(
     // Changelog is reachable via this menu row (ctrl+l). Show from the first frame so the menu doesn't shift while the CDN fetch completes.
     let show_changelog_action = p.has_access && !show_picker;
 
-    let gate_menu;
+    let gate_menu: [(&str, &str); 2];
     let owned_menu;
     let menu_items: &[(&str, &str)] = if !p.has_access {
-        gate_menu = [(key_g, cta), (key_l, "Logout"), (key_q, "Quit")];
+        gate_menu = [(key_l, "Logout"), (key_q, "Quit")];
         &gate_menu
     } else {
         let (key_w, key_resume, key_q, key_i_with_x) = (
@@ -2083,7 +2076,6 @@ fn render_welcome_done(
 
     // Skip the prompt input when picker is visible to save space; shortcuts are rendered inside the picker content area
     let mut refresh_hit_rect: Option<Rect> = None;
-    let mut gate_url_hit_rect: Option<Rect> = None;
     let mut privacy_banner_opt_in_rect: Option<Rect> = None;
     let mut privacy_banner_opt_out_rect: Option<Rect> = None;
     let mut privacy_banner_terms_rect: Option<Rect> = None;
@@ -2139,7 +2131,7 @@ fn render_welcome_done(
         let gate_text = p
             .gate
             .map(|g| g.message.as_str())
-            .unwrap_or("SuperGrok subscription required");
+            .unwrap_or("This account does not have access.");
         let msg = Line::from(Span::styled(
             gate_text,
             Style::default().fg(theme.gray_bright),
@@ -2154,35 +2146,8 @@ fn render_welcome_done(
             buf,
         );
 
-        if centered.height > 2 {
-            let url_area = Rect {
-                y: centered.y + 2,
-                height: 1,
-                ..centered
-            };
-            let gate_link = p
-                .gate
-                .and_then(|g| g.url.as_deref())
-                .unwrap_or("https://grok.com/supergrok?referrer=grok-build");
-            let url = Line::from(Span::styled(
-                gate_link,
-                Style::default()
-                    .fg(theme.accent_user)
-                    .add_modifier(Modifier::UNDERLINED),
-            ))
-            .alignment(Alignment::Center);
-            Paragraph::new(url).render(url_area, buf);
-
-            // Compute click rect for the gate URL text (centered within url_area).
-            let link_width = gate_link.len() as u16;
-            let link_x = url_area.x + url_area.width.saturating_sub(link_width) / 2;
-            gate_url_hit_rect = Some(Rect {
-                x: link_x,
-                y: url_area.y,
-                width: link_width.min(url_area.width),
-                height: 1,
-            });
-        }
+        // The gate states the block and stops. It used to paint a clickable subscription link
+        // (defaulting to the upstream vendor's own plan page, referral-tagged); that funnel is gone.
 
         render_version_badge(
             layout.version,
@@ -2349,7 +2314,6 @@ fn render_welcome_done(
         auth_url_rect: None,
         auth_fallback_rect: None,
         refresh_rect: refresh_hit_rect,
-        gate_url_rect: gate_url_hit_rect,
         consent_link_rects: Vec::new(),
         consent_legibility: None,
         changelog_action_present: show_changelog_action,

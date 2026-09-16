@@ -1208,7 +1208,7 @@ fn free_usage_error_detected_by_embedded_code() {
 }
 
 #[test]
-fn free_usage_upsell_shows_three_options_with_exact_labels() {
+fn free_usage_limit_shows_one_billing_option_with_exact_labels() {
     let mut app = test_app_with_agent();
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     open_free_usage_upsell(agent, None);
@@ -1216,36 +1216,27 @@ fn free_usage_upsell_shows_three_options_with_exact_labels() {
     let qv = agent_qv(&app);
     assert!(matches!(
         qv.local_kind,
-        Some(
-            crate::views::question_view::LocalQuestionKind::FreeUsageUpsell {
-                source: fuigo_telemetry::events::SuperGrokUpsell::FreeUsagePaywall,
-            }
-        )
+        Some(crate::views::question_view::LocalQuestionKind::FreeUsageUpsell)
     ));
     let q = &qv.questions[0];
+    // The user is still told they hit a limit; the competitor-plan ladder that used to sit under it is gone.
     assert_eq!(q.question, "You hit your free usage limit.");
-    let expected = [
-        (
-            "Upgrade to SuperGrok",
-            "For everyday coding and productivity tasks",
-            Some(UPSELL_URL_UPGRADE),
-        ),
-        (
-            "Upgrade to SuperGrok Plus",
-            "Significantly higher usage and rate limits",
-            Some(UPSELL_URL_UPGRADE),
-        ),
-        (
-            "Upgrade to SuperGrok Heavy",
-            "Get the most out of Fuigo. Highest usage limits.",
-            Some(UPSELL_URL_UPGRADE),
-        ),
-    ];
+    let expected = [(
+        "Open billing",
+        "Manage credits and spending limits",
+        Some(UPSELL_URL_UPGRADE),
+    )];
     assert_eq!(q.options.len(), expected.len());
     for (opt, (label, desc, id)) in q.options.iter().zip(expected) {
         assert_eq!(opt.label, label);
         assert_eq!(opt.description, desc);
         assert_eq!(opt.id.as_deref(), id);
+    }
+    for opt in &q.options {
+        assert!(
+            !opt.label.contains("SuperGrok") && !opt.description.contains("SuperGrok"),
+            "no competitor subscription may be marketed here: {opt:?}"
+        );
     }
 }
 
@@ -1322,11 +1313,9 @@ fn free_usage_translate_local_submit_maps_options() {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     open_free_usage_upsell(agent, None);
     let mut qv = agent.question_view.take().unwrap();
-    let kind = || LocalQuestionKind::FreeUsageUpsell {
-        source: fuigo_telemetry::events::SuperGrokUpsell::FreeUsagePaywall,
-    };
+    let kind = || LocalQuestionKind::FreeUsageUpsell;
 
-    for idx in [0, 1, 2] {
+    for idx in [0] {
         qv.selections[0] = QuestionSelection::Single(Some(idx));
         match translate_local_submit_for_test(&qv, kind(), false) {
             InputOutcome::Action(Action::OpenUrl(url)) => assert_eq!(url, UPSELL_URL_UPGRADE),
@@ -1337,7 +1326,7 @@ fn free_usage_translate_local_submit_maps_options() {
 
 // ── Restricted-command upsell tests ─────────────────────────────────
 
-/// Submitting a tier-restricted command opens the three-option SuperGrok upsell and neither runs the command nor leaks the text to the model.
+/// Submitting a tier-restricted command opens the usage-limit notice and neither runs the command nor leaks the text to the model.
 #[test]
 fn restricted_command_submit_opens_three_option_upsell() {
     let mut app = test_app_with_agent();
@@ -1363,21 +1352,13 @@ fn restricted_command_submit_opens_three_option_upsell() {
     let qv = agent_qv(&app);
     assert!(matches!(
         qv.local_kind,
-        Some(
-            crate::views::question_view::LocalQuestionKind::FreeUsageUpsell {
-                source: fuigo_telemetry::events::SuperGrokUpsell::RestrictedCommand,
-            }
-        )
+        Some(crate::views::question_view::LocalQuestionKind::FreeUsageUpsell)
     ));
     let q = &qv.questions[0];
-    assert_eq!(q.question, "Unlock all features with SuperGrok.");
-    assert_eq!(q.options.len(), 3);
-    assert_eq!(q.options[0].label, "Upgrade to SuperGrok");
+    assert_eq!(q.question, "This command is not available for your account.");
+    assert_eq!(q.options.len(), 1);
+    assert_eq!(q.options[0].label, "Open billing");
     assert_eq!(q.options[0].id.as_deref(), Some(UPSELL_URL_UPGRADE));
-    assert_eq!(q.options[1].label, "Upgrade to SuperGrok Plus");
-    assert_eq!(q.options[1].id.as_deref(), Some(UPSELL_URL_UPGRADE));
-    assert_eq!(q.options[2].label, "Upgrade to SuperGrok Heavy");
-    assert_eq!(q.options[2].id.as_deref(), Some(UPSELL_URL_UPGRADE));
 }
 
 /// Aliases of a restricted command hit the same upsell (deny-list matching covers aliases via the registry).

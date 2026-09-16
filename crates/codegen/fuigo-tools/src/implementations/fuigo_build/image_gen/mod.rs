@@ -47,8 +47,8 @@ pub use fuigo_tools_api::slash_commands::{
 /// configured provider refuses `image_gen` / `image_edit` for the current
 /// credential. The model relays it to the user.
 ///
-/// This used to instruct the model to upsell the user to SuperGrok, complete
-/// with a `?referrer=grok-build` tag -- marketing a competitor's subscription
+/// This used to instruct the model to sell the user the upstream vendor's
+/// subscription, complete with a referral tag -- marketing a competitor's plan
 /// from inside Fuigo, to users who reached it through FluxRouter or their own
 /// key. Fuigo has no subscription tiers, so the tier framing was also simply
 /// untrue here. It now states the fact and stops.
@@ -74,7 +74,7 @@ pub struct ImageGenClient {
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
     /// (free / X Basic). `image_gen` / `image_edit` short-circuit before any
-    /// HTTP call and return the SuperGrok upsell prose instead. See
+    /// HTTP call and return [`TIER_RESTRICTED_UPSELL`] instead. See
     /// [`ImageGenClient::is_tier_restricted`].
     tier_restricted: bool,
     /// Per-request [`SESSION_ID_HEADER`]; kept off `default_headers` so the
@@ -182,7 +182,7 @@ impl ImageGenClient {
 
     /// Whether the current user's tier (free / X Basic) is zero-limited on
     /// Imagine server-side. `image_gen` / `image_edit` use this to short-circuit
-    /// with the SuperGrok upsell instead of issuing a doomed request.
+    /// with [`TIER_RESTRICTED_UPSELL`] instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
     }
@@ -351,8 +351,8 @@ pub enum ImageGenConfig {
         edit_model_override: Option<String>,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The tools stay advertised to the model, but
-        /// `image_gen` / `image_edit` short-circuit at call time with the
-        /// SuperGrok upsell prose instead of a doomed request. Set by the
+        /// `image_gen` / `image_edit` short-circuit at call time with
+        /// [`TIER_RESTRICTED_UPSELL`] instead of a doomed request. Set by the
         /// host from the subscription tier; always `false` for team /
         /// API-key / workspace callers.
         tier_restricted: bool,
@@ -500,8 +500,8 @@ impl fuigo_tool_runtime::Tool for ImageGenTool {
         };
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
-        // the upsell prose instead of a doomed request (the tool stays
-        // advertised so the model can surface the nudge in-conversation).
+        // the explanatory prose instead of a doomed request (the tool stays
+        // advertised so the model can relay the reason in-conversation).
         if client.is_tier_restricted() {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
@@ -845,10 +845,10 @@ mod tests {
 
     #[tokio::test]
     async fn tier_restricted_short_circuits_with_upsell() {
-        // A free / X Basic user's image_gen call returns the SuperGrok upsell
-        // prose as a normal result (no HTTP, no error card) so the model can
-        // relay it. Only the client is inserted — the short-circuit returns
-        // before any other resource (e.g. SessionFolder) is required.
+        // A free / X Basic user's image_gen call returns TIER_RESTRICTED_UPSELL
+        // as a normal result (no HTTP, no error card) so the model can relay it.
+        // Only the client is inserted — the short-circuit returns before any
+        // other resource (e.g. SessionFolder) is required.
         let cfg = ImageGenConfig::Enabled {
             api_key: "k".into(),
             base_url: "https://api.x.ai/v1".into(),
@@ -871,14 +871,16 @@ mod tests {
             },
         )
         .await
-        .expect("tier-restricted call must succeed with upsell prose");
+        .expect("tier-restricted call must succeed with the explanatory prose");
 
         match result {
             ToolOutput::Text(t) => {
-                assert!(t.text.contains("SuperGrok"), "got: {}", t.text);
-                assert!(t.text.contains("superfuigo?referrer=fuigo-build"));
+                assert_eq!(t.text, TIER_RESTRICTED_UPSELL);
+                // It must never market anybody else's subscription, nor carry a referral tag.
+                assert!(!t.text.contains("SuperGrok"), "got: {}", t.text);
+                assert!(!t.text.contains("referrer="), "got: {}", t.text);
             }
-            other => panic!("expected Text upsell, got {other:?}"),
+            other => panic!("expected Text result, got {other:?}"),
         }
     }
 }

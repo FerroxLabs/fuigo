@@ -3,7 +3,7 @@
 //! Layering (pager-owned):
 //! - **Voice gate**: on by default in GA. Remote `voice_mode_enabled: false` is a kill switch that hides voice everywhere and shows no toast.
 //!   An absent remote value falls through to on. `FUIGO_VOICE_MODE` overrides for local dev; the env var beats the remote flag, which beats the default.
-//!   Free/X Basic still get the SuperGrok upsell via tier gates, not this flag.
+//!   Free/X Basic still get the unavailable notice via tier gates, not this flag.
 //! - **Session mode** (`voice_ui_active`): this CLI run only; shows the mic.
 //! - **Capture chord**: `/voice` or `Ctrl+Space` start dictation, and Esc or Enter stops it.
 //!   `Ctrl+Space` decodes identically on every terminal, so the cheatsheet shows it whenever voice is enabled.

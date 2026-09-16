@@ -195,7 +195,6 @@ pub(crate) fn test_app() -> AppView {
         ask_user_question_timeout_enabled: None,
         zdr_access_enabled: false,
         usage_billing_redirect_url: None,
-        access_gate_shown_logged: false,
         announcement_cta_impressions_logged: Default::default(),
         gate: None,
         subscription_tier: None,
@@ -228,7 +227,6 @@ pub(crate) fn test_app() -> AppView {
         welcome_announcement: WelcomeAnnouncementState::default(),
         welcome_auth_fallback_rect: None,
         welcome_refresh_rect: None,
-        welcome_gate_url_rect: None,
         welcome_upgrade_cta_rect: None,
         welcome_privacy_banner_opt_in_rect: None,
         welcome_privacy_banner_opt_out_rect: None,
@@ -1729,7 +1727,7 @@ fn apply_auth_meta_clears_gate_on_subscription() {
     let mut app = test_app();
     app.gate = Some(fuigo_shell::auth::GateInfo {
         message: "Subscribe to use Fuigo".into(),
-        url: Some("https://grok.com/supergrok?referrer=grok-build".into()),
+        url: Some("https://billing.example/upgrade".into()),
         label: None,
     });
     assert!(app.is_access_blocked());
