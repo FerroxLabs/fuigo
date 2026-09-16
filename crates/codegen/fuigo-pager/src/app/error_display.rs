@@ -180,6 +180,11 @@ pub(crate) fn format_request_failure(
     let extracted = extract_error_detail(raw);
     let mut class = classify(status, wire);
     // A status-less `api` error proves no server fault (a 403 content-safety block arrives this way): its readable detail is the message
+    // Only the headline and the canned `why` give way to it. `action` is the "what to do" line, and a
+    // status-less `api` failure is often transient with a detail that is not self-explanatory ("stream
+    // closed mid-response"); dropping the next step there left the user a reason and no guidance, which
+    // 1.0.17 did not do. Where retrying is genuinely useless (a content-safety block) the detail says so
+    // next to the advice, which is the same thing every 4xx reply with a provider reason already does.
     if status.is_none()
         && wire == WireErrorType::Api
         && let Some(detail) = extracted.as_deref()
@@ -187,7 +192,7 @@ pub(crate) fn format_request_failure(
     {
         class = Classified {
             headline: "Request failed".to_string(),
-            action: None,
+            action: class.action,
             default_why: None,
         };
     }
