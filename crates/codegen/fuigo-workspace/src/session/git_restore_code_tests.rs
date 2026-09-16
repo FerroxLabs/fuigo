@@ -1417,7 +1417,26 @@ async fn ensure_binding_forks_conv_branch_off_base_and_is_idempotent() {
             .await
             .unwrap()
     );
-    assert_eq!(Some(main_sha.clone()), res.head_sha);
+    // `head_sha` is documented as "HEAD after the op", and a genuine fresh
+    // fork also seeds and COMMITS `.gitignore` (both documented on
+    // `ensure_binding` and `seed_default_gitignore`). So HEAD is the seed
+    // commit and its parent is the base -- assert the fork point through the
+    // parent rather than expecting the base to still be HEAD.
+    let head_sha = res.head_sha.clone().expect("head_sha reported");
+    assert_eq!(
+        head_sha,
+        git_cli(&work, &["rev-parse", "HEAD"]).await.unwrap(),
+        "head_sha must be HEAD after the op"
+    );
+    assert_eq!(
+        main_sha,
+        git_cli(&work, &["rev-parse", "HEAD~1"]).await.unwrap(),
+        "the conv branch must be forked off the base"
+    );
+    assert!(
+        work.join(".gitignore").exists(),
+        "a genuine fresh fork seeds a committed .gitignore"
+    );
     std::fs::write(work.join("f.txt"), "x").unwrap();
     git_cli(&work, &["add", "-A"]).await.unwrap();
     git_cli(&work, &["commit", "-m", "conv work"])
