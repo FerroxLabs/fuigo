@@ -8,31 +8,19 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ## Installation
 
-Install the latest stable release (macOS, Linux, or Windows via Git Bash):
+Fuigo ships as an npm package. It requires Node.js 20 or newer; the `fuigo` launcher selects the binary for your platform (macOS, Linux, or Windows on arm64 and x64). Install the latest stable release:
 
 ```bash
-curl -fsSL https://x.ai/cli/install.sh | bash
+npm install -g fuigo
 ```
 
 Install a specific version:
 
 ```bash
-curl -fsSL https://x.ai/cli/install.sh | bash -s 0.1.42
+npm install -g fuigo@<version>
 ```
 
-On **Windows (PowerShell)**, use the native PowerShell installer:
-
-```powershell
-irm https://x.ai/cli/install.ps1 | iex
-```
-
-Install a specific version:
-
-```powershell
-$env:FUIGO_VERSION="0.1.42"; irm https://x.ai/cli/install.ps1 | iex
-```
-
-The PowerShell installer automatically adds `%USERPROFILE%\.fuigo\bin` to your User PATH. Alternatively, install via [Git for Windows](https://gitforwindows.org/) (Git Bash) or MSYS2 using the bash script above. WSL users get the Linux binary automatically.
+On **Windows**, run the same command from PowerShell or cmd; it installs the native Windows binary. WSL users run it inside WSL and get the Linux binary.
 
 Verify the installation:
 
@@ -40,9 +28,11 @@ Verify the installation:
 fuigo --version
 ```
 
-Update to the latest version at any time:
+Update to the latest version at any time, either through npm or with the built-in updater:
 
 ```bash
+npm install -g fuigo@latest
+# or
 fuigo update
 ```
 
@@ -66,9 +56,9 @@ Start Fuigo by running:
 fuigo
 ```
 
-On first launch, Fuigo opens your browser to authenticate with grok.com. After you sign in, Fuigo stores your credentials in `~/.fuigo/auth.json`, where they persist across sessions. Fuigo refreshes your credentials automatically and prompts you to sign in again when they can no longer be renewed.
+On first launch, Fuigo asks for an API key: paste your FluxRouter API key (from your FluxRouter dashboard), or pick a supported key that is already in your environment from the menu. Fuigo stores the key in `~/.fuigo/auth.json`, where it persists across sessions. There is no browser sign-in unless your deployment configures an identity provider or an external auth provider, in which case the first-launch menu also offers **Login with** that provider.
 
-If you prefer API key authentication (e.g., for CI/CD or environments without a browser), set the `FUIGO_API_KEY` environment variable instead:
+For CI/CD or any environment where you would rather not paste a key, set the `FUIGO_API_KEY` environment variable instead:
 
 ```bash
 export FUIGO_API_KEY="fuigo-..."

@@ -1,6 +1,6 @@
 # Authentication
 
-Fuigo supports several authentication methods, including interactive browser login, enterprise single sign-on (SSO), and headless CI/CD runners.
+Fuigo supports several authentication methods: a FluxRouter API key (the default), ChatGPT and Grok subscription login, enterprise single sign-on (SSO), external auth providers, and headless CI/CD runners.
 
 ---
 
@@ -51,6 +51,12 @@ base_url = "https://api.x.ai/v1"
 auth_provider = "grok-subscription"
 ```
 
+The xAI `base_url` is the provider's own inference endpoint and must be spelled
+exactly as above for the subscription credential to be attached. Fuigo's egress
+guard refuses xAI hosts by default, so both `fuigo login --provider xai` and a
+session using `grok-subscription` need `FUIGO_ALLOW_UPSTREAM_HOSTS=1` in the
+environment.
+
 Replace the model placeholders, then select `-m chatgpt-subscription` or
 `-m grok-subscription`, or select that configured model in the TUI/ACP client.
 Keep each subscription's wire model/endpoint mapping unambiguous. Do not combine
@@ -86,15 +92,17 @@ endorsement or a guarantee of a stable third-party subscription API.
 
 ---
 
-## Browser Login (Default)
+## First Launch (API Key by Default)
 
-On first launch, Fuigo opens your browser to authenticate with grok.com:
+On first launch, Fuigo asks for an API key:
 
 ```bash
 fuigo
 ```
 
-Fuigo stores credentials in `~/.fuigo/auth.json` and reuses them across sessions. Fuigo refreshes access tokens automatically in the background. When a token can't be refreshed, Fuigo prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
+Paste your FluxRouter API key (from your FluxRouter dashboard), or pick a supported key that is already in your environment from the menu. Fuigo does not open a browser: it ships with no first-party web login. The first-launch menu offers a **Login with ...** row only when your deployment has configured something real behind it -- an OIDC issuer or an external auth provider -- so the row never leads to a dead end.
+
+Fuigo stores the credential in `~/.fuigo/auth.json` and reuses it across sessions. For issuer-backed sessions, Fuigo refreshes access tokens automatically in the background; when a token can't be refreshed, Fuigo prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
 
 ### Credential storage
 
@@ -112,11 +120,11 @@ To switch accounts or resolve an authentication problem, run:
 fuigo login
 ```
 
-Running `fuigo login` starts the sign-in flow again, replacing your cached session. By default, it opens your browser and signs in through Ferrox Labs OAuth at `auth.x.ai`. Pass a flag to select a different flow:
+Running `fuigo login` (without `--provider`) starts the sign-in flow again, replacing your cached session. It signs in through the identity provider your deployment configured: enterprise OIDC under `[fuigo_com_config.oidc]`, or an OAuth2 issuer set with `FUIGO_OAUTH2_ISSUER` and `FUIGO_OAUTH2_CLIENT_ID`. Fuigo ships with no issuer of its own, so with neither configured the command explains that there is nothing to log in to and points you at `FUIGO_API_KEY`. Pass a flag to select the transport:
 
 | Flag | Description |
 |------|-------------|
-| `--oauth` | Sign in through Ferrox Labs OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
+| `--oauth` | Sign in through the configured issuer in your browser. This is the default, so the flag is optional. |
 | `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
 
 To sign out of the existing first-party session, run `fuigo logout` without `--provider`.
@@ -125,7 +133,7 @@ To sign out of the existing first-party session, run `fuigo logout` without `--p
 
 ## API Key
 
-For CI/CD, automation, or environments without browser access, use an API key from [console.x.ai](https://console.x.ai):
+For CI/CD, automation, or any environment where pasting a key at the prompt is impractical, set your FluxRouter API key (from your FluxRouter dashboard) in the environment:
 
 ```bash
 export FUIGO_API_KEY="fuigo-..."
@@ -138,7 +146,7 @@ Fuigo uses the API key as a fallback when no session token is active. If you hav
 
 ## OIDC (Customer SSO)
 
-Authenticate developers through your own Identity Provider (IdP) -- such as Okta, Azure AD, or Auth0 -- instead of grok.com.
+Authenticate developers through your own Identity Provider (IdP) -- such as Okta, Azure AD, or Auth0 -- instead of an API key.
 
 ### 1. Register a public client in your IdP
 
@@ -369,14 +377,14 @@ Fuigo picks up changes to `~/.fuigo/auth.json` automatically. If you update cred
 Fuigo resolves credentials for each request in this order, highest to lowest:
 
 1. **Per-model `api_key` or `env_key`** -- set under `[model.<name>]` in `config.toml`. Wins whenever present.
-2. **Active session token** -- obtained through browser, OIDC/OAuth2, or external-provider login and stored in `~/.fuigo/auth.json`.
+2. **Active session token** -- obtained through OIDC/OAuth2 or external-provider login and stored in `~/.fuigo/auth.json`.
 3. **`FUIGO_API_KEY`** -- fallback when no session token is active.
 
 When more than one login flow is configured, Fuigo populates the session token from the first available source, highest to lowest:
 
 1. **External auth provider** (`auth_provider_command`)
 2. **Enterprise OIDC** -- when OIDC is configured, through `[fuigo_com_config.oidc]` in `config.toml` or the `FUIGO_OIDC_ISSUER` and `FUIGO_OIDC_CLIENT_ID` environment variables
-3. **Ferrox Labs OAuth2 browser login** -- the default
+3. **OAuth2 issuer browser login** -- when `FUIGO_OAUTH2_ISSUER` and `FUIGO_OAUTH2_CLIENT_ID` are set. Fuigo ships with no issuer, so without one of these three there is no web login and the API key is the credential.
 
 During a session, the active method handles all mid-session refreshes.
 
@@ -394,8 +402,8 @@ which `/privacy` opens — does not change these config knobs:
 | External OpenTelemetry | `FUIGO_EXTERNAL_OTEL` / `[telemetry] otel_*`. See [Monitoring Usage](24-monitoring-usage.md). |
 
 On team accounts, only a team admin can change coding-data sharing.
-Team admins can also enable or disable Zero Data Retention (ZDR) for their team.
-See [How to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr).
+Team admins can also enable or disable Zero Data Retention (ZDR) for their team;
+that is an account-level setting managed from your FluxRouter dashboard, not from Fuigo.
 When ZDR is on, coding-data sharing cannot be changed at all — the settings
 row shows `ZDR` in place of the value.
 

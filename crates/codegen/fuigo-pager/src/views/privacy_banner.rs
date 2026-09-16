@@ -15,8 +15,12 @@ const PRIVACY_BANNER_DESC: &str = "Off by default. Opt-in to allow Ferrox Labs t
      data, e.g., prompts, traces, & metrics, for training and debugging purposes. Change \
      anytime via settings.";
 
-pub(crate) const PRIVACY_BANNER_TERMS_URL: &str = "https://x.ai/legal/terms-of-service";
-pub(crate) const PRIVACY_BANNER_POLICY_URL: &str = "https://x.ai/legal/privacy-policy";
+/// The legal documents behind the two underlined words. These are Fuigo's own
+/// (FluxRouter's) pages, linked from the fluxrouter.ai homepage footer; the
+/// banner is a Ferrox Labs consent notice, so it must cite Ferrox Labs' terms
+/// and nobody else's.
+pub(crate) const PRIVACY_BANNER_TERMS_URL: &str = "https://fluxrouter.ai/terms-of-service";
+pub(crate) const PRIVACY_BANNER_POLICY_URL: &str = "https://fluxrouter.ai/privacy-policy";
 
 /// `(text, url_when_link)`.
 type LegalSegment = (&'static str, Option<&'static str>);
@@ -389,6 +393,42 @@ mod tests {
         assert_eq!(rects.opt_out, Rect::default());
         assert_eq!(rects.terms, Rect::default());
         assert_eq!(rects.policy, Rect::default());
+    }
+
+    /// A Ferrox Labs consent banner must cite Ferrox Labs' own legal pages. Pinned by literal URL
+    /// (the rest of this module only compares rects against the constants), and the paint is
+    /// checked host-free at every width: the links are words, never a URL, so no vendor host can
+    /// leak into the buffer through a legal variant either.
+    #[test]
+    fn legal_links_are_fluxrouter_pages_and_the_paint_names_no_host() {
+        assert_eq!(
+            PRIVACY_BANNER_TERMS_URL,
+            "https://fluxrouter.ai/terms-of-service"
+        );
+        assert_eq!(
+            PRIVACY_BANNER_POLICY_URL,
+            "https://fluxrouter.ai/privacy-policy"
+        );
+        for variant in PRIVACY_BANNER_LEGAL_VARIANTS {
+            let urls: Vec<&str> = variant.iter().filter_map(|(_, url)| *url).collect();
+            assert_eq!(
+                urls,
+                [PRIVACY_BANNER_TERMS_URL, PRIVACY_BANNER_POLICY_URL],
+                "every variant links terms then privacy: {:?}",
+                legal_text(variant)
+            );
+        }
+        for width in [200, 117, 80, 60, 40, 30, 24, 18] {
+            let (rows, rects) = draw(width);
+            let text = rows.join("\n");
+            for needle in ["x.ai", "grok.com", "://"] {
+                assert!(
+                    !text.contains(needle),
+                    "width {width}: {needle:?} painted: {rows:?}"
+                );
+            }
+            assert_eq!(text_at(&rows, rects.terms), "Terms");
+        }
     }
 
     /// The two links open different documents, so an off-by-one rect sends the user to the wrong page.

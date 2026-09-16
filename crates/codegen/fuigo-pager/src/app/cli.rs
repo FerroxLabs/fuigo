@@ -38,7 +38,7 @@ pub enum Command {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
-        /// Use Fuigo OAuth via auth.x.ai.
+        /// Sign in through the deployment's configured OAuth2/OIDC issuer in the browser (the default).
         #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
@@ -401,7 +401,7 @@ pub struct LeaderArgs {
     /// Keep the leader running after the last client disconnects.
     #[arg(long)]
     pub no_exit_on_disconnect: bool,
-    /// Defer the grok.com relay WebSocket until the first headless IPC client registers.
+    /// Defer the relay WebSocket until the first headless IPC client registers.
     /// Without this flag the leader connects the relay eagerly at startup.
     /// Bare leaders (headless remote env / systemd) need the eager connect: they receive remote prompts *through* the relay.
     /// Passed by leaders auto-spawned from interactive clients (TUI/IDE), which only need the relay if a headless client appears.
@@ -1116,6 +1116,32 @@ pub fn parse_headless_timeout_env(raw: Option<&str>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `--help` is user-reachable copy. Fuigo ships no upstream-vendor login host and no
+    /// upstream-vendor relay, so no flag may describe itself in terms of one. Walks every
+    /// subcommand's long help (hidden args excluded, as the user sees it).
+    #[test]
+    fn help_text_never_names_the_upstream_vendor() {
+        use clap::CommandFactory as _;
+        fn walk(cmd: &mut clap::Command, path: String, out: &mut Vec<String>) {
+            let help = cmd.render_long_help().to_string();
+            for needle in ["x.ai", "grok.com"] {
+                if help.to_ascii_lowercase().contains(needle) {
+                    out.push(format!("{path}: help mentions {needle:?}"));
+                }
+            }
+            let names: Vec<String> = cmd
+                .get_subcommands()
+                .map(|s| s.get_name().to_string())
+                .collect();
+            for name in names {
+                let mut sub = cmd.find_subcommand_mut(&name).expect("listed").clone();
+                walk(&mut sub, format!("{path} {name}"), out);
+            }
+        }
+        let mut hits = Vec::new();
+        walk(&mut PagerArgs::command(), "fuigo".to_string(), &mut hits);
+        assert!(hits.is_empty(), "{}", hits.join("\n"));
+    }
     /// A host that exports `FUIGO_HEADLESS_TIMEOUT_SECS` empty or garbage must not brick the CLI:
     /// clap runs an env-backed value parser for *every* subcommand and mode, so a `range(1..)`
     /// parser on the environment made `fuigo --version`, `fuigo doctor` and the interactive TUI
