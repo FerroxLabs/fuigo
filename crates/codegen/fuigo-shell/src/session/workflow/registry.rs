@@ -977,9 +977,15 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         symlink(&project, &linked).unwrap();
         let path = save_project_workflow(&linked, "safe", &script("safe")).unwrap();
+        // Compare canonical to canonical. `project` itself is only as canonical as the temp
+        // root: on macOS `tempdir()` lives under `/var/folders/...`, which is a symlink to
+        // `/private/var/folders/...`, so a canonical left side against a raw right side fails
+        // on every Mac and passes only on hosts whose temp root has no symlink in it.
         assert_eq!(
             dunce::canonicalize(path).unwrap(),
-            project.join(".fuigo/workflows/safe.rhai")
+            dunce::canonicalize(&project)
+                .unwrap()
+                .join(".fuigo/workflows/safe.rhai")
         );
     }
 

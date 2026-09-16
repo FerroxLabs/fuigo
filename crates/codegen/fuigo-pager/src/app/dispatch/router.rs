@@ -4,7 +4,6 @@ use super::auth::{
     dispatch_submit_api_key, dispatch_submit_auth_code, dispatch_switch_account,
     dispatch_use_detected_key,
 };
-use super::billing::dispatch_open_superfuigo_url;
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
     sync_sleep_inhibitor, with_active_agent, with_scrollback,
@@ -1124,7 +1123,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::Logout => dispatch_logout(app),
         Action::SwitchAccount => dispatch_switch_account(app),
         Action::CheckSubscription => vec![Effect::CheckSubscription { verify: None }],
-        Action::OpenSuperfuigoUrl => dispatch_open_superfuigo_url(app),
         Action::RetryCreditLimitPrompt => super::billing::dispatch_retry_credit_limit_prompt(app),
         Action::OpenUrl(url) => {
             if url.starts_with("file://") {

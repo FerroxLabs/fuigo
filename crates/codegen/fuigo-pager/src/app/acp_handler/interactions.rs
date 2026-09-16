@@ -195,7 +195,7 @@ pub(crate) fn handle_ask_user_question(
                         LocalQuestionKind::Fork { .. } => "/fork",
                         LocalQuestionKind::NewSession => "/new",
                         LocalQuestionKind::CreditLimitUpsell { .. } => "credit-limit upsell",
-                        LocalQuestionKind::FreeUsageUpsell { .. } => "SuperGrok upsell",
+                        LocalQuestionKind::FreeUsageUpsell => "usage-limit notice",
                         LocalQuestionKind::AgentTypeMismatch { .. } => "model switch",
                         LocalQuestionKind::DeleteCurrentSession => "/delete",
                         LocalQuestionKind::Feedback | LocalQuestionKind::FeedbackTrace { .. } => {

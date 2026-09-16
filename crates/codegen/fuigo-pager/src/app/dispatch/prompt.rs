@@ -492,7 +492,7 @@ pub(super) fn dispatch_send_prompt_inner(
             .is_restricted(invocation.token)
     {
         // Only consume the composer when the upsell can actually open
-        // With another question modal already up, `open_superfuigo_upsell` would no-op and wiping the composer here would silently drop the typed text
+        // With another question modal already up, `open_usage_limit_notice` would no-op and wiping the composer here would silently drop the typed text
         // Keep it instead so the user can resubmit after closing the modal, and never fall through to passthrough for restricted commands
         if agent.question_view.is_none() {
             if consume_input {

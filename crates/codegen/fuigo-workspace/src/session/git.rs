@@ -3141,15 +3141,17 @@ pub async fn ensure_binding(
             )
             .await?;
         } else {
+            // `switch -c`, not `checkout -b`: `checkout` takes either a
+            // start-point or pathspecs, and on git 2.39 an argument that
+            // follows `--end-of-options` is resolved as a pathspec, so
+            // `checkout -b <branch> --end-of-options <base>` dies with
+            // "Cannot update paths and switch to branch at the same time"
+            // and a fresh conversation branch can never be forked. `switch`
+            // takes no pathspecs at all, so the guard and the start-point
+            // cannot be confused for one another on any git version.
             git_cli(
                 git_root,
-                &[
-                    "checkout",
-                    "-b",
-                    session_branch,
-                    "--end-of-options",
-                    base_ref,
-                ],
+                &["switch", "-c", session_branch, "--end-of-options", base_ref],
             )
             .await?;
             created = true;

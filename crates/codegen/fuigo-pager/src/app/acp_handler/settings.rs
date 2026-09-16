@@ -212,8 +212,6 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         // (An empty gate_message would only clear the gate message text, NOT access, so it does not touch the gate here.)
         let effs = app.impose_gate(fuigo_shell::auth::GateInfo {
             message: msg.clone(),
-            url: update.gate_url.clone(),
-            label: update.gate_label.clone(),
         });
         app.pending_effects.extend(effs);
     }
@@ -525,10 +523,6 @@ pub(super) struct PagerSettingsUpdate {
     campaigns: Option<Vec<fuigo_shell::util::config::CampaignOverride>>,
     #[serde(default)]
     gate_message: Option<String>,
-    #[serde(default)]
-    gate_url: Option<String>,
-    #[serde(default)]
-    gate_label: Option<String>,
     #[serde(default)]
     allow_access: Option<bool>,
     #[serde(default)]

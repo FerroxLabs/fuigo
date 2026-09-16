@@ -417,7 +417,7 @@ impl SharedIndex {
         op: impl Fn(&SessionSearchIndex) -> Result<R, rusqlite::Error>,
     ) -> io::Result<R> {
         let mut slot = self.0.lock();
-        let epoch = recovery::current_epoch();
+        let epoch = recovery::current_epoch(db_path);
         if !matches!(&*slot, Some((e, _)) if *e == epoch) {
             let index = SessionSearchIndex::open_or_create(db_path).map_err(sqlite_to_io_error)?;
             *slot = Some((epoch, index));
@@ -446,7 +446,7 @@ async fn reindex_all(
     claim_token: &ClaimToken,
     claim_lost: Arc<AtomicBool>,
 ) -> io::Result<BootstrapOutcome> {
-    let epoch = recovery::CacheEpoch::now();
+    let epoch = recovery::CacheEpoch::now(&search_db_path(root_dir));
 
     progress.indexed.store(0, Ordering::Relaxed);
     progress.skipped.store(0, Ordering::Relaxed);

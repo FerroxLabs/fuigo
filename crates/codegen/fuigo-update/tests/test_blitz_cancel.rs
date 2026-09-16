@@ -285,7 +285,7 @@ async fn smoke_test_rejects_garbage_and_keeps_previous_good() {
 
     let new_binary = home
         .join("downloads")
-        .join(format!("grok-0.1.181-{platform}"));
+        .join(format!("fuigo-0.1.181-{platform}"));
     assert_invariant(home, &prev_good, &new_binary, Expect::PreviousGood);
 
     // A subsequent clean serve must succeed.

@@ -243,7 +243,7 @@ impl CommandRegistry {
     ///
     /// Entries are normalized via [`Self::normalize_deny_name`].
     /// Restricted commands stay visible in the dropdown/completion (discoverability) but disappear from `get()`.
-    /// Invoking one shows the SuperGrok upsell instead of executing (see the `dispatch_send_prompt_inner` hook).
+    /// Invoking one shows the usage-limit notice instead of executing (see the `dispatch_send_prompt_inner` hook).
     /// Pass an empty slice to clear the deny list (e.g. after a tier upgrade mid-session).
     pub fn set_restricted_commands(&mut self, names: &[String]) {
         self.restricted = names
@@ -255,10 +255,10 @@ impl CommandRegistry {
     }
 
     /// True when `key` (canonical name or alias, `/` and case ignored) names a command the tier deny list blocks from [`Self::get`].
-    /// Lets the dispatcher distinguish a restricted invocation (upsell) from a genuinely unknown one (pass through to the shell/model).
+    /// Lets the dispatcher distinguish a restricted invocation (notice) from a genuinely unknown one (pass through to the shell/model).
     ///
     /// Deliberately scans `commands` instead of `key_to_index`: a restricted command can still be missing from the key map for *other* reasons.
-    /// (`tools_satisfied` drops tool-gated commands until the toolset handshake lands.) A typed invocation must upsell even then.
+    /// (`tools_satisfied` drops tool-gated commands until the toolset handshake lands.) A typed invocation must still show the notice even then.
     pub fn is_restricted(&self, key: &str) -> bool {
         if self.restricted.is_empty() {
             return false;
@@ -527,7 +527,7 @@ impl CommandRegistry {
 
             // Restricted commands (per-user deny list, e.g. tier restrictions) deliberately stay listed.
             // They keep their triggers/key entries so the dropdown, ghost completion, and palette show them like any other command (discoverability)
-            // Execution is blocked by `get()`'s `restricted_match` filter; invoking one shows the SuperGrok upsell instead
+            // Execution is blocked by `get()`'s `restricted_match` filter; invoking one shows the usage-limit notice instead
 
             // Insert canonical key.
             self.key_to_index.insert(canonical.to_string(), idx);
@@ -801,7 +801,7 @@ mod tests {
         registry.set_restricted_commands(&["usage".to_string()]);
         // Execution is blocked
         assert!(registry.get("usage").is_none());
-        // The command stays listed (dropdown/completion discoverability); invoking shows the upsell instead
+        // The command stays listed (dropdown/completion discoverability); invoking shows the notice instead
         assert!(registry.triggers().iter().any(|t| t.canonical == "usage"));
         // Other commands unaffected.
         assert!(registry.get("exit").is_some());
@@ -1293,7 +1293,7 @@ mod tests {
         );
         assert!(
             reg.get_for_dispatch("usage").is_none(),
-            "restricted stays blocked (upsell path owns it)"
+            "restricted stays blocked (notice path owns it)"
         );
         assert!(
             reg.get_for_dispatch("loop").is_none(),

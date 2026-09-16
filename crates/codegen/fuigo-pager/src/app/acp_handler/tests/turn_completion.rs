@@ -604,10 +604,13 @@
         }
     }
 
+    /// The busy-wake piercing path keeps rate-limit copy instead of the generic "Request failed"
+    /// banner — but it must not hand the user the provider's consumer-subscription pitch.
+    /// The body below used to be asserted to "pass through untouched"; it is now replaced with our
+    /// own rate-limit copy, the same suppression `format_rate_limited_user_message` applies.
     #[test]
-    fn rate_limited_wake_during_local_turn_keeps_rate_limit_copy() {
-        // The busy-wake piercing path must pass rate-limit copy through untouched like `finish_wake_turn` does
-        // The generic formatter would strip the upgrade URL and headline it "Request failed"
+    fn rate_limited_wake_during_local_turn_suppresses_the_provider_upsell() {
+        use fuigo_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_OAUTH;
         let mut app = make_app_with_agent("sess-wake");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -637,8 +640,45 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         match last_session_event(&agent.scrollback) {
             Some(SessionEvent::TurnFailed { error, .. }) => {
-                assert_eq!(error, rate_limit_copy, "copy must pass through untouched");
+                assert_eq!(error, RATE_LIMITED_USER_MESSAGE_OAUTH);
+                assert!(!error.contains("grok.com/supergrok"), "{error}");
+                assert!(error.contains("rate limit"), "{error}");
             }
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+    }
+
+    /// A rate-limited wake whose body carries no upsell still shows the provider's own words.
+    #[test]
+    fn rate_limited_wake_during_local_turn_keeps_a_clean_server_detail() {
+        let mut app = make_app_with_agent("sess-wake");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+        }
+        let clean = "The model is at capacity right now. Please try again shortly.";
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new("sess-wake"),
+            update: FuigoSessionUpdate::TurnCompleted {
+                prompt_id: "task-completed-bg2".into(),
+                stop_reason: "rate_limit".into(),
+                agent_result: Some(clean.into()),
+                error_kind: None,
+                usage: None,
+                elapsed_ms: None,
+            },
+            meta: Some(serde_json::json!({ "isReplay": false })),
+        };
+        let notif = acp::ExtNotification::new(
+            "fuigo/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        );
+
+        let _ = handle_ext_notification(&notif, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::TurnFailed { error, .. }) => assert_eq!(error, clean),
             other => panic!("expected TurnFailed, got {other:?}"),
         }
     }

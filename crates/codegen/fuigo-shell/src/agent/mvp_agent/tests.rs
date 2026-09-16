@@ -98,7 +98,7 @@ fn resolve_subscription_tier_prefers_display_then_api_key_then_jwt() {
 #[test]
 fn jwt_claim_matches_user_subscription_tier_known_pairs() {
     let cases = [
-        ("superfuigo", "FuigoPro"),
+        ("superfuigo", "GrokPro"),
         ("x_basic", "XBasic"),
         ("x_premium", "XPremium"),
         ("x_premium_plus", "XPremiumPlus"),
@@ -113,6 +113,21 @@ fn jwt_claim_matches_user_subscription_tier_known_pairs() {
             "{claim} should match {user_tier}"
         );
     }
+}
+/// The tier-1 `/user` value is the provider's spelling, `GrokPro`. The 1.0.1 mechanical rebrand
+/// rewrote it to `FuigoPro`, a string the provider can never send, so a tier-1 subscriber's
+/// post-unblock catalog refresh always fell through to the numeric arm and never matched.
+/// Every string compared against a provider response keeps the provider's spelling.
+#[test]
+fn tier_one_matches_the_providers_grokpro_wire_value_not_a_rebranded_one() {
+    assert!(
+        jwt_claim_matches_user_subscription_tier("superfuigo", "GrokPro"),
+        "the provider's tier-1 wire value `GrokPro` must match the tier-1 JWT claim"
+    );
+    assert!(
+        !jwt_claim_matches_user_subscription_tier("superfuigo", "FuigoPro"),
+        "`FuigoPro` is a rebrand artefact, not a wire value; nothing may match it"
+    );
 }
 #[test]
 fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
@@ -132,9 +147,7 @@ fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
         "superfuigo_heavy",
         "SuperGrokPlus"
     ));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "free", "FuigoPro"
-    ));
+    assert!(!jwt_claim_matches_user_subscription_tier("free", "GrokPro"));
     assert!(!jwt_claim_matches_user_subscription_tier("", "XPremium"));
     assert!(!jwt_claim_matches_user_subscription_tier(
         "superfuigo_heavy",

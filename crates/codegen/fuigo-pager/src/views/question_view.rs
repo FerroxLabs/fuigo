@@ -114,12 +114,9 @@ pub enum LocalQuestionKind {
     CreditLimitUpsell {
         choices: Vec<fuigo_telemetry::events::CreditLimitChoice>,
     },
-    /// SuperGrok upsell modal: the free-usage paywall (429 with `subscription:free-usage-exhausted`) or a tier-restricted slash command invocation.
-    /// Upgrade options carry their URL in the option `id`.
-    FreeUsageUpsell {
-        /// Telemetry source for `SuperGrokUpsellClicked`; distinguishes the paywall from the restricted-command upsell.
-        source: fuigo_telemetry::events::SuperGrokUpsell,
-    },
+    /// Usage-limit notice: the free-usage paywall (429 with `subscription:free-usage-exhausted`) or a tier-restricted slash command invocation.
+    /// The billing option carries its URL in the option `id`.
+    FreeUsageUpsell,
     /// Modal shown when the shell rejects a model switch due to agent type incompatibility.
     /// Carries the target model and effort so the answer handler can create a new session with it.
     AgentTypeMismatch {
@@ -791,7 +788,7 @@ impl QuestionViewState {
     /// Returns the current freeform text so the caller can load it into the prompt.
     ///
     /// No-op returning an empty string when `no_freeform` is set.
-    /// Such questions (e.g. the SuperGrok upsell) have no freeform row, so `InputMode` must be unreachable.
+    /// Such questions (e.g. the usage-limit notice) have no freeform row, so `InputMode` must be unreachable.
     /// Callers gate on `no_freeform` / [`Self::is_on_freeform_row`] too; this is defense in depth.
     pub fn activate_freeform_input(&mut self) -> String {
         if self.no_freeform {
@@ -2765,7 +2762,7 @@ mod tests {
 
     // ── no_freeform ────────────────────────────────────────────────────
 
-    /// `no_freeform` questions (e.g. the SuperGrok upsell) have no "Other" row, so activating freeform input must be impossible.
+    /// `no_freeform` questions (e.g. the usage-limit notice) have no "Other" row, so activating freeform input must be impossible.
     /// Focus stays in Navigation and nothing gets marked selected.
     /// Regression test for the upsell modal letting the user type after clicking under the last option.
     #[test]

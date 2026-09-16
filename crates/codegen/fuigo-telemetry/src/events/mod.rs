@@ -1706,37 +1706,8 @@ pub struct EventLoopStall {
     pub stall_mcp_servers_connected: u32,
 }
 
-// ---------------------------------------------------------------------------
-// SuperGrok upsell
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SuperGrokUpsell {
-    WelcomeScreen,
-    RateLimitError,
-    /// Free-usage-exhausted paywall modal (free-tier 429 with the `subscription:free-usage-exhausted` well-known error code).
-    FreeUsagePaywall,
-    /// Upsell modal shown when a tier-restricted slash command (`/usage`, `/imagine`, …) is invoked on the free / X Basic tiers.
-    RestrictedCommand,
-}
-
-#[derive(Serialize)]
-pub struct SuperGrokUpsellShown {
-    pub source: SuperGrokUpsell,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct SuperGrokUpsellClicked {
-    pub source: SuperGrokUpsell,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<String>,
-}
-
 /// Which surface a promo announcement's upgrade CTA was activated from.
-/// Modeled on [`SuperGrokUpsell`]; lets the funnel attribute the click to the welcome hero vs the in-session header vs the banner vs the dashboard.
+/// Lets the funnel attribute the click to the welcome hero vs the in-session header vs the banner vs the dashboard.
 /// Also distinguishes keyboard (`Ctrl+O`) activations from pointer/OSC 8 ones.
 /// Ord/Eq exist so the pager can track which (announcement, surface) pairs already showed the CTA.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2172,16 +2143,12 @@ pub struct CreditLimitUpsellClicked {
 // Subscription conversion
 // ---------------------------------------------------------------------------
 
-/// Emitted when a previously access-gated user re-authenticates and the gate is lifted, i.e. they subscribed (externally on grok.com) and came back.
-/// This is the actual conversion signal for SuperGrok Heavy subscriptions attributed to Fuigo.
-/// The user saw the gate in Fuigo, went and paid, then returned with access.
+/// Emitted when a previously access-gated user re-authenticates and the gate is lifted, i.e. their account regained access.
+/// It records that the block cleared; there is no upsell surface behind it and nothing is attributed to one.
 #[derive(Serialize)]
 pub struct SubscriptionActivated {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
-    /// Whether the subscribe CTA was shown in this session before the gate was lifted (`access_gate_shown_logged`).
-    /// When `true`, the conversion is strongly attributable to Fuigo's upsell surface.
-    pub upsell_shown_this_session: bool,
 }
 
 /// Why auth recovery could not refresh the credential, forcing the user to manually re-authenticate.
@@ -2523,8 +2490,6 @@ telemetry_event!(
 telemetry_event!(PagerSlashCommand, "pager_slash_command");
 telemetry_event!(PlanSubmit, "plan_submit");
 telemetry_event!(EventLoopStall, "event_loop_stall");
-telemetry_event!(SuperGrokUpsellShown, "superfuigo_upsell_shown");
-telemetry_event!(SuperGrokUpsellClicked, "superfuigo_upsell_clicked");
 telemetry_event!(AnnouncementCtaShown, "announcement_cta_shown");
 telemetry_event!(AnnouncementCtaClicked, "announcement_cta_clicked");
 telemetry_event!(CodingDataConsentSelected, "coding_data_consent_selected");

@@ -112,25 +112,29 @@ fn spawn_gateway_drain(
     hook_rx
 }
 
+/// Every persistence write succeeds - `spawn_persistence_stub` answers all eleven
+/// responder-carrying `PersistenceMsg` variants (bounded execution, `a7a17ff`, made the
+/// compaction commit one of them: `/compact` waits for `CommitCompactionAndAck` and fails the
+/// turn with "compaction persistence acknowledgement lost" if the oneshot is dropped). This
+/// module used to keep its own two-arm copy whose comment made the same claim; it now shares
+/// the stub and only taps the stream for user-message chunks.
 fn spawn_persistence_drain(
-    mut persistence_rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    persistence_rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
 ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
     let (user_chunk_tx, user_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::task::spawn_local(async move {
-        while let Some(message) = persistence_rx.recv().await {
-            match message {
-                PersistenceMsg::FlushAndAck { respond_to } => {
-                    let _ = respond_to.send(Ok(()));
-                }
-                PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
-                    notification,
-                )) if matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_)) => {
-                    let _ = user_chunk_tx.send(());
-                }
-                _ => {}
+    super::disk_full_tests::spawn_persistence_stub_observing(
+        persistence_rx,
+        || Ok(()),
+        move |message| {
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
+                notification,
+            )) = message
+                && matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
+            {
+                let _ = user_chunk_tx.send(());
             }
-        }
-    });
+        },
+    );
     user_chunk_rx
 }
 
@@ -324,11 +328,22 @@ async fn runtime_control_slash_stays_inert_without_dynamic_catalogs() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+/// Driven on an explicit 16 MiB thread: a full `SessionActor` turn future overflows the default
+/// libtest thread stack. The product never runs a session on a default-size stack either
+/// (`acp_session_impl::spawn` spawns each session thread with `SESSION_THREAD_STACK_SIZE` = 8 MiB),
+/// and CI exports `RUST_MIN_STACK=16777216`. Sibling turn tests (`disk_full_tests`,
+/// `length_salvage_tests`, `transient_retry_loop_tests`, `auth_retry_budget_tests`) do the same,
+/// so the test does not depend on an env var the local/hermetic runners do not set.
+#[test]
+fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            tokio::task::LocalSet::new().block_on(&rt, async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
@@ -618,8 +633,11 @@ async fn parent_compact_and_available_skill_execute_but_other_slashes_stay_inert
                 actor.permissions.is_yolo_mode(),
                 "model-authored /always-approve off must remain inert"
             );
+            });
         })
-        .await;
+        .expect("spawn large-stack test thread")
+        .join()
+        .expect("test thread");
 }
 
 #[tokio::test(flavor = "current_thread")]

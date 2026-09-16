@@ -886,23 +886,38 @@ api_key = "same-owned-key"
     }
 
     /// The temp-file cleanup property, exercised where the write itself fails:
-    /// a readable config whose directory cannot be written to.
+    /// a readable config whose replacement cannot be created beside it.
+    ///
+    /// The obstacle is the length of the temp name, not directory permissions.
+    /// `write_atomically` creates `<config name>.<pid>.<nonce>.tmp` next to the
+    /// target, so a config whose own name is `NAME_MAX - 5` bytes has a
+    /// readable name, a creatable `.lock` name, and a temp name that no
+    /// filesystem will accept. A `chmod 0500` on the directory cannot be used:
+    /// the suite runs as root in its build container, root bypasses the
+    /// permission bits, and the write then succeeds. (It also never reached the
+    /// temp file even off root -- the `config.toml.lock` beside it is created
+    /// first and failed first.)
     #[cfg(unix)]
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_failed_write_leaves_no_temp_file_behind() {
-        use std::os::unix::fs::PermissionsExt as _;
+        /// `NAME_MAX` on every filesystem this runs on (ext4, xfs, APFS, overlayfs).
+        const NAME_MAX: usize = 255;
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
-        let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
+        // Leaves room for `.lock` (exactly NAME_MAX) but not for the shortest
+        // possible `.<pid>.<nonce>.tmp` suffix (8 bytes).
+        let long_name = "c".repeat(NAME_MAX - ".lock".len());
+        let path = dir.path().join(&long_name);
         fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
 
-        // Read + execute, no write: the read below succeeds, creating the temp
-        // file next to it does not.
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
-        let result = write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"]));
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        result.expect_err("a write into a read-only directory must fail");
+        let err = write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"]))
+            .expect_err("a write whose temp file cannot be created must fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENAMETOOLONG),
+            "the write must fail creating the temp file, not somewhere earlier: {err}"
+        );
 
         let strays: Vec<String> = fs::read_dir(dir.path())
             .unwrap()

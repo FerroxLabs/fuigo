@@ -29,8 +29,12 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Default Imagine model for `image_gen`. Used unless an explicit
 /// `model_override` is supplied via `ImageGenConfig::Enabled`.
-const FUIGO_IMAGINE_MODEL: &str = "fuigo-imagine-image-quality";
-// Some Imagine models (e.g. `fuigo-imagine-image`, selectable via `model_override`)
+///
+/// This is a model id ON THE WIRE (the `model` field of the request), so it keeps the
+/// provider's spelling. The 1.0.1 mechanical rebrand rewrote it to `fuigo-imagine-image-quality`,
+/// a model no provider serves. (Its protect rule covered only `grok-<digit>` ids.)
+const FUIGO_IMAGINE_MODEL: &str = "grok-imagine-image-quality";
+// Some Imagine models (e.g. `grok-imagine-image`, selectable via `model_override`)
 // expand the prompt then generate, and the proxy buffers
 // the whole image before sending any bytes — so the client may receive nothing
 // for well over a minute. Keep these generous so a slow-but-progressing
@@ -47,8 +51,8 @@ pub use fuigo_tools_api::slash_commands::{
 /// configured provider refuses `image_gen` / `image_edit` for the current
 /// credential. The model relays it to the user.
 ///
-/// This used to instruct the model to upsell the user to SuperGrok, complete
-/// with a `?referrer=grok-build` tag -- marketing a competitor's subscription
+/// This used to instruct the model to sell the user the upstream vendor's
+/// subscription, complete with a referral tag -- marketing a competitor's plan
 /// from inside Fuigo, to users who reached it through FluxRouter or their own
 /// key. Fuigo has no subscription tiers, so the tier framing was also simply
 /// untrue here. It now states the fact and stops.
@@ -74,7 +78,7 @@ pub struct ImageGenClient {
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
     /// (free / X Basic). `image_gen` / `image_edit` short-circuit before any
-    /// HTTP call and return the SuperGrok upsell prose instead. See
+    /// HTTP call and return [`TIER_RESTRICTED_UPSELL`] instead. See
     /// [`ImageGenClient::is_tier_restricted`].
     tier_restricted: bool,
     /// Per-request [`SESSION_ID_HEADER`]; kept off `default_headers` so the
@@ -182,7 +186,7 @@ impl ImageGenClient {
 
     /// Whether the current user's tier (free / X Basic) is zero-limited on
     /// Imagine server-side. `image_gen` / `image_edit` use this to short-circuit
-    /// with the SuperGrok upsell instead of issuing a doomed request.
+    /// with [`TIER_RESTRICTED_UPSELL`] instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
     }
@@ -351,8 +355,8 @@ pub enum ImageGenConfig {
         edit_model_override: Option<String>,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The tools stay advertised to the model, but
-        /// `image_gen` / `image_edit` short-circuit at call time with the
-        /// SuperGrok upsell prose instead of a doomed request. Set by the
+        /// `image_gen` / `image_edit` short-circuit at call time with
+        /// [`TIER_RESTRICTED_UPSELL`] instead of a doomed request. Set by the
         /// host from the subscription tier; always `false` for team /
         /// API-key / workspace callers.
         tier_restricted: bool,
@@ -500,8 +504,8 @@ impl fuigo_tool_runtime::Tool for ImageGenTool {
         };
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
-        // the upsell prose instead of a doomed request (the tool stays
-        // advertised so the model can surface the nudge in-conversation).
+        // the explanatory prose instead of a doomed request (the tool stays
+        // advertised so the model can relay the reason in-conversation).
         if client.is_tier_restricted() {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
@@ -674,14 +678,14 @@ mod tests {
             extra_headers: indexmap::IndexMap::new(),
             image_gen_enabled: false,
             image_edit_enabled: true,
-            model_override: Some("fuigo-imagine-image".into()),
+            model_override: Some("grok-imagine-image".into()),
             edit_model_override: None,
             tier_restricted: false,
         };
         assert!(cfg.has_credentials());
         assert!(!cfg.image_gen_enabled());
         assert!(cfg.image_edit_enabled());
-        assert_eq!(cfg.model_override(), Some("fuigo-imagine-image"));
+        assert_eq!(cfg.model_override(), Some("grok-imagine-image"));
 
         assert!(!ImageGenConfig::Disabled.has_credentials());
     }
@@ -787,11 +791,37 @@ mod tests {
         );
         // Override → that exact model slug.
         assert_eq!(
-            ImageGenClient::new(&mk(Some("fuigo-imagine-image")), None)
+            ImageGenClient::new(&mk(Some("grok-imagine-image")), None)
                 .unwrap()
                 .model,
-            "fuigo-imagine-image"
+            "grok-imagine-image"
         );
+    }
+
+    /// The default model slugs are sent verbatim as the request's `model`, so they are the
+    /// provider's spelling. The 1.0.1 mechanical rebrand rewrote them to `fuigo-imagine-*`, ids
+    /// no provider serves, so every default `/imagine` request named a model that does not exist.
+    #[test]
+    fn default_imagine_model_slugs_carry_the_providers_spelling() {
+        assert_eq!(FUIGO_IMAGINE_MODEL, "grok-imagine-image-quality");
+        assert_eq!(
+            super::super::image_edit::FUIGO_IMAGINE_EDIT_MODEL,
+            "grok-imagine-image-quality"
+        );
+        assert_eq!(
+            super::super::video_gen::FUIGO_VIDEO_MODEL,
+            "grok-imagine-video-1.5"
+        );
+        for slug in [
+            FUIGO_IMAGINE_MODEL,
+            super::super::image_edit::FUIGO_IMAGINE_EDIT_MODEL,
+            super::super::video_gen::FUIGO_VIDEO_MODEL,
+        ] {
+            assert!(
+                !slug.contains("fuigo"),
+                "{slug}: a wire model id can never carry our name"
+            );
+        }
     }
 
     #[test]
@@ -816,8 +846,8 @@ mod tests {
                 .edit_model(),
             super::super::image_edit::FUIGO_IMAGINE_EDIT_MODEL
         );
-        let client = ImageGenClient::new(&mk(Some("fuigo-imagine-image-v2")), None).unwrap();
-        assert_eq!(client.edit_model(), "fuigo-imagine-image-v2");
+        let client = ImageGenClient::new(&mk(Some("grok-imagine-image-v2")), None).unwrap();
+        assert_eq!(client.edit_model(), "grok-imagine-image-v2");
         assert_eq!(client.model, FUIGO_IMAGINE_MODEL);
     }
 
@@ -845,10 +875,10 @@ mod tests {
 
     #[tokio::test]
     async fn tier_restricted_short_circuits_with_upsell() {
-        // A free / X Basic user's image_gen call returns the SuperGrok upsell
-        // prose as a normal result (no HTTP, no error card) so the model can
-        // relay it. Only the client is inserted — the short-circuit returns
-        // before any other resource (e.g. SessionFolder) is required.
+        // A free / X Basic user's image_gen call returns TIER_RESTRICTED_UPSELL
+        // as a normal result (no HTTP, no error card) so the model can relay it.
+        // Only the client is inserted — the short-circuit returns before any
+        // other resource (e.g. SessionFolder) is required.
         let cfg = ImageGenConfig::Enabled {
             api_key: "k".into(),
             base_url: "https://api.x.ai/v1".into(),
@@ -871,14 +901,24 @@ mod tests {
             },
         )
         .await
-        .expect("tier-restricted call must succeed with upsell prose");
+        .expect("tier-restricted call must succeed with the explanatory prose");
 
         match result {
             ToolOutput::Text(t) => {
-                assert!(t.text.contains("SuperGrok"), "got: {}", t.text);
-                assert!(t.text.contains("superfuigo?referrer=fuigo-build"));
+                // Spelled out rather than compared to the constant: `assert_eq!(t.text,
+                // TIER_RESTRICTED_UPSELL)` is satisfied by any edit to the constant, so it could
+                // not have caught the competitor pitch this copy replaced.
+                assert_eq!(
+                    t.text,
+                    "Image generation is not available with the current API key or provider. \
+                     Let the user know their key's provider does not grant access to image \
+                     generation. Do not retry this tool."
+                );
+                // It must never market anybody else's subscription, nor carry a referral tag.
+                assert!(!t.text.contains("SuperGrok"), "got: {}", t.text);
+                assert!(!t.text.contains("referrer="), "got: {}", t.text);
             }
-            other => panic!("expected Text upsell, got {other:?}"),
+            other => panic!("expected Text result, got {other:?}"),
         }
     }
 }

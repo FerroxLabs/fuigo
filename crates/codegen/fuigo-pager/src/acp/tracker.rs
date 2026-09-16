@@ -2218,7 +2218,7 @@ fn media_gen_block(tc: &acp::ToolCall, success: bool) -> RenderBlock {
     RenderBlock::ToolCall(ToolCallBlock::Other(block))
 }
 /// Plain-text body of a media-variant tool that returned `ToolOutput::Text` rather than a media file.
-/// That happens on the free / X Basic SuperGrok-upsell short-circuit.
+/// That happens on the free / X Basic tier-restricted short-circuit.
 /// `None` for real media outputs (including ZDR upload-only results) so their typed rendering is untouched.
 fn media_gen_text(tc: &acp::ToolCall) -> Option<String> {
     match serde_json::from_value::<ToolOutput>(tc.raw_output.clone()?).ok()? {

@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-/// Identity of a media file's contents at load time, keying the negative cache of failed loads.
+/// Identity of a media file's metadata at load time, the cheap half of the negative cache's key.
 /// On Unix, inode and ctime also catch a same-length in-place rewrite whose mtime is too coarse to move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MediaFileStamp {
@@ -22,10 +22,26 @@ pub(crate) struct MediaFileStamp {
     ctime: (i64, i64),
 }
 
+/// How recently a file must have been touched for its metadata to be unable to prove it is unchanged.
+///
+/// Every timestamp a rewrite can move comes off a coarse clock: the kernel stamps inodes from
+/// `ktime_get_coarse_real_ts64` (a jiffy, up to 10ms), and the filesystem then truncates it to its
+/// own granularity — 1s on ext3 and HFS+, 2s on FAT, ~16ms on NTFS. Two writes inside one of those
+/// ticks carry identical timestamps, so a same-length in-place rewrite moves no metadata field at
+/// all. Past this window a later write is guaranteed to land on a different tick, so metadata alone
+/// is proof again. 3s clears the coarsest of those granularities with room to spare.
+const COARSE_TIMESTAMP_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Byte budget of the inline-media byte cache; one image at or above it stays transient.
+const INLINE_MEDIA_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Largest file the negative cache will read for a content digest. Above it the digest is `None`.
+const MEDIA_DIGEST_MAX_BYTES: u64 = INLINE_MEDIA_CACHE_MAX_BYTES as u64;
+
 impl MediaFileStamp {
     /// `None` when the platform reports no mtime: a `(len, no-mtime)` marker would match every future rewrite of the same length.
     /// Such failures are never negative-cached (the load is retried instead).
-    fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
+    pub(super) fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
         let modified = meta.modified().ok()?;
         #[cfg(unix)]
         let (ino, ctime) = {
@@ -41,6 +57,171 @@ impl MediaFileStamp {
             ctime,
         })
     }
+
+    /// The most recent write-driven timestamp this stamp carries.
+    fn newest_timestamp(&self) -> std::time::SystemTime {
+        #[cfg(unix)]
+        {
+            let (secs, nsec) = self.ctime;
+            let whole_seconds = std::time::Duration::from_secs(secs.unsigned_abs());
+            let base = if secs >= 0 {
+                std::time::UNIX_EPOCH + whole_seconds
+            } else {
+                std::time::UNIX_EPOCH - whole_seconds
+            };
+            let ctime = base + std::time::Duration::from_nanos(nsec.max(0) as u64);
+            ctime.max(self.modified)
+        }
+        #[cfg(not(unix))]
+        {
+            self.modified
+        }
+    }
+
+    /// `true` while a rewrite could still land on the same coarse tick as this stamp and leave every
+    /// field of it untouched — including a timestamp in the future, which says the clocks disagree
+    /// and the metadata cannot be reasoned about at all.
+    fn may_hide_a_rewrite(&self, now: std::time::SystemTime) -> bool {
+        now.duration_since(self.newest_timestamp())
+            .map(|age| age < COARSE_TIMESTAMP_WINDOW)
+            .unwrap_or(true)
+    }
+}
+
+/// What decides whether the file a failed load saw is still the same file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureProof {
+    /// The metadata stamp alone is proof: no write after the attempt can leave it untouched, so a
+    /// frame costs one `stat` and the file is never read again.
+    Stamp,
+    /// The stamp may still hide a rewrite that landed after the attempt's read but on the same
+    /// coarse tick, so the contents decide. `digest` is of the bytes the attempt itself used, and
+    /// `attempted_at` is the checker's own clock at the attempt: once a frame has verified the bytes
+    /// a full `COARSE_TIMESTAMP_WINDOW` after it, any later write must land on a new tick and the
+    /// proof settles to `Stamp`.
+    Contents {
+        attempted_at: std::time::Instant,
+        digest: [u8; 32],
+    },
+}
+
+/// What a failed load recorded about the file, so a later frame can tell "still the same broken
+/// file" from "rewritten since".
+///
+/// The metadata stamp answers that on its own once the file has settled. It cannot answer it inside
+/// `COARSE_TIMESTAMP_WINDOW`, where a same-length in-place rewrite moves nothing: with metadata as
+/// the only key, the entry then matched forever and the user stayed on a blank image for the rest of
+/// the session — exactly the mid-write self-heal this cache is supposed to allow. In that window the
+/// content decides — and it keeps deciding until a frame has confirmed it a full window after the
+/// attempt, measured on the checker's clock, not the file's. The file's own timestamps cannot say
+/// whether a same-tick rewrite happened AFTER the attempt: they are identical either way, and once
+/// they are old enough the draw loop may have been idle for the whole interval. Only a verification
+/// that post-dates every possible same-tick write settles the entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailedMediaLoad {
+    pub(crate) stamp: MediaFileStamp,
+    pub(crate) proof: FailureProof,
+}
+
+impl FailedMediaLoad {
+    /// Record a failed attempt. `stamp` is the metadata the attempt saw, `digest` the bytes it
+    /// actually used, `wall` and `now` the two clocks at the moment the stamp was captured.
+    ///
+    /// The stamp is proof on its own when the file's newest timestamp was already a full window old
+    /// at the attempt: no later write can share its tick. (This trusts the file's clock not to be
+    /// BEHIND ours by more than the window; a clock that is ahead — a timestamp in the future — is
+    /// handled by the checker's clock, below.) Otherwise the digest carries the proof, and `None`
+    /// there means the attempt could not read the file or it is above `MEDIA_DIGEST_MAX_BYTES`:
+    /// nothing content-based can ever be proven about such a file, so its stamp is trusted as it
+    /// stands. For a file above the cap that leaves the same-tick same-length rewrite undetected —
+    /// the cost of never reading more than the cap on the draw thread. Any other write moves the
+    /// stamp and is retried as usual.
+    pub(crate) fn record(
+        stamp: MediaFileStamp,
+        digest: Option<[u8; 32]>,
+        wall: std::time::SystemTime,
+        now: std::time::Instant,
+    ) -> Self {
+        let proof = match digest {
+            Some(digest) if stamp.may_hide_a_rewrite(wall) => FailureProof::Contents {
+                attempted_at: now,
+                digest,
+            },
+            _ => FailureProof::Stamp,
+        };
+        Self { stamp, proof }
+    }
+
+    /// `true` when the file is provably the same one this entry failed on, so another frame may skip
+    /// the decode/extraction.
+    ///
+    /// `digest` is a closure because reading the file is the expensive half and is wanted only while
+    /// the proof still rests on the contents. `now` is the checker's clock; a verification at or after
+    /// `attempted_at + COARSE_TIMESTAMP_WINDOW` settles the entry so no later frame reads the file.
+    fn still_matches(
+        &mut self,
+        current: &MediaFileStamp,
+        now: std::time::Instant,
+        digest: impl FnOnce() -> Option<[u8; 32]>,
+    ) -> bool {
+        if self.stamp != *current {
+            return false;
+        }
+        let FailureProof::Contents {
+            attempted_at,
+            digest: recorded,
+        } = self.proof
+        else {
+            return true;
+        };
+        // An unreadable file proves nothing: retry, and let the attempt record what it finds.
+        let Some(seen) = digest() else {
+            return false;
+        };
+        if seen != recorded {
+            return false;
+        }
+        // The read started at `now`; a write after it cannot share the attempt's tick once a full
+        // window has passed since the attempt, so from here the stamp is proof on its own.
+        if now.saturating_duration_since(attempted_at) >= COARSE_TIMESTAMP_WINDOW {
+            self.proof = FailureProof::Stamp;
+        }
+        true
+    }
+}
+
+/// Digest of `bytes`, as recorded for a failed load.
+fn media_bytes_digest(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
+
+/// Digest of the bytes an image attempt read, or `None` above `MEDIA_DIGEST_MAX_BYTES` so hashing
+/// keeps the same bound as reading.
+fn media_digest_of_bytes(bytes: &[u8]) -> Option<[u8; 32]> {
+    (bytes.len() as u64 <= MEDIA_DIGEST_MAX_BYTES).then(|| media_bytes_digest(bytes))
+}
+
+/// Digest of a media file read straight from disk, in fixed-size chunks so a large video is never
+/// pulled into memory whole. `None` when the file cannot be read, or when it is larger than
+/// `MEDIA_DIGEST_MAX_BYTES`: this runs on the draw thread, so the read is bounded by the cap rather
+/// than by the file (a 1 GiB file costs one `fstat` here, not ~400ms of hashing per frame).
+fn media_file_digest(path: &std::path::Path) -> Option<[u8; 32]> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MEDIA_DIGEST_MAX_BYTES {
+        return None;
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+    }
+    Some(*hasher.finalize().as_bytes())
 }
 
 /// Insert `bytes` into the bounded cache, evicting arbitrary entries to fit.
@@ -144,28 +325,55 @@ impl AgentView {
         if !self.inline_media_cache.contains_key(path) {
             // A missing file keeps polling cheaply (generation may still be writing it) and never reaches the decode/ffmpeg work below
             let meta = std::fs::metadata(path).ok()?;
+            // Both clocks are read right after the stat, so every write behind this stamp is
+            // older than `now`: that is what lets a later verification rule out a same-tick write.
+            let wall = std::time::SystemTime::now();
+            let now = std::time::Instant::now();
             // A failure is retried only when the file changed since
             // A file caught mid-write self-heals; a genuinely broken one doesn't re-run decode/extraction every frame
             // No stamp (no mtime) means no change signal: never negative-cache, keep retrying
+            // While the metadata cannot tell those apart, the digest does (`FailedMediaLoad`)
             let stamp = MediaFileStamp::from_metadata(&meta);
             if let Some(stamp) = stamp
-                && self.inline_media_load_failed.get(path) == Some(&stamp)
+                && let Some(failed) = self.inline_media_load_failed.get_mut(path)
+                && failed.still_matches(&stamp, now, || media_file_digest(path))
             {
                 return None;
             }
-            let loaded = if placement.info.is_video {
-                crate::prompt_images::extract_poster_frame(path).and_then(|(frame_bytes, _, _)| {
-                    crate::terminal::image::prepare_overlay_image_bytes(&frame_bytes)
-                })
+            // The digest is taken from the bytes this attempt itself used, never re-read after the
+            // attempt: a second read could pick up the very rewrite the next frame has to notice,
+            // and would then file the new contents under the old failure.
+            let (loaded, digest) = if placement.info.is_video {
+                // ffmpeg reads the file itself, so the digest costs one read here — against a
+                // process spawn and a decode, which is what it saves on the frames after this one.
+                // It is read only when the stamp could hide a rewrite (`FailedMediaLoad::record`
+                // would not consult it otherwise) and only up to `MEDIA_DIGEST_MAX_BYTES`. A video
+                // still being written moves its stamp on every frame, so every frame is a fresh
+                // attempt — ffmpeg on each, as before this cache — plus this one bounded read.
+                let digest = stamp
+                    .is_some_and(|stamp| stamp.may_hide_a_rewrite(wall))
+                    .then(|| media_file_digest(path))
+                    .flatten();
+                let loaded = crate::prompt_images::extract_poster_frame(path).and_then(
+                    |(frame_bytes, _, _)| {
+                        crate::terminal::image::prepare_overlay_image_bytes(&frame_bytes)
+                    },
+                );
+                (loaded, digest)
             } else {
-                std::fs::read(path)
-                    .ok()
-                    .and_then(|raw| crate::terminal::image::prepare_overlay_image_bytes(&raw))
+                let raw = std::fs::read(path).ok();
+                let loaded = raw
+                    .as_deref()
+                    .and_then(crate::terminal::image::prepare_overlay_image_bytes);
+                (loaded, raw.as_deref().and_then(media_digest_of_bytes))
             };
             let Some(bytes) = loaded else {
                 match stamp {
                     Some(stamp) => {
-                        self.inline_media_load_failed.insert(path.clone(), stamp);
+                        self.inline_media_load_failed.insert(
+                            path.clone(),
+                            FailedMediaLoad::record(stamp, digest, wall, now),
+                        );
                     }
                     None => {
                         self.inline_media_load_failed.remove(path);
@@ -177,7 +385,6 @@ impl AgentView {
             // Bound the cache: a long image-heavy session must not pin every encoded image for its lifetime
             // Evicting drops only CPU-side bytes; Kitty placements already transmitted stay valid on the GPU (`inline_media_ids` is kept)
             // An evicted path re-reads from disk if it needs a re-transmit
-            const INLINE_MEDIA_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
             oversized = cache_inline_media_bytes(
                 &mut self.inline_media_cache,
                 path,
@@ -686,6 +893,229 @@ mod tests {
             fps: 1.0,
             finished: false,
         }
+    }
+
+    // -- Negative-cache identity ---------------------------------------------
+
+    use super::{
+        COARSE_TIMESTAMP_WINDOW, FailedMediaLoad, FailureProof, MEDIA_DIGEST_MAX_BYTES,
+        MediaFileStamp, media_bytes_digest, media_digest_of_bytes, media_file_digest,
+    };
+    use std::time::{Duration, Instant, SystemTime};
+
+    /// A metadata stamp for a file last touched at `touched`, as `from_metadata` would report it.
+    fn stamp_touched_at(touched: SystemTime) -> MediaFileStamp {
+        #[cfg(unix)]
+        let ctime = {
+            let d = touched
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("test stamps sit after the epoch");
+            (d.as_secs() as i64, i64::from(d.subsec_nanos()))
+        };
+        MediaFileStamp {
+            len: 4096,
+            modified: touched,
+            #[cfg(unix)]
+            ino: 4_242,
+            #[cfg(unix)]
+            ctime,
+        }
+    }
+
+    /// A failed attempt at `(wall, t0)` on a file whose stamp is `stamp`, recording `bytes`.
+    fn failed_at(
+        stamp: MediaFileStamp,
+        bytes: &[u8],
+        wall: SystemTime,
+        t0: Instant,
+    ) -> FailedMediaLoad {
+        FailedMediaLoad::record(stamp, Some(media_bytes_digest(bytes)), wall, t0)
+    }
+
+    /// The shape of the bug this cache had: a same-length in-place rewrite that lands on the same
+    /// coarse clock tick as the failed write leaves `len`, mtime, inode and ctime all identical, so
+    /// the metadata stamp says "unchanged" about a file whose contents are completely different.
+    /// Pinned here with the stamps forced equal, so it holds at any speed and on any filesystem.
+    #[test]
+    fn a_same_tick_same_length_rewrite_is_not_proven_unchanged() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall);
+        let mut failed = failed_at(stamp, b"half-written placeholder", wall, t0);
+        assert!(
+            !failed.still_matches(&stamp, t0, || Some(media_bytes_digest(b"the real png"))),
+            "identical metadata must not outvote different contents inside the coarse-tick window"
+        );
+    }
+
+    /// The other half: same tick, same bytes, so the file really is the one that failed and another
+    /// frame must not pay for the decode again.
+    #[test]
+    fn a_same_tick_reread_of_the_same_bytes_stays_cached() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall);
+        let mut failed = failed_at(stamp, b"still broken", wall, t0);
+        assert!(failed.still_matches(&stamp, t0, || Some(media_bytes_digest(b"still broken"))));
+    }
+
+    /// The draw loop idles once the session is quiet (`AppView::tick_demand` -> `TickDemand::None`), so
+    /// the frame after a same-tick rewrite may come minutes later. It must still notice the rewrite:
+    /// the file's own timestamps cannot say whether that rewrite happened, however old they are.
+    #[test]
+    fn a_same_tick_rewrite_first_seen_after_the_window_is_still_detected() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall);
+        let mut failed = failed_at(stamp, b"half-written placeholder", wall, t0);
+        let later = t0 + COARSE_TIMESTAMP_WINDOW + Duration::from_secs(1);
+        assert!(
+            !failed.still_matches(&stamp, later, || Some(media_bytes_digest(b"the real png"))),
+            "a same-tick rewrite must be noticed by the next drawn frame, however late it is drawn"
+        );
+    }
+
+    /// A frame that verifies the bytes a full window after the attempt settles the entry: no write
+    /// after that read can share the attempt's tick, so the stamp is proof and the file is never
+    /// read again. A verification inside the window settles nothing — the next same-tick write
+    /// could still be ahead of it.
+    #[test]
+    fn a_verification_a_full_window_after_the_attempt_settles_the_entry() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall);
+        let mut failed = failed_at(stamp, b"still broken", wall, t0);
+        let inside = t0 + COARSE_TIMESTAMP_WINDOW - Duration::from_millis(1);
+        assert!(failed.still_matches(&stamp, inside, || Some(media_bytes_digest(b"still broken"))));
+        assert!(
+            matches!(failed.proof, FailureProof::Contents { .. }),
+            "a verification inside the window must not settle the entry"
+        );
+        let at_window = t0 + COARSE_TIMESTAMP_WINDOW;
+        assert!(failed.still_matches(&stamp, at_window, || {
+            Some(media_bytes_digest(b"still broken"))
+        }));
+        assert_eq!(failed.proof, FailureProof::Stamp);
+        assert!(
+            failed.still_matches(&stamp, at_window + Duration::from_secs(3600), || {
+                panic!("a settled entry must not read the file again")
+            })
+        );
+    }
+
+    /// Once the file was already older than the window when the attempt saw it, a later write
+    /// cannot share its tick, so the metadata is proof on its own and the file is never read again.
+    #[test]
+    fn a_settled_file_is_trusted_without_reading_it() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall - COARSE_TIMESTAMP_WINDOW);
+        let mut failed = failed_at(stamp, b"still broken", wall, t0);
+        assert_eq!(failed.proof, FailureProof::Stamp);
+        assert!(failed.still_matches(&stamp, t0, || {
+            panic!("a settled file must not be re-read to decide the negative cache")
+        }));
+    }
+
+    /// A timestamp from the future means the clocks disagree and nothing about the metadata can be
+    /// reasoned about, so the contents decide there too.
+    #[test]
+    fn a_timestamp_in_the_future_falls_back_to_the_contents() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall + Duration::from_secs(3600));
+        let mut failed = failed_at(stamp, b"half-written placeholder", wall, t0);
+        assert!(!failed.still_matches(&stamp, t0, || Some(media_bytes_digest(b"the real png"))));
+    }
+
+    /// A broken file whose timestamp sits in the future never settles by its own clock. It must
+    /// settle by the checker's: once a frame has verified the bytes a full window after the attempt,
+    /// no later write can leave the stamp untouched, and the file is never read again.
+    #[test]
+    fn a_broken_file_with_a_future_timestamp_settles_on_the_checkers_clock() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall + Duration::from_secs(3600));
+        let mut failed = failed_at(stamp, b"still broken", wall, t0);
+        let verified_at = t0 + COARSE_TIMESTAMP_WINDOW;
+        assert!(failed.still_matches(&stamp, verified_at, || {
+            Some(media_bytes_digest(b"still broken"))
+        }));
+        let after = verified_at + Duration::from_secs(1);
+        assert!(failed.still_matches(&stamp, after, || {
+            panic!("a file verified a full window after the attempt must not be read again")
+        }));
+    }
+
+    /// Nothing is proven by a file that cannot be read at check time: it is retried, and the
+    /// attempt records what it finds.
+    #[test]
+    fn an_unreadable_file_at_check_time_retries() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall);
+        let mut failed = failed_at(stamp, b"still broken", wall, t0);
+        assert!(!failed.still_matches(&stamp, t0, || None));
+    }
+
+    /// A failure recorded without a digest — the attempt could not read the file, or the file is
+    /// above the digest cap — has nothing content-based to verify, ever. Its stamp decides on its
+    /// own from the start: no per-frame read, no per-frame retry, and (for a file above the cap)
+    /// the same-tick same-length rewrite goes undetected until some metadata moves.
+    #[test]
+    fn a_failure_recorded_without_a_digest_is_decided_by_its_stamp_alone() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let stamp = stamp_touched_at(wall);
+        let mut never_read = FailedMediaLoad::record(stamp, None, wall, t0);
+        assert_eq!(never_read.proof, FailureProof::Stamp);
+        assert!(never_read.still_matches(&stamp, t0, || {
+            panic!("there is nothing to compare a read against")
+        }));
+        let moved = stamp_touched_at(wall + Duration::from_secs(1));
+        assert!(!never_read.still_matches(&moved, t0, || {
+            panic!("a changed stamp is already an answer")
+        }));
+    }
+
+    /// The cheap half still short-circuits: a moved stamp is a change, and no read is needed to say so.
+    #[test]
+    fn a_moved_metadata_stamp_needs_no_read() {
+        let (wall, t0) = (SystemTime::now(), Instant::now());
+        let mut failed = failed_at(
+            stamp_touched_at(wall - Duration::from_secs(1)),
+            b"still broken",
+            wall,
+            t0,
+        );
+        let current = stamp_touched_at(wall);
+        assert!(!failed.still_matches(&current, t0, || {
+            panic!("a changed stamp is already an answer")
+        }));
+    }
+
+    /// A file above the digest cap is never read for its digest: the read would be the unbounded
+    /// per-frame cost, so the cap answers `None` after one `fstat`.
+    #[test]
+    fn media_file_digest_skips_a_file_above_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.mkv");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MEDIA_DIGEST_MAX_BYTES + 1).unwrap();
+        drop(file);
+        assert_eq!(media_file_digest(&path), None);
+    }
+
+    /// At the cap the file is still digested: the cap bounds the read, it does not shrink it.
+    #[test]
+    fn media_file_digest_reads_a_file_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("at-cap.mkv");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MEDIA_DIGEST_MAX_BYTES).unwrap();
+        drop(file);
+        assert!(media_file_digest(&path).is_some());
+    }
+
+    /// The image path already holds the bytes; hashing them keeps the same bound as reading them,
+    /// so an image above the cap is recorded without a digest exactly like a video above it.
+    #[test]
+    fn media_digest_of_bytes_keeps_the_same_cap() {
+        let at_cap = vec![0u8; MEDIA_DIGEST_MAX_BYTES as usize];
+        assert!(media_digest_of_bytes(&at_cap).is_some());
+        let above = vec![0u8; MEDIA_DIGEST_MAX_BYTES as usize + 1];
+        assert_eq!(media_digest_of_bytes(&above), None);
     }
 
     /// Closing the video viewer modal drops the pre-extracted frame set; the purge must fire on close and never on other viewer keys.

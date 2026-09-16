@@ -484,8 +484,8 @@ pub fn installed_on_disk_version() -> Option<String> {
 }
 
 /// Everything between the `{bin_prefix}-` prefix and the first platform-OS component is the version, validated as semver.
-/// Handles the internal layout (`grok-0.1.150-macos-aarch64`) and the npm layout without a platform suffix (`grok-0.1.150`).
-/// Pre-releases parse whole: `grok-0.1.150-alpha.1-linux-x86_64` gives `0.1.150-alpha.1`.
+/// Handles the internal layout (`fuigo-0.1.150-macos-aarch64`) and the npm layout without a platform suffix (`fuigo-0.1.150`).
+/// Pre-releases parse whole: `fuigo-0.1.150-alpha.1-linux-x86_64` gives `0.1.150-alpha.1`.
 /// Unknown layouts (`fuigo-latest`, `fuigo-pager-*` when `bin_prefix` is `fuigo`) return `None` instead of garbage.
 ///
 /// Shared by the disk-version probe above and `cleanup_old_downloads` in `auto_update`; keep it the single place that understands this naming.

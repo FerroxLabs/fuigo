@@ -75,18 +75,23 @@ pub(crate) fn first_marked_field(
     protos: &[&Path],
 ) -> anyhow::Result<Option<String>> {
     let pool = compile_descriptor_pool(protoc, protoc_include_dir, includes, protos)?;
+    Ok(first_marked_field_in_pool(&pool, protos))
+}
+
+/// The half of [`first_marked_field`] that runs once `protoc` has produced a pool.
+/// Split out so tests can drive it from a recorded descriptor set instead of protoc.
+fn first_marked_field_in_pool(pool: &DescriptorPool, protos: &[&Path]) -> Option<String> {
     // Normalize to `/` — descriptor file names always use it, filesystem paths may not.
     let compiled: Vec<String> = protos
         .iter()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
 
-    Ok(pool
-        .all_messages()
+    pool.all_messages()
         .filter(|m| is_compiled_here(&compiled, m.parent_file().name()))
         .flat_map(|m| m.fields().collect::<Vec<_>>())
         .find(|f| classify(f.clone()).is_some())
-        .map(|f| f.full_name().to_string()))
+        .map(|f| f.full_name().to_string())
 }
 
 fn is_compiled_here(compiled: &[String], file_name: &str) -> bool {
@@ -129,9 +134,13 @@ fn compile_descriptor_pool(
     anyhow::ensure!(status.success(), "debug_redact: protoc failed");
 
     let bytes = std::fs::read(&fds_path)?;
+    decode_descriptor_pool(&bytes)
+}
+
+fn decode_descriptor_pool(bytes: &[u8]) -> anyhow::Result<DescriptorPool> {
     // Must decode with prost-reflect directly: a round-trip through
     // prost_types drops extension options as unknown fields.
-    DescriptorPool::decode(bytes.as_slice()).context("debug_redact: decode descriptor set")
+    DescriptorPool::decode(bytes).context("debug_redact: decode descriptor set")
 }
 
 enum MarkedDebugRedact {
@@ -162,16 +171,63 @@ fn classify(field: FieldDescriptor) -> Option<MarkedDebugRedact> {
 mod tests {
     use super::*;
 
+    // These fixtures are descriptor sets recorded from the pinned `bin/protoc`
+    // (libprotoc 29.3) rather than compiled by a `protoc` found at test time.
+    // `debug_redact` is a `FieldOptions` field that only exists in protobuf >= 23, and
+    // `find_protoc` deliberately falls back to whatever `protoc` is on `PATH` when the
+    // pinned dotslash wrapper cannot run (no `dotslash`, or no network to fetch it).
+    // On the offline CI image that fallback is libprotoc 3.21.12, which rejects the
+    // option outright — so compiling the fixtures here tested the ambient toolchain,
+    // not this module. Decoding recorded bytes keeps the test hermetic while still
+    // exercising real protoc output.
+    //
+    // Regenerate after editing either .proto, from this crate's directory:
+    //   for p in debug_redact_test debug_redact_plain; do \
+    //     ../../../bin/protoc --descriptor_set_out=test_data/$p.pbbin --include_imports \
+    //       --experimental_allow_proto3_optional -Itest_data $p.proto; done
+    const TEST_FDS: &[u8] = include_bytes!("../test_data/debug_redact_test.pbbin");
+    const PLAIN_FDS: &[u8] = include_bytes!("../test_data/debug_redact_plain.pbbin");
+
+    // Recorded bytes cannot notice that their `.proto` moved on. Editing a fixture
+    // `.proto` without re-running the command above leaves these tests decoding a
+    // stale descriptor and quietly passing on the old shape. Pin each source so that
+    // drift fails here instead. FNV-1a/64 over the source with CR stripped: no new
+    // dependency, and no false failure on a CRLF checkout of the `.proto` (which,
+    // unlike the `.pbbin`, really is text). Update the constant in the same commit
+    // that regenerates the `.pbbin`.
+    const TEST_PROTO: &str = include_str!("../test_data/debug_redact_test.proto");
+    const PLAIN_PROTO: &str = include_str!("../test_data/debug_redact_plain.proto");
+    const TEST_PROTO_FNV1A: u64 = 0xa74a_cb03_a7f2_48fe;
+    const PLAIN_PROTO_FNV1A: u64 = 0xfade_b05e_d15c_4c55;
+
+    fn fnv1a64_no_cr(src: &str) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in src.bytes().filter(|b| *b != b'\r') {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// The `.pbbin` fixtures are recordings; this fails when their source drifts.
+    #[test]
+    fn recorded_descriptor_sets_still_match_their_protos() {
+        for (name, src, expected) in [
+            ("debug_redact_test.proto", TEST_PROTO, TEST_PROTO_FNV1A),
+            ("debug_redact_plain.proto", PLAIN_PROTO, PLAIN_PROTO_FNV1A),
+        ] {
+            assert_eq!(
+                fnv1a64_no_cr(src),
+                expected,
+                "{name} changed since its .pbbin was recorded: regenerate the \
+                 descriptor sets with the protoc command above and update the \
+                 matching *_PROTO_FNV1A constant"
+            );
+        }
+    }
+
     fn field(name: &str) -> FieldDescriptor {
-        let test_data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
-        let protoc = crate::find_protoc::find_protoc().unwrap();
-        let pool = compile_descriptor_pool(
-            protoc.as_deref(),
-            None,
-            &[test_data.as_path()],
-            &[Path::new("debug_redact_test.proto")],
-        )
-        .unwrap();
+        let pool = decode_descriptor_pool(TEST_FDS).unwrap();
         pool.get_message_by_name("t.M")
             .unwrap()
             .get_field_by_name(name)
@@ -199,18 +255,19 @@ mod tests {
 
     #[test]
     fn first_marked_field_finds_annotations_and_ignores_comments() {
-        let test_data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
-        let protoc = crate::find_protoc::find_protoc().unwrap();
-        let find = |protos: &[&Path]| {
-            first_marked_field(protoc.as_deref(), None, &[test_data.as_path()], protos).unwrap()
+        let find = |fds: &[u8], protos: &[&Path]| {
+            first_marked_field_in_pool(&decode_descriptor_pool(fds).unwrap(), protos)
         };
 
         // Marked fields in directly compiled protos are found.
         assert_eq!(
-            find(&[Path::new("debug_redact_test.proto")]).as_deref(),
+            find(TEST_FDS, &[Path::new("debug_redact_test.proto")]).as_deref(),
             Some("t.M.marked")
         );
         // A proto that only mentions the option in comments reports nothing.
-        assert_eq!(find(&[Path::new("debug_redact_plain.proto")]), None);
+        assert_eq!(
+            find(PLAIN_FDS, &[Path::new("debug_redact_plain.proto")]),
+            None
+        );
     }
 }

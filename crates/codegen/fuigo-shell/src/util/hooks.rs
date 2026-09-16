@@ -49,14 +49,35 @@ pub(crate) fn discover_hook_source_paths(
     git_root: Option<&Path>,
     compat: &fuigo_tools::types::compat::CompatConfig,
 ) -> HookSourcePaths {
-    let fuigo = fuigo_config::user_fuigo_home();
-    let home = fuigo_dirs::home_dir();
+    discover_hook_source_paths_in(
+        fuigo_config::user_fuigo_home().as_deref(),
+        fuigo_dirs::home_dir().as_deref(),
+        git_root,
+        compat,
+    )
+}
+
+/// [`discover_hook_source_paths`] with the two home-anchored roots passed in: `fuigo` is the
+/// user fuigo home (`<fuigo>/hooks`, `<fuigo>/hooks-paths`) and `home` the user home
+/// (`<home>/.claude/settings*.json`, `<home>/.cursor/hooks.json`).
+///
+/// The production entry point reads both from the environment; this seam exists so a test can
+/// run the real discovery and assembly against directories it owns instead of the developer's
+/// dotfiles. A test that used the environment-reading entry point read whatever the machine
+/// happened to have under `$HOME`, and a stray `~/.cursor/hooks.json` turned an unrelated
+/// assertion red.
+fn discover_hook_source_paths_in(
+    fuigo: Option<&Path>,
+    home: Option<&Path>,
+    git_root: Option<&Path>,
+    compat: &fuigo_tools::types::compat::CompatConfig,
+) -> HookSourcePaths {
     let include_claude = include_claude_hooks(compat);
     let include_cursor = include_cursor_hooks(compat);
 
     // An unreadable hooks-paths file keeps the fixed Fuigo sources; a hard resolve failure omits all Fuigo global sources
     let mut global: Vec<PathBuf> =
-        match resolve_global_hook_sources(fuigo.as_deref(), /* reject_symlinks */ false) {
+        match resolve_global_hook_sources(fuigo, /* reject_symlinks */ false) {
             Ok(resolved) => {
                 if let Some(e) = &resolved.configured_error {
                     tracing::warn!(
@@ -78,7 +99,7 @@ pub(crate) fn discover_hook_source_paths(
             }
         };
 
-    if let Some(h) = home.as_deref() {
+    if let Some(h) = home {
         if include_claude {
             global.push(h.join(".claude").join("settings.json"));
             global.push(h.join(".claude").join("settings.local.json"));
@@ -116,20 +137,35 @@ pub(crate) fn discover_hooks(
     assemble_hooks(&config_layers, git_root, compat, trusted)
 }
 
-/// Pure, injectable core: combine config-layer hooks with file-source hooks and dedup once.
-/// Config-layer specs go first.
-/// The first-wins dedup in [`fuigo_hooks::discovery::registry_from_specs_deduped`] then lets a config hook beat a byte-identical file hook.
-/// `config_layers` is a parameter (not read here) so tests can drive it with hand-built layers.
+/// Combine config-layer hooks with the file-source hooks discovered under the user's home and
+/// the project, and dedup once. `config_layers` is a parameter (not read here) so tests can
+/// drive it with hand-built layers; the file sources come from the environment via
+/// [`discover_hook_source_paths`], so a test that must not read the developer's dotfiles uses
+/// [`assemble_hooks_from_sources`] with sources it discovered under its own roots.
 pub(crate) fn assemble_hooks(
     config_layers: &[fuigo_config::HookConfigLayer],
     git_root: Option<&Path>,
     compat: &fuigo_tools::types::compat::CompatConfig,
     trusted: bool,
 ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
+    assemble_hooks_from_sources(
+        config_layers,
+        &discover_hook_source_paths(git_root, compat),
+        trusted,
+    )
+}
+
+/// Pure, injectable core of [`assemble_hooks`]: nothing here reads the environment.
+/// Config-layer specs go first.
+/// The first-wins dedup in [`fuigo_hooks::discovery::registry_from_specs_deduped`] then lets a config hook beat a byte-identical file hook.
+fn assemble_hooks_from_sources(
+    config_layers: &[fuigo_config::HookConfigLayer],
+    source_paths: &HookSourcePaths,
+    trusted: bool,
+) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
     let (mut specs, mut errors) =
         fuigo_hooks::config::parse_hooks_from_config_layers(config_layers);
 
-    let source_paths = discover_hook_source_paths(git_root, compat);
     let (global_sources, project_sources) = source_paths.as_sources(trusted);
     let (file_specs, file_errors) =
         fuigo_hooks::discovery::collect_specs_from_sources(&global_sources, &project_sources);
@@ -150,6 +186,31 @@ mod tests {
 
     fn write_requirements(dir: &Path, content: &str) {
         std::fs::write(dir.join("requirements.toml"), content).unwrap();
+    }
+
+    /// The real assembly ([`assemble_hooks_from_sources`]) over file sources discovered under
+    /// two empty roots this test owns, standing in for the user fuigo home and the user home.
+    ///
+    /// The environment-reading [`assemble_hooks`] discovers `<home>/.claude/settings*.json` and
+    /// `<home>/.cursor/hooks.json` under `fuigo_dirs::home_dir()`, i.e. the developer's real
+    /// dotfiles: a malformed `~/.cursor/hooks.json` on the workstation made these tests fail
+    /// with `ParseFile { path: "/Users/<dev>/.cursor/hooks.json", .. }`. Nothing here touches
+    /// `HOME`, so the isolation holds whatever the process environment is and needs no
+    /// serialisation against other env-mutating tests.
+    fn assemble_under_empty_homes(
+        layers: &[fuigo_config::HookConfigLayer],
+        compat: &fuigo_tools::types::compat::CompatConfig,
+    ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
+        let fuigo_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let sources =
+            discover_hook_source_paths_in(Some(fuigo_home.path()), Some(home.path()), None, compat);
+        assert!(
+            sources.global.iter().all(|p| p.starts_with(fuigo_home.path()) || p.starts_with(home.path())),
+            "every global hook source must sit under a root this test owns: {:?}",
+            sources.global
+        );
+        assemble_hooks_from_sources(layers, &sources, false)
     }
 
     /// A temp policy layer pins hooks for `SessionStart`, `UserPromptSubmit`, and `PreToolUse`.
@@ -188,7 +249,7 @@ timeout = 5
         assert_eq!(layers[0].source_name(), "requirements/system");
 
         let compat = fuigo_tools::types::compat::CompatConfig::default();
-        let (registry, errors) = assemble_hooks(&layers, None, &compat, false);
+        let (registry, errors) = assemble_under_empty_homes(&layers, &compat);
         assert!(errors.is_empty(), "errors: {errors:?}");
 
         for (event, command) in [
@@ -284,7 +345,7 @@ timeout = 5
         // Registry level through the real assembly: all three events register with requirements provenance
         // The byte-identical PreToolUse duplicate collapses to one effective hook
         let compat = fuigo_tools::types::compat::CompatConfig::default();
-        let (registry, errors) = assemble_hooks(&layers, None, &compat, false);
+        let (registry, errors) = assemble_under_empty_homes(&layers, &compat);
         assert!(errors.is_empty(), "errors: {errors:?}");
         for event in [
             HookEventName::SessionStart,

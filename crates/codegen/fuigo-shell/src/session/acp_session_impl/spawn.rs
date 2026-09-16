@@ -74,6 +74,76 @@ fn subagent_sampler_rate_limit_threshold(is_subagent: bool, pacer_max_attempts: 
         fuigo_sampler::RATE_LIMIT_RETRY_THRESHOLD
     }
 }
+/// Whether this session keeps the MCP meta-tools `search_tool` and `use_tool`.
+///
+/// `AgentBuilder` drops both when this is false ("with none configured at session start they
+/// are dead schema bytes in every request", `fuigo-agent/src/builder.rs`, pinned there by
+/// `mcp_meta_tools_follow_the_configured_signal`). They are also the *only* way a session
+/// reaches an MCP server at all: `McpState` is not handed to the builder, so a stripped pair
+/// means no MCP tool can be called.
+///
+/// * `own_servers` - the session's own resolved local/client/managed list.
+/// * `acp_servers` - in-process SDK servers registered over the gateway.
+/// * `inherited_servers` - a subagent's share of its parent's already-connected pool.
+///   A child does NOT get its servers only from its own definition's `mcpServers`:
+///   `subagent::handle_request` runs the parent pool through `resolve_inherited_mcp_pool`,
+///   and `McpInheritance` defaults to `All`, so by default the child imports every server
+///   the parent already has connected (`plugin_agents_inherit_parent_mcp_pool_by_default`).
+///   Those are live clients the child is meant to call, so they have to keep the pair that
+///   reaches them - the import at the `McpState` build below happens after this gate and
+///   cannot feed it.
+/// * `presentation_mode` - `full`, `compact` or `adaptive`.
+///
+/// `adaptive` keeps the pair regardless of any server: `search_tool` is not only the MCP
+/// discovery tool, it is also the native discovery channel (`scope=native`) that reveals a
+/// deferred media schema, and `turn.rs` only enables the adaptive projection while
+/// `search_tool` is advertised. Without that an adaptive session with no MCP server silently
+/// degrades to `full` and advertises every media schema it was supposed to defer.
+fn mcp_meta_tools_reachable(
+    own_servers: usize,
+    acp_servers: usize,
+    inherited_servers: usize,
+    presentation_mode: &str,
+) -> bool {
+    own_servers > 0 || acp_servers > 0 || inherited_servers > 0 || presentation_mode == "adaptive"
+}
+
+#[cfg(test)]
+mod mcp_meta_tool_gate_tests {
+    use super::mcp_meta_tools_reachable;
+
+    #[test]
+    fn a_session_that_can_reach_no_mcp_server_drops_the_meta_tools() {
+        assert!(!mcp_meta_tools_reachable(0, 0, 0, "full"));
+        assert!(!mcp_meta_tools_reachable(0, 0, 0, "compact"));
+    }
+
+    #[test]
+    fn own_and_acp_declared_servers_each_keep_the_meta_tools() {
+        assert!(mcp_meta_tools_reachable(1, 0, 0, "full"));
+        assert!(mcp_meta_tools_reachable(0, 1, 0, "compact"));
+    }
+
+    /// A subagent inherits its parent's connected pool by default: `McpInheritance`
+    /// derives `Default` as `All` (`fuigo-agent/src/config.rs`), `subagent::handle_request`
+    /// runs it through `resolve_inherited_mcp_pool`, and
+    /// `plugin_agents_inherit_parent_mcp_pool_by_default` pins that even plugin children
+    /// get it. Those are live clients the child is meant to call, and `search_tool` /
+    /// `use_tool` are the only route to them.
+    #[test]
+    fn an_inherited_parent_pool_keeps_the_meta_tools_that_reach_it() {
+        assert!(mcp_meta_tools_reachable(0, 0, 2, "full"));
+        assert!(mcp_meta_tools_reachable(0, 0, 2, "compact"));
+    }
+
+    /// Adaptive presentation needs `search_tool` as the native discovery channel even with
+    /// no MCP server anywhere, or `turn.rs` never enables the adaptive projection.
+    #[test]
+    fn adaptive_presentation_keeps_the_native_discovery_channel_without_any_mcp_server() {
+        assert!(mcp_meta_tools_reachable(0, 0, 0, "adaptive"));
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "spawn_runtime_containment_tests.rs"]
 mod runtime_containment_tests;
@@ -927,9 +997,12 @@ pub(crate) async fn spawn_session_actor(
             },
         ))
     });
-    // Any configured server (resolved local/client/managed list, or in-process SDK servers) keeps
-    // the MCP meta-tools advertised; with none, `search_tool`/`use_tool` are dropped at build.
-    let mcp_configured = !mcp_servers.is_empty() || !acp_mcp_servers.is_empty();
+    let mcp_configured = mcp_meta_tools_reachable(
+        mcp_servers.len(),
+        acp_mcp_servers.len(),
+        parent_mcp_pool.as_ref().map_or(0, |pool| pool.len()),
+        &initial_native_presentation.mode(),
+    );
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
         if let Some(ref pool) = parent_mcp_pool {

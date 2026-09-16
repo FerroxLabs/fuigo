@@ -1278,12 +1278,18 @@ pub struct AgentView {
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
     /// decoding and iTerm2 re-sends. Kitty transmits once and re-places.
     pub(crate) inline_media_cache: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
-    /// Paths that failed to decode/extract, keyed by the file stamp at
-    /// failure: skips per-frame decode/ffmpeg retries while the file is
+    /// Paths that failed to decode/extract, keyed by what the file looked like
+    /// at failure: skips per-frame decode/ffmpeg retries while the file is
     /// unchanged, and self-heals when it changes (e.g. caught mid-write).
+    /// The metadata stamp alone cannot see a same-length in-place rewrite that
+    /// lands on the same coarse clock tick, so a content digest rides along and
+    /// decides until a frame has verified the bytes a full window after the
+    /// attempt, on this process's clock (`media::FailedMediaLoad`). Reads for
+    /// that are capped at `media::MEDIA_DIGEST_MAX_BYTES`; a larger file is
+    /// decided by its stamp alone.
     /// Cleared with the byte cache on eviction.
     pub(crate) inline_media_load_failed:
-        std::collections::HashMap<std::path::PathBuf, media::MediaFileStamp>,
+        std::collections::HashMap<std::path::PathBuf, media::FailedMediaLoad>,
     /// Kitty GPU image IDs per media path. Each path gets a unique ID (2+)
     /// so switching between images is a cheap re-place (~80 bytes) instead
     /// of a full re-transmit. ID 1 is reserved for modal overlays.
@@ -1907,19 +1913,14 @@ fn translate_local_submit(
             );
             InputOutcome::Action(Action::OpenUrl(url.to_string()))
         }
-        LocalQuestionKind::FreeUsageUpsell { source } => {
+        LocalQuestionKind::FreeUsageUpsell => {
             let url = qv
                 .questions
                 .first()
                 .and_then(|q| q.options.get(*idx))
                 .and_then(|o| o.id.as_deref())
                 .unwrap_or(super::dispatch::UPSELL_URL_UPGRADE);
-            fuigo_telemetry::session_ctx::log_event(
-                fuigo_telemetry::events::SuperGrokUpsellClicked {
-                    source,
-                    auth_method: None,
-                },
-            );
+            // No click event: this modal points at our own billing page and feeds no referral funnel.
             InputOutcome::Action(Action::OpenUrl(url.to_string()))
         }
         LocalQuestionKind::AgentTypeMismatch { model_id, effort } => {

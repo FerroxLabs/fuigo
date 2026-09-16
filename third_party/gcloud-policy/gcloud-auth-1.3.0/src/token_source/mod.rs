@@ -114,6 +114,13 @@ mod tests {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS/BSD hand back an accepted socket that inherited the
+                        // listener's O_NONBLOCK, and a read timeout has no effect on a
+                        // non-blocking socket, so the first `read` returns WouldBlock
+                        // instead of the request. Linux does not inherit it, which is
+                        // why this only ever showed up off the CI host. Clear it
+                        // explicitly; the 3s read timeout below is the real bound.
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
                         let mut bytes = Vec::new();
                         let mut buffer = [0; 4096];

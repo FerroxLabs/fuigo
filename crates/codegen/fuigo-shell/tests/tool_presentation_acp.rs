@@ -9,6 +9,9 @@ fn compact_presentation_keeps_instructions_and_native_schemas() {
     // One test per binary; configure before mock or agent threads exist.
     unsafe { std::env::set_var("FUIGO_TOOL_PRESENTATION", "compact"); }
     run_agent_test(|cwd, mock| async move {
+        // Compact presentation is asserted on the full meta-tool pair below; see
+        // `acp_harness::declare_fixture_mcp_server` for why one has to be declared.
+        acp_harness::declare_fixture_mcp_server();
         std::fs::write(cwd.join("AGENTS.md"), "Project convention: KEEP_COMPACT_INSTRUCTION_719.\n").unwrap();
         let (conn, _) = connect_and_auth(AutoApproveClient, "compact-presentation-fixture").await;
         let session = new_session(&conn, &cwd).await;

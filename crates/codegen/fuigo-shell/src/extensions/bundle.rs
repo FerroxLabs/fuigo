@@ -528,8 +528,12 @@ mod tests {
                                 .get("authorization")
                                 .and_then(|v| v.to_str().ok())
                                 .map(str::to_owned),
+                            // The provider's token-auth header (`X-XAI-Token-Auth`, a wire value):
+                            // the bundle request must NOT carry it. The rebrand rewrote this
+                            // lookup to `x-fuigo-token-auth`, a name the client never sends, which
+                            // made the `token_auth == None` assertion below vacuous.
                             token_auth: headers
-                                .get("x-fuigo-token-auth")
+                                .get("x-xai-token-auth")
                                 .and_then(|v| v.to_str().ok())
                                 .map(str::to_owned),
                             user_id: headers

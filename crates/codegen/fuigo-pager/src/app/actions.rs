@@ -121,8 +121,6 @@ pub enum Action {
     DeleteCurrentSessionAnswered {
         confirmed: bool,
     },
-    /// Open grok.com in the browser for SuperGrok subscription upsell.
-    OpenSuperfuigoUrl,
     /// Re-check subscription status via the shell's `fuigo/auth/check_subscription`.
     CheckSubscription,
     /// Open an arbitrary URL in the system browser (with scheme validation).

@@ -874,8 +874,6 @@ pub struct AppView {
     pub welcome_auth_fallback_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the "[Refresh]" button on the paywall tier line.
     pub welcome_refresh_rect: Option<ratatui::layout::Rect>,
-    /// Hit-test rect for the gate URL link on the paywall CTA.
-    pub welcome_gate_url_rect: Option<ratatui::layout::Rect>,
     /// Rewritten by every welcome frame, so a resize leaves no stale click target.
     pub welcome_consent_link_rects: Vec<(usize, ratatui::layout::Rect)>,
     /// Consent link the mouse is over, so every run of a wrapped link brightens together.
@@ -1147,7 +1145,6 @@ pub struct AppView {
     /// Server-controlled via RemoteSettings (remote settings `fuigo_build_usage_redirect_url`, targeted at personal-team users).
     /// `None` (default) fetches usage from the backend.
     pub usage_billing_redirect_url: Option<String>,
-    pub access_gate_shown_logged: bool,
     /// (hide-key, surface) pairs whose `AnnouncementCtaShown` impression was already logged (once per pager process, cleared on logout).
     /// Keyed by `announcement_hide_key` (stable even for id-less items, unlike the event's `id`).
     pub announcement_cta_impressions_logged:
@@ -1428,8 +1425,6 @@ impl AppView {
         }
         Some(fuigo_shell::auth::GateInfo {
             message: msg.clone(),
-            url: rs.gate_url.clone(),
-            label: rs.gate_label.clone(),
         })
     }
     /// Apply typed auth metadata from the shell.
@@ -1449,7 +1444,6 @@ impl AppView {
             fuigo_telemetry::session_ctx::log_event(
                 fuigo_telemetry::events::SubscriptionActivated {
                     auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
-                    upsell_shown_this_session: self.access_gate_shown_logged,
                 },
             );
         }
@@ -1589,7 +1583,6 @@ impl AppView {
             welcome_announcement: WelcomeAnnouncementState::default(),
             welcome_auth_fallback_rect: None,
             welcome_refresh_rect: None,
-            welcome_gate_url_rect: None,
             welcome_consent_link_rects: Vec::new(),
             welcome_consent_hover_link: None,
             consent_answered: None,
@@ -1715,7 +1708,6 @@ impl AppView {
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
             usage_billing_redirect_url: None,
-            access_gate_shown_logged: false,
             announcement_cta_impressions_logged: Default::default(),
             gate: None,
             subscription_tier: None,
@@ -2882,7 +2874,6 @@ impl AppView {
                     auth_url_rect: self.welcome_auth_url_rect.as_ref(),
                     auth_fallback_rect: self.welcome_auth_fallback_rect.as_ref(),
                     refresh_rect: self.welcome_refresh_rect.as_ref(),
-                    gate_url_rect: self.welcome_gate_url_rect.as_ref(),
                     upgrade_cta_rect: self.welcome_upgrade_cta_rect.as_ref(),
                     privacy_banner_opt_in_rect: self.welcome_privacy_banner_opt_in_rect.as_ref(),
                     privacy_banner_opt_out_rect: self.welcome_privacy_banner_opt_out_rect.as_ref(),
@@ -3501,7 +3492,6 @@ struct WelcomeInputCtx<'a> {
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
     auth_fallback_rect: Option<&'a ratatui::layout::Rect>,
     refresh_rect: Option<&'a ratatui::layout::Rect>,
-    gate_url_rect: Option<&'a ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero upgrade CTA `[label]` button (click opens the promo url).
     upgrade_cta_rect: Option<&'a ratatui::layout::Rect>,
     privacy_banner_opt_in_rect: Option<&'a ratatui::layout::Rect>,
@@ -4063,7 +4053,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             return handle_menu_shortcuts(
                 key,
                 ctx.menu_index,
-                &['g', 'l', 'q'],
+                &['l', 'q'],
                 dispatch_access_gate_menu_action,
             );
         }
@@ -4322,11 +4312,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 {
                     return InputOutcome::Action(Action::CheckSubscription);
                 }
-                if let Some(rect) = ctx.gate_url_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::OpenSuperfuigoUrl);
-                }
                 if let Some(rect) = ctx.upgrade_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 {
@@ -4567,13 +4552,13 @@ fn dispatch_zdr_menu_action(index: usize) -> InputOutcome {
         _ => InputOutcome::Unchanged,
     }
 }
-/// Menu actions when user is access-gated: item 0 is Subscribe CTA, item 1 is Logout, item 2 is Quit.
+/// Menu actions when user is access-gated: item 0 is Logout, item 1 is Quit.
 /// "Refresh" (ctrl-r) is handled as a direct key shortcut, not a menu item.
+/// There is no upgrade CTA: Fuigo sells no subscription, so the gate states the block and offers no funnel out of it.
 fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
     match index {
-        0 => InputOutcome::Action(Action::OpenSuperfuigoUrl),
-        1 => InputOutcome::Action(Action::Logout),
-        2 => InputOutcome::Action(Action::Quit),
+        0 => InputOutcome::Action(Action::Logout),
+        1 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
 }
@@ -5023,7 +5008,6 @@ impl AppView {
                         self.welcome_auth_url_rect = result.auth_url_rect;
                         self.welcome_auth_fallback_rect = result.auth_fallback_rect;
                         self.welcome_refresh_rect = result.refresh_rect;
-                        self.welcome_gate_url_rect = result.gate_url_rect;
                         self.welcome_consent_link_rects = result.consent_link_rects;
                         if self.welcome_consent_link_rects.is_empty() {
                             self.welcome_consent_hover_link = None;
@@ -5088,18 +5072,6 @@ impl AppView {
                                 cached_lines,
                                 compact,
                                 &theme,
-                            );
-                        }
-                        if !has_access && !self.access_gate_shown_logged {
-                            self.access_gate_shown_logged = true;
-                            fuigo_telemetry::session_ctx::log_event(
-                                fuigo_telemetry::events::SuperGrokUpsellShown {
-                                    source: fuigo_telemetry::events::SuperGrokUpsell::WelcomeScreen,
-                                    auth_method: self
-                                        .login_method_id
-                                        .as_ref()
-                                        .map(|id| id.0.to_string()),
-                                },
                             );
                         }
                         if let Some(tutorial) = self.tutorial.as_mut() {

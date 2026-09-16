@@ -1944,10 +1944,14 @@ fn dashboard_slash_restricted_command_upsells_via_toast() {
         .unwrap()
         .error_toast
         .as_deref()
-        .expect("restricted command must set the upsell toast");
+        .expect("restricted command must set the unavailable toast");
     assert!(
-        toast.contains("/imagine") && toast.contains("SuperGrok"),
-        "toast must carry the upsell: {toast}"
+        toast.contains("/imagine") && toast.contains("not available for your account"),
+        "toast must name the command and say it is unavailable: {toast}"
+    );
+    assert!(
+        !toast.contains("SuperGrok"),
+        "no competitor subscription may be marketed here: {toast}"
     );
 }
 /// A slash command that fails (`CommandResult::Error`) surfaces on
