@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// `SessionActor` turn futures overflow the default test thread stack.
-fn block_on_session(f: impl FnOnce() + Send + 'static) {
+pub(super) fn block_on_session(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(f)
@@ -18,7 +18,7 @@ fn block_on_session(f: impl FnOnce() + Send + 'static) {
         .expect("test thread");
 }
 
-fn current_thread_local<F>(f: F)
+pub(super) fn current_thread_local<F>(f: F)
 where
     F: Future<Output = ()> + 'static,
 {
@@ -29,7 +29,7 @@ where
     tokio::task::LocalSet::new().block_on(&rt, f);
 }
 
-const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
+pub(super) const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
 /// A `search_replace` call: an edit, so a non-yolo permission manager always prompts for it.
 const SEARCH_REPLACE_ARGS: &str =
     r#"{"file_path":"/tmp/permission-hook.txt","old_string":"a","new_string":"b"}"#;
@@ -59,16 +59,22 @@ fn capture_hook_events(
     fired
 }
 
-/// Injects ENOSPC on the flush barrier **only**.
+/// Answers **every** `PersistenceMsg` that carries a `respond_to`, so a driven turn can only fail
+/// for the reason a test is actually injecting and never because "the persistence actor is gone".
 ///
-/// Every other must-answer `PersistenceMsg` is served normally, so the fault under test stays "the
-/// turn-end fsync hit a full disk" and does not degrade into "the persistence actor is gone".
-/// `ExecutionState` is one of those: a turn with `max_turns` set opens a durable execution record
-/// before the first model call (`SessionActor::handle_turn_input`), and dropping its oneshot fails
-/// the prompt with `Execution state could not be made durable` before the turn ever starts.
-/// It is applied against a real temp dir, the same way `execution_state::tests::fixture_actor` and
-/// the bounded-compaction fixture do.
-fn drain_persistence_flush_enospc(mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
+/// `flush` decides what the turn-end fsync barrier (`FlushAndAck`) returns; that is the only fault
+/// this stub can inject. The variants without a `respond_to` are fire-and-forget writes with no
+/// caller waiting on them, so dropping those is not observable.
+///
+/// `ExecutionState` is the arm that has to do real work: a turn with `max_turns` set opens a
+/// durable execution record before the first model call (`SessionActor::handle_turn_input`), reads
+/// it once per sampling round and mutates it on every admission, so a stubbed `Ok` would make the
+/// bounded-execution state machine meaningless. It is applied against a real temp dir, the same way
+/// `execution_state::tests::fixture_actor` and the bounded-compaction fixture do.
+pub(super) fn spawn_persistence_stub(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+    flush: fn() -> std::io::Result<()>,
+) {
     let execution_dir = tempfile::tempdir().expect("execution state dir");
     tokio::task::spawn_local(async move {
         // Held for the lifetime of the drain so the execution record outlives the turn.
@@ -76,8 +82,7 @@ fn drain_persistence_flush_enospc(mut rx: tokio::sync::mpsc::UnboundedReceiver<P
         while let Some(msg) = rx.recv().await {
             match msg {
                 PersistenceMsg::FlushAndAck { respond_to } => {
-                    let _ =
-                        respond_to.send(Err(std::io::Error::from(std::io::ErrorKind::StorageFull)));
+                    let _ = respond_to.send(flush());
                 }
                 PersistenceMsg::ExecutionState {
                     mutation,
@@ -88,15 +93,44 @@ fn drain_persistence_flush_enospc(mut rx: tokio::sync::mpsc::UnboundedReceiver<P
                             .await,
                     );
                 }
+                PersistenceMsg::PresentationHints { respond_to, .. }
+                | PersistenceMsg::ReplaceChatHistoryForStripAndAck { respond_to, .. }
+                | PersistenceMsg::DeleteGoalModeState { respond_to }
+                | PersistenceMsg::WorkflowRunStateAndAck { respond_to, .. }
+                | PersistenceMsg::ProbeWritable { respond_to } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::CommitCompactionAndAck { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::AppendUpdateDurablyAndAck { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                PersistenceMsg::AppendCwdSwitchAndAck { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(fuigo_chat_state::StrictAppendAck::Appended));
+                }
+                PersistenceMsg::CopyFile { one_shot } => {
+                    let _ = one_shot.send(Ok(
+                        crate::session::persistence::SessionStateCopy { files: Vec::new() },
+                    ));
+                }
+                // Fire-and-forget: no `respond_to`, so nothing is waiting on these.
                 _ => {}
             }
         }
     });
 }
 
+/// Injects ENOSPC on the turn-end flush barrier, and only there.
+fn drain_persistence_flush_enospc(rx: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>) {
+    spawn_persistence_stub(rx, || {
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    });
+}
+
 /// `permission_gateway` installs a non-yolo permission manager and the read+edit toolset, so a
 /// scripted `search_replace` call prompts the client and the client's answer decides the turn.
-async fn actor_with_mock_sampler(
+pub(super) async fn actor_with_mock_sampler(
     server: &MockInferenceServer,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     gateway_tx: tokio::sync::mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
@@ -172,7 +206,7 @@ async fn actor_with_mock_sampler(
     actor
 }
 
-async fn run_prompt(
+pub(super) async fn run_prompt(
     actor: &Arc<SessionActor>,
     prompt_id: &str,
 ) -> Result<crate::session::commands::PromptTurnOk, acp::Error> {
@@ -277,10 +311,13 @@ fn drain_gateway_cancelling_permission(
 /// disk-full error; a cancellation the user asked for must still come back as `Cancelled`, or the
 /// host is told its Esc failed with a storage error it cannot act on.
 ///
-/// The cancellation is driven through the permission prompt rather than `max_turns`: with bounded
-/// execution (`a7a17ff`) a `max_turns` limit puts the first round in the finalization slot, so a
-/// scripted tool call is refused with `Tool call rejected during finalization` and the turn never
-/// reaches a cancelled outcome at all (see the cluster report).
+/// The cancellation is a real one: the client answers the tool-call permission prompt with
+/// `Cancelled`, which is what a user pressing Esc on that prompt sends, and the turn ends
+/// `TurnOutcome::Cancelled`. It used to be driven by `max_turns = Some(0)`, which is not a
+/// configuration the product can be in - `spawn.rs` refuses it with "max_turns must be greater
+/// than 0" - and which under bounded execution failed the prompt outright instead of cancelling
+/// it. The flag's own stop is a different outcome with a different completion kind
+/// (`MaxTurnsReached`, reported to headless as `error_max_turns`); `max_turns_bound_tests` owns it.
 #[test]
 fn cancelled_turn_flush_enospc_still_reports_cancellation() {
     block_on_session(|| {
