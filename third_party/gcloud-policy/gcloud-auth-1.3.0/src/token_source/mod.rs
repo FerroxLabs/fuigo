@@ -79,7 +79,29 @@ mod tests {
     };
     use crate::token_source::TokenSource;
 
+    /// Pick the jsonwebtoken crypto backend explicitly before any signing.
+    ///
+    /// `jsonwebtoken` 10 refuses to guess when more than one backend is compiled
+    /// in, and in this workspace both are: this crate turns on
+    /// `jsonwebtoken/aws_lc_rs` (feature `jwt-aws-lc-rs`) while `fuigo-shell`
+    /// depends on `jsonwebtoken` directly with `rust_crypto`. Cargo unifies the
+    /// two, so `CryptoProvider::get_default()` matches neither `cfg` arm and the
+    /// first sign/verify panics with its NOT_INSTALLED_ERROR instead of erroring.
+    /// The rest of the workspace installs a provider at each JWT entry point
+    /// (`fuigo_shell::auth::jwt::ensure_jwt_crypto_provider`, `auth::oidc::login`);
+    /// these tests establish the same process precondition rather than relying on
+    /// whichever test happened to run first. `install_default` returns `Err` when a
+    /// provider is already installed, which is the normal case: first install wins.
+    /// `lib.rs` makes the two `cfg`s below mutually exclusive and exhaustive.
+    fn ensure_jwt_crypto_provider() {
+        #[cfg(feature = "jwt-aws-lc-rs")]
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+        #[cfg(feature = "jwt-rust-crypto")]
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    }
+
     fn fixture_credentials(token_uri: &str) -> CredentialsFile {
+        ensure_jwt_crypto_provider();
         // Ephemeral test-only key; never reads ambient Google credentials.
         let output = std::process::Command::new("openssl")
             .args(["genrsa", "2048"]).output().expect("openssl test-key generator");
