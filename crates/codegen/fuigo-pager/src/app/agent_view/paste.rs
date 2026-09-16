@@ -2003,14 +2003,16 @@ pub(super) mod paste_key_tests {
     /// and an in-place rewrite keeps the inode — which leaves ctime, and ctime comes off the kernel's
     /// COARSE clock, so two writes inside one tick carry the same one (measured on the build host,
     /// Linux 6.8/overlayfs: back-to-back write+utimensat pairs land on an identical ctime 1878 times
-    /// out of 2000). A test cannot make the clock stand still on demand, so that state is pinned the
-    /// only way it can be made deterministic: the cache entry is forced onto the REWRITTEN file's own
-    /// stamp, which is precisely what a same-tick rewrite leaves behind. The decision itself is
-    /// pinned field-by-field in `media::tests`.
+    /// out of 2000). With the stamp as the only key this test failed deterministically when run in
+    /// isolation on macOS and about one run in three inside the parallel suite on Linux — whenever
+    /// the two writes landed on one tick. A test cannot make the clock stand still on demand, so
+    /// that state is pinned the only way it can be made deterministic: the cache entry is forced
+    /// onto the REWRITTEN file's own stamp, which is precisely what a same-tick rewrite leaves
+    /// behind. The decision itself is pinned field-by-field in `media::tests`.
     #[cfg(unix)]
     #[test]
     fn tool_media_same_length_same_mtime_rewrite_retries_failed_load() {
-        use crate::app::agent_view::media::{FailedMediaLoad, MediaFileStamp};
+        use crate::app::agent_view::media::{FailedMediaLoad, FailureProof, MediaFileStamp};
         use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
         let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
         let dir = tempfile::tempdir().unwrap();
@@ -2036,6 +2038,10 @@ pub(super) mod paste_key_tests {
             .get(&path)
             .cloned()
             .expect("the placeholder must be negative-cached");
+        assert!(
+            matches!(failed.proof, FailureProof::Contents { .. }),
+            "a file this fresh cannot be proven by its stamp: {failed:?}"
+        );
         std::fs::write(&path, &png).unwrap();
         pin_mtime(&path);
         let rewritten = MediaFileStamp::from_metadata(&std::fs::metadata(&path).unwrap())
@@ -2044,7 +2050,7 @@ pub(super) mod paste_key_tests {
             path.clone(),
             FailedMediaLoad {
                 stamp: rewritten,
-                digest: failed.digest,
+                proof: failed.proof,
             },
         );
         assert!(
