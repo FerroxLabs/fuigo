@@ -929,7 +929,17 @@ pub(crate) async fn spawn_session_actor(
     });
     // Any configured server (resolved local/client/managed list, or in-process SDK servers) keeps
     // the MCP meta-tools advertised; with none, `search_tool`/`use_tool` are dropped at build.
-    let mcp_configured = !mcp_servers.is_empty() || !acp_mcp_servers.is_empty();
+    //
+    // Adaptive presentation keeps them regardless: `search_tool` is not only the MCP discovery
+    // tool, it is also the native discovery channel (`scope=native`) that reveals a deferred
+    // media schema, and `turn.rs` only enables the adaptive projection while `search_tool` is
+    // advertised. Without this an adaptive session with no MCP server silently degrades to
+    // `full` and advertises every media schema it was supposed to defer - which is every
+    // subagent, because a child's server list comes only from its own definition's
+    // `mcpServers` (`subagent::handle_request`), never from the parent's configuration.
+    let mcp_configured = !mcp_servers.is_empty()
+        || !acp_mcp_servers.is_empty()
+        || initial_native_presentation.mode() == "adaptive";
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
         if let Some(ref pool) = parent_mcp_pool {
