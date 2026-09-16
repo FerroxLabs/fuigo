@@ -160,6 +160,7 @@
                 attempts: 3,
                 reason: "rate limited".into(),
                 is_rate_limited: true,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -177,6 +178,7 @@
             attempts: 3,
             reason: "".into(),
             is_rate_limited: true,
+            error_type: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -199,6 +201,7 @@
             attempts: 3,
             reason: reason.clone(),
             is_rate_limited: true,
+            error_type: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -225,6 +228,7 @@
                      https://grok.com/supergrok"
                 .into(),
             is_rate_limited: true,
+            error_type: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -249,6 +253,7 @@
                 attempts: 3,
                 reason: "server error".into(),
                 is_rate_limited: false,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -279,6 +284,7 @@
                          subscription:free-usage-exhausted: You have used all your free usage."
                     .into(),
                 is_rate_limited: true,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -296,6 +302,69 @@
             session.in_flight_prompt.is_none(),
             "free-usage exhaustion clears in_flight_prompt like other failures"
         );
+    }
+
+    /// The empty-response exhaustion this release exists to explain reaches the banner as
+    /// "Empty response", not the generic "Request failed".
+    ///
+    /// End-to-end pin for `RetryState::Exhausted.error_type`: the shell stamps the kind that ran
+    /// out of budget (`SamplingErrorKind::EmptyResponse`, asserted on the shell side by
+    /// `reasoning_only_storm_is_capped_and_mirrored_on_session_update`) and `apply_retry_state`
+    /// must hand it to `format_request_failure`. Drop the field or stop forwarding it and the
+    /// user who watched "(1/3)" and "(2/3)" climb is told only that the request failed.
+    #[test]
+    fn retry_exhausted_empty_response_headlines_the_kind_that_ran_out_of_budget() {
+        use fuigo_shell::sampling::error::SamplingErrorKind;
+        let reason = "empty response from model (reasoning_only)";
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Exhausted {
+                attempts: 3,
+                reason: reason.into(),
+                is_rate_limited: false,
+                error_type: Some(SamplingErrorKind::EmptyResponse.as_str().to_string()),
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed { status, headline, detail }) => {
+                assert_eq!(status, None, "an empty response carries no HTTP status");
+                assert_eq!(
+                    headline, "Empty response",
+                    "the exhaustion keeps the kind the shell classified"
+                );
+                assert_eq!(detail, "The model returned no content. Try sending again.");
+            }
+            other => panic!("expected an empty-response RequestFailed, got {other:?}"),
+        }
+    }
+
+    /// The same exhaustion without the kind is the pre-`error_type` shape: it degrades to the
+    /// generic banner. Pins what the field buys, so a wiring change cannot look like a no-op.
+    #[test]
+    fn retry_exhausted_without_a_kind_falls_back_to_the_generic_banner() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Exhausted {
+                attempts: 3,
+                reason: "empty response from model (reasoning_only)".into(),
+                is_rate_limited: false,
+                error_type: None,
+            },
+            &mut session,
+            &mut scrollback,
+            false,
+        );
+        match last_session_event(&scrollback) {
+            Some(SessionEvent::RequestFailed { headline, .. }) => {
+                assert_ne!(headline, "Empty response");
+            }
+            other => panic!("expected a RequestFailed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -339,6 +408,7 @@
                 attempts: 3,
                 reason: "status 403: run out of credits".into(),
                 is_rate_limited: false,
+                error_type: None,
             },
             &mut session,
             &mut scrollback, false);

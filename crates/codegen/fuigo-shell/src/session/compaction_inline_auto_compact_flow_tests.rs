@@ -214,6 +214,7 @@ async fn create_test_actor(
         transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
+        turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-auto-compact"),
             cwd: cwd.as_str().to_string(),

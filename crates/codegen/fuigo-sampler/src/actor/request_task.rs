@@ -213,7 +213,7 @@ pub(crate) async fn run_request_task(
     }
 
     let mut request = request;
-    let mut retry_count: u32 = 0;
+    let mut retry_counts = RetryCounts::default();
     // Doom-loop recovery keeps its own resample budget, independent of the transport/empty budget above
     let doom_policy = config.doom_loop_recovery;
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
@@ -234,7 +234,10 @@ pub(crate) async fn run_request_task(
             .expect("accounting ledger")
             .begin_attempt();
         let receipt = crate::request_accounting::Attempt::new(
-            &request, request_id.as_str(), retry_count + doom_retry_count + 1);
+            &request,
+            request_id.as_str(),
+            retry_counts.total + doom_retry_count + 1,
+        );
         let mut outcome = receipt.scope(run_one_attempt(
             &client,
             request.clone(),
@@ -285,7 +288,7 @@ pub(crate) async fn run_request_task(
                         .iter()
                         .map(|signal| signal.raw.clone()),
                 );
-                metrics.attempts = retry_count + doom_retry_count + 1;
+                metrics.attempts = retry_counts.total + doom_retry_count + 1;
                 if let Some(policy) = doom_policy {
                     let confident = policy.confident_triggers(&response.doom_loop_signals);
                     if !confident.is_empty() {
@@ -340,9 +343,9 @@ pub(crate) async fn run_request_task(
                     reason = context.reason,
                 );
                 let err = SamplingError::EmptyResponse { context };
-                if !apply_retry_decision(
+                let resent = apply_retry_decision(
                     &err,
-                    &mut retry_count,
+                    &mut retry_counts,
                     effective_max_retries,
                     &retry_policy,
                     &event_tx,
@@ -353,8 +356,8 @@ pub(crate) async fn run_request_task(
                     &cancel_token,
                     &mut completion,
                 )
-                .await
-                {
+                .await;
+                if !hand_off_attempt(resent, &receipt, &cancel_token).await {
                     return request_id;
                 }
             }
@@ -378,6 +381,7 @@ pub(crate) async fn run_request_task(
                             Err(clone_error(&error)),
                             terminal_event_queued,
                         );
+                        hand_off_attempt(false, &receipt, &cancel_token).await;
                         return request_id;
                     }
                     let backoff = retry_mod::doom_loop_backoff(doom_retry_count + 1);
@@ -407,14 +411,15 @@ pub(crate) async fn run_request_task(
                         &error,
                     );
                     if sleep_or_cancel(backoff, &cancel_token).await {
+                        hand_off_attempt(true, &receipt, &cancel_token).await;
                         continue;
                     }
                     handle_cancellation(&event_tx, &request_id, &mut completion);
                     return request_id;
                 }
-                if !apply_retry_decision(
+                let resent = apply_retry_decision(
                     &error,
-                    &mut retry_count,
+                    &mut retry_counts,
                     effective_max_retries,
                     &retry_policy,
                     &event_tx,
@@ -425,8 +430,8 @@ pub(crate) async fn run_request_task(
                     &cancel_token,
                     &mut completion,
                 )
-                .await
-                {
+                .await;
+                if !hand_off_attempt(resent, &receipt, &cancel_token).await {
                     return request_id;
                 }
             }
@@ -435,9 +440,9 @@ pub(crate) async fn run_request_task(
                 return request_id;
             }
             AttemptOutcome::InitFailed { error } => {
-                if !apply_retry_decision(
+                let resent = apply_retry_decision(
                     &error,
-                    &mut retry_count,
+                    &mut retry_counts,
                     effective_max_retries,
                     &retry_policy,
                     &event_tx,
@@ -448,8 +453,8 @@ pub(crate) async fn run_request_task(
                     &cancel_token,
                     &mut completion,
                 )
-                .await
-                {
+                .await;
+                if !hand_off_attempt(resent, &receipt, &cancel_token).await {
                     return request_id;
                 }
             }
@@ -457,12 +462,94 @@ pub(crate) async fn run_request_task(
     }
 }
 
+/// Resends one request has made so far, per budget (doom-loop resamples keep their own count in the request loop).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RetryCounts {
+    /// Every resend; the configured `max_retries` budget bounds these.
+    total: u32,
+    /// Resends of an empty reply, reasoning-only and fully empty alike, on one shared
+    /// budget ([`retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS`]). Counted apart from `total` so a
+    /// retry of another kind never spends the empty-response budget, and vice versa.
+    empty_response: u32,
+}
+
+impl RetryCounts {
+    /// Record one resend and return the attempt number its `Retrying` event announces: the empty-response count for an empty response, else the total.
+    fn record_resend(&mut self, empty_response: bool) -> u32 {
+        self.total += 1;
+        if empty_response {
+            self.empty_response += 1;
+            self.empty_response
+        } else {
+            self.total
+        }
+    }
+}
+
+/// Record one resend and emit its `Retrying` event.
+///
+/// An empty reply announces the empty-response cap lowered to what the shared configured
+/// budget can still fund, so the denominator never promises a resend that cannot happen.
+fn announce_resend(
+    retry_counts: &mut RetryCounts,
+    empty_response: bool,
+    configured_max_retries: u32,
+    max_retries: u32,
+    event_tx: &AccountingEvents,
+    request_id: &RequestId,
+    err: &SamplingError,
+) {
+    let attempt = retry_counts.record_resend(empty_response);
+    let announced = if empty_response {
+        retry_mod::empty_response_announced_attempts(
+            retry_counts.empty_response,
+            retry_counts.total,
+            configured_max_retries,
+        )
+    } else {
+        max_retries
+    };
+    emit_retrying(event_tx, request_id, attempt, announced, err);
+}
+
+/// Hand the execution-state liability of the attempt just finished to whatever comes next.
+///
+/// `resent`: a retry of this request takes the attempt over, so settle it — a superseded
+/// attempt is finished work, and leaving it pending makes a turn that recovered on the
+/// retry report a partial terminal receipt and fail with `-32603`.
+/// Otherwise the attempt is abandoned: it stays unresolved work (so a genuinely failed
+/// turn still reports partial) unless the caller resubmits the same logical call.
+/// A cancelled request marks nothing: its attempt's effects are unknown, not finished.
+/// Durable-write failures only leave the attempt pending, which is the conservative side.
+async fn hand_off_attempt(
+    resent: bool,
+    receipt: &crate::request_accounting::Attempt,
+    cancel_token: &CancellationToken,
+) -> bool {
+    let handed = if resent {
+        receipt.supersede_execution().await
+    } else if cancel_token.is_cancelled() {
+        Ok(())
+    } else {
+        receipt.abandon_execution().await
+    };
+    if let Err(error) = handed {
+        tracing::warn!(
+            target: crate::sampling_log::TARGET,
+            %error,
+            resent,
+            "attempt liability could not be handed off durably"
+        );
+    }
+    resent
+}
+
 /// Apply a [`RetryDecision`]. Returns `true` if the loop should continue, `false` if the request is finished (either fatal or emit-to-session).
 /// Performs the side-effects of the decision: sleeping, rebuilding the client, stripping images, emitting the `Retrying` event.
 #[allow(clippy::too_many_arguments)]
 async fn apply_retry_decision(
     err: &SamplingError,
-    retry_count: &mut u32,
+    retry_counts: &mut RetryCounts,
     max_retries: u32,
     retry_policy: &RetryPolicy,
     event_tx: &AccountingEvents,
@@ -478,7 +565,24 @@ async fn apply_retry_decision(
     } else {
         retry_policy.rate_limit_retry_threshold
     };
-    let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
+    // An empty response is judged on its own resend count against its low cap, so an earlier retry of another kind never spends it
+    // It still never runs past the configured budget, which bounds every resend of the request
+    // `max_retries` becomes the cap here so `Retrying` events and the exhaustion span report the budget actually applied
+    let configured_max_retries = max_retries;
+    let max_retries = retry_mod::effective_max_retries(err, configured_max_retries);
+    let empty_response = matches!(err, SamplingError::EmptyResponse { .. });
+    let decision = if empty_response && retry_counts.total + 1 >= configured_max_retries {
+        RetryDecision::Fatal(clone_error(err))
+    } else if empty_response {
+        classify_error(
+            err,
+            retry_counts.empty_response,
+            configured_max_retries,
+            rate_limit_threshold,
+        )
+    } else {
+        classify_error(err, retry_counts.total, max_retries, rate_limit_threshold)
+    };
 
     // Connection-reset / broken-pipe on body upload often means nginx rejected an oversized payload before responding 413
     // Strip images proactively before any retry of those errors so we don't burn budget re-uploading the same large body
@@ -509,8 +613,15 @@ async fn apply_retry_decision(
 
     match decision {
         RetryDecision::Retry { backoff } => {
-            *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            announce_resend(
+                retry_counts,
+                empty_response,
+                configured_max_retries,
+                max_retries,
+                event_tx,
+                request_id,
+                err,
+            );
             if sleep_or_cancel(backoff, cancel_token).await {
                 true
             } else {
@@ -519,8 +630,15 @@ async fn apply_retry_decision(
             }
         }
         RetryDecision::RetryWithBackoff { backoff, .. } => {
-            *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            announce_resend(
+                retry_counts,
+                empty_response,
+                configured_max_retries,
+                max_retries,
+                event_tx,
+                request_id,
+                err,
+            );
             if sleep_or_cancel(backoff, cancel_token).await {
                 true
             } else {
@@ -566,13 +684,27 @@ async fn apply_retry_decision(
                 stripped_urls.len()
             );
             emit_images_stripped(event_tx, request_id, stripped_urls, reason);
-            *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            announce_resend(
+                retry_counts,
+                empty_response,
+                configured_max_retries,
+                max_retries,
+                event_tx,
+                request_id,
+                err,
+            );
             true
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
-            *retry_count += 1;
-            emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
+            announce_resend(
+                retry_counts,
+                empty_response,
+                configured_max_retries,
+                max_retries,
+                event_tx,
+                request_id,
+                err,
+            );
             if !sleep_or_cancel(backoff, cancel_token).await {
                 handle_cancellation(event_tx, request_id, completion);
                 return false;
@@ -600,14 +732,17 @@ async fn apply_retry_decision(
             send_completion(completion, Err(emitted_err), terminal_event_queued);
             false
         }
-        RetryDecision::Fatal(fatal_err) => {
+        RetryDecision::Fatal(mut fatal_err) => {
             // Emit only on true budget exhaustion (hit the retry / rate-limit cap), mirroring `classify_error`'s Fatal conditions
             // A server `x-should-retry: false` or a non-retryable error is also Fatal but is not "exhausted"
-            let next_attempt = *retry_count + 1;
+            let next_attempt = retry_counts.total + 1;
             let server_said_stop = matches!(err.should_retry_header(), Some(false));
             let budget_exhausted = !server_said_stop
                 && if err.is_rate_limited() {
                     next_attempt >= max_retries.min(rate_limit_threshold)
+                } else if empty_response {
+                    retry_counts.empty_response + 1 >= max_retries
+                        || next_attempt >= configured_max_retries
                 } else {
                     err.is_retryable() && next_attempt >= max_retries
                 };
@@ -628,6 +763,13 @@ async fn apply_retry_decision(
                     exhausted_span.record("status_code", status as i64);
                 }
                 exhausted_span.in_scope(|| {});
+            }
+            // Stamp what the shared empty-response budget spent (the original plus its resends).
+            // The shell reports the give-up as an exhaustion that names the attempts, like the
+            // rate-limit path, instead of a bare failure that never mentions the cap the user
+            // just watched climb. Only the retry loop knows the count, so it travels with the error.
+            if let SamplingError::EmptyResponse { context } = &mut fatal_err {
+                context.attempts = Some(retry_counts.empty_response + 1);
             }
             let terminal_event_queued = emit_failed(event_tx, request_id, &fatal_err);
             send_completion(completion, Err(fatal_err), terminal_event_queued);
@@ -1037,6 +1179,8 @@ fn build_empty_context(
         prompt_tokens,
         model,
         first_choice_seen,
+        // Per-attempt context: only the terminal classification knows what the budget spent.
+        attempts: None,
     }
 }
 
@@ -1710,7 +1854,7 @@ mod tests {
         let event_tx = AccountingEvents::new(event_tx);
         let (completion_tx, completion_rx) = oneshot::channel();
         let mut completion = CompletionState::new(Some(completion_tx));
-        let mut retry_count = 0;
+        let mut retry_counts = RetryCounts::default();
         let mut request = ConversationRequest::default();
         let config = SamplerConfig {
             base_url: "http://localhost".into(),
@@ -1722,7 +1866,7 @@ mod tests {
 
         let should_continue = apply_retry_decision(
             &error,
-            &mut retry_count,
+            &mut retry_counts,
             2,
             &RetryPolicy::default(),
             &event_tx,
@@ -1800,5 +1944,252 @@ mod tests {
         assert_eq!(usage.reasoning_tokens, 2);
         assert_eq!(sum_cost_ticks(Some(100), Some(200)), Some(300));
         assert_eq!(sum_cost_ticks(Some(100), None), Some(100));
+    }
+
+    fn empty_response_err(reason: fuigo_sampling_types::EmptyReason) -> SamplingError {
+        let had_reasoning = reason == fuigo_sampling_types::EmptyReason::ReasoningOnly;
+        SamplingError::EmptyResponse {
+            context: fuigo_sampling_types::EmptyResponseContext {
+                reason,
+                had_reasoning,
+                content_len: 0,
+                tool_call_count: 0,
+                finish_reason: Some("end_turn".into()),
+                completion_tokens: Some(40),
+                reasoning_tokens: Some(if had_reasoning { 39 } else { 0 }),
+                prompt_tokens: Some(5000),
+                model: "test-model".into(),
+                first_choice_seen: true,
+                attempts: None,
+            },
+        }
+    }
+
+    fn overloaded_503() -> SamplingError {
+        SamplingError::Api {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            message: "overloaded".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: None,
+        }
+    }
+
+    struct Ladder {
+        /// `(attempt, max_retries, kind)` of every `Retrying` event, in order.
+        retrying: Vec<(u32, u32, String)>,
+        /// Virtual time slept across all backoffs.
+        slept: Duration,
+        /// Provider calls: the original attempt plus every resend the decisions allowed.
+        calls: usize,
+        failed_kind: Option<String>,
+        /// `empty_response_context.attempts` of the terminal `Failed` event, when it carried one.
+        failed_empty_attempts: Option<u32>,
+    }
+
+    /// Drive `apply_retry_decision` the way the request loop does: attempt `n` (0-based) fails with `error_for(n)`, and each "continue" makes one more attempt.
+    async fn retry_ladder(error_for: impl Fn(usize) -> SamplingError, max_retries: u32) -> Ladder {
+        let cancel_token = CancellationToken::new();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let event_tx = AccountingEvents::new(event_tx);
+        let (completion_tx, _completion_rx) = oneshot::channel();
+        let mut completion = CompletionState::new(Some(completion_tx));
+        let mut retry_counts = RetryCounts::default();
+        let mut request = ConversationRequest::default();
+        let config = SamplerConfig {
+            base_url: "http://localhost".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        let mut client = SamplingClient::new(config.clone()).expect("test client");
+        let started = tokio::time::Instant::now();
+        let mut calls = 0;
+        loop {
+            assert!(calls < 50, "the retry ladder never terminated");
+            let err = error_for(calls);
+            calls += 1;
+            let keep_going = apply_retry_decision(
+                &err,
+                &mut retry_counts,
+                max_retries,
+                &RetryPolicy::default(),
+                &event_tx,
+                &RequestId::from("ladder"),
+                &mut request,
+                &mut client,
+                &config,
+                &cancel_token,
+                &mut completion,
+            )
+            .await;
+            if !keep_going {
+                break;
+            }
+        }
+        let slept = started.elapsed();
+        let mut ladder = Ladder {
+            retrying: Vec::new(),
+            slept,
+            calls,
+            failed_kind: None,
+            failed_empty_attempts: None,
+        };
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                SamplingEvent::Retrying {
+                    attempt,
+                    max_retries,
+                    kind,
+                    ..
+                } => ladder
+                    .retrying
+                    .push((attempt, max_retries, kind.as_str().to_string())),
+                SamplingEvent::Failed { error, .. } => {
+                    ladder.failed_kind = Some(error.kind.as_str().to_string());
+                    ladder.failed_empty_attempts = error
+                        .empty_response_context
+                        .as_ref()
+                        .and_then(|context| context.attempts);
+                }
+                _ => {}
+            }
+        }
+        ladder
+    }
+
+    fn retrying(attempt: u32, max_retries: u32, kind: &str) -> (u32, u32, String) {
+        (attempt, max_retries, kind.to_string())
+    }
+
+    /// An exhausted empty-response budget tells the shell how many attempts it spent, so the
+    /// turn's terminal reaches the client as an exhaustion that names them ("failed after 3
+    /// attempts") instead of a bare failure that never mentions the cap the user watched climb.
+    #[tokio::test(start_paused = true)]
+    async fn an_exhausted_empty_response_budget_reports_the_attempts_it_spent() {
+        use fuigo_sampling_types::EmptyReason::{NoVisibleContent, ReasoningOnly};
+        // The customer's shape: reasoning-only, then cached fully-empty replies on one budget.
+        let ladder = retry_ladder(
+            |n| {
+                empty_response_err(if n == 0 {
+                    ReasoningOnly
+                } else {
+                    NoVisibleContent
+                })
+            },
+            retry_mod::DEFAULT_MAX_RETRIES,
+        )
+        .await;
+        assert_eq!(ladder.calls, 3, "the original reply plus its two resends");
+        assert_eq!(ladder.failed_kind.as_deref(), Some("empty_response"));
+        assert_eq!(
+            ladder.failed_empty_attempts,
+            Some(3),
+            "the attempts the shared empty-response budget spent"
+        );
+
+        // A configured budget that funds no resend at all still reports its single attempt.
+        let unfunded = retry_ladder(|_| empty_response_err(ReasoningOnly), 1).await;
+        assert_eq!(unfunded.calls, 1);
+        assert_eq!(unfunded.failed_empty_attempts, Some(1));
+    }
+
+    /// A 503 retry must not spend the empty-response budget: it counts empty replies only.
+    #[tokio::test(start_paused = true)]
+    async fn empty_replies_after_a_503_keep_their_own_budget() {
+        use fuigo_sampling_types::EmptyReason::ReasoningOnly;
+        let ladder = retry_ladder(
+            |n| match n {
+                0 => overloaded_503(),
+                _ => empty_response_err(ReasoningOnly),
+            },
+            retry_mod::DEFAULT_MAX_RETRIES,
+        )
+        .await;
+        assert_eq!(
+            ladder.retrying,
+            vec![
+                retrying(1, 15, "api"),
+                retrying(1, 3, "empty_response"),
+                retrying(2, 3, "empty_response")
+            ],
+            "the 503 retry, then both empty-response resends announced against their own budget"
+        );
+        assert_eq!(ladder.calls, 4, "503, the empty reply, and its two resends");
+        assert_eq!(ladder.failed_kind.as_deref(), Some("empty_response"));
+        assert!(
+            ladder.slept >= Duration::from_millis(5_600)
+                && ladder.slept <= Duration::from_millis(6_400),
+            "the 503's ~2 s (+/-20%) plus two fixed 2 s waits: {:?}",
+            ladder.slept
+        );
+    }
+
+    /// Fully empty replies keep their two resends even when other retries happen in between.
+    #[tokio::test(start_paused = true)]
+    async fn fully_empty_resends_are_counted_on_their_own_across_other_retries() {
+        use fuigo_sampling_types::EmptyReason::NoVisibleContent;
+        let ladder = retry_ladder(
+            |n| match n {
+                0 | 2 => empty_response_err(NoVisibleContent),
+                _ => overloaded_503(),
+            },
+            5,
+        )
+        .await;
+        assert_eq!(
+            ladder.retrying,
+            vec![
+                retrying(1, 3, "empty_response"),
+                retrying(2, 5, "api"),
+                retrying(2, 3, "empty_response"),
+                retrying(4, 5, "api"),
+            ],
+            "empty resends count 1, 2 of their cap; 503 attempts keep counting against the configured budget"
+        );
+        assert_eq!(
+            ladder.calls, 5,
+            "the configured budget still bounds the request"
+        );
+        assert_eq!(ladder.failed_kind.as_deref(), Some("api"));
+        assert!(
+            ladder.slept >= Duration::from_millis(20_000)
+                && ladder.slept <= Duration::from_millis(28_000),
+            "2 s + ~4 s + 2 s + ~16 s (+/-20% on the ladder): {:?}",
+            ladder.slept
+        );
+    }
+
+    /// An empty response never raises the budget of what follows: a 503 after a reasoning-only resend runs out on the configured budget.
+    #[tokio::test(start_paused = true)]
+    async fn a_503_after_a_reasoning_only_resend_stays_on_the_configured_budget() {
+        use fuigo_sampling_types::EmptyReason::ReasoningOnly;
+        let ladder = retry_ladder(
+            |n| match n {
+                0 => empty_response_err(ReasoningOnly),
+                _ => overloaded_503(),
+            },
+            4,
+        )
+        .await;
+        assert_eq!(
+            ladder.retrying,
+            vec![
+                retrying(1, 3, "empty_response"),
+                retrying(2, 4, "api"),
+                retrying(3, 4, "api"),
+            ]
+        );
+        assert_eq!(
+            ladder.calls, 4,
+            "four attempts in all, the configured budget"
+        );
+        assert_eq!(ladder.failed_kind.as_deref(), Some("api"));
+        assert!(
+            ladder.slept >= Duration::from_millis(11_600)
+                && ladder.slept <= Duration::from_millis(16_400),
+            "2 s + ~4 s + ~8 s (+/-20% on the ladder): {:?}",
+            ladder.slept
+        );
     }
 }

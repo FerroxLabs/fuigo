@@ -15,6 +15,7 @@ use agent_client_protocol as acp;
 use fuigo_acp_lib::{AcpAgentTx, AcpClientMessageBox, AcpClientRx, acp_send};
 use fuigo_shell::agent::auth_method::AuthMethodKind;
 use fuigo_shell::agent::config::Config as AgentConfig;
+use fuigo_shell::extensions::notification::is_retry_status_update;
 use fuigo_shell::extensions::task::{CancelSubagentRequest, KillTaskRequest};
 use fuigo_shell::sampling::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
@@ -2008,6 +2009,8 @@ fn handle_headless_acp_message(
     match msg {
         AcpClientMessageBox::SessionNotification(boxed) => {
             match &boxed.request.update {
+                // Retry progress for stock ACP clients, never part of the answer
+                update if is_retry_status_update(update) => {}
                 acp::SessionUpdate::AgentMessageChunk(chunk) => {
                     if let acp::ContentBlock::Text(text) = &chunk.content
                         && !text.text.is_empty()
