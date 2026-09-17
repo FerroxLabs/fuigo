@@ -5284,8 +5284,7 @@ fn overlay_esc_running_turn_scrollback_swallows_not_backout() {
     );
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
 }
-/// Overlay in non-vim mode: mid-turn Esc hints at the cancel key (matching full-screen) and still must not detach to the dashboard.
-/// U080 replaced the old "Esc cancels in non-vim mode" expectation; the case is retargeted, not dropped.
+/// Overlay in non-vim mode: mid-turn Esc hints at Ctrl+C (matching full-screen), and still must not detach to the dashboard.
 #[test]
 fn overlay_esc_running_turn_non_vim_hints_not_backout() {
     let mut app = test_app_with_agent();
@@ -5302,15 +5301,16 @@ fn overlay_esc_running_turn_non_vim_hints_not_backout() {
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
-        "running-turn overlay Esc must hint, not cancel, in non-vim mode, got {outcome:?}",
-    );
-    assert!(
-        !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-        "Esc must not detach mid-turn",
+        "running-turn overlay Esc must swallow with a hint, not detach/cancel, got {outcome:?}",
     );
     assert!(
         app.agents[&id].cancel_trigger_hint.is_none(),
         "Esc never becomes a cancel trigger",
+    );
+    assert_eq!(
+        Some("Press Ctrl+c to cancel the turn"),
+        app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str()),
+        "the overlay's mid-turn Esc must show the cancel-key hint",
     );
 }
 #[test]
@@ -5335,8 +5335,7 @@ fn overlay_esc_wake_turn_scrollback_does_not_backout() {
         "vim-mode wake Esc must swallow, not detach, got {outcome:?}",
     );
 }
-/// Overlay while TurnCancelling: Esc is swallowed with no hint (does not retry the cancel and does not detach).
-/// U080 replaced the old "Esc retries cancel" expectation; the case is retargeted, not dropped.
+/// Overlay while TurnCancelling: Esc is swallowed with no hint (neither re-sends the cancel nor detaches).
 #[test]
 fn overlay_esc_cancelling_scrollback_is_swallowed_not_backout() {
     let mut app = test_app_with_agent();
@@ -5353,15 +5352,11 @@ fn overlay_esc_cancelling_scrollback_is_swallowed_not_backout() {
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
-        "cancelling overlay Esc must be swallowed, got {outcome:?}",
+        "cancelling overlay Esc must swallow, not re-cancel or detach, got {outcome:?}",
     );
     assert!(
-        !matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "Esc must not retry the cancel",
-    );
-    assert!(
-        !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-        "Esc must not detach while cancelling",
+        app.agents[&id].cancel_trigger_hint.is_none(),
+        "Esc never becomes a cancel trigger",
     );
     assert!(app.agents[&id].toast.is_none(), "no hint while cancelling");
 }
