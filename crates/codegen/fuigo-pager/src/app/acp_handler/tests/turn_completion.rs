@@ -1985,10 +1985,111 @@
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnCancelled { .. })
-        ));
+        match last_session_event(&agent.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { .. }) => {
+                // No meta at all (older shell): unnamed, never "by user"
+                assert_eq!(ev.message(), "Turn cancelled in 0.8s.");
+            }
+            other => panic!("expected an unnamed cancel, got {other:?}"),
+        }
+    }
+
+    /// The banner text for one cancelled `TurnCompleted` carrying `extra_meta`.
+    fn cancelled_banner(extra_meta: serde_json::Value) -> String {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &fuigo_turn_completed_replay("sess-1", "p1", "cancelled", Some(800), None, extra_meta),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { .. }) => ev.message(),
+            other => panic!("expected a cancel banner, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_session_close_names_session_closed() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "session_close" })),
+            "Turn cancelled because the session closed in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "session_delete" })),
+            "Turn cancelled because the session closed in 0.8s."
+        );
+    }
+
+    #[test]
+    fn replay_shutdown_names_shutdown() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "shutdown" })),
+            "Turn cancelled because the session shut down in 0.8s."
+        );
+    }
+
+    #[test]
+    fn replay_host_interrupt_names_agent_host() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "host_interrupt" })),
+            "Turn cancelled by the agent host in 0.8s."
+        );
+    }
+
+    #[test]
+    fn replay_user_gestures_name_user() {
+        for trigger in ["esc", "ctrl_c", "mouse", "dashboard_stop"] {
+            assert_eq!(
+                cancelled_banner(serde_json::json!({ "cancelTrigger": trigger })),
+                "Turn cancelled by user in 0.8s.",
+                "{trigger}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_policy_categories_beat_the_trigger() {
+        use fuigo_shell::session::commands::{
+            MAX_TURNS_REACHED_CATEGORY, PERMISSION_CANCELLED_CATEGORY,
+            PERMISSION_REJECTED_CATEGORY,
+        };
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancelTrigger": "ctrl_c",
+                "cancellationCategory": PERMISSION_REJECTED_CATEGORY,
+            })),
+            "Turn cancelled because a permission was denied in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancelTrigger": "esc",
+                "cancellationCategory": PERMISSION_CANCELLED_CATEGORY,
+            })),
+            "Turn cancelled because a permission prompt was dismissed in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancellationCategory": MAX_TURNS_REACHED_CATEGORY,
+            })),
+            "Turn cancelled after reaching the turn limit in 0.8s."
+        );
+    }
+
+    /// A client that sends `session/cancel` without `_meta.cancelTrigger` (Murage) ends with a trigger-less
+    /// `MidTurnAbort`; an unknown trigger is a future wire name. Both stay unnamed rather than claiming "by user".
+    #[test]
+    fn replay_unknown_or_triggerless_cancel_is_unnamed() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancellationCategory": fuigo_shell::session::commands::MID_TURN_ABORT_CATEGORY,
+            })),
+            "Turn cancelled in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "gateway_cancel" })),
+            "Turn cancelled in 0.8s."
+        );
     }
 
     #[test]
