@@ -1931,3 +1931,169 @@ fn a_collapsed_queue_still_keeps_its_header() {
         "a collapsed queue paints no body"
     );
 }
+
+// -------------------------------------------------------- U037: Tasks, Monitor
+// and linked Loop rows open what the tasks pane opens.
+
+fn insert_finished_subagent(agent: &mut AgentView, child_session_id: &str) {
+    insert_running_subagent(agent, child_session_id);
+    let info = agent
+        .subagent_sessions
+        .get_mut(child_session_id)
+        .expect("subagent");
+    info.finished = true;
+    info.status = Some(std::sync::Arc::from("completed"));
+}
+
+/// Upstream's first half only: Fuigo's dock has no `h` show-done toggle, so the
+/// half that reveals finished subagents does not apply.
+#[test]
+fn finished_only_subagents_do_not_paint_a_done_summary() {
+    let mut agent = make_agent();
+    insert_finished_subagent(&mut agent, "child-done");
+    agent.dock_shown = true;
+    agent.dock_on = true;
+    agent.active_pane = AgentPane::Dock;
+    assert!(agent.dock_subagent_rows().is_empty());
+    assert!(!agent.dock_items().iter().any(|item| {
+        matches!(
+            item,
+            DockItem::Header(Section::Subagents) | DockItem::Row(Section::Subagents, _)
+        )
+    }));
+
+    insert_running_task(&mut agent, "bg-1");
+    assert!(agent.dock_subagent_rows().is_empty());
+}
+
+#[test]
+fn enter_and_click_open_a_task_row() {
+    let mut agent = dock_with_task();
+    // Two rows would go entirely to headers; this test is about the task row's
+    // open behaviour, so give the dock its resting height.
+    agent.pane_areas.dock = Rect::new(2, 4, 78, MAX_DOCK_ROWS);
+    agent.dock_cursor = task_row_index(&agent);
+
+    let outcome = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(
+        agent
+            .block_viewer
+            .as_ref()
+            .and_then(|v| v.bg_task_id.as_deref()),
+        Some("bg-1")
+    );
+    assert_eq!(agent.active_pane, AgentPane::Scrollback);
+
+    agent.block_viewer = None;
+    agent.active_pane = AgentPane::Dock;
+    let y = agent.pane_areas.dock.y + 1;
+    let _ = agent.handle_mouse(&mouse(
+        MouseEventKind::Moved,
+        agent.pane_areas.dock.right() - 1,
+        y,
+    ));
+    cache_stop_button(&mut agent);
+    let stop = agent.dock_stop_button.as_ref().expect("stop").rect;
+    assert!(stop.x > agent.pane_areas.dock.x);
+    let outcome = agent.handle_mouse(&mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        stop.x - 1,
+        y,
+    ));
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(
+        agent
+            .block_viewer
+            .as_ref()
+            .and_then(|v| v.bg_task_id.as_deref()),
+        Some("bg-1")
+    );
+}
+
+/// Fuigo addition: the Watchers arm's Monitor case opens the same viewer.
+#[test]
+fn enter_opens_a_monitor_row() {
+    let mut agent = make_agent();
+    insert_running_monitor(&mut agent, "monitor-1");
+    agent.dock_shown = true;
+    agent.dock_on = true;
+    agent.active_pane = AgentPane::Dock;
+    agent.dock_cursor = agent
+        .dock_items()
+        .iter()
+        .position(|item| matches!(item, DockItem::Row(Section::Watchers, 0)))
+        .expect("monitor row");
+    assert!(
+        agent
+            .dock_watcher_rows()
+            .first()
+            .unwrap_or_else(|| panic!("missing index"))
+            .1
+            .openable
+    );
+
+    let outcome = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(
+        agent
+            .block_viewer
+            .as_ref()
+            .and_then(|v| v.bg_task_id.as_deref()),
+        Some("monitor-1")
+    );
+}
+
+#[test]
+fn click_opens_a_linked_loop_and_ignores_an_unlinked_one() {
+    let mut agent = make_agent();
+    insert_running_subagent(&mut agent, "child-1");
+    agent.session.scheduled_tasks.insert(
+        "loop-1".into(),
+        crate::app::agent::ScheduledTaskInfo {
+            task_id: "loop-1".into(),
+            prompt: "check CI".into(),
+            human_schedule: "every 5m".into(),
+            created_at: std::time::Instant::now(),
+            next_fire_at: None,
+            tag: "loop".into(),
+            last_subagent_id: Some("sa-child-1".into()),
+        },
+    );
+    agent.dock_shown = true;
+    agent.dock_on = true;
+    agent.active_pane = AgentPane::Dock;
+    // Two rows would go entirely to headers; this test is about the loop row's
+    // open behaviour, so give the dock its resting height.
+    agent.pane_areas.dock = Rect::new(2, 4, 78, MAX_DOCK_ROWS);
+    agent.dock_cursor = agent
+        .dock_items()
+        .iter()
+        .position(|item| matches!(item, DockItem::Row(Section::Watchers, 0)))
+        .expect("loop row");
+    assert!(
+        agent
+            .dock_watcher_rows()
+            .first()
+            .unwrap_or_else(|| panic!("missing index"))
+            .1
+            .openable,
+        "linked loop must paint the view control"
+    );
+
+    let outcome = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Changed));
+    assert_eq!(agent.active_subagent.as_deref(), Some("child-1"));
+
+    agent.active_subagent = None;
+    agent.active_pane = AgentPane::Dock;
+    agent
+        .session
+        .scheduled_tasks
+        .get_mut("loop-1")
+        .expect("loop")
+        .last_subagent_id = None;
+    let outcome = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(outcome, InputOutcome::Unchanged));
+    assert!(agent.active_subagent.is_none());
+}
