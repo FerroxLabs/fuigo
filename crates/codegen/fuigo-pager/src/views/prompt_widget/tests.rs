@@ -638,6 +638,21 @@
         assert_ne!(pw.textarea.text(), before);
     }
 
+    /// Terminals without the kitty keyboard protocol send Ctrl+Shift+Z as plain Ctrl+Z, so Alt+Z is the fallback redo key.
+    #[test]
+    fn alt_z_redoes() {
+        let mut pw = PromptWidget::new();
+        pw.handle_key(&key!('x').to_key_event());
+        pw.handle_key(&key!('z', CONTROL).to_key_event()); // undo
+        let before = pw.textarea.text().to_string();
+
+        assert_eq!(
+            pw.handle_key(&key!('z', ALT).to_key_event()),
+            PromptEvent::Edited,
+        );
+        assert_ne!(pw.textarea.text(), before);
+    }
+
     #[test]
     fn unknown_ctrl_key_is_ignored() {
         let mut pw = PromptWidget::new();
@@ -791,6 +806,41 @@
             "exactly-threshold single-line paste must stay inline"
         );
         assert_eq!(pw.textarea.text(), text);
+    }
+
+    /// Display label of the single paste chip in the buffer, e.g. `[Pasted: 4 lines]`.
+    fn paste_chip_label(pw: &PromptWidget) -> String {
+        let elems = pw.textarea.elements();
+        assert_eq!(elems.len(), 1);
+        assert_eq!(elems[0].kind, KIND_PASTE);
+        elems[0]
+            .display
+            .as_ref()
+            .expect("chip has a display label")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn paste_paragraph_separators_create_chip() {
+        // Rich-text clipboards (macOS voice memos) separate paragraphs with U+2029, which str::lines() does not split on
+        let mut pw = PromptWidget::new();
+        assert_eq!(
+            pw.handle_paste("line1\u{2029}line2\u{2029}line3\u{2029}line4"),
+            PromptEvent::Edited
+        );
+        assert_eq!(paste_chip_label(&pw), "[Pasted: 4 lines]");
+        assert_eq!(pw.textarea.text(), "line1\nline2\nline3\nline4");
+    }
+
+    #[test]
+    fn paste_below_threshold_separators_become_newlines() {
+        let mut pw = PromptWidget::new();
+        assert_eq!(pw.handle_paste("ab\u{2029}cd"), PromptEvent::Edited);
+        assert!(pw.textarea.elements().is_empty());
+        assert_eq!(pw.textarea.text(), "ab\ncd");
     }
 
     #[test]
@@ -1288,7 +1338,7 @@
 
     #[test]
     fn repaste_with_bare_cr_expands_chip() {
-        // normalize_cr is an identity on \r\n; bare \r is its non-identity case
+        // normalize_line_breaks is an identity on \r\n; bare \r is its non-identity case
         // The chip stores the \n form, so the repaste comparison must normalize the incoming bytes before comparing
         let mut pw = PromptWidget::new();
         let text = "line1\rline2\rline3\rline4";
@@ -1891,26 +1941,34 @@
         assert!(pw.textarea.elements().is_empty());
     }
 
-    // ── normalize_cr tests ─────────────────────────────────────────
+    // ── normalize_line_breaks tests ─────────────────────────────────────────
 
     #[test]
-    fn normalize_cr_bare_cr() {
-        assert_eq!(normalize_cr("a\rb\rc"), "a\nb\nc");
+    fn normalize_line_breaks_bare_cr() {
+        assert_eq!(normalize_line_breaks("a\rb\rc"), "a\nb\nc");
     }
 
     #[test]
-    fn normalize_cr_crlf_preserved() {
-        assert_eq!(normalize_cr("a\r\nb\r\nc"), "a\r\nb\r\nc");
+    fn normalize_line_breaks_crlf_preserved() {
+        assert_eq!(normalize_line_breaks("a\r\nb\r\nc"), "a\r\nb\r\nc");
     }
 
     #[test]
-    fn normalize_cr_mixed() {
-        assert_eq!(normalize_cr("a\r\nb\rc"), "a\r\nb\nc");
+    fn normalize_line_breaks_mixed() {
+        assert_eq!(normalize_line_breaks("a\r\nb\rc"), "a\r\nb\nc");
     }
 
     #[test]
-    fn normalize_cr_no_cr() {
-        assert_eq!(normalize_cr("no cr\nhere"), "no cr\nhere");
+    fn normalize_line_breaks_no_cr() {
+        assert_eq!(normalize_line_breaks("no cr\nhere"), "no cr\nhere");
+    }
+
+    #[test]
+    fn normalize_line_breaks_unicode_separators() {
+        assert_eq!(normalize_line_breaks("a\u{2028}b\u{2029}c"), "a\nb\nc");
+        assert_eq!(normalize_line_breaks("a\r\nb\u{2029}c"), "a\r\nb\nc");
+        assert_eq!(normalize_line_breaks("a\r\u{2029}b"), "a\n\nb");
+        assert_eq!(normalize_line_breaks("a\u{2028}\r\nb"), "a\n\r\nb");
     }
 
     // ── Inline paste (handle_paste without element) ──────────────
@@ -1920,7 +1978,7 @@
         let mut pw = PromptWidget::new();
         let text = "line1\nline2\nline3";
         // Simulate Ctrl+Shift+V: insert_str directly, no element.
-        let normalized = normalize_cr(text);
+        let normalized = normalize_line_breaks(text);
         pw.textarea.insert_str(&normalized);
         assert_eq!(pw.textarea.text(), text);
         assert!(pw.textarea.elements().is_empty());

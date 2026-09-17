@@ -1713,7 +1713,7 @@ impl PromptWidget {
         // Ctrl-Shift-V: inline paste, inserting clipboard content directly without creating a [Pasted: N lines] element
         if crate::input::key::is_inline_paste_key(key) {
             if let Some(text) = system_clipboard_get() {
-                let text = normalize_cr(&text);
+                let text = normalize_line_breaks(&text);
                 if text.is_empty() {
                     crate::clipboard::log_paste_key_empty_host_clipboard("prompt_widget_inline");
                     return PromptEvent::Ignored;
@@ -2208,12 +2208,12 @@ impl PromptWidget {
         }
         self.post_insert_image_preview = None;
 
-        let text = normalize_cr(text);
+        let text = normalize_line_breaks(text);
         let text = &text;
         let replacing_selection = self.textarea.selection_range().is_some();
 
         // Repaste-to-expand: "paste didn't do what I want? paste again."
-        // Requires exact byte equality after the original insertion's canonicalization (normalize_cr above and the textarea's tab expansion)
+        // Requires exact byte equality after the original insertion's canonicalization (normalize_line_breaks above and the textarea's tab expansion)
         // E.g. a trailing-newline difference is a different paste and takes the normal path below.
         if !replacing_selection
             && let Some(elem) = self.paste_element_near_cursor()
@@ -3584,7 +3584,7 @@ fn chip_line(label: String) -> Line<'static> {
 ///
 /// Some terminals send bare `\r` for line breaks in bracketed-paste content.
 /// Rust's `str::lines()` only splits on `\n` and `\r\n`, so without this normalization multi-line pastes would be treated as a single line.
-fn normalize_cr(text: &str) -> String {
+fn normalize_line_breaks(text: &str) -> String {
     let mut s = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
