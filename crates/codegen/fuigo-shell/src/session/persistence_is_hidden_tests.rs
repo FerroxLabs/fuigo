@@ -71,3 +71,45 @@ fn explicit_hidden_overrides_session_kind() {
     s.hidden = Some(true);
     assert!(s.is_hidden(), "explicit hidden=true overrides kind");
 }
+
+#[test]
+fn unused_husk_includes_worktree_stamped_empty() {
+    let mut s = summary_with_kind(Some("worktree"));
+    s.worktree_label = Some("fix-bug".into());
+    s.num_messages = 0;
+    s.session_summary.clear();
+    assert!(
+        s.is_unused_optimistic_husk(),
+        "0-message untitled worktree stamp is still a husk"
+    );
+}
+
+#[test]
+fn unused_husk_excludes_fork_and_titled_or_used() {
+    let mut fork = summary_with_kind(Some("fork"));
+    fork.num_messages = 0;
+    fork.session_summary.clear();
+    assert!(!fork.is_unused_optimistic_husk());
+
+    let mut worktree_fork = summary_with_kind(Some("worktree"));
+    worktree_fork.num_messages = 0;
+    worktree_fork.session_summary.clear();
+    worktree_fork.worktree_label = Some("fix-bug".into());
+    worktree_fork.parent_session_id = Some("parent-session".into());
+    worktree_fork.forked_at = Some(chrono::Utc::now());
+    assert!(
+        !worktree_fork.is_unused_optimistic_husk(),
+        "worktree fork provenance must stay visible"
+    );
+
+    let mut titled = summary_with_kind(Some("worktree"));
+    titled.num_messages = 0;
+    titled.session_summary.clear();
+    titled.generated_title = Some("named".into());
+    assert!(!titled.is_unused_optimistic_husk());
+
+    let mut used = summary_with_kind(None);
+    used.session_summary.clear();
+    used.num_messages = 1;
+    assert!(!used.is_unused_optimistic_husk());
+}

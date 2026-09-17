@@ -1198,6 +1198,13 @@ impl Summary {
             .unwrap_or(&self.session_summary)
     }
 
+    /// Unused TUI-open husk: untitled, 0 messages, and no fork provenance.
+    /// Worktree stamps do not exempt. `session_kind == "fork"` or
+    /// `parent_session_id` / `forked_at` do (worktree forks keep kind `worktree`).
+    pub fn is_unused_optimistic_husk(&self) -> bool {
+        false
+    }
+
     /// [`Self::display_title`] as an `Option`, `None` when blank.
     pub fn display_title_opt(&self) -> Option<String> {
         let title = self.display_title().trim();
