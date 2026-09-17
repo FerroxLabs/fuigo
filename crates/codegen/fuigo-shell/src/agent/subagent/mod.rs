@@ -1106,8 +1106,22 @@ async fn bootstrap_initial_context(
             ..Default::default()
         };
         use crate::session::storage::StorageAdapter as _;
-        // A woken child continues its own session in place: copying a
-        // session onto itself would truncate the files it is read from.
+        // A woken child continues its own session in place, so there is
+        // nothing to copy: `copy_session_data` onto itself is destructive.
+        // Measured, not assumed (`session/storage/jsonl` `copy_session_data_sync`):
+        // it creates the target dir FIRST and then reads the source summary,
+        // so with source == target it fails `NotFound` on the freshly created
+        // dir's missing `summary.json` before writing anything — that ENOENT
+        // is the failure an unguarded wake actually produces. (It does NOT
+        // empty the transcript: the source chat is read before
+        // `File::create(chat_file(target))`, so a self-copy would rewrite it
+        // with identical content.) Past that first read the remaining steps
+        // are the real damage: `remove_dir_all` on the target's workflows and
+        // goal-state dirs deletes this session's own, `copy_updates_streaming`
+        // reads and writes one updates file, `copy_sidecar_file` copies
+        // usage/tool_state onto themselves, and `fork_summary` rewrites the
+        // summary with the session as its own parent. Upstream skips the copy
+        // for the same reason (`xai-grok-shell` `agent/subagent/mod.rs`).
         let is_same_session = source.child_session_id == child_session_info.id.0.as_ref()
             && source.child_cwd == child_session_info.cwd;
         let copy_result = if is_same_session {
