@@ -419,18 +419,57 @@ impl AgentView {
                 }
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
                     Some(AgentPane::Dock) => {
-                        self.set_active_pane(AgentPane::Dock, false);
-                        let row = mouse.row.saturating_sub(self.pane_areas.dock.y);
-                        let items = self.dock_items();
-                        match crate::views::dock::item_at(&self.dock_counts(), row) {
+                        let item = self.dock_item_at(self.pane_areas.dock, mouse.row);
+                        if let Some(hit) = self
+                            .dock_stop_button
+                            .clone()
+                            .filter(|hit| hit.rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            if self.pos_occluded(mouse.column, mouse.row) {
+                                return InputOutcome::Changed;
+                            }
+                            let Some(item) = item else {
+                                return InputOutcome::Changed;
+                            };
+                            let Some(action) = self.dock_stop_action(item) else {
+                                return InputOutcome::Changed;
+                            };
+                            if super::agent_view::DockKillId::from_action(&action).as_ref()
+                                != Some(&hit.id)
+                            {
+                                return InputOutcome::Changed;
+                            }
+                            return InputOutcome::Action(action);
+                        }
+                        match item {
                             Some(item) => {
-                                if let Some(idx) = items.iter().position(|it| *it == item) {
-                                    self.dock_cursor = idx;
+                                // Collapsing a section with a click must not leave
+                                // its header wearing the selection highlight.
+                                let collapsing_header = matches!(
+                                    item,
+                                    crate::views::dock::DockItem::Header(section)
+                                        if self.is_dock_section_expanded(section)
+                                );
+                                if !collapsing_header {
+                                    self.set_active_pane(AgentPane::Dock, false);
+                                    if let Some(idx) =
+                                        self.dock_items().iter().position(|it| *it == item)
+                                    {
+                                        self.dock_cursor = idx;
+                                    }
+                                } else if self.active_pane == AgentPane::Dock {
+                                    self.set_active_pane(AgentPane::Prompt, false);
                                 }
-                                self.dock_activate(item);
+                                self.activate_dock_item(item);
+                                self.dock_hovered =
+                                    self.dock_item_at(self.pane_areas.dock, mouse.row);
+                                self.cache_dock_stop_button();
                                 InputOutcome::Changed
                             }
-                            None => InputOutcome::Changed,
+                            None => {
+                                self.set_active_pane(AgentPane::Dock, false);
+                                InputOutcome::Changed
+                            }
                         }
                     }
                     Some(AgentPane::Todo) => {

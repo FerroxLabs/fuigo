@@ -1314,6 +1314,8 @@ impl AgentView {
         let dock_on = crate::views::dock::enabled()
             && !viewer_open
             && area.height > agent::SHORT_TERMINAL_ROWS;
+        self.dock_on = dock_on;
+        self.reconcile_dock_before_paint();
         let tasks_height = if viewer_open || dock_on {
             0
         } else {
@@ -1346,18 +1348,22 @@ impl AgentView {
             self.queue.desired_height()
         };
         let drain_blocked = self.drain_blocked();
-        let turn_status_drain_blocked = if dock_on { false } else { drain_blocked };
+        let dock_covers_cues = self.dock_covers_idle_cues(dock_on);
+        let turn_status_drain_blocked = if dock_covers_cues {
+            false
+        } else {
+            drain_blocked
+        };
         let watchers = self.watchers();
         let parked = self.renders_parked();
-        let turn_status_watchers = if dock_on {
-            crate::views::turn_status::Watchers {
-                workflows: watchers.workflows,
-                ..Default::default()
-            }
+        // The dock now carries a Workflows section of its own, so it covers the
+        // workflow cue too -- but only while it is actually painted.
+        let turn_status_watchers = if dock_covers_cues {
+            crate::views::turn_status::Watchers::default()
         } else {
             watchers
         };
-        let turn_status_parked = if dock_on { false } else { parked };
+        let turn_status_parked = if dock_covers_cues { false } else { parked };
         let wake_display_state = self.wake_display_state();
         let display_state = wake_display_state.unwrap_or(&self.session.state);
         let send_now_gap = self.send_now_awaiting_current() && display_state.is_idle();
@@ -1396,41 +1402,15 @@ impl AgentView {
             _ => 1,
         };
         let follow_ups_height = u16::from(self.follow_ups.is_some());
-        let mut dock_data = dock_on.then(|| crate::views::dock::DockData {
-            subagents: self
-                .dock_subagent_rows()
-                .into_iter()
-                .map(|(_, _, row)| row)
-                .collect(),
-            tasks: self
-                .dock_task_rows()
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect(),
-            watchers: self
-                .dock_watcher_rows()
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect(),
-            queued: self.visible_held_queue_len(),
-            subagents_expanded: self.dock_subagents_expanded,
-            tasks_expanded: self.dock_tasks_expanded,
-            watchers_expanded: self.dock_watchers_expanded,
-            focused: self.active_pane == ActivePane::Dock,
-            cursor: 0,
-            queue_body_rows: self.queue.desired_height(),
-        });
-        if let Some(data) = &mut dock_data {
-            let max = crate::views::dock::visible_items(data)
-                .len()
-                .saturating_sub(1);
-            self.dock_cursor = self.dock_cursor.min(max);
-            data.cursor = self.dock_cursor;
-        }
+        let mut dock_data = (dock_on && !self.dock_hidden).then(|| self.dock_snapshot());
         let dock_height = dock_data
             .as_ref()
             .map_or(0, crate::views::dock::desired_height);
+        self.take_dock_row_request();
         self.dock_shown = dock_height > 0;
+        if !self.dock_shown && self.active_pane == ActivePane::Dock {
+            self.active_pane = ActivePane::Scrollback;
+        }
         let timeline_width = crate::views::timeline::rail_width(
             appearance.show_timeline,
             self.is_subagent_view,
@@ -1539,7 +1519,19 @@ impl AgentView {
             self.timeline_hover = None;
             self.timeline_hover_preview = None;
         }
+        if let Some(data) = &mut dock_data {
+            if layout.dock.height > 0 {
+                data.max_rows =
+                    crate::views::dock::MaxRows::new(data.max_rows.get().min(layout.dock.height));
+            }
+            self.sync_dock_hover_from_pointer(layout.dock);
+            data.hovered = self.dock_hovered;
+            let (col, row) = self.last_mouse_pos;
+            data.stop_hovered = crate::views::dock::hovered_stop_button_rect(layout.dock, data)
+                .is_some_and(|hit| hit.rect.contains((col, row).into()));
+        }
         if let Some(dock) = &dock_data {
+            self.cache_dock_stop_at(layout.dock, dock);
             let body = crate::views::dock::queue_body_rect(layout.dock, dock);
             if body.height > 0 {
                 layout.queue = body;

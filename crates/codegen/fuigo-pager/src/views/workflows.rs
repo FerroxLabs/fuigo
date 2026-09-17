@@ -96,6 +96,32 @@ impl WorkflowRunSnapshot {
         self.agents.iter().filter(|a| a.state == "running").count()
     }
 
+    /// Dock/tasks-pane activity line: `<current phase>` and the live agent
+    /// count while the run is active, otherwise the status with its underscores
+    /// spaced out.
+    pub fn activity_label(&self) -> String {
+        if self.is_active() {
+            let phase = self
+                .current_phase
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
+            let agents = match self.active_agent_count() {
+                0 => None,
+                1 => Some("1 agent".to_owned()),
+                n => Some(format!("{n} agents")),
+            };
+            match (phase, agents) {
+                (Some(p), Some(a)) => format!("{p} \u{b7} {a}"),
+                (Some(p), None) => p.to_owned(),
+                (None, Some(a)) => a,
+                (None, None) => "running".to_owned(),
+            }
+        } else {
+            self.status.replace('_', " ")
+        }
+    }
+
     pub fn live_elapsed_ms(&self) -> u64 {
         let base = self.elapsed_ms;
         if self.is_active() {
