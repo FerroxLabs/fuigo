@@ -1035,6 +1035,8 @@ pub struct AppView {
     /// Passed to `show_ephemeral_tip`, which increments the matching key in place.
     /// In-memory only and per-session: never persisted to disk, so each pager run starts fresh (count 0).
     pub tip_seen_counts: std::collections::HashMap<&'static str, u32>,
+    /// `/copy` or `/export` was used this run: the export-copy tip is moot for every view from then on.
+    pub export_copy_slash_used: bool,
     /// Terminal height (rows) from startup / the last `Event::Resize`.
     /// Feeds the auto-compact derivation (`views::agent::effective_compact`).
     /// The render-value compact flag is forced on while the terminal is `AUTO_COMPACT_MAX_ROWS` or shorter.
@@ -1659,6 +1661,7 @@ impl AppView {
             contextual_hints: Default::default(),
             remote_contextual_hints: None,
             tip_seen_counts: Default::default(),
+            export_copy_slash_used: false,
             last_known_terminal_rows: 0,
             small_screen_tip_evaluated: false,
             ssh_wrap_tip_evaluated: false,
@@ -5858,6 +5861,24 @@ impl AppView {
             needs_redraw |= agent.prompt.history_search.poll();
             needs_redraw |= agent.poll_scrollback_search();
             needs_redraw |= agent.tick_toast();
+            if !self.export_copy_slash_used
+                && let Some(child_sid) = agent.active_subagent.clone()
+                && let Some(child_view) = agent.subagent_views.get_mut(&child_sid)
+            {
+                if child_view.tick_export_copy_detector() {
+                    needs_redraw |= super::dispatch::present_export_copy_tip(
+                        child_view,
+                        &mut self.tip_seen_counts,
+                        self.contextual_hints.export_copy,
+                    );
+                }
+            } else if !self.export_copy_slash_used && agent.tick_export_copy_detector() {
+                needs_redraw |= super::dispatch::present_export_copy_tip(
+                    agent,
+                    &mut self.tip_seen_counts,
+                    self.contextual_hints.export_copy,
+                );
+            }
             needs_redraw |= agent.tick_extensions_result_notice();
             needs_redraw |= agent.tick_ephemeral_tip();
             needs_redraw |= agent.tick_mode_banner();

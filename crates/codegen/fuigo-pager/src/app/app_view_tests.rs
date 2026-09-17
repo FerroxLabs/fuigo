@@ -149,6 +149,7 @@ pub(crate) fn test_app() -> AppView {
         contextual_hints: Default::default(),
         remote_contextual_hints: None,
         tip_seen_counts: Default::default(),
+        export_copy_slash_used: false,
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
         ssh_wrap_tip_evaluated: false,

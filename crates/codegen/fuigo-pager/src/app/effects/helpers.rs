@@ -1187,6 +1187,18 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "contextual_hints.export_copy" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "contextual_hints.export_copy",
+                    "Bool",
+                    &value,
+                ));
+            };
+            fuigo_shell::util::config::set_contextual_hint_export_copy(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "theme" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("theme", "Enum", &value));

@@ -1231,6 +1231,21 @@ pub(in crate::app::dispatch) fn set_contextual_hint_ssh_wrap(
     )
 }
 
+pub(in crate::app::dispatch) fn set_contextual_hint_export_copy(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = app.current_ui.contextual_hints.export_copy;
+    set_contextual_hint(
+        app,
+        "contextual_hints.export_copy",
+        "Copy and export hint",
+        prev,
+        |h, v| h.export_copy = v,
+        new,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Theme settings: `theme`, `auto_dark_theme`, `auto_light_theme`.
 //

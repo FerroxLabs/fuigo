@@ -1369,6 +1369,8 @@ pub struct AgentView {
     /// intercept refuses and the tick path retires the tip, so the long TTL
     /// can never shadow yank mid-edit. `None` while the tip is not showing.
     pub(crate) word_select_tip_prompt_snapshot: Option<String>,
+    /// Drag-copy cluster detector behind the `/copy` · `/export` tip; ticks down the Copied! toast before showing.
+    pub(crate) export_copy_detector: crate::tips::export_copy::ExportCopyDetector,
     /// When the last fold/nav double-click landed on assistant text (a
     /// word-select probe). A second probe within the repeat window is the
     /// repeated-selection-attempt signal that fires the word-select tip;

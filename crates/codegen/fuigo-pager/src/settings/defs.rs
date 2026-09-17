@@ -509,6 +509,7 @@ const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.send_now",
     "contextual_hints.small_screen",
     "contextual_hints.word_select",
+    "contextual_hints.export_copy",
     "contextual_hints.ssh_wrap",
 ];
 
@@ -1557,6 +1558,20 @@ pub fn default_settings() -> Vec<SettingMeta> {
             ],
             kind: SettingKind::Bool {
                 default: ui_default.contextual_hints.word_select.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "contextual_hints.export_copy",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Copy and export",
+            description: "After three nearby drag-copies of conversation text, \
+                          remind you that /copy and /export exist.",
+            keywords: &["copy", "export", "transcript", "clipboard", "hint"],
+            kind: SettingKind::Bool {
+                default: ui_default.contextual_hints.export_copy.unwrap_or(true),
             },
             restart_required: false,
             hidden_in_minimal: false,

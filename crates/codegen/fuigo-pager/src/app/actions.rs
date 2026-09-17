@@ -584,6 +584,7 @@ pub enum Action {
     SetContextualHintSmallScreen(bool),
     SetContextualHintWordSelect(bool),
     SetContextualHintSshWrap(bool),
+    SetContextualHintExportCopy(bool),
     /// Commit the active theme (canonical name, e.g. `"fuigonight"`, `"auto"`).
     SetTheme(String),
     /// Commit the theme used when the OS is in dark mode.

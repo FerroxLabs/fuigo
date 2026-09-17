@@ -46,7 +46,8 @@ pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
-pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};
+pub(crate) use session::lifecycle::{abandon_unused_home_session, maybe_create_home_session};
+pub(in crate::app) use prompt::{present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip};
 pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,
     note_peek_page_flip, shim_renders_own_user_block,

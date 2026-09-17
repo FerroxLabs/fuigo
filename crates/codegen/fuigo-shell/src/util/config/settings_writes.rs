@@ -157,6 +157,11 @@ pub async fn set_contextual_hint_word_select(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.word_select = Some(value)).await
 }
 
+/// Persist `[ui.contextual_hints].export_copy` via `update_config`.
+pub async fn set_contextual_hint_export_copy(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.contextual_hints.export_copy = Some(value)).await
+}
+
 /// Persist `[ui.contextual_hints].ssh_wrap` via `update_config`.
 pub async fn set_contextual_hint_ssh_wrap(value: bool) -> Result<()> {
     update_config(|cfg| cfg.ui.contextual_hints.ssh_wrap = Some(value)).await
