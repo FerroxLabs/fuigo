@@ -2090,6 +2090,33 @@ async fn mcp_list_gateway_off_disables_cached_catalog() {
         })
         .await;
 }
+/// `/skills` scans disk for the modal and must also refresh every live session's baseline.
+#[tokio::test(flavor = "current_thread")]
+async fn skills_list_refreshes_session_skill_baseline() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-skills-list");
+    let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+    agent.insert_resident(&sid, handle);
+    let req = acp::ExtRequest::new(
+        "fuigo/skills/list",
+        serde_json::value::to_raw_value(&serde_json::json!({ "cwd": "/tmp" }))
+            .unwrap()
+            .into(),
+    );
+    crate::extensions::skills::handle(
+        &agent,
+        &req,
+        None,
+        fuigo_agent::prompt::skills::CompatConfig::default(),
+    )
+    .await
+    .expect("skills/list succeeds");
+    let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
+        .await
+        .expect("RefreshSkillBaseline should be sent")
+        .expect("channel should stay open");
+    assert!(matches!(cmd, SessionCommand::RefreshSkillBaseline));
+}
 /// Gateway tools live on the agent catalog, so sessions only rebuild `search_tool`.
 #[tokio::test(flavor = "current_thread")]
 async fn refresh_mcp_search_index_broadcasts_to_sessions() {

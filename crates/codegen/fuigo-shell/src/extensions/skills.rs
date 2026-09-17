@@ -399,6 +399,9 @@ pub async fn handle(
         "fuigo/skills/list" => {
             let req: SkillsListRequest = super::parse_params_str(args.params.get())?;
             let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
+            // Sessions otherwise learn about disk changes only from inotify,
+            // which misses writes made through another NFS client.
+            agent.refresh_skill_baseline_for_all_sessions();
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
