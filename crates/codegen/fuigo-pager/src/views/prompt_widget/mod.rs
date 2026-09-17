@@ -2155,6 +2155,16 @@ impl PromptWidget {
     /// The caller should forward ALL mouse events, not just those in the prompt area.
     /// TextArea tracks drag state internally and handles drag-beyond-edge.
     pub fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> PromptEvent {
+        self.handle_mouse_inner(mouse).0
+    }
+
+    /// Forward a wheel event to the textarea; `true` when the textarea actually scrolled its own
+    /// content, so the caller can hand an unconsumed wheel to the conversation instead.
+    pub fn handle_mouse_scroll(&mut self, mouse: &crossterm::event::MouseEvent) -> bool {
+        self.handle_mouse_inner(mouse).1
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: &crossterm::event::MouseEvent) -> (PromptEvent, bool) {
         use fuigo_ratatui_textarea::{MouseAction, TextElementEventKind};
 
         self.post_insert_image_preview = None;
@@ -2183,7 +2193,8 @@ impl PromptWidget {
             }
         }
 
-        match action {
+        let did_scroll = matches!(action, MouseAction::Scrolled);
+        let event = match action {
             MouseAction::CursorPlaced
             | MouseAction::SelectionUpdated
             | MouseAction::SelectionFinished
@@ -2193,7 +2204,8 @@ impl PromptWidget {
                 PromptEvent::Edited
             }
             MouseAction::Nothing => PromptEvent::Edited,
-        }
+        };
+        (event, did_scroll)
     }
 
     /// Handle a paste event.

@@ -898,7 +898,13 @@ impl AgentView {
                     row,
                     modifiers: KeyModifiers::NONE,
                 };
-                self.prompt.handle_mouse(&event);
+                if !self.prompt.handle_mouse_scroll(&event) {
+                    if lines > 0 {
+                        self.scrollback.scroll_down(lines as u16);
+                    } else {
+                        self.scrollback.scroll_up((-lines) as u16);
+                    }
+                }
             }
         }
     }
