@@ -359,17 +359,14 @@ impl AgentView {
     /// Callers must know the button is UP (bare `Moved`, an unpaired release).
     /// The toggle clears xterm.js's tracking of a press in flight, so firing it mid-press would break that gesture.
     /// Gated to xterm.js embeds: other terminals don't have the wedge, and some (VTE) emit spurious events on mouse-mode churn.
-    pub(super) fn reset_wedged_mouse_reporting(&self) {
+    pub(super) fn reset_wedged_mouse_reporting(&mut self) {
         if crate::terminal::terminal_context().brand.is_xtermjs_embed()
             && crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire)
         {
-            fuigo_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(
-                    stderr,
-                    crossterm::event::DisableMouseCapture,
-                    crossterm::event::EnableMouseCapture
-                );
-            });
+            // Queued, not written inline: this runs on the event-loop thread, where taking
+            // the stderr lock deadlocks the UI if the terminal has stopped reading.
+            self.pending_effects
+                .push(crate::app::actions::Effect::ResetMouseReporting);
         }
     }
 

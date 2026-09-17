@@ -95,19 +95,24 @@ static GBOOM_KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 /// Tracking several keys held at once needs those release events.
 /// Does nothing unless the Kitty keyboard protocol is active.
 /// [`pop_gboom_keyboard_flags`] pops the layer again (so does `restore_terminal` on teardown).
-pub(crate) fn push_gboom_keyboard_flags() {
+pub(crate) fn push_gboom_keyboard_flags(writer: &crate::render::draw::EscapeWriter) {
     if !kitty_flags_pushed() || GBOOM_KEYBOARD_PUSHED.swap(true, Ordering::AcqRel) {
         return;
     }
     let flags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
         | event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
-    });
+    writer.emit_command(event::PushKeyboardEnhancementFlags(flags));
 }
-/// Pop the extra keyboard layer pushed by [`push_gboom_keyboard_flags`].
-pub(crate) fn pop_gboom_keyboard_flags() {
+/// Pop the extra keyboard layer pushed by [`push_gboom_keyboard_flags`], via the writer queue.
+pub(crate) fn pop_gboom_keyboard_flags(writer: &crate::render::draw::EscapeWriter) {
+    if GBOOM_KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
+        writer.emit_command(event::PopKeyboardEnhancementFlags);
+    }
+}
+/// Teardown/panic variant of [`pop_gboom_keyboard_flags`]: writes inline because the
+/// writer thread is already drained (or being abandoned) on those paths.
+fn pop_gboom_keyboard_flags_inline() {
     if GBOOM_KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
         fuigo_shell::util::with_locked_stderr(|stderr| {
             let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
@@ -1586,7 +1591,7 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     fuigo_shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, event::DisableFocusChange);
     });
-    pop_gboom_keyboard_flags();
+    pop_gboom_keyboard_flags_inline();
     if crate::terminal::take_kitty_flags_pushed() {
         fuigo_shell::util::with_locked_stderr(|stderr| {
             let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
@@ -1692,6 +1697,30 @@ fn set_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The loop-top gboom keyboard-layer sync runs on the event-loop thread: its push/pop
+    /// escapes must ride the writer queue, not an inline stderr write.
+    #[cfg(not(windows))]
+    #[test]
+    fn gboom_keyboard_flags_ride_the_writer_queue() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = crate::render::draw::EscapeWriter::new(
+            tx,
+            crate::render::draw::WriterSync::new(),
+        );
+        let prev = crate::terminal::pushed_kitty_flags();
+        crate::terminal::set_pushed_kitty_flags(
+            event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        );
+        push_gboom_keyboard_flags(&writer);
+        pop_gboom_keyboard_flags(&writer);
+        crate::terminal::set_pushed_kitty_flags(prev);
+        let push = rx.try_recv().expect("push escape queued");
+        let pop = rx.try_recv().expect("pop escape queued");
+        assert!(String::from_utf8_lossy(push.data()).contains("\x1b[>"));
+        assert!(String::from_utf8_lossy(pop.data()).contains("\x1b[<"));
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn restore_runs_teardown_even_when_writer_failed() {
         use ratatui::{TerminalOptions, Viewport};

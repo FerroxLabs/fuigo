@@ -73,6 +73,8 @@ pub(crate) fn execute(
             crate::app::signal_handler::set_current_session_id(None);
             unregister_active_session_best_effort(&session_id);
         }
+        // Handled by `process_effects` on the event-loop thread (it owns the escape writer).
+        Effect::ResetMouseReporting => {}
         Effect::Quit => {
             ulog::info("pager quit", None, None);
             return (true, meta);

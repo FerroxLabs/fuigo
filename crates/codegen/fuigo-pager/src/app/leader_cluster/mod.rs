@@ -488,7 +488,12 @@ impl PagerLeaderCluster {
             self.authenticated = true;
         }
 
-        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx,
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         app.leader_mode = true;
         app.auth_state = AuthState::Done;
         app.trust_state = TrustState::Done;

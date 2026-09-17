@@ -109,7 +109,11 @@ pub(crate) fn test_app() -> AppView {
         scroll_state: MouseScrollState::default(),
         scroll_config: ScrollConfig::default(),
         appearance: AppearanceConfig::default(),
-        notification_service: NotificationService::new(Default::default()),
+        notification_service: NotificationService::new(
+            Default::default(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        ),
+        escape_writer: crate::render::draw::EscapeWriter::disconnected(),
         pending_notification_escapes: None,
         deferred_notification: None,
         tracing_rx: None,

@@ -1,4 +1,3 @@
-use std::io::Write;
 
 use crate::notifications::tmux;
 use crate::terminal::{TerminalContext, TerminalName};
@@ -35,15 +34,6 @@ fn progress_sequence(state: ProgressState, ctx: &TerminalContext) -> Option<Stri
         Some(tmux::tmux_passthrough(sequence))
     } else {
         Some(sequence.to_owned())
-    }
-}
-
-pub fn emit_progress(state: ProgressState, ctx: &TerminalContext) {
-    if let Some(seq) = progress_sequence(state, ctx) {
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            let _ = stderr.write_all(seq.as_bytes());
-            let _ = stderr.flush();
-        });
     }
 }
 
@@ -90,44 +80,6 @@ mod tests {
                 "{brand:?} should not support progress bar"
             );
         }
-    }
-
-    #[test]
-    fn emit_noop_for_unsupported_terminal() {
-        let ctx = ctx_for(TerminalName::Kitty);
-        // The only check is no panic; an unsupported brand writes nothing
-        emit_progress(ProgressState::Indeterminate, &ctx);
-        emit_progress(ProgressState::Clear, &ctx);
-    }
-
-    #[test]
-    fn emit_does_not_panic_for_supported_terminals() {
-        for ctx in [
-            TerminalContext {
-                brand: TerminalName::Iterm2,
-                term_program_version: Some("3.6.0".into()),
-                ..Default::default()
-            },
-            ctx_for(TerminalName::Ghostty),
-            ctx_for(TerminalName::WezTerm),
-        ] {
-            emit_progress(ProgressState::Indeterminate, &ctx);
-            emit_progress(ProgressState::Clear, &ctx);
-        }
-    }
-
-    #[test]
-    fn emit_with_tmux_passthrough() {
-        let ctx = TerminalContext {
-            brand: TerminalName::Iterm2,
-            multiplexer: MultiplexerKind::Tmux,
-            tmux_version: Some("tmux 3.3".into()),
-            term_program_version: Some("3.6.0".into()),
-            ..Default::default()
-        };
-        // The only check is no panic; these calls take the tmux passthrough wrapping path
-        emit_progress(ProgressState::Indeterminate, &ctx);
-        emit_progress(ProgressState::Clear, &ctx);
     }
 
     // --- build_progress_escape tests ---

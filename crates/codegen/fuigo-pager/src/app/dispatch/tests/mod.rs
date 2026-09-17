@@ -99,7 +99,11 @@ fn test_app() -> AppView {
         scroll_state: crate::input::mouse::MouseScrollState::default(),
         scroll_config: crate::input::mouse::ScrollConfig::default(),
         appearance: crate::appearance::AppearanceConfig::default(),
-        notification_service: crate::notifications::NotificationService::new(Default::default()),
+        notification_service: crate::notifications::NotificationService::new(
+            Default::default(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        ),
+        escape_writer: crate::render::draw::EscapeWriter::disconnected(),
         status_line: Default::default(),
         pending_notification_escapes: None,
         deferred_notification: None,

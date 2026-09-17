@@ -673,6 +673,13 @@ fn writer_event_sequence(event: crate::render::draw::WriterEvent) -> std::io::Re
     }
 }
 
+/// Re-assert mouse capture through the writer queue; an inline stderr write here deadlocks the
+/// event loop when the terminal has stopped reading (the writer thread holds the lock).
+fn reassert_mouse_capture_on_focus(escape_writer: &crate::render::draw::EscapeWriter) {
+    if crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire) {
+        escape_writer.emit_command(crossterm::event::EnableMouseCapture);
+    }
+}
 const SUSPEND_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 fn suspend_retry_ready(retry_after: Option<Instant>, now: Instant) -> bool {
@@ -1104,10 +1111,14 @@ pub(crate) async fn run(
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
     fuigo_telemetry::startup::enter(fuigo_telemetry::startup::StartupPhase::AppInit);
+    // Live handle onto the writer thread's queue: every mid-session out-of-band escape goes
+    // through it instead of taking the stderr lock on this thread (see `EscapeWriter`)
+    let escape_writer = terminal.backend_mut().writer_mut().escape_writer();
     let mut app = AppView::new(
         connection.tx,
         connection.models,
         connection.available_commands,
+        escape_writer,
     );
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
@@ -1448,6 +1459,7 @@ pub(crate) async fn run(
     if let Some(ref raw) = effective_config {
         app.notification_service = crate::notifications::NotificationService::new(
             crate::notifications::load_notification_config(raw),
+            app.escape_writer.clone(),
         );
         if let Some(table) = raw.as_table() {
             // Voice inherits the same resolved endpoints base as chat (config > FUIGO_API_BASE_URL env > default)
@@ -2347,14 +2359,14 @@ pub(crate) async fn run(
         let want_gboom_keyboard = app.gboom_active();
         if want_gboom_keyboard {
             if !gboom_keyboard_pushed {
-                super::push_gboom_keyboard_flags();
+                super::push_gboom_keyboard_flags(&app.escape_writer);
                 gboom_keyboard_pushed = true;
             }
             // Only the active game receives release events
             // Any other open game must drop its latched holds, or it resumes walking with no key down when reopened after a tab/view switch
             app.gboom_release_backgrounded_games();
         } else if gboom_keyboard_pushed {
-            super::pop_gboom_keyboard_flags();
+            super::pop_gboom_keyboard_flags(&app.escape_writer);
             gboom_keyboard_pushed = false;
             // No game is the active input target now (switched to a non-game view); clear every game's holds for the same reason
             app.gboom_release_all_games();
@@ -3663,11 +3675,7 @@ async fn drain_and_process(
                 // That silently downgrades mouse reports from SGR to legacy X10
                 // X10 column-coordinate bytes of 95 or more then corrupt into typed characters
                 // Idempotent everywhere else, and gated so a deliberate capture-off state is never undone
-                if crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire) {
-                    fuigo_shell::util::with_locked_stderr(|stderr| {
-                        let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
-                    });
-                }
+                reassert_mouse_capture_on_focus(&app.escape_writer);
                 // Force a full repaint on refocus to heal out-of-band stranded rows.
                 // Sets needs_draw (not had_non_resize_change)
                 // The draw site honors force_repaint ahead of the resize debounce, clearing even a coalesced same-size resize
@@ -4439,6 +4447,16 @@ fn process_effects(
 ) -> bool {
     let flags = session_flags_for_effects(app, &effs);
     for eff in effs {
+        if matches!(eff, super::actions::Effect::ResetMouseReporting) {
+            // Capture may have been turned off between the request and here; re-check
+            if crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire) {
+                app.escape_writer
+                    .emit_command(crossterm::event::DisableMouseCapture);
+                app.escape_writer
+                    .emit_command(crossterm::event::EnableMouseCapture);
+            }
+            continue;
+        }
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle
@@ -4478,6 +4496,36 @@ mod tests {
     /// Tests drive live input only: everything they build arrived after the reader started.
     fn test_live_input_start() -> std::time::Instant {
         std::time::Instant::now() - std::time::Duration::from_secs(3600)
+    }
+
+    /// The wedged-mouse-reporting reset rides the escape writer via `Effect::ResetMouseReporting`,
+    /// re-checking capture at process time; nothing is written inline on the event-loop thread.
+    #[cfg(not(windows))]
+    #[test]
+    fn reset_mouse_reporting_effect_rides_the_writer_queue() {
+        use std::sync::atomic::Ordering;
+        let mut app = crate::app::app_view::tests::test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.escape_writer = crate::render::draw::EscapeWriter::new(
+            tx,
+            crate::render::draw::WriterSync::new(),
+        );
+        let mut tasks = JoinSet::new();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let was = crate::app::MOUSE_CAPTURE_ENABLED.swap(true, Ordering::AcqRel);
+        let quit = process_effects(
+            vec![super::super::actions::Effect::ResetMouseReporting],
+            &mut tasks,
+            &mut app,
+            &progress_tx,
+        );
+        crate::app::MOUSE_CAPTURE_ENABLED.store(was, Ordering::Release);
+        assert!(!quit);
+        let disable = rx.try_recv().expect("disable escape queued");
+        let enable = rx.try_recv().expect("enable escape queued");
+        assert!(String::from_utf8_lossy(disable.data()).contains("\x1b[?1000l"));
+        assert!(String::from_utf8_lossy(enable.data()).contains("\x1b[?1000h"));
+        assert!(rx.try_recv().is_err(), "exactly one toggle pair expected");
     }
 
     #[test]
