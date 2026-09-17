@@ -2776,7 +2776,14 @@ impl TextArea {
         self.elements
             .iter()
             .find(|e| e.id == id)
-            .map(|e| &self.text[e.range.clone()])
+            .and_then(|e| self.get_range(e.range.clone()))
+    }
+
+    /// Buffer text at `range`, or `None` when the range is not a valid slice of the current buffer
+    /// (out of bounds or off a char boundary). Element metadata restored from an older buffer can
+    /// carry such ranges, so element-text reads go through here instead of indexing.
+    pub fn get_range(&self, range: Range<usize>) -> Option<&str> {
+        self.text().get(range)
     }
 
     /// Update the display for an existing element. Invalidates the wrap cache.
@@ -2797,11 +2804,15 @@ impl TextArea {
     /// describes one element whose text already occupies `range` in the
     /// buffer. No text is inserted — this only recreates the element
     /// metadata so the textarea renders chips instead of raw text.
+    /// Invalid ranges are skipped because restored ranges can outlive the buffer.
     pub fn restore_elements(
         &mut self,
         elems: impl IntoIterator<Item = (Range<usize>, ElementKind, Option<Line<'static>>)>,
     ) {
         for (range, kind, display) in elems {
+            if self.get_range(range.clone()).is_none() {
+                continue;
+            }
             self.add_element(range, kind, display);
         }
         self.wrap_cache.replace(None);

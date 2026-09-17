@@ -514,7 +514,9 @@ impl StashedPrompt {
             }
             chip.range = chip.range.start - start..chip.range.end - start;
             if chip.kind == KIND_IMAGE
-                && let Some(number) = parse_image_display_number(&text[chip.range.clone()])
+                && let Some(number) = text
+                    .get(chip.range.clone())
+                    .and_then(parse_image_display_number)
             {
                 image_numbers.insert(number);
             }
@@ -1239,7 +1241,11 @@ impl PromptWidget {
                     // Absorbing (rather than trimming the insert) lands the cursor after the separator, in the args phase
                     // Never absorb an element's byte: a chip's leading space is chip data
                     // replace_range expands any overlap to the whole element, so the absorb would swallow the chip
-                    let next_is_plain_space = self.textarea.text()[range.end..].starts_with(' ')
+                    let next_is_plain_space = self
+                        .textarea
+                        .text()
+                        .get(range.end..)
+                        .is_some_and(|s| s.starts_with(' '))
                         && !self
                             .textarea
                             .elements()
@@ -1426,7 +1432,7 @@ impl PromptWidget {
                 continue;
             }
             if cursor >= elem.range.start && cursor <= elem.range.end + 1 {
-                let text = &self.textarea.text()[elem.range.clone()];
+                let text = self.textarea.get_range(elem.range.clone())?;
                 return Some(Self::parse_file_ref_element(text));
             }
         }
@@ -1444,7 +1450,7 @@ impl PromptWidget {
                 continue;
             }
             if cursor == elem.range.end || cursor == elem.range.start {
-                let text = &self.textarea.text()[elem.range.clone()];
+                let text = self.textarea.get_range(elem.range.clone())?;
                 return Some(Self::parse_file_ref_element(text));
             }
         }
@@ -2227,9 +2233,10 @@ impl PromptWidget {
         // Repaste-to-expand: "paste didn't do what I want? paste again."
         // Requires exact byte equality after the original insertion's canonicalization (normalize_line_breaks above and the textarea's tab expansion)
         // E.g. a trailing-newline difference is a different paste and takes the normal path below.
+        let expanded = self.textarea.expand_tabs(text);
         if !replacing_selection
             && let Some(elem) = self.paste_element_near_cursor()
-            && self.textarea.text()[elem.range.clone()] == *self.textarea.expand_tabs(text)
+            && self.textarea.get_range(elem.range.clone()) == Some(expanded.as_ref())
         {
             let id = elem.id;
             self.expand_element(id);
@@ -2417,7 +2424,10 @@ impl PromptWidget {
             // Primary: match by element_id (collision-free, stable for non-undo/redo edits)
             if let Some(mut img) = stored_by_id.remove(id) {
                 // Refresh display_number from the live buffer text in case the chip was renumbered externally (sanity)
-                let parsed = parse_image_display_number(&self.textarea.text()[range.clone()])
+                let parsed = self
+                    .textarea
+                    .get_range(range.clone())
+                    .and_then(parse_image_display_number)
                     .unwrap_or(img.display_number);
                 img.element_id = *id;
                 img.display_number = parsed;
@@ -2425,8 +2435,11 @@ impl PromptWidget {
                 continue;
             }
             // Fallback (redo path): match by display_number from the stash, then rebind to the freshly-issued `element_id`
-            let display_number =
-                parse_image_display_number(&self.textarea.text()[range.clone()]).unwrap_or(0);
+            let display_number = self
+                .textarea
+                .get_range(range.clone())
+                .and_then(parse_image_display_number)
+                .unwrap_or(0);
             if let Some(mut img) = stash_by_number.remove(&display_number) {
                 img.element_id = *id;
                 img.display_number = display_number;
@@ -2618,7 +2631,10 @@ impl PromptWidget {
             if elem.kind != KIND_IMAGE {
                 continue;
             }
-            if let Some(dn) = parse_image_display_number(&buf[elem.range.clone()]) {
+            if let Some(dn) = buf
+                .get(elem.range.clone())
+                .and_then(parse_image_display_number)
+            {
                 if by_number.iter().any(|(seen_dn, _)| *seen_dn == dn) {
                     tracing::warn!(
                         target: PROMPT_IMAGES_TRACING_TARGET,
@@ -2703,7 +2719,9 @@ impl PromptWidget {
 
     /// Buffer text of `elem` if it is a paste chip (`KIND_PASTE`).
     fn paste_text(&self, elem: &TextElement) -> Option<&str> {
-        (elem.kind == KIND_PASTE).then(|| &self.textarea.text()[elem.range.clone()])
+        (elem.kind == KIND_PASTE)
+            .then_some(elem.range.clone())
+            .and_then(|range| self.textarea.get_range(range))
     }
 
     /// Check if the cursor is currently on a paste element.
