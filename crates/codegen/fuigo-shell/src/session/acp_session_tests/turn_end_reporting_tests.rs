@@ -37,18 +37,23 @@ struct Harness {
     queue: Option<super::turn_end_hooks::TurnEndQueue>,
     /// Held only so the loop does not see its chat channel close.
     chat: Option<tokio::sync::mpsc::UnboundedSender<fuigo_chat_state::ChatStateEvent>>,
+    hook_workspace: Option<tempfile::TempDir>,
 }
 
 impl Harness {
     async fn new() -> Self {
-        Self::build(false).await
+        Self::build(false, None).await
     }
 
     async fn subagent() -> Self {
-        Self::build(true).await
+        Self::build(true, None).await
     }
 
-    async fn build(is_subagent: bool) -> Self {
+    async fn with_hook_workspace() -> Self {
+        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd"))).await
+    }
+
+    async fn build(is_subagent: bool, hook_workspace: Option<tempfile::TempDir>) -> Self {
         let (gateway_tx, gateway) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, mut persistence) =
             tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
@@ -57,6 +62,9 @@ impl Harness {
         tokio::task::spawn_local(async move { while persistence.recv().await.is_some() {} });
         let (mut actor, events) =
             create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+        if let Some(dir) = hook_workspace.as_ref() {
+            actor.hook_resolved_workspace_root = dir.path().to_string_lossy().into_owned();
+        }
         actor.startup_hints.is_subagent = is_subagent;
         if is_subagent {
             actor.startup_hints.subagent_type = Some("explore".into());
@@ -74,6 +82,7 @@ impl Harness {
             gateway: Some(gateway),
             events: Some(events),
             chat: None,
+            hook_workspace,
         }
     }
 
@@ -448,13 +457,25 @@ async fn a_subagent_session_end_names_the_child() {
         let mut parent = Harness::new().await;
         parent.listen(&events);
         let timer = fuigo_telemetry::session_end::SessionEndTimer::new_shared();
-        super::run_loop::fire_session_end_hooks(&parent.actor, "shutdown", &timer).await;
+        super::run_loop::fire_session_end_hooks(
+            &parent.actor,
+            "shutdown",
+            &timer,
+            &mut super::run_loop::DeferredStart::new(),
+        )
+        .await;
         assert_eq!(parent.fired(), vec!["session_end", "stop"]);
 
         let mut child = Harness::subagent().await;
         child.listen(&events);
         let child_timer = fuigo_telemetry::session_end::SessionEndTimer::new_shared();
-        super::run_loop::fire_session_end_hooks(&child.actor, "shutdown", &child_timer).await;
+        super::run_loop::fire_session_end_hooks(
+            &child.actor,
+            "shutdown",
+            &child_timer,
+            &mut super::run_loop::DeferredStart::new(),
+        )
+        .await;
         let fired = child.fired_payloads();
         assert_eq!(
             fired.len(),
@@ -988,6 +1009,90 @@ async fn a_flush_leaves_the_queue_open() {
         assert_eq!(fired.len(), 2);
         assert_eq!(fired[0]["promptId"], "p1");
         assert_eq!(fired[1]["promptId"], "p2");
+    })
+    .await;
+}
+
+/// A gated SessionStart hook must not hold the session command loop: session end is reached while it
+/// is still running, the deferred task is cancelled (bounded join), and no start event lands after end.
+#[tokio::test(flavor = "current_thread")]
+async fn session_end_cancels_in_flight_start_hook() {
+    run(async {
+        let mut h = Harness::with_hook_workspace().await;
+        let _cwd = h.hook_workspace.as_ref().expect("owned hook cwd");
+        h.listen(&[HookEventName::SessionStart, HookEventName::SessionEnd]);
+        let gate = tempfile::TempDir::new().unwrap();
+        let release = gate.path().join("release");
+        let started = gate.path().join("started");
+        // The hook backgrounds a grandchild: cancelling it must killpg the whole group, not just
+        // SIGKILL the direct child, or the grandchild outlives the session and writes `leaked`.
+        let leaked = gate.path().join("leaked");
+        *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
+            super::client_hooks_tests::file_registry_with_spec(
+                HookEventName::SessionStart,
+                &format!(
+                    "sh -c 'sleep 3 && echo alive > {}' & echo $$ > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done",
+                    leaked.display(),
+                    started.display(),
+                    release.display()
+                ),
+            ),
+        ));
+        let (cmd_tx, fired) = h.spawn_loop().await;
+        cmd_tx
+            .send(SessionCommand::DispatchSessionStartHook {
+                source: "new".into(),
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if started.exists() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("deferred start must launch the hook before cancel");
+        drop(cmd_tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let saw_end = fired
+                    .borrow()
+                    .iter()
+                    .any(|e| e["hookEventName"] == "session_end");
+                if saw_end {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session-end must not wait out a gated start hook");
+
+        std::fs::write(&release, b"go").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let names: Vec<String> = fired
+            .borrow()
+            .iter()
+            .filter_map(|e| e["hookEventName"].as_str().map(String::from))
+            .collect();
+        let end = names.iter().position(|n| n == "session_end");
+        assert!(end.is_some(), "session-end missing: {names:?}");
+        assert!(
+            !names
+                .iter()
+                .skip(end.unwrap())
+                .any(|n| n == "session_start"),
+            "cancelled start must not fire after session-end, got {names:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(
+            !leaked.exists(),
+            "the cancelled start hook's backgrounded grandchild outlived the session, \
+             so its process group was not killpg'd"
+        );
     })
     .await;
 }

@@ -75,6 +75,7 @@ pub struct CellSpan {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    pub strike: bool,
     /// Hyperlink (url, id) when this span is inside a `[label](url)` link or autolink inside a table cell.
     /// `None` for plain text.
     pub link: Option<(String, u32)>,
@@ -86,6 +87,7 @@ impl CellSpan {
         bold: bool,
         italic: bool,
         code: bool,
+        strike: bool,
         link: Option<(String, u32)>,
     ) -> Self {
         Self {
@@ -93,6 +95,7 @@ impl CellSpan {
             bold,
             italic,
             code,
+            strike,
             link,
         }
     }
@@ -136,6 +139,7 @@ pub struct TableState {
     pub cell_bold: bool,
     pub cell_italic: bool,
     pub cell_code: bool,
+    pub cell_strike: bool,
     /// Current link state: `Some((url, id))` while inside a `Tag::Link` / `Tag::Image` inside a table cell.
     /// Text events while this is set produce link-tagged `CellSpan`s so the table renderer can apply link styling and emit `HyperlinkTarget`s.
     pub cell_link: Option<(String, u32)>,
@@ -156,6 +160,7 @@ impl TableState {
             cell_bold: false,
             cell_italic: false,
             cell_code: false,
+            cell_strike: false,
             cell_link: None,
             in_header: false,
             range: start..start,
@@ -169,6 +174,7 @@ impl TableState {
             self.cell_bold,
             self.cell_italic,
             self.cell_code,
+            self.cell_strike,
             self.cell_link.clone(),
         ));
     }

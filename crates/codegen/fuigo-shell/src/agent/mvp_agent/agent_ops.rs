@@ -1468,9 +1468,15 @@ impl MvpAgent {
             crate::agent::otel_gate::policy_channel_for(&proxy_url)
         };
         self.otel_gate.rearm_on_switch(&identity, channel);
-        let outcome = self.fetch_settings_self_healing_401(auth).await;
+        let outcome = self
+            .settings_manager
+            .fetch(auth, || self.fetch_settings_self_healing_401(auth))
+            .await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
-        self.otel_gate.resolve(&identity, outcome, live.as_deref())
+        match outcome {
+            Some(outcome) => self.otel_gate.resolve(&identity, outcome, live.as_deref()),
+            None => None,
+        }
     }
     /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`] refresh and re-fetch if it yields a *different* token.
     /// This recovers a 401 from a token that expired mid-fetch.
@@ -2337,6 +2343,7 @@ impl MvpAgent {
             allow_access_resolved_for: std::cell::RefCell::new(None),
             storage_mode: std::cell::Cell::new(storage_mode),
             otel_gate: crate::agent::otel_gate::OtelGate::default(),
+            settings_manager: super::settings_manager::SettingsManager::default(),
             default_yolo_mode,
             default_auto_mode,
             trace_upload_live: Arc::new(
