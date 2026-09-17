@@ -230,10 +230,8 @@ fn an_empty_read_of_a_running_resumed_child_stays_needs_replay_and_retries() {
     let child_sid = "child-resumed-empty";
     set_replay_fuigo_home_for_tests(Some(home.path().to_path_buf()));
     let mut parent = make_min_child_view();
-    let mut child = make_min_child_view();
-    child
-        .scrollback
-        .push_block(RenderBlock::user_prompt("task only"));
+    // A freshly spawned child view is empty: the task prompt arrives as the child stream's own echo
+    let child = make_min_child_view();
     parent
         .subagent_views
         .insert(child_sid.to_string(), Box::new(child));
@@ -605,10 +603,8 @@ fn child_view_for_live_update_hydrates_a_resumed_child_before_returning_it() {
     std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
     set_replay_fuigo_home_for_tests(Some(home.path().to_path_buf()));
     let mut parent = make_min_child_view();
-    let mut child = make_min_child_view();
-    child
-        .scrollback
-        .push_block(RenderBlock::user_prompt("task only"));
+    // A freshly spawned child view is empty: the task prompt arrives as the child stream's own echo
+    let child = make_min_child_view();
     parent
         .subagent_views
         .insert(child_sid.to_string(), Box::new(child));
