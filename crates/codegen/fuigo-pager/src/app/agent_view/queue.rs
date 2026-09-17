@@ -80,7 +80,7 @@ impl AgentView {
     /// Bare Enter and the send-now chord share this path; queue-pane selection and mouse "Send now" keep intentional selection.
     /// Returns `None` when there is nothing to send.
     pub(super) fn try_send_now_queued_from_prompt(&mut self) -> Option<InputOutcome> {
-        if !self.session.state.is_turn_running() {
+        if !self.can_send_now() {
             return None;
         }
         self.sync_queue_pane();
@@ -121,7 +121,7 @@ impl AgentView {
     /// Whether an explicit send-now dispatched right now will actually cancel the running turn shell-side.
     /// Also requires the front committed so a spared send-now does not paint under later output from that front.
     pub(crate) fn expects_send_now_cancel(&self) -> bool {
-        self.session.state.is_turn_running()
+        self.can_send_now()
             && self.front_message_committed
             && !self
                 .goal_state
@@ -355,7 +355,7 @@ impl AgentView {
 
     /// Send one merged-queue row now (cancel-and-send), by selection id. The shell cancels the running turn and runs this row as the next turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
-        if !self.session.state.is_turn_running() {
+        if !self.can_send_now() {
             self.show_toast("No turn running: prompt will send when ready");
             return InputOutcome::Changed;
         }

@@ -702,6 +702,7 @@ impl AgentView {
     /// Whether Send now can target a local turn or an idle-looking automatic wake.
     pub(crate) fn can_send_now(&self) -> bool {
         self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling())
     }
     /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle and not replaying; keeps an in-flight cancel marker for the same id.
     pub(crate) fn note_streaming_wake_turn(&mut self, prompt_id: &str) {
