@@ -3955,6 +3955,16 @@ struct BindMcpTestState {
     /// end at its own timeout — the shape of a server that swallows methods it
     /// does not know.
     swallow_discover: bool,
+    /// How many `initialize` requests have reached the wire so far.
+    inits: Arc<std::sync::atomic::AtomicUsize>,
+    /// When set, `initialize` waits this long and then rejects. A rejection
+    /// SHORT of the startup window is a `HandshakeFailed`, not a `Timeout`, so
+    /// it is what fires the protocol-version fallback.
+    init_reject_after_ms: Option<u64>,
+    /// When set, the `initialize` with this zero-based index and every one
+    /// after it never answers — the shape of a server that accepts the
+    /// connection and then stalls.
+    init_hang_from: Option<usize>,
 }
 async fn bind_mcp_post(
     axum::extract::State(state): axum::extract::State<BindMcpTestState>,
@@ -3973,19 +3983,31 @@ async fn bind_mcp_post(
             std::future::pending::<()>().await;
             unreachable!("a swallowed probe never answers")
         }
-        Some("initialize") => (
-            [("mcp-session-id", "local-test-session")],
-            axum::Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": request["params"]["protocolVersion"].clone(),
-                    "capabilities": {},
-                    "serverInfo": {"name": "local-test", "version": "1"}
-                }
-            })),
-        )
-            .into_response(),
+        Some("initialize") => {
+            let attempt = state
+                .inits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if state.init_hang_from.is_some_and(|from| attempt >= from) {
+                std::future::pending::<()>().await;
+            }
+            if let Some(delay_ms) = state.init_reject_after_ms {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            (
+                [("mcp-session-id", "local-test-session")],
+                axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": request["params"]["protocolVersion"].clone(),
+                        "capabilities": {},
+                        "serverInfo": {"name": "local-test", "version": "1"}
+                    }
+                })),
+            )
+                .into_response()
+        }
         Some("tools/list") => {
             if state.hang_tools_list {
                 std::future::pending::<()>().await;
@@ -6279,8 +6301,8 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
 /// override to the raw discovery deadline lets a server that swallows
 /// `server/discover` burn the entire deadline in phase 1 — the legacy
 /// `initialize` never runs and a perfectly healthy legacy server is reported as
-/// a generic discovery timeout. Deriving it from
-/// [`fuigo_mcp::servers::McpClient::max_startup_within_deadline`] leaves both
+/// a generic discovery timeout. Handing the client the deadline (which then
+/// applies `startup_within_deadline` for the transport it holds) leaves both
 /// phases a window inside the deadline.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
@@ -6335,6 +6357,160 @@ async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
             failure.error
         ),
     }
+    drive.await.unwrap().expect("the drive must finish");
+    server_task.abort();
+}
+/// Regression: a STDIO bind server must keep the WHOLE discovery deadline for its `initialize`.
+///
+/// `try_handshake` sends stdio straight to `serve_legacy`: it runs no `server/discover` probe at
+/// all. Reserving `DISCOVER_PROBE_TIMEOUT_SECS` out of its budget therefore buys nothing and
+/// costs ten seconds of a phase it never runs. The class that pays is the cold-start `npx`/`uvx`
+/// server whose first `initialize` fetches a package and needs 20-30 s: at v1.0.19 the bind path
+/// set `startup_timeout_sec = ceil(discovery_timeout)` and it connected. There is no operator
+/// remedy either — the bind path's `McpClientTimeoutOverrides` outrank everything fuigo-shell
+/// resolves — so the deadline has to be split by the client, which knows the transport.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
+    // Twenty seconds: the smallest deadline that still carves a FULL probe window out, so a
+    // transport-blind budget leaves stdio `20 - DISCOVER_PROBE_TIMEOUT_SECS` = 10 s of
+    // `initialize` against the 20 s v1.0.19 gave it.
+    let discovery_timeout = std::time::Duration::from_secs(20);
+    let blind_budget =
+        fuigo_mcp::servers::McpClient::max_startup_within_deadline(discovery_timeout.as_secs());
+    assert_eq!(
+        blind_budget, 10,
+        "premise: the probe reservation is visible"
+    );
+
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    // `sleep` never reads its stdin, so the legacy `initialize` can only end at its own window —
+    // the timing shape of a server still installing itself.
+    let server = agent_client_protocol::McpServer::Stdio(
+        agent_client_protocol::McpServerStdio::new(
+            "slow-to-initialize",
+            std::path::PathBuf::from("sleep"),
+        )
+        .args(vec!["120".to_owned()]),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let started = std::time::Instant::now();
+    let drive = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                discovery_timeout,
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    let outcome = rx.recv().await.expect("the drive must report the server");
+    let elapsed = started.elapsed();
+    assert!(
+        outcome.is_err(),
+        "a server that never answers `initialize` cannot start"
+    );
+    assert!(
+        elapsed >= discovery_timeout - std::time::Duration::from_secs(5),
+        "the stdio server's `initialize` was cut off after {elapsed:?}: it was handed \
+         `deadline - DISCOVER_PROBE_TIMEOUT_SECS` ({blind_budget}s) for a probe phase stdio \
+         never runs, instead of the whole {discovery_timeout:?} deadline",
+    );
+    drive.await.unwrap().expect("the drive must finish");
+}
+/// A bind server that fails and then stalls must surface ITS OWN error, inside the deadline.
+///
+/// This is what the per-server sizing is for, and the quantity it has to fit is the whole
+/// `ensure_initialized` worst case, not one attempt: a plain-HTTP server that fails its first
+/// `initialize` short of the window gets a protocol-version fallback on a fresh transport, for
+/// `2 * deadline - DISCOVER_PROBE_TIMEOUT_SECS` against a `deadline`-long drive. The drive then
+/// cancels mid-retry and every such server is reported as the generic
+/// "MCP discovery timed out after …" — precisely the failure the sizing exists to prevent.
+/// The fix is not to shrink the first attempt (that regresses the same class as the stdio case
+/// above) but to bound the RETRY by the deadline's remainder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() {
+    // 12 s deadline: probing transports get startup 6, probe 6. The fake then burns the probe
+    // phase (6 s), rejects `initialize` #0 at 4 s — a `HandshakeFailed`, which is what fires the
+    // fallback — and hangs `initialize` #1 forever. Unclamped, that retry runs to 16 s.
+    let discovery_timeout = std::time::Duration::from_secs(12);
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        swallow_discover: true,
+        init_reject_after_ms: Some(4_000),
+        init_hang_from: Some(1),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let started = std::time::Instant::now();
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("stalls-after-a-rejection", url);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                discovery_timeout,
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    let outcome = rx.recv().await.expect("the drive must report the server");
+    let elapsed = started.elapsed();
+    let Err(failure) = outcome else {
+        panic!("the fake never completes a handshake; the server must not start");
+    };
+    assert!(
+        !failure.error.contains("MCP discovery timed out after"),
+        "after {elapsed:?} the drive's deadline cancelled the handshake and flattened this \
+         server's error into the generic discovery timeout: {}",
+        failure.error,
+    );
+    assert!(
+        elapsed < discovery_timeout,
+        "the handshake must fail on its own INSIDE the deadline, not at it: {elapsed:?}",
+    );
     drive.await.unwrap().expect("the drive must finish");
     server_task.abort();
 }

@@ -1761,7 +1761,11 @@ async fn fake_handle_post(
                 .init_user_agents
                 .lock()
                 .extend(header_values(&headers, axum::http::header::USER_AGENT));
-            if state.options.init_hang_from.is_some_and(|from| init_n >= from) {
+            if state
+                .options
+                .init_hang_from
+                .is_some_and(|from| init_n >= from)
+            {
                 std::future::pending::<()>().await;
             }
             if state.options.init_delay_ms > 0 {
@@ -2274,9 +2278,70 @@ fn handshake_budget_covers_the_probe_phase() {
     );
 }
 
-/// Deadline-driven callers derive per-server startup budgets from
-/// [`McpClient::max_startup_within_deadline`]; the resulting worst-case
-/// handshake must always fit the deadline.
+/// A deadline-sized client on the transport of the caller's choosing. Deadline-driven callers
+/// hand the client the DEADLINE, not a startup budget: only the client knows which handshake
+/// phases its transport runs.
+fn deadline_overrides(deadline_secs: u64) -> McpClientTimeoutOverrides {
+    McpClientTimeoutOverrides {
+        handshake_deadline_sec: Some(deadline_secs),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    }
+}
+
+/// A real stdio client. `sleep` never reads its stdin, so the legacy `initialize` can only end at
+/// its own window — the shape of a hung stdio server, and the one transport that runs no probe.
+#[cfg(unix)]
+async fn fake_stdio_client_with_overrides(overrides: McpClientTimeoutOverrides) -> Arc<McpClient> {
+    let mut cmd = Command::new("sleep");
+    cmd.arg("120").kill_on_drop(true);
+    fuigo_tools::util::detach_command(&mut cmd);
+    let (transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        None,
+        "stdio-srv".to_string(),
+        fuigo_session_events::EventWriter::noop(),
+    )
+    .await
+    .expect("spawn stdio test child");
+    Arc::new(McpClient::new_stdio(
+        "stdio-srv".to_string(),
+        transport,
+        Some(&overrides),
+        None,
+    ))
+}
+
+/// A real ACP client: in-process bridge, so it probes but has no server-side session to fall back
+/// for. The invoker never answers; none of these tests drive a handshake through it.
+fn fake_acp_client_with_overrides(overrides: McpClientTimeoutOverrides) -> Arc<McpClient> {
+    use crate::acp_transport::AcpReverseInvoker;
+
+    struct NeverInvoker;
+    #[async_trait::async_trait]
+    impl AcpReverseInvoker for NeverInvoker {
+        async fn invoke(
+            &self,
+            _server_id: &str,
+            _message: serde_json::Value,
+            _timeout: std::time::Duration,
+        ) -> Result<serde_json::Value, String> {
+            std::future::pending().await
+        }
+    }
+
+    Arc::new(McpClient::new_acp(
+        "acp-srv".to_string(),
+        "srv_0".to_string(),
+        Arc::new(NeverInvoker),
+        Some(&overrides),
+        None,
+    ))
+}
+
+/// The probing half of the deadline split, unchanged from upstream: a transport that runs
+/// `server/discover` must keep that window OUT of its legacy phase, or a swallowed probe burns
+/// the entire deadline in phase 1 and the `initialize` never runs.
 #[test]
 fn max_startup_within_deadline_fits_the_probe_phase() {
     let probe = McpClient::DISCOVER_PROBE_TIMEOUT_SECS;
@@ -2290,35 +2355,114 @@ fn max_startup_within_deadline_fits_the_probe_phase() {
     );
     assert_eq!(McpClient::max_startup_within_deadline(10), 5);
     assert_eq!(McpClient::max_startup_within_deadline(6), 3);
-    let budget = |deadline: u64| {
-        let startup = McpClient::max_startup_within_deadline(deadline);
-        fake_http_client_with_startup("http://127.0.0.1:1/mcp", startup, 5).handshake_budget_secs()
-    };
-    for deadline in McpClient::MIN_HANDSHAKE_DEADLINE_SECS..=60 {
-        assert!(
-            budget(deadline) <= deadline,
-            "deadline {deadline}s: worst-case handshake {}s exceeds it",
-            budget(deadline)
+}
+
+/// The invariant the `drive_server_starts` comment actually claims: a hung handshake fails with
+/// THIS SERVER's error before the shared deadline has to cancel it — on every transport.
+///
+/// That needs two things a transport-blind startup budget cannot give:
+/// - stdio keeps the WHOLE deadline for its `initialize`. It runs no probe
+///   (`try_handshake` sends it straight to `serve_legacy`), so reserving a probe window costs a
+///   cold-start `npx`/`uvx` server ten seconds of a phase it never runs.
+/// - the worst case, not one attempt, is what fits. `handshake_budget_secs() <= deadline` was
+///   the quantity the old test pinned, and it is not the quantity that matters: plain HTTP adds
+///   a protocol-version fallback on top, for `2 * deadline - probe` against a `deadline`-long
+///   drive. `ensure_initialized` bounds its retries by the deadline's remainder, which is what
+///   makes the worst case fit without shrinking anyone's first attempt.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_handshake_deadline_bounds_the_worst_case_on_every_transport() {
+    let url = "http://127.0.0.1:1/mcp";
+    for deadline in [0u64, 1, 2, 3, 6, 10, 12, 19, 20, 30, 45, 60] {
+        let floor = deadline.max(McpClient::MIN_HANDSHAKE_DEADLINE_SECS);
+        let stdio = fake_stdio_client_with_overrides(deadline_overrides(deadline)).await;
+        let acp = fake_acp_client_with_overrides(deadline_overrides(deadline));
+        let http = fake_http_client_with_overrides(url, deadline_overrides(deadline));
+        let oauth = fake_http_auth_client_with_deadline(url, deadline).await;
+        for (label, client) in [
+            ("stdio", &stdio),
+            ("acp", &acp),
+            ("http", &http),
+            ("oauth", &oauth),
+        ] {
+            assert!(
+                client.handshake_worst_case_secs() <= floor,
+                "{label} at a {deadline}s deadline: worst case {}s exceeds it",
+                client.handshake_worst_case_secs(),
+            );
+        }
+        // Stdio keeps the whole deadline (capped by the configured default, as every transport
+        // is): no probe phase means no reservation for one.
+        assert_eq!(
+            stdio.startup_timeout_sec(),
+            DEFAULT_STARTUP_TIMEOUT_SECS.min(deadline.max(1)),
+            "stdio at a {deadline}s deadline must keep its whole `initialize` window",
         );
+        assert_eq!(stdio.probe_phase_secs(), 0);
+        // The probing transports split the deadline, exactly as upstream does.
+        assert_eq!(
+            acp.startup_timeout_sec(),
+            DEFAULT_STARTUP_TIMEOUT_SECS.min(McpClient::max_startup_within_deadline(deadline)),
+        );
+        assert_eq!(http.startup_timeout_sec(), acp.startup_timeout_sec());
     }
-    // Below the minimum, both one-second phases still need the minimum budget.
-    for deadline in 0..McpClient::MIN_HANDSHAKE_DEADLINE_SECS {
-        assert_eq!(budget(deadline), McpClient::MIN_HANDSHAKE_DEADLINE_SECS);
-    }
+
+    // The concrete case the bind path ships: a 30 s discovery deadline.
+    let stdio = fake_stdio_client_with_overrides(deadline_overrides(30)).await;
+    assert_eq!(stdio.startup_timeout_sec(), 30, "v1.0.19 parity for stdio");
+    assert!(
+        stdio.startup_timeout_sec() > McpClient::max_startup_within_deadline(30),
+        "a transport-blind budget would hand stdio {}s",
+        McpClient::max_startup_within_deadline(30),
+    );
+    let http = fake_http_client_with_overrides("http://127.0.0.1:1/mcp", deadline_overrides(30));
+    assert_eq!(http.startup_timeout_sec(), 20);
+    // Unclamped, plain HTTP's worst case here is probe 10 + startup 20 + the fallback's second
+    // startup 20 = 50 s against a 30 s deadline. The deadline clamp is what brings it back.
+    assert_eq!(
+        http.handshake_budget_secs() + http.version_fallback_secs(),
+        50
+    );
+    assert_eq!(http.handshake_worst_case_secs(), 30);
+}
+
+/// Without a deadline (the ordinary config path) nothing is clamped: retries keep running on
+/// their own phase timeouts, exactly as they did before deadline-driven callers existed.
+#[test]
+fn no_deadline_means_no_clamp() {
+    let http = fake_http_client_with_startup("http://127.0.0.1:1/mcp", 30, 5);
+    assert_eq!(http.handshake_deadline_sec, None);
+    assert_eq!(http.handshake_worst_case_secs(), 70);
+    assert_eq!(
+        http.remaining_handshake_window(std::time::Duration::ZERO),
+        None,
+    );
 }
 
 /// An OAuth-capable client, for the budget arithmetic. The manager only has to EXIST for
 /// [`McpClient::handshake_worst_case_secs`] to admit a refresh retry, so it is pointed at a closed
 /// port: construction must not touch the network.
 async fn fake_http_auth_client_with_startup(url: &str, startup_timeout_sec: u64) -> Arc<McpClient> {
-    let manager = crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
-        .await
-        .expect("loopback auth manager");
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(startup_timeout_sec),
         tool_timeout_sec: Some(5),
         ..Default::default()
     };
+    fake_http_auth_client_with_overrides(url, overrides).await
+}
+
+/// The OAuth client of [`fake_http_auth_client_with_startup`], sized from a caller deadline.
+async fn fake_http_auth_client_with_deadline(url: &str, deadline_secs: u64) -> Arc<McpClient> {
+    fake_http_auth_client_with_overrides(url, deadline_overrides(deadline_secs)).await
+}
+
+async fn fake_http_auth_client_with_overrides(
+    url: &str,
+    overrides: McpClientTimeoutOverrides,
+) -> Arc<McpClient> {
+    let manager = crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
+        .await
+        .expect("loopback auth manager");
     Arc::new(McpClient::new_http_auth(
         "fake".to_string(),
         HttpConfig {
@@ -2342,6 +2486,7 @@ async fn fake_http_auth_client_with_startup(url: &str, startup_timeout_sec: u64)
 /// (`serve_legacy` returns `HandshakeFailed`, not `Timeout`, for everything short of the window, so
 /// the `!Timeout` gate on that retry does not suppress it.) An OAuth-capable client can then
 /// refresh its token and run a further full handshake.
+#[cfg(unix)]
 #[tokio::test]
 async fn handshake_worst_case_covers_the_fallback_and_the_oauth_refresh_retry() {
     let url = "http://127.0.0.1:1/mcp";
@@ -2351,12 +2496,29 @@ async fn handshake_worst_case_covers_the_fallback_and_the_oauth_refresh_retry() 
     assert_eq!(http.version_fallback_secs(), 30);
     assert_eq!(http.handshake_worst_case_secs(), 70);
 
-    // No `http_config` means no rebuildable HTTP transport, so no fallback retry and no OAuth
-    // refresh retry: one probe + startup.
-    let stdio = McpClient::stub("stdio-srv");
-    assert!(stdio.http_config.is_none());
+    // A REAL stdio client, not `McpClient::stub` — the stub holds a `PendingTransport::Http`, so
+    // `restorable_http_transport` hands it a fallback retry and it is the wrong stand-in for a
+    // transport that has none. Stdio runs no probe either: its budget is the startup window flat.
+    let stdio_overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(30),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    };
+    let stdio = fake_stdio_client_with_overrides(stdio_overrides.clone()).await;
+    assert_eq!(stdio.probe_phase_secs(), 0);
+    assert_eq!(stdio.handshake_budget_secs(), 30);
     assert_eq!(stdio.version_fallback_secs(), 0);
-    assert_eq!(stdio.handshake_worst_case_secs(), stdio.handshake_budget_secs());
+    assert_eq!(stdio.handshake_worst_case_secs(), 30);
+
+    // ACP probes (the bridge is rebuildable) but holds no server-side session, so no fallback.
+    let acp = fake_acp_client_with_overrides(stdio_overrides);
+    assert_eq!(
+        acp.probe_phase_secs(),
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+    assert_eq!(acp.handshake_budget_secs(), 40);
+    assert_eq!(acp.version_fallback_secs(), 0);
+    assert_eq!(acp.handshake_worst_case_secs(), 40);
 
     // OAuth: a failed attempt (70), the refresh interlude (15), and a full retry. The retry runs
     // after the fallback block, so it is one `handshake_budget_secs()` (40), not another 70.
@@ -2370,6 +2532,120 @@ async fn handshake_worst_case_covers_the_fallback_and_the_oauth_refresh_retry() 
     // records; the OAuth arm clears it with room for the second attempt.
     assert!(oauth.handshake_worst_case_secs() >= 70);
     assert!(http.handshake_worst_case_secs() >= 70);
+}
+
+/// The fallback's GATE and the budget that has to cover it must read the same fact.
+///
+/// `restorable_http_transport` decides whether the protocol-version retry can fire;
+/// `version_fallback_secs` decides whether every waiter parked on the handshake budgets for it.
+/// A client that budgets "no fallback" while its retry fires under-sizes every one of those
+/// waiters — the round-1 failure, one level out. Both now read `transport_kind`, so the pair
+/// cannot drift; this walks every `PendingTransport` shape the crate builds and pins that.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_fallback_gate_and_its_budget_read_the_same_transport_fact() {
+    use crate::acp_transport::AcpReverseInvoker;
+
+    struct NeverInvoker;
+    #[async_trait::async_trait]
+    impl AcpReverseInvoker for NeverInvoker {
+        async fn invoke(
+            &self,
+            _server_id: &str,
+            _message: serde_json::Value,
+            _timeout: std::time::Duration,
+        ) -> Result<serde_json::Value, String> {
+            std::future::pending().await
+        }
+    }
+
+    let http_config = HttpConfig {
+        url: "http://127.0.0.1:1/mcp".to_string(),
+        headers: vec![],
+        local_agent_endpoint: false,
+    };
+    let auth_manager = Arc::new(tokio::sync::Mutex::new(
+        crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
+            .await
+            .expect("loopback auth manager"),
+    ));
+    let mut cmd = Command::new("sleep");
+    cmd.arg("120").kill_on_drop(true);
+    fuigo_tools::util::detach_command(&mut cmd);
+    let (stdio_transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        None,
+        "stdio-srv".to_string(),
+        fuigo_session_events::EventWriter::noop(),
+    )
+    .await
+    .expect("spawn stdio test child");
+
+    let shapes = [
+        ("stdio", PendingTransport::Stdio(Box::new(stdio_transport))),
+        (
+            "acp",
+            PendingTransport::Acp {
+                server_id: "srv_0".to_string(),
+                invoker: Arc::new(NeverInvoker),
+            },
+        ),
+        ("http", PendingTransport::Http(http_config.clone())),
+        (
+            "http-auth",
+            PendingTransport::HttpAuth {
+                config: http_config,
+                auth_manager,
+            },
+        ),
+    ];
+    // Every shape is built with `http_config: None` ON PURPOSE. That is not a contrived client:
+    // it is exactly the shape `McpClient::stub` hands out — a `PendingTransport::Http` with no
+    // `http_config` — and any future constructor can do the same. Under a budget keyed on
+    // `http_config` the two HTTP shapes report "no fallback" while `restorable_http_transport`
+    // hands their retry a fresh transport, and every waiter parked on them is under-sized.
+    let overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(30),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    };
+    for (label, pending) in shapes {
+        let can_retry = restorable_http_transport(&pending).is_some();
+        let client = McpClient::new_with_transport(
+            label.to_string(),
+            pending,
+            Some(&overrides),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            can_retry,
+            client.version_fallback_secs() > 0,
+            "{label}: the fallback GATE says the retry can{} fire, but the fallback BUDGET \
+             allows {}s for it",
+            if can_retry { "" } else { "not" },
+            client.version_fallback_secs(),
+        );
+    }
+
+    // The client-level consequence, on real clients: stdio and ACP provably cannot fire the
+    // retry and budget zero for it.
+    let stdio = fake_stdio_client_with_overrides(overrides.clone()).await;
+    let acp = fake_acp_client_with_overrides(overrides);
+    for (label, client) in [("stdio", &stdio), ("acp", &acp)] {
+        assert_eq!(client.version_fallback_secs(), 0, "{label}");
+        assert!(
+            client
+                .reconnect
+                .as_ref()
+                .and_then(restorable_http_transport)
+                .is_none(),
+            "{label}: no rebuildable HTTP transport, so the retry cannot fire",
+        );
+    }
 }
 
 /// Regression (U110): a waiter parked on `init_done` must budget for the holder's whole
