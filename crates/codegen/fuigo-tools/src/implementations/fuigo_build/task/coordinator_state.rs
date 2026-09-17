@@ -832,22 +832,16 @@ pub(super) fn completed_inspection(
     }
 }
 
-/// Truncate `output` to `cap` bytes (UTF-8 safe) with a truncation footer.
-/// Returns a refcount clone when already within the cap.
+/// Truncate `output` to `cap` bytes (UTF-8 safe). Returns a refcount clone
+/// when already within the cap. No marker here: the notice renders the cut
+/// from `full_output_bytes`.
 pub fn cap_completion_output(output: &Arc<str>, cap: usize) -> Arc<str> {
-    if output.len() <= cap {
-        return output.clone();
+    let head = crate::util::truncate::truncate_str(output, cap);
+    if head.len() == output.len() {
+        output.clone()
+    } else {
+        Arc::from(head)
     }
-    let mut end = cap;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-    Arc::from(format!(
-        "{}\n[output truncated: {} of {} bytes shown]",
-        &output[..end],
-        end,
-        output.len()
-    ))
 }
 
 /// Model-facing summary for a finished child, honoring the request's
@@ -871,6 +865,7 @@ pub fn completion_summary(
         tool_calls: result.tool_calls,
         turns: result.turns,
         output,
+        full_output_bytes: result.output.len(),
     }
 }
 

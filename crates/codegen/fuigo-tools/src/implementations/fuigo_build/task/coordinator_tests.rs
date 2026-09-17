@@ -2070,12 +2070,28 @@ async fn completion_buffer_caps_summary_without_mutating_result() {
         }))
         .expect("actor command channel open");
     let buffered = response_rx.await.expect("completion response");
-    assert_eq!(buffered.len(), 1);
-    assert_eq!(buffered[0].subagent_id, "buffered");
-    assert_eq!(
-        buffered[0].output.as_ref(),
-        "a\n[output truncated: 1 of 4 bytes shown]"
+    let [first] = buffered.as_slice() else {
+        panic!(
+            "expected exactly one buffered completion, got {}",
+            buffered.len()
+        );
+    };
+    assert_eq!(first.subagent_id, "buffered");
+    assert_eq!(first.output.as_ref(), "a");
+    assert_eq!(first.full_output_bytes, 4);
+    let notice = crate::reminders::task_completion::format_subagent_completion(
+        first,
+        Some("get_task_output"),
+        None,
     );
+    assert!(
+        notice.contains(
+            "\n[output truncated: 1 of 4 bytes shown]\n\
+             Use get_task_output(\"buffered\") to see the full output."
+        ),
+        "{notice}"
+    );
+    assert_eq!(notice.matches("[output truncated:").count(), 1);
     harness.actor.abort();
 }
 
@@ -2148,14 +2164,27 @@ async fn buffered_completion_output_cap_bounds_buffered_summary() {
         }))
         .expect("actor command channel open");
     let buffered = response_rx.await.expect("completion response");
-    assert_eq!(buffered.len(), 1);
-    assert!(
-        buffered[0]
-            .output
-            .contains("[output truncated: 8 of 64 bytes shown]"),
-        "buffered output must be capped, got: {}",
-        buffered[0].output
+    let [first] = buffered.as_slice() else {
+        panic!(
+            "expected exactly one buffered completion, got {}",
+            buffered.len()
+        );
+    };
+    assert_eq!(first.output.len(), 8, "buffered output must be capped");
+    assert_eq!(first.full_output_bytes, 64);
+    let notice = crate::reminders::task_completion::format_subagent_completion(
+        first,
+        Some("get_task_output"),
+        None,
     );
+    assert!(
+        notice.contains(
+            "\n[output truncated: 8 of 64 bytes shown]\n\
+             Use get_task_output(\"capped\") to see the full output."
+        ),
+        "{notice}"
+    );
+    assert_eq!(notice.matches("[output truncated:").count(), 1);
     harness.actor.abort();
 }
 
