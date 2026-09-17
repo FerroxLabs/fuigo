@@ -144,6 +144,7 @@ struct WakeRunner {
     admissions: mpsc::UnboundedSender<AdmissionCall>,
     runs: mpsc::UnboundedSender<crate::implementations::fuigo_build::task::types::SubagentRequest>,
     finish: std::sync::Arc<tokio::sync::Notify>,
+    completions: mpsc::UnboundedSender<CompletionDisposition>,
 }
 
 impl ChildRunner for WakeRunner {
@@ -201,7 +202,9 @@ impl ChildRunner for WakeRunner {
         true
     }
 
-    fn on_completed(&self, _: ChildCompletion<()>) {}
+    fn on_completed(&self, completion: ChildCompletion<()>) {
+        let _ = self.completions.send(completion.disposition);
+    }
 }
 
 type WakeCoordinator = SubagentCoordinator<WakeRunner>;
@@ -210,6 +213,7 @@ struct WakeFixture {
     runs:
         mpsc::UnboundedReceiver<crate::implementations::fuigo_build::task::types::SubagentRequest>,
     finish: std::sync::Arc<tokio::sync::Notify>,
+    completions: mpsc::UnboundedReceiver<CompletionDisposition>,
 }
 
 fn wake_fixture() -> (
@@ -243,14 +247,26 @@ fn wake_fixture_with_limits(
     mpsc::UnboundedReceiver<AdmissionCall>,
     WakeFixture,
 ) {
-    let config = CoordinatorConfig {
+    wake_fixture_with_config(CoordinatorConfig {
         limits,
         ..CoordinatorConfig::default()
-    };
+    })
+}
+
+fn wake_fixture_with_config(
+    config: CoordinatorConfig,
+) -> (
+    WakeCoordinator,
+    crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
+    mpsc::UnboundedSender<AdmissionCall>,
+    mpsc::UnboundedReceiver<AdmissionCall>,
+    WakeFixture,
+) {
     let (command_tx, command_rx) =
         SubagentCoordinatorReceiver::with_capacity(MAX_ACTIVE_MESSAGE_ADMISSIONS);
     let (admission_tx, admissions) = mpsc::unbounded_channel();
     let (runs_tx, runs) = mpsc::unbounded_channel();
+    let (completions_tx, completions) = mpsc::unbounded_channel();
     let finish = std::sync::Arc::new(tokio::sync::Notify::new());
     let coordinator = SubagentCoordinator::from_channel(
         command_rx,
@@ -258,6 +274,7 @@ fn wake_fixture_with_limits(
             admissions: admission_tx.clone(),
             runs: runs_tx,
             finish: finish.clone(),
+            completions: completions_tx,
         },
         config,
     );
@@ -266,7 +283,11 @@ fn wake_fixture_with_limits(
         command_tx,
         admission_tx,
         admissions,
-        WakeFixture { runs, finish },
+        WakeFixture {
+            runs,
+            finish,
+            completions,
+        },
     )
 }
 
@@ -437,11 +458,19 @@ async fn wake_rejected_at_the_spawn_limit_restores_the_displaced_completion() {
                 behavior: crate::implementations::fuigo_build::task::admission::LimitBehavior::Fail,
             },
         );
+    let order = |c: &WakeCoordinator| c.completed_order.iter().cloned().collect::<Vec<String>>();
+    // Three completions in age order; the wake targets the MIDDLE one, so a
+    // restore at the wrong end is visible.
+    insert_child(&mut coordinator, admission_tx.clone(), "older", "parent");
+    finish_child(&mut coordinator, "older");
     insert_child(&mut coordinator, admission_tx.clone(), "child", "parent");
     finish_child(&mut coordinator, "child");
+    insert_child(&mut coordinator, admission_tx.clone(), "newer", "parent");
+    finish_child(&mut coordinator, "newer");
     // Saturate the parent's single slot so the wake cannot start.
     insert_child(&mut coordinator, admission_tx, "other", "parent");
     assert!(coordinator.completed.contains_key("child"));
+    assert_eq!(order(&coordinator), ["older", "child", "newer"]);
 
     let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
 
@@ -449,9 +478,16 @@ async fn wake_rejected_at_the_spawn_limit_restores_the_displaced_completion() {
         ActiveAgentMessageOutcome::NotActiveOrFinalizing,
         response_outcome(response).await
     );
-    // Displaced record restored, and restored to the completed ORDER too.
+    // Displaced record restored, and restored to its ORIGINAL POSITION in the
+    // completed order — not appended as the newest. `coordinator.rs` evicts
+    // with `pop_front` at `MAX_COMPLETED_ENTRIES`, so appending would make
+    // "newer" the first record dropped even though it really is newer.
     assert!(coordinator.completed.contains_key("child"));
-    assert!(coordinator.completed_order.contains(&"child".to_owned()));
+    assert_eq!(
+        order(&coordinator),
+        ["older", "child", "newer"],
+        "the displaced completion must go back where it was in the eviction order"
+    );
     assert!(!coordinator.woken.contains_key("child"));
     // Nothing was started or left parked.
     assert!(!coordinator.pending.contains_key("child"));
@@ -511,6 +547,124 @@ async fn wake_queued_at_the_spawn_limit_holds_the_record_and_never_expires() {
     assert!(response.try_recv().is_err());
 }
 
+/// F040's wake inherits `surface_completion` from the displaced request, and
+/// that inherited flag is the ONLY route the woken child's answer has back to
+/// the parent: upstream clears it here and surfaces through `WakeOrigin`, which
+/// this branch deliberately did not port (it uses `resume_from`).
+/// `coordinator.rs` gates BOTH the buffered completion and `should_surface` on
+/// the flag, so clearing it on the wake path would leave the sender with
+/// `Accepted` and then silence. This is the guard behind that deviation.
+#[tokio::test]
+async fn woken_child_completion_surfaces_to_the_parent() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, mut wake) =
+        wake_fixture_with_config(CoordinatorConfig {
+            buffer_completions: true,
+            ..CoordinatorConfig::default()
+        });
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    assert_eq!(coordinator.pending_completions.len(), 1);
+
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    run_until_started(&mut coordinator).await;
+    let _ = wake.runs.try_recv().expect("wake incarnation ran");
+    assert!(matches!(
+        response_outcome(response).await,
+        ActiveAgentMessageOutcome::Accepted { .. }
+    ));
+    wake.finish.notify_one();
+    await_with_timeout(async {
+        while coordinator.active.contains_key("child") {
+            let Some((id, output)) = coordinator.runs.next().await else {
+                break;
+            };
+            match output {
+                Ok(output) => coordinator.begin_terminalization(&id, output),
+                Err(_) => coordinator.begin_panicked_terminalization(&id),
+            }
+        }
+    })
+    .await;
+
+    // 1. The woken incarnation's answer is buffered for the parent session.
+    assert_eq!(
+        coordinator.pending_completions.len(),
+        2,
+        "the wake's completion must be buffered alongside the original"
+    );
+    let buffered = coordinator
+        .pending_completions
+        .last()
+        .expect("the wake buffered a completion");
+    assert_eq!(buffered.parent_session_id, "parent");
+    assert_eq!(buffered.summary.subagent_id, "child");
+    assert_eq!(
+        buffered.summary.output.as_ref(),
+        "follow up",
+        "the buffered completion must carry the WOKEN turn's answer; clearing \
+         `surface_completion` on the wake path buffers nothing and leaves the sender with \
+         `Accepted` and then silence"
+    );
+
+    // 2. And the same flag drives `should_surface` on the terminal event.
+    let mut dispositions = Vec::new();
+    while let Ok(disposition) = wake.completions.try_recv() {
+        dispositions.push(disposition);
+    }
+    let woken = dispositions
+        .last()
+        .expect("the woken incarnation reported a completion");
+    assert!(
+        woken.should_surface,
+        "the woken child's completion must be marked for surfacing; the wake inherits \
+         `surface_completion` ON PURPOSE (upstream clears it and surfaces through `WakeOrigin`, \
+         which Fuigo has no equivalent of), and clearing it leaves the sender with `Accepted` \
+         and then silence"
+    );
+}
+
+/// A child whose completion cannot surface (`surface_completion: false` — a
+/// reparented grandchild, or a harness-internal spawn the model must never
+/// see) still passes every ownership check, so without an explicit refusal a
+/// wake would answer `Accepted { message_id }`, re-run the child on the
+/// sender's text and then report nothing to anyone. Refuse it instead.
+#[tokio::test]
+async fn wake_of_a_non_surfacing_child_is_refused_not_accepted_then_silent() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, mut wake) =
+        wake_fixture_with_config(CoordinatorConfig {
+            buffer_completions: true,
+            ..CoordinatorConfig::default()
+        });
+    insert_non_surfacing_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    assert!(coordinator.completed.contains_key("child"));
+    // Nothing buffered, which is the whole point of the flag.
+    assert!(coordinator.pending_completions.is_empty());
+
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+
+    // The refusal is synchronous: an eligible wake would instead leave this
+    // reply outstanding until the new incarnation starts, then say `Accepted`.
+    assert_eq!(
+        response.try_recv(),
+        Ok(ActiveAgentMessageOutcome::NotActiveOrFinalizing),
+        "a wake whose completion can never surface must be REFUSED: accepting it answers \
+         `Accepted` and is then silent forever, the one outcome `send_subagent_message`'s \
+         description may not produce"
+    );
+    // Nothing was started, queued, parked or displaced.
+    assert!(!coordinator.pending.contains_key("child"));
+    assert!(!coordinator.queued.contains_id("child"));
+    assert!(coordinator.spawn_ready.is_empty());
+    assert!(!coordinator.woken.contains_key("child"));
+    assert!(coordinator.completed.contains_key("child"));
+    assert!(
+        wake.runs.try_recv().is_err(),
+        "no incarnation may run for a refused wake"
+    );
+    assert!(coordinator.pending_completions.is_empty());
+}
+
 fn fixture_with_capacity(
     active_message_capacity: usize,
 ) -> (
@@ -536,16 +690,41 @@ fn fixture() -> (
     fixture_with_capacity(MAX_ACTIVE_MESSAGE_ADMISSIONS)
 }
 
+/// A model-visible child, as the ordinary `task` spawn makes one:
+/// `surface_completion: true` (`task/mod.rs`). The flag is load-bearing on the
+/// wake path — see `insert_non_surfacing_child`.
 fn insert_child<R: TestChildRunner>(
     coordinator: &mut SubagentCoordinator<R>,
     admissions: mpsc::UnboundedSender<AdmissionCall>,
     id: &str,
     parent: &str,
 ) {
+    insert_child_surfacing(coordinator, admissions, id, parent, true);
+}
+
+/// A child the model must never see: a reparented grandchild
+/// (`coordinator/spawn.rs`) or a harness-internal spawn (goal
+/// planner/classifier). Owned by `parent`, so it passes every ownership check.
+fn insert_non_surfacing_child<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
+    admissions: mpsc::UnboundedSender<AdmissionCall>,
+    id: &str,
+    parent: &str,
+) {
+    insert_child_surfacing(coordinator, admissions, id, parent, false);
+}
+
+fn insert_child_surfacing<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
+    admissions: mpsc::UnboundedSender<AdmissionCall>,
+    id: &str,
+    parent: &str,
+    surface_completion: bool,
+) {
     let mut request =
         crate::implementations::fuigo_build::task::coordinator::tests::request(id, true);
     request.parent_session_id = parent.to_owned();
-    request.surface_completion = false;
+    request.surface_completion = surface_completion;
     coordinator.active.insert(
         id.to_owned(),
         ActiveChild {
