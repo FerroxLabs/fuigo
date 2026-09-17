@@ -635,11 +635,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                     && crate::app::dispatch::scrollback_has_recent_error_banner(&agent.scrollback),
             },
         );
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            Some(pending.prompt_id.as_str()),
-        );
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event);
 
         agent.mark_turn_finished(TurnEnd::Completed);
         agent.activity_started_at = None;
