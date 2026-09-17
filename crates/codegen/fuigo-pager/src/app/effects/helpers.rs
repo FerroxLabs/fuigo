@@ -194,7 +194,7 @@ pub(crate) fn compact_error(err: &acp::Error) -> CompactError {
 pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
+        crate::views::dock::fmt_elapsed(secs)
     } else {
         format!("{}.{:01}s", secs, d.subsec_millis() / 100)
     }
@@ -1746,5 +1746,22 @@ pub(super) fn unregister_active_session_best_effort_in(
         )
         }
         Err(e) => tracing::warn!(?e, "Failed to unregister active session"),
+    }
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::format_restore_elapsed;
+    use std::time::Duration;
+
+    /// Restore progress keeps tenths under a minute and rolls into hours past one.
+    #[test]
+    fn restore_elapsed_rolls_into_hours() {
+        assert_eq!(format_restore_elapsed(Duration::from_millis(4_300)), "4.3s");
+        assert_eq!(format_restore_elapsed(Duration::from_secs(65)), "1m05s");
+        assert_eq!(
+            format_restore_elapsed(Duration::from_secs(194 * 60 + 4)),
+            "3h14m"
+        );
     }
 }

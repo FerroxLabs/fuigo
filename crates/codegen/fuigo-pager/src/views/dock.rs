@@ -361,17 +361,28 @@ fn paint_row(
     }
 }
 
+/// Compact elapsed seconds for the dock, status line, and restore banners: `5s`, `1m05s`, and `3h14m` once an hour
+/// has passed. One formatter so the surfaces cannot drift.
 pub fn fmt_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    }
+    crate::views::goal_detail::format_elapsed(secs.saturating_mul(1000))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Subagent / task elapsed in the dock meta column rolls into hours like the status line.
+    #[test]
+    fn fmt_elapsed_rolls_into_hours() {
+        assert_eq!(fmt_elapsed(0), "0s");
+        assert_eq!(fmt_elapsed(59), "59s");
+        assert_eq!(fmt_elapsed(65), "1m05s");
+        assert_eq!(fmt_elapsed(59 * 60 + 59), "59m59s");
+        assert_eq!(fmt_elapsed(60 * 60), "1h00m");
+        assert_eq!(fmt_elapsed(194 * 60 + 4), "3h14m");
+        // The ms conversion saturates instead of overflowing
+        assert!(fmt_elapsed(u64::MAX).ends_with('m'));
+    }
 
     fn row_text(buf: &Buffer, y: u16) -> String {
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
