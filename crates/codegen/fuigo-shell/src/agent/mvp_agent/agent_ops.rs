@@ -2924,6 +2924,8 @@ impl MvpAgent {
                 let state = *state_rx.borrow_and_update();
                 let status = match state {
                     crate::relay::ConnectionState::Connected => {
+                        // `None` when FUIGO_CODE_WEB_URL is unset: the client is told the
+                        // session is syncing, not handed a URL to a host nobody configured.
                         let share_url = crate::relay::sync::build_share_url(
                             &session_id.0,
                         );

@@ -4406,11 +4406,23 @@ pub async fn connect_local_workspace(
             workspace_home.display()
         ))
     })?;
-    let api_base_url = std::env::var("FUIGO_CLI_CHAT_PROXY_BASE_URL")
-        .unwrap_or_else(|_| "https://cli-chat-proxy.grok.com/v1".to_string());
-    let data_collection_disabled =
+    let api_base_url = cli_chat_proxy_base_url();
+    let mut data_collection_disabled =
         std::env::var("FUIGO_WORKSPACE_DATA_COLLECTION_DISABLED").as_deref() != Ok("false");
-    let mut factory = WorkspaceSessionContextFactory::with_auth(auth.clone(), api_base_url.clone());
+    let mut factory = match api_base_url.as_deref() {
+        Some(url) => WorkspaceSessionContextFactory::with_auth(auth.clone(), url.to_owned()),
+        None => {
+            // No auxiliary service is configured, so the tools and the upload path that
+            // need one are off. Upstream silently dialled its own vendor host here; Fuigo
+            // says what is unavailable and why instead.
+            tracing::info!(
+                "{CLI_CHAT_PROXY_BASE_URL_ENV} is not set: image/video generation, web search \
+                 and trace upload are unavailable in this workspace"
+            );
+            data_collection_disabled = true;
+            WorkspaceSessionContextFactory::new()
+        }
+    };
     if crate::session::tool_config::tool_state_enabled() {
         factory = factory.with_tool_state_home(workspace_home.clone());
     }
@@ -4452,9 +4464,11 @@ pub async fn connect_local_workspace(
             .extend(bundled_allowlist_ignore_dirs(&dir, allowlist.as_deref()));
         ws_config.skills_config.bundled_skill_dirs = vec![dir];
     }
+    // With no proxy configured the base is empty; every enqueue path is gated on
+    // `data_collection_disabled` (forced above), so it is never dialled.
     let proxy_storage = Arc::new(crate::upload::ProxyStorageConfig::new(
         auth.clone(),
-        api_base_url.clone(),
+        api_base_url.clone().unwrap_or_default(),
         identity.clone(),
     ));
     let trace_source: Arc<dyn fuigo_file_utils::queue::TraceExportSource> = Arc::new(
@@ -4519,6 +4533,24 @@ pub async fn connect_local_workspace(
     );
     connect_result?;
     Ok(ws_handle)
+}
+/// Env var naming the auxiliary service (gen tools, web search, trace upload) the
+/// workspace routes through.
+pub const CLI_CHAT_PROXY_BASE_URL_ENV: &str = "FUIGO_CLI_CHAT_PROXY_BASE_URL";
+/// The configured auxiliary-service base URL, or `None` when
+/// [`CLI_CHAT_PROXY_BASE_URL_ENV`] is unset or empty.
+///
+/// There is **no compiled default**. Upstream fell back to its vendor's
+/// `cli-chat-proxy` host; Fuigo runs no such service, so an unset var means the
+/// features that need one are unavailable (see [`connect_local_workspace`]).
+/// `fuigo-shell` makes the same choice (`CLI_CHAT_PROXY_BASE_URL_DEFAULT = ""`).
+pub fn cli_chat_proxy_base_url() -> Option<String> {
+    cli_chat_proxy_base_url_from(std::env::var(CLI_CHAT_PROXY_BASE_URL_ENV).ok())
+}
+/// [`cli_chat_proxy_base_url`] over an already-read value; empty counts as unset.
+/// Set values pass through verbatim.
+pub fn cli_chat_proxy_base_url_from(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.is_empty())
 }
 /// Resolve `$FUIGO_WORKSPACE_HOME`, the workspace-owned on-disk state root.
 ///

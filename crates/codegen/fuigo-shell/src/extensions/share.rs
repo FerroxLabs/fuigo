@@ -79,6 +79,14 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         return Err(crate::acp_error::invalid_params("No messages to share yet"));
     }
 
+    // Fail closed before any upload: with no share backend or web origin configured there is
+    // nothing to share to and nowhere to view it, and the error names the variable to set.
+    let client = BackendClient::new().with_auth_manager(agent.auth_manager.clone());
+    client.share_link_origin().map_err(|e| {
+        tracing::warn!(error = %e, "share unavailable: not configured");
+        crate::acp_error::invalid_request(e.to_string())
+    })?;
+
     // Obtain trace context once; used for the signed URL upload and then moved into the spawned metadata task
     let trace_context = agent.get_trace_context(&info, current_turn).await;
 
@@ -95,7 +103,6 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     // Upload to backend and get share URL.
     // The `save_session_data` call may fail with 413 for very large sessions; that is acceptable because the data is already in cloud storage
-    let client = BackendClient::new().with_auth_manager(agent.auth_manager.clone());
     let agent_id = agent_id();
     let share_url = client
         .share_session(&exported, &agent_id)

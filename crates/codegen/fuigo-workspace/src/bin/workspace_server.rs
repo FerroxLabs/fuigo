@@ -67,8 +67,11 @@ struct Args {
     /// Legacy binaries reject the unknown flag via clap (non-zero exit), giving the launcher a definitive feature probe.
     #[arg(long)]
     capabilities: bool,
-    #[arg(long, default_value = "wss://computer-hub.grok.com/v1/tools")]
-    hub_url: String,
+    /// The hub this server registers with. There is no default: upstream's
+    /// pointed at its vendor's hub, which Fuigo does not run. Required unless
+    /// `--capabilities` is the only thing asked for.
+    #[arg(long)]
+    hub_url: Option<String>,
     #[arg(long)]
     auth_config: Option<PathBuf>,
     #[arg(long)]
@@ -229,6 +232,16 @@ struct Capabilities {
     diag: bool,
 }
 const CAPABILITIES: Capabilities = Capabilities { diag: true };
+/// `--hub-url` is mandatory for a real run: the message says so instead of the
+/// server dialling a hub nobody configured.
+fn require_hub_url(hub_url: Option<&str>) -> anyhow::Result<String> {
+    match hub_url.filter(|s| !s.is_empty()) {
+        Some(url) => Ok(url.to_owned()),
+        None => anyhow::bail!(
+            "--hub-url is required: fuigo-workspace-server has no default hub to connect to"
+        ),
+    }
+}
 fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
     if args.capabilities {
@@ -328,7 +341,8 @@ async fn run(
         }
         _ => false,
     };
-    let url = Url::parse(&args.hub_url).map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))?;
+    let url = Url::parse(&require_hub_url(args.hub_url.as_deref())?)
+        .map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))?;
     {
         use fuigo_sandbox::{ProfileName, SandboxManager};
         let profile = match std::env::var("FUIGO_SANDBOX_PROFILE").ok() {
@@ -795,6 +809,35 @@ mod tests {
         assert_eq!(body["state"], "failed");
         assert_eq!(body["error_class"], "hub_connect");
         assert_eq!(body["error_detail"], "network error: connection refused");
+    }
+    /// `--hub-url` has no default: parsing without it succeeds (so `--capabilities` still
+    /// works as a probe) but no hub is named. Upstream defaulted to its vendor's hub.
+    /// (Inspects `Debug` output only, so it compiles against the pre-fix `String` too.)
+    #[test]
+    fn hub_url_has_no_vendor_default() {
+        let args = Args::try_parse_from(["fuigo-workspace-server"]).unwrap();
+        let rendered = format!("{:?}", args.hub_url);
+        assert!(
+            !rendered.contains("grok.com"),
+            "--hub-url defaulted to a vendor host: {rendered}"
+        );
+    }
+    /// Typed: the value is absent, and the run-time check names the flag instead of
+    /// dialling a hub nobody configured; a given value passes through verbatim.
+    #[test]
+    fn hub_url_is_required_at_run_time() {
+        let args = Args::try_parse_from(["fuigo-workspace-server"]).unwrap();
+        assert_eq!(args.hub_url, None);
+        let err = require_hub_url(args.hub_url.as_deref()).expect_err("no hub, no run");
+        assert!(err.to_string().contains("--hub-url is required"), "{err}");
+        assert!(require_hub_url(Some("")).is_err(), "empty counts as unset");
+        let args =
+            Args::try_parse_from(["fuigo-workspace-server", "--hub-url", "wss://hub.example.test/v1"])
+                .unwrap();
+        assert_eq!(
+            require_hub_url(args.hub_url.as_deref()).unwrap(),
+            "wss://hub.example.test/v1"
+        );
     }
     #[test]
     fn capabilities_flag_parses_and_defaults_off() {
