@@ -35,6 +35,8 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
         super::mouse_reporting_toggle_enabled(),
     );
     app.welcome_prompt.set_screen_mode(mode);
+    // Minimal turns mouse capture off; without a motion event the last hover would stick.
+    app.last_mouse_pos = None;
     for agent in app.agents.values_mut() {
         reseed_agent_screen_mode(agent, mode);
     }
@@ -42,6 +44,10 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
 
 fn reseed_agent_screen_mode(agent: &mut AgentView, mode: ScreenMode) {
     agent.prompt.set_screen_mode(mode);
+    agent.clear_pointer_hover();
+    if !mode.is_minimal() {
+        agent.scrollback.reapply_thinking_fold_policy();
+    }
     for child in agent.subagent_views.values_mut() {
         reseed_agent_screen_mode(child, mode);
     }
