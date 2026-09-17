@@ -11,6 +11,7 @@ mod listing;
 mod skill_path_suggestion;
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use crate::implementations::skills::types::SkillInfo;
@@ -148,12 +149,21 @@ pub struct SkillManager {
     /// `SessionContext.skills` and never rewritten by later seeds or
     /// baseline reloads. The `paths:` gate never applies here.
     discovery_snapshot_names: Vec<String>,
+
+    /// Last listing hash, so a lost `announced_names` set cannot re-inject the same block.
+    last_emitted_listing_hash: Option<u64>,
 }
 
 /// Canonicalize a skill path, falling back to the raw path for not-yet-created
 /// files or symlink-resolution failures.
 fn canonical_path(path: &str) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+}
+
+fn listing_content_hash(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Why a reconciliation is pending.
@@ -440,7 +450,16 @@ impl SkillManager {
         };
         let skills = skills_owned.as_deref().unwrap_or(&self.discovered_skills);
 
-        let system_reminder = render_listing(skills, &mut announced, &self.render_params());
+        let mut system_reminder = render_listing(skills, &mut announced, &self.render_params());
+        if let Some(text) = system_reminder.as_ref() {
+            let hash = listing_content_hash(text);
+            if self.last_emitted_listing_hash == Some(hash) {
+                tracing::debug!(hash, "skipping identical skill listing re-emit");
+                system_reminder = None;
+            } else {
+                self.last_emitted_listing_hash = Some(hash);
+            }
+        }
         self.announced_names = announced;
 
         // Disabled skills are omitted from the listing via `s.enabled` in
@@ -557,6 +576,7 @@ impl SkillManager {
         self.discovered_canonical_paths.clear();
         self.checked_dirs.clear();
         self.announced_names.clear();
+        self.last_emitted_listing_hash = None;
         // Re-hide every conditional skill on /clear.
         let startup = std::mem::take(&mut self.startup_skills);
         self.startup_skills = self.conditional.rehide(startup);
@@ -951,6 +971,71 @@ mod tests {
             1,
             "must not duplicate discovered skills"
         );
+    }
+
+    #[test]
+    fn take_pending_skips_byte_identical_listing() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("startup", "/s/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        let first = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .unwrap();
+        assert!(first.contains("- startup:"));
+
+        // Announced set lost, listing text unchanged: do not inject it again.
+        mgr.restore_announced_names(HashSet::new());
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("startup", "/s/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        let r = mgr.take_pending_reconciliation().unwrap();
+        assert!(r.effects.system_reminder.is_none());
+        assert!(r.effects.send_available_commands);
+    }
+
+    /// `/clear` forgets the last listing: the post-clear baseline must be
+    /// announced again even though its text is byte-identical.
+    #[test]
+    fn on_clear_re_emits_identical_baseline_listing() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("startup", "/s/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        let first = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .unwrap();
+        assert!(first.contains("- startup:"));
+
+        mgr.on_clear();
+        let after_clear = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .expect("post-clear baseline listing must be emitted again");
+        assert_eq!(after_clear, first);
     }
 
     #[test]
