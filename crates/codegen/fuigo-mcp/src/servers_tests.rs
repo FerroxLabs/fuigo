@@ -2245,6 +2245,39 @@ fn handshake_budget_covers_the_probe_phase() {
     );
 }
 
+/// Deadline-driven callers derive per-server startup budgets from
+/// [`McpClient::max_startup_within_deadline`]; the resulting worst-case
+/// handshake must always fit the deadline.
+#[test]
+fn max_startup_within_deadline_fits_the_probe_phase() {
+    let probe = McpClient::DISCOVER_PROBE_TIMEOUT_SECS;
+    // Room for a full probe plus the legacy window: probe + startup == deadline.
+    assert_eq!(McpClient::max_startup_within_deadline(30), 30 - probe);
+    assert_eq!(McpClient::max_startup_within_deadline(2 * probe), probe);
+    // Shorter deadlines split evenly: the probe timeout tracks the startup budget.
+    assert_eq!(
+        McpClient::max_startup_within_deadline(2 * probe - 1),
+        probe - 1
+    );
+    assert_eq!(McpClient::max_startup_within_deadline(10), 5);
+    assert_eq!(McpClient::max_startup_within_deadline(6), 3);
+    let budget = |deadline: u64| {
+        let startup = McpClient::max_startup_within_deadline(deadline);
+        fake_http_client_with_startup("http://127.0.0.1:1/mcp", startup, 5).handshake_budget_secs()
+    };
+    for deadline in McpClient::MIN_HANDSHAKE_DEADLINE_SECS..=60 {
+        assert!(
+            budget(deadline) <= deadline,
+            "deadline {deadline}s: worst-case handshake {}s exceeds it",
+            budget(deadline)
+        );
+    }
+    // Below the minimum, both one-second phases still need the minimum budget.
+    for deadline in 0..McpClient::MIN_HANDSHAKE_DEADLINE_SECS {
+        assert_eq!(budget(deadline), McpClient::MIN_HANDSHAKE_DEADLINE_SECS);
+    }
+}
+
 /// Wire-level counterpart: a 5s-startup client (the desktop bind path's size class) still
 /// probes `server/discover`, so a modern server is negotiated without any `initialize`.
 #[tokio::test(flavor = "multi_thread")]
