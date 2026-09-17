@@ -8,7 +8,9 @@ use fuigo_tools::types::tool::{ToolKind, ToolNamespace};
 use super::*;
 use crate::acp::meta::NotificationMeta;
 use crate::acp::tracker::AcpUpdateTracker;
-use crate::scrollback::blocks::tool::{SentMessagePresentation, ToolCallBlock};
+use crate::scrollback::blocks::tool::{
+    SentMessageDelivery, SentMessagePresentation, ToolCallBlock,
+};
 use crate::scrollback::state::ScrollbackState;
 
 fn raw_output(output: SendSubagentMessageOutput) -> serde_json::Value {
@@ -108,6 +110,86 @@ fn direct_and_enveloped_wire_inputs_preserve_exact_arguments() {
         ));
         assert_eq!(block.subagent_id.as_deref(), Some("sub-123"));
         assert_eq!(block.text.as_deref(), Some("follow up"));
+    }
+}
+
+#[test]
+fn wire_delivery_selects_the_verb() {
+    for (raw, expected_delivery, expected_title) in [
+        (
+            serde_json::json!({
+                "subagent_id": "sub-123",
+                "text": "follow up",
+                "delivery": "interject",
+            }),
+            Some(SentMessageDelivery::Interject),
+            "Interjected message to subagent",
+        ),
+        (
+            serde_json::json!({
+                "subagent_id": "sub-123",
+                "text": "follow up",
+                "delivery": "queue",
+            }),
+            Some(SentMessageDelivery::Queue),
+            "Queued message for subagent",
+        ),
+        (
+            serde_json::json!({
+                "variant": "SendSubagentMessage",
+                "subagent_id": "sub-123",
+                "text": "follow up",
+                "delivery": "steer",
+            }),
+            Some(SentMessageDelivery::Steer),
+            "Sent message to subagent",
+        ),
+        (
+            input("sub-123", "follow up"),
+            None,
+            "Sent message to subagent",
+        ),
+    ] {
+        let block = block(&call(
+            acp::ToolCallStatus::Completed,
+            Some(raw),
+            Some(SendSubagentMessageOutput::Accepted {
+                message_id: "message-1".into(),
+            }),
+        ));
+        assert_eq!(block.delivery, expected_delivery);
+        assert_eq!(block.title(), expected_title);
+        assert_eq!(block.subagent_id.as_deref(), Some("sub-123"));
+        assert_eq!(block.text.as_deref(), Some("follow up"));
+    }
+}
+
+#[test]
+fn unknown_delivery_value_still_renders_id_and_text() {
+    for delivery in [
+        serde_json::json!("interrupt_and_send"),
+        serde_json::json!(7),
+    ] {
+        let block = block(&call(
+            acp::ToolCallStatus::Completed,
+            Some(serde_json::json!({
+                "subagent_id": "sub-123",
+                "text": "follow up",
+                "delivery": delivery,
+            })),
+            Some(SendSubagentMessageOutput::Accepted {
+                message_id: "message-1".into(),
+            }),
+        ));
+        assert_eq!(block.delivery, None, "{delivery}");
+        assert_eq!(block.title(), "Sent message to subagent", "{delivery}");
+        assert_eq!(
+            block.presentation,
+            SentMessagePresentation::Sent,
+            "{delivery}"
+        );
+        assert_eq!(block.subagent_id.as_deref(), Some("sub-123"), "{delivery}");
+        assert_eq!(block.text.as_deref(), Some("follow up"), "{delivery}");
     }
 }
 

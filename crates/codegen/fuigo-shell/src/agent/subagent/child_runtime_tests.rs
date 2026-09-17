@@ -5,7 +5,8 @@ use fuigo_tools::implementations::fuigo_build::task::coordinator::{
     ChildRunner, CoordinatorConfig, LocalBoxFuture, SendBoxFuture, StartedChild, SubagentProgress,
 };
 use fuigo_tools::implementations::fuigo_build::task::types::{
-    ActiveAgentMessageDelivery, ActiveAgentMessageOperation, ActiveAgentMessageOutcome,
+    ActiveAgentMessage, ActiveAgentMessageDelivery, ActiveAgentMessageOperation,
+    ActiveAgentMessageOutcome,
     ActiveAgentMessageRequest, SubagentDescribeOutcome, SubagentOwner, SubagentRequest,
     SubagentValidateTypeOutcome,
 };
@@ -224,6 +225,21 @@ async fn rejected_delivery(
     operation: ActiveAgentMessageOperation,
     force_queue_envelope: bool,
 ) -> (ActiveAgentMessageOutcome, bool) {
+    let (outcome, dispatched) = delivery_probe(target, operation, force_queue_envelope).await;
+    (outcome, dispatched.is_some())
+}
+
+/// Drive one `send_active_message` through the real backend, coordinator and
+/// `MessageDeliveryHandle`, and report both the sender's outcome and the
+/// delivery the child host was handed (`None` when nothing was dispatched).
+async fn delivery_probe(
+    target: &str,
+    operation: ActiveAgentMessageOperation,
+    force_queue_envelope: bool,
+) -> (
+    ActiveAgentMessageOutcome,
+    Option<(ActiveAgentMessage, ActiveAgentMessageOperation)>,
+) {
     let local = tokio::task::LocalSet::new();
     await_with_timeout(local.run_until(async {
         let (coordinator_sender, receiver) =
@@ -260,12 +276,58 @@ async fn rejected_delivery(
             .await
             .expect("probe child started");
 
-        let outcome = await_with_timeout(backend.send_active_message(
-            ActiveAgentMessageRequest::try_new_with_operation("child", "follow up", operation)
-            .expect("valid message"),
-        ))
-        .await;
-        let dispatched = child_cmd_rx.try_recv().is_ok();
+        // Poll send on the LocalSet while this task waits for the child command.
+        // A pinned-but-unpolled future deadlocks Steer dispatch on current_thread.
+        let send_task = tokio::task::spawn_local({
+            let backend = backend.clone();
+            async move {
+                backend
+                    .send_active_message(
+                        ActiveAgentMessageRequest::try_new_with_operation(
+                            "child",
+                            "follow up",
+                            operation,
+                        )
+                        .expect("valid message"),
+                    )
+                    .await
+            }
+        });
+        // With a matching target and a well-formed envelope EVERY class is
+        // authorized and dispatched, so the probe must await the command for
+        // all three: a pinned-but-unpolled future deadlocks dispatch on
+        // current_thread. The remaining cases are refused before dispatch.
+        let (outcome, dispatched) = if target == "child" && !force_queue_envelope {
+            let command = await_with_timeout(child_cmd_rx.recv())
+                .await
+                .expect("parent-agent message dispatched to the child host");
+            let SessionCommand::ParentAgentMessage {
+                respond_to,
+                delivery,
+                ..
+            } = command
+            else {
+                panic!("expected parent-message command");
+            };
+            let dispatched = Some((delivery.message().clone(), delivery.operation()));
+            respond_to
+                .send(ActiveMessageAdmission::Rejected)
+                .expect("admission future remains open");
+            (
+                await_with_timeout(send_task).await.expect("send task"),
+                dispatched,
+            )
+        } else {
+            let outcome = await_with_timeout(send_task).await.expect("send task");
+            let dispatched = match child_cmd_rx.try_recv() {
+                Ok(SessionCommand::ParentAgentMessage { delivery, .. }) => {
+                    Some((delivery.message().clone(), delivery.operation()))
+                }
+                Ok(_) => panic!("expected parent-message command"),
+                Err(_) => None,
+            };
+            (outcome, dispatched)
+        };
         coordinator_task.abort();
         spawn_task.abort();
         (outcome, dispatched)
@@ -284,9 +346,61 @@ async fn target_mismatch_rejects_without_dispatch() {
 }
 
 #[tokio::test]
-async fn matched_steer_is_unsupported_and_uncommitted() {
+async fn matched_steer_dispatches_to_the_child_host() {
     let actual = rejected_delivery("child", ActiveAgentMessageOperation::Steer, false).await;
-    assert_eq!(actual, (ActiveAgentMessageOutcome::Unsupported, false));
+    assert_eq!(
+        actual,
+        (ActiveAgentMessageOutcome::NotActiveOrFinalizing, true)
+    );
+}
+
+#[tokio::test]
+async fn matched_interject_dispatches_to_the_child_host() {
+    let actual = rejected_delivery("child", ActiveAgentMessageOperation::Interject, false).await;
+    assert_eq!(
+        actual,
+        (ActiveAgentMessageOutcome::NotActiveOrFinalizing, true)
+    );
+}
+
+/// The engine half of `send_subagent_message`'s promise. Its description tells
+/// the model that `queue`, `steer` and `interject` all land the same way and
+/// that the class is only recorded; this proves the class travels no further
+/// than the authorization gate. Each class reaches the child host as the SAME
+/// `SessionCommand::ParentAgentMessage`, carrying the same message, and the
+/// only thing that varies is the recorded label. From there
+/// `admit_parent_agent_message` reads `delivery.message()` and commits through
+/// `commit_queued_delivery` without ever consulting the operation. If a class
+/// is ever given its own delivery, this test and the tool's golden description
+/// (`tool_description_promises_only_the_delivery_the_engine_implements`) must
+/// change together.
+#[tokio::test]
+async fn every_delivery_class_reaches_the_child_host_as_the_same_command() {
+    let classes = [
+        ActiveAgentMessageOperation::Queue,
+        ActiveAgentMessageOperation::Steer,
+        ActiveAgentMessageOperation::Interject,
+    ];
+    let mut dispatched = Vec::new();
+    for operation in classes {
+        let (outcome, delivered) = delivery_probe("child", operation, false).await;
+        assert_eq!(outcome, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+        dispatched.push(
+            delivered.unwrap_or_else(|| panic!("{operation:?} must reach the child host")),
+        );
+    }
+
+    // Same command, same message, for every class.
+    for (message, _) in &dispatched {
+        assert_eq!(message.text.as_ref(), "follow up");
+        assert_eq!(message.sender_session_id, "parent");
+        assert!(!message.message_id.is_empty());
+    }
+
+    // The class survives only as the label the sender chose.
+    let labels: Vec<ActiveAgentMessageOperation> =
+        dispatched.iter().map(|(_, label)| *label).collect();
+    assert_eq!(labels, classes.to_vec());
 }
 
 #[tokio::test]

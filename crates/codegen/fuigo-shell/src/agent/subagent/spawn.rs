@@ -216,6 +216,12 @@ impl coordinator::ChildRunner for ShellChildRunner {
             }
         })
     }
+    /// `handle_request` resumes a spawn whose `resume_from` is its own id in
+    /// place (same session dir, no copy), so a completed child can be woken.
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
     fn on_completed(&self, completion: coordinator::ChildCompletion<Self::CompletionData>) {
         let gateway = self.agent_ref.get().gateway.clone();
         let will_wake = will_wake_for(&completion);
@@ -313,6 +319,15 @@ pub(crate) fn spawn_subagent_coordinator(
         limits,
         limit_sink: Some(limit_sink),
         buffer_completions: true,
+        // Stays `None` on purpose. This cap is per BUFFERED SUMMARY and would
+        // fire even for a toolset with no polling tool, where the between-turn
+        // reminder is the model's only copy of the child's output. The
+        // aggregate the audit flagged — an unbounded 256-entry batch at
+        // `INLINE_SUBAGENT_OUTPUT_BYTES` each — is bounded one layer up
+        // instead, by `BETWEEN_TURN_INLINE_OUTPUT_BYTES` in
+        // `fuigo_tools::reminders::task_completion::format_between_turn_completions`,
+        // which applies only where a `get_task_output` pointer exists to
+        // recover the rest.
         buffered_completion_output_cap: None,
     };
     tokio::task::spawn_local(

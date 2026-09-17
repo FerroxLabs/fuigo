@@ -2404,6 +2404,8 @@ impl SessionActor {
                         },
                         WorkflowSource::Name { name } => format!("Workflow: {name}"),
                         WorkflowSource::Resume { .. } => "Workflow: resume run".to_string(),
+                        WorkflowSource::Pause { .. } => "Workflow: pause run".to_string(),
+                        WorkflowSource::Stop { .. } => "Workflow: stop run".to_string(),
                         WorkflowSource::ScriptPath { .. } => "Workflow: launch script".to_string(),
                     }
                 };
