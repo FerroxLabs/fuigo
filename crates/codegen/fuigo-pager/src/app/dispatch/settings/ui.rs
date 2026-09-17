@@ -507,13 +507,13 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
             "active_view": format!("{:?}", app.active_view),
         })),
     );
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = if enable {
-            crossterm::execute!(stderr, crossterm::event::EnableMouseCapture)
-        } else {
-            crossterm::execute!(stderr, crossterm::event::DisableMouseCapture)
-        };
-    });
+    if enable {
+        app.escape_writer
+            .emit_command(crossterm::event::EnableMouseCapture);
+    } else {
+        app.escape_writer
+            .emit_command(crossterm::event::DisableMouseCapture);
+    }
     // On legacy conhost, DisableMouseCapture restores the *pre-capture* stdin mode
     // That mode may itself have QuickEdit off (a per-window profile or a stale mode from a crashed run)
     // Assert it so "mouse off" actually hands the terminal native drag-select, the whole point of the toggle

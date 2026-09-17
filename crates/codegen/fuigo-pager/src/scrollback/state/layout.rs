@@ -111,6 +111,18 @@ impl LayoutCache {
     }
 }
 
+/// Whether settlement may act on follow mode's release decisions.
+///
+/// A full rebuild re-derives the page-flip pin's authoritative target after settling, so releasing
+/// the reserve during settlement would drop the pose the rebuild is about to restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SettlementFollowPolicy {
+    /// Ordinary path: settlement re-anchors and may consume follow-preserve.
+    Evaluate,
+    /// Full-rebuild path: re-anchor only; the caller owns the release decision.
+    Defer,
+}
+
 impl ScrollbackState {
     /// Invalidate and rebuild the layout cache from scratch.
     ///
@@ -727,11 +739,13 @@ impl ScrollbackState {
     /// Returns `true` if any entry was newly measured (i.e. an estimate was replaced by an exact height).
     /// Hidden (group-truncated, height 0) and synthetic group-header rows render no markdown, so they are skipped.
     /// Their height is owned by group truncation, not measurement.
-    fn measure_window_exact(&mut self, width: u16, start: usize, end: usize) -> bool {
+    /// Returns `(entry_index, height_delta)` for every entry whose estimate became exact, so the
+    /// caller can shift a captured pin pose by growth ABOVE the pinned prompt.
+    fn measure_window_exact(&mut self, width: u16, start: usize, end: usize) -> Vec<(usize, i32)> {
         // Pre-scan: bail before building a Theme and layout when every in-window entry is already measured or non-rendered (hidden / group-header)
         {
             let Some(cache) = self.layout_cache.as_ref() else {
-                return false;
+                return Vec::new();
             };
             let needs_measure = (start..=end).any(|idx| {
                 cache.entries.get(idx).is_some_and(|info| {
@@ -741,7 +755,7 @@ impl ScrollbackState {
                 })
             });
             if !needs_measure {
-                return false;
+                return Vec::new();
             }
         }
 
@@ -751,10 +765,10 @@ impl ScrollbackState {
         let inline_edit_height = self.inline_edit_height;
 
         let Some(cache) = self.layout_cache.as_mut() else {
-            return false;
+            return Vec::new();
         };
 
-        let mut measured_any = false;
+        let mut changes: Vec<(usize, i32)> = Vec::new();
         for idx in start..=end {
             if idx >= cache.entries.len() {
                 break;
@@ -778,7 +792,9 @@ impl ScrollbackState {
                 Some((edit_id, h)) if edit_id == *entry_id => h,
                 _ => renderer.desired_height(entry_area_width),
             };
-            cache.entries[idx].height = info.with_verb_header_row(member_height);
+            let exact_height = info.with_verb_header_row(member_height);
+            changes.push((idx, exact_height as i32 - info.height as i32));
+            cache.entries[idx].height = exact_height;
             // Truncated height only feeds prompt sticky-header min_height, so only prompts pay for the extra Truncated-mode render
             // Others keep their seeded value (unused for non-prompts)
             if entry.block.is_user_prompt() {
@@ -786,16 +802,19 @@ impl ScrollbackState {
                     renderer.compute_truncated_height(entry_area_width);
             }
             cache.measured[idx] = true;
-            measured_any = true;
         }
-        measured_any
+        changes
     }
 
     /// Upgrade the on-screen entries from estimated to exact heights and re-anchor the viewport so what the user is looking at stays put.
     ///
     /// Iterates because an exact height shifts later entries, which can reveal a new entry at the bottom edge.
     /// `measured` grows monotonically so it terminates; the loop bound is a defensive cap.
-    pub(super) fn settle_visible_measurements(&mut self, width: u16) {
+    pub(super) fn settle_visible_measurements(
+        &mut self,
+        width: u16,
+        follow_policy: SettlementFollowPolicy,
+    ) {
         if self.viewport_height == 0 || self.last_width == 0 {
             return;
         }
@@ -804,16 +823,29 @@ impl ScrollbackState {
             let Some((start, end)) = self.measurement_window() else {
                 return;
             };
-            if !self.measure_window_exact(width, start, end) {
+            let changes = self.measure_window_exact(width, start, end);
+            if changes.is_empty() {
                 // Everything visible is exact: render will match the layout.
                 return;
             }
             // Estimates became exact: rebuild offsets (cheap arithmetic, no markdown) and re-pin the viewport
+            self.shift_pin_reserve_target_for_changes(&changes);
             self.rebuild_virtual_y_from_heights();
             self.compute_total_height_from_cache();
-            if self.follow_mode {
+            if self.follow_mode && follow_policy == SettlementFollowPolicy::Evaluate {
                 // Bottom-anchored: re-pin to the (now exact) bottom.
                 self.follow_scroll_to_bottom();
+            } else if self.follow_mode {
+                // A full rebuild defers the release decision until its authoritative pin target is
+                // reset (see `prepare_layout`), but settlement still needs re-anchoring so its next
+                // measurement window converges.
+                if self.follow_preserve_scroll && self.pin_reserve_active {
+                    if let Some(target) = self.pin_reserve_prompt_scroll_target() {
+                        self.scroll_offset = target;
+                    }
+                } else if !self.follow_preserve_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
             } else {
                 // Top-anchored: the first visible entry's offset is unchanged (nothing above it was measured), so scroll stays put
                 // Only clamp if the content shrank past the end
@@ -890,7 +922,7 @@ impl ScrollbackState {
     }
 
     /// Measure exact heights for entries in `[start, end]` (clamped to the visible range) and rebuild cached offsets if anything was newly measured.
-    fn measure_span_and_rebuild(&mut self, start: usize, end: usize, width: u16) {
+    pub(super) fn measure_span_and_rebuild(&mut self, start: usize, end: usize, width: u16) {
         if self.viewport_height == 0 || self.layout_cache.is_none() {
             return;
         }
@@ -903,7 +935,9 @@ impl ScrollbackState {
         if start > end {
             return;
         }
-        if self.measure_window_exact(width, start, end) {
+        let changes = self.measure_window_exact(width, start, end);
+        if !changes.is_empty() {
+            self.shift_pin_reserve_target_for_changes(&changes);
             self.rebuild_virtual_y_from_heights();
             self.compute_total_height_from_cache();
         }
@@ -1028,8 +1062,8 @@ impl ScrollbackState {
             .iter()
             .map(|e| e.height as usize + e.gap_after as usize)
             .sum();
-        // Release on every layout path, then include the active reserve in scroll geometry.
-        self.release_pin_reserve_if_below_fold();
+        // Scrolling past the pinned prompt no longer drops the pad; release is owned by
+        // `release_pin_reserve_outside_view` and the explicit bottom gestures
         self.pin_reserve_pad = self.pin_reserve_pad_rows(total);
         self.total_height = total.saturating_add(self.pin_reserve_pad);
     }

@@ -512,7 +512,6 @@ impl AgentView {
             self.is_subagent_view,
             (self.session.state.is_turn_running() || self.wake_turn_active())
                 && !self.renders_parked(),
-            self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,
             selected_is_agent_message,
@@ -1916,7 +1915,7 @@ impl AgentView {
                 render_active_selection_overlay(
                     &self.last_scrollback_selection_model,
                     drag,
-                    self.table_geometry_for_selection(drag.anchor.entry_idx, drag.anchor.range_id),
+                    self.drag_table_geometry_for(drag.anchor.entry_idx, drag.anchor.range_id),
                     buf,
                 );
             } else if let Some(ref block_drag) = self.block_drag_selection {
@@ -2210,14 +2209,33 @@ impl AgentView {
             let total_links = self.visible_link_map.len();
             self.paint_link_highlights(buf, link_active_style, sb_n..total_links);
             self.reclamp_drag_head_post_render(true);
+            if let Some(width) = self
+                .last_btw_selection_model
+                .visible_block_content_width(BTW_OVERLAY_ENTRY_IDX)
+                && self
+                    .btw_selection_wrap_width
+                    .is_some_and(|armed| armed != width)
+            {
+                self.clear_btw_owned_selection();
+            }
             if let Some(ref drag) = self.drag_selection
                 && drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX
             {
-                render_active_selection_overlay(&self.last_btw_selection_model, drag, None, buf);
+                render_active_selection_overlay(
+                    &self.last_btw_selection_model,
+                    drag,
+                    self.drag_table_geometry_for(drag.anchor.entry_idx, drag.anchor.range_id),
+                    buf,
+                );
             } else if let Some(ref sel) = self.persistent_text_selection
                 && sel.entry_idx == BTW_OVERLAY_ENTRY_IDX
             {
-                render_persistent_selection_overlay(&self.last_btw_selection_model, sel, None, buf);
+                render_persistent_selection_overlay(
+                    &self.last_btw_selection_model,
+                    sel,
+                    self.table_geometry_for_selection(sel.entry_idx, sel.range_id),
+                    buf,
+                );
             }
         } else {
             self.hit_btw_close.clear();

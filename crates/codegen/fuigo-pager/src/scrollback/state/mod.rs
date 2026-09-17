@@ -119,6 +119,9 @@ pub struct ScrollbackState {
     /// This lets dispatch_send_prompt position the prompt at the viewport top while still enabling follow for new content.
     follow_preserve_scroll: bool,
 
+    /// Content generation captured when follow-preserve is armed, so synthetic turns distinguish appended output from geometry-only rebuilds.
+    follow_preserve_content_generation: u64,
+
     /// Extra rows under the latest user prompt so a page-flip can keep that prompt at the top.
     /// Independent of follow mode: a user scroll must not collapse it (that clamp is the tail-jump).
     /// Dropped when the prompt scrolls fully below the fold, or when the transcript is cleared.
@@ -196,6 +199,9 @@ pub struct ScrollbackState {
     /// Streaming content mutations (`push_chunk_to_*`) leave this false, enabling an O(1) incremental virtual_y patch instead of an O(n) full rebuild.
     gaps_may_be_dirty: bool,
 
+    /// A synchronous settings rebuild populated the cache, but the next frame must still run the full reserve lifecycle.
+    full_settlement_pending: bool,
+
     warm_above: DeferredWarmAbove,
 
     /// Last observed [`ffmpeg_available`](crate::inline_media_ffmpeg::ffmpeg_available).
@@ -253,6 +259,7 @@ impl ScrollbackState {
             viewport_height: 0,
             follow_mode: true,
             follow_preserve_scroll: false,
+            follow_preserve_content_generation: 0,
             pin_reserve_active: false,
             pin_reserve_pad: 0,
             pin_reserve_target: None,
@@ -271,6 +278,7 @@ impl ScrollbackState {
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
             gaps_may_be_dirty: false,
+            full_settlement_pending: false,
             warm_above: DeferredWarmAbove::Idle,
             ffmpeg_available_snapshot: false,
             expanded_groups: HashSet::new(),
@@ -399,15 +407,15 @@ impl ScrollbackState {
     }
 
     /// Remeasure every entry when a process-wide visibility flag flips (e.g. show thinking blocks) without changing `AppearanceConfig`.
-    /// Eagerly rebuilds when `last_width` is known; clears dirty markers so the next `prepare_layout` does not re-enter the incremental path.
+    /// Refreshes the cache synchronously for settings callers and leaves full-dirty state for the next frame's reserve lifecycle settlement.
     pub fn invalidate_heights(&mut self) {
         for entry in self.entries.values_mut() {
             entry.invalidate_cache();
         }
         self.rebuild_layout();
-        // rebuild_layout already remeasured; leave Case 2 empty so follow mode is not re-run as if heights were still streaming-dirty
-        self.dirty_heights.clear();
-        self.gaps_may_be_dirty = false;
+        self.dirty_heights = self.entries.keys().copied().collect();
+        self.gaps_may_be_dirty = true;
+        self.full_settlement_pending = true;
         self.bump_generation();
     }
 
@@ -1002,7 +1010,6 @@ impl ScrollbackState {
     pub fn mark_height_dirty(&mut self, id: EntryId) {
         self.dirty_heights.insert(id);
         self.gaps_may_be_dirty = true;
-        self.layout_cache = None;
         self.bump_content_generation();
     }
 
@@ -1518,13 +1525,16 @@ impl ScrollbackState {
 
         // Update viewport height
         self.viewport_height = height;
+        // The reserve belongs to a prompt in the visible slice; a view switch that drops it
+        // releases the pad (scrolling past the prompt no longer does)
+        self.release_pin_reserve_outside_view();
 
         // Take an armed StructuralScrollAnchor unconditionally so it never outlives the first layout pass after its mutation
         // Only the same-width full rebuild below applies it
         let structural_anchor = self.structural_scroll_anchor.take();
 
         // Case 1: Cache missing or width changed, full rebuild
-        if self.layout_cache.is_none() || width != self.last_width {
+        if self.layout_cache.is_none() || width != self.last_width || self.full_settlement_pending {
             // A width change re-wraps every entry
             // The absolute wrapped-row scroll_offset would then point at different content after the rebuild (the resize jump)
             // While the old cache is still valid, anchor the viewport-top content; restore it below
@@ -1539,21 +1549,30 @@ impl ScrollbackState {
 
             let width_changed = width != self.last_width;
             let resized = width_changed && self.last_width != 0;
+            let pre_rebuild_pin = self.pin_reserve_target;
+            let has_targeted_dirty =
+                !self.dirty_heights.is_empty() && self.dirty_heights.len() < self.entries.len();
             if width_changed {
                 for entry in self.entries.values_mut() {
                     entry.invalidate_width_caches();
                 }
                 self.last_width = width;
             }
+            if self.full_settlement_pending {
+                self.layout_cache = None;
+                self.full_settlement_pending = false;
+            }
             // Full rebuild produces cheap height ESTIMATES for every entry.
             self.ensure_layout_cache(width);
-            // Width changes invalidate the captured row coordinate
-            // Re-pin before the release logic compares the new target with `scroll_offset`
-            if resized && self.pin_reserve_active {
-                self.pin_reserve_target = self.pin_reserve_prompt_scroll_target();
-                if let Some(target) = self.pin_reserve_target {
-                    self.scroll_offset = target;
-                }
+            // Width changes invalidate the captured row coordinate; the page-flip pose owns the
+            // viewport, so re-pin it to the re-wrapped prompt instead of dropping the reserve
+            if resized
+                && self.follow_mode
+                && self.follow_preserve_scroll
+                && self.pin_reserve_active
+                && let Some(target) = self.pin_reserve_prompt_scroll_target()
+            {
+                self.scroll_offset = target;
             }
             self.compute_total_height_from_cache();
             // Re-pin the anchored content to the viewport top now that virtual_y is rebuilt at the new width (before settle clamps / re-pins to it)
@@ -1565,9 +1584,66 @@ impl ScrollbackState {
                 self.apply_structural_scroll_anchor(structural_anchor, width);
             }
             self.fixup_hidden_selection();
-            self.handle_follow_mode();
+            if self.follow_mode && !self.follow_preserve_scroll {
+                self.handle_follow_mode();
+            }
             // Upgrade the on-screen entries to exact heights (O(viewport), not O(history)) and re-pin the viewport to the measured content
-            self.settle_visible_measurements(width);
+            self.settle_visible_measurements(width, layout::SettlementFollowPolicy::Defer);
+            if resized {
+                // The measured heights move the prompt again: re-capture the pose at the new width
+                self.reset_pin_reserve_target();
+                self.compute_total_height_from_cache();
+                if self.follow_mode
+                    && self.follow_preserve_scroll
+                    && self.pin_reserve_active
+                    && let Some(target) = self.pin_reserve_target
+                {
+                    self.scroll_offset = target;
+                } else {
+                    self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+                }
+            } else if self.pin_reserve_active {
+                self.compute_total_height_from_cache();
+                self.settle_pin_reserve_target();
+            }
+            // The pinned prompt's entry is gone (rewind/clear): there is nothing left to hold the pad for
+            let pin_entry_gone = self.pin_reserve_active
+                && self.pin_reserve_prompt_id.is_some()
+                && self.pin_reserve_prompt_index().is_none();
+            if pin_entry_gone {
+                let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
+                let was_following = self.follow_mode;
+                self.follow_preserve_scroll = false;
+                self.clear_pin_reserve();
+                self.total_height = unpadded_total;
+                self.pin_reserve_pad = 0;
+                if was_following {
+                    self.scroll_offset = self.max_scroll_offset();
+                } else {
+                    self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+                }
+            } else if !resized
+                && (has_targeted_dirty || self.pin_reserve_after_turn)
+                && self.follow_mode
+                && self.follow_preserve_scroll
+            {
+                // The response grew past the pinned pose: the real tail is now below it, so the
+                // pad has done its job and follow resumes at the bottom
+                let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
+                let shrink_target = if has_targeted_dirty {
+                    pre_rebuild_pin
+                } else {
+                    self.pin_reserve_target
+                };
+                if shrink_target.is_some_and(|target| target >= unpadded_total) {
+                    self.follow_preserve_scroll = false;
+                    self.clear_pin_reserve();
+                    self.total_height = unpadded_total;
+                    self.pin_reserve_pad = 0;
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
+            self.handle_follow_mode();
             // Pre-measure a few pages above the bottom so the first scroll-up is glitch-free (no-op unless bottom-pinned)
             //
             // Warming three off-screen pages per drag event, only to throw them away at the next width, profiled as the largest cost of a resize
@@ -1588,14 +1664,16 @@ impl ScrollbackState {
             // Viewport-top identity before heights change
             // Case 2 retains the cache (no insert/remove), so the plain index stays valid for the duration of this call
             let top_anchor = self.viewport_top_anchor_point();
+            let pin_before = self.pin_reserve_prompt_scroll_target();
             let changes = self.update_dirty_entry_heights(width);
             self.dirty_heights.clear();
-            self.shift_pin_reserve_target_for_changes(&changes);
 
             if !changes.is_empty() {
                 if self.gaps_may_be_dirty {
                     // Structural change (fold/expand/add/remove): full rebuild
                     self.rebuild_virtual_y_from_heights();
+                    let pin_after = self.pin_reserve_prompt_scroll_target();
+                    self.shift_pin_reserve_target_for_layout(pin_before, pin_after);
                     self.gaps_may_be_dirty = false;
                     self.compute_total_height_from_cache();
                     self.fixup_hidden_selection();
@@ -1603,11 +1681,11 @@ impl ScrollbackState {
                     // Fast path (streaming): only heights changed, gaps are stable.
                     // Patch virtual_y in O(n-k) where k is the earliest dirty index.
                     // For streaming (dirty entry at end), this is O(1).
+                    self.shift_pin_reserve_target_for_changes(&changes);
                     let total_delta = self.patch_virtual_y_for_dirty(&changes);
                     // Streamed growth must shrink the reserve rather than inflate max_offset.
                     let content = self.total_height.saturating_sub(self.pin_reserve_pad);
                     let new_content = (content as i64 + total_delta as i64).max(0) as usize;
-                    self.release_pin_reserve_if_below_fold();
                     self.pin_reserve_pad = self.pin_reserve_pad_rows(new_content);
                     self.total_height = new_content.saturating_add(self.pin_reserve_pad);
                 }
@@ -1615,6 +1693,8 @@ impl ScrollbackState {
                 // Heights didn't change, but structural state is dirty (e.g., a new entry was pushed that extends a group needing truncation)
                 // Must rebuild to apply group truncation even though heights are stable.
                 self.rebuild_virtual_y_from_heights();
+                let pin_after = self.pin_reserve_prompt_scroll_target();
+                self.shift_pin_reserve_target_for_layout(pin_before, pin_after);
                 self.gaps_may_be_dirty = false;
                 self.compute_total_height_from_cache();
                 self.fixup_hidden_selection();
@@ -1630,7 +1710,7 @@ impl ScrollbackState {
             }
             self.handle_follow_mode();
             // A scroll/content change may have brought estimated entries into view (e.g. streaming while scrolled up); measure them exactly.
-            self.settle_visible_measurements(width);
+            self.settle_visible_measurements(width, layout::SettlementFollowPolicy::Evaluate);
             self.run_pending_warm_above(width);
             return !changes.is_empty();
         }
@@ -1644,9 +1724,12 @@ impl ScrollbackState {
         // Follow/preserve state may still need to react to the new total_height (e.g., consume preserve on overflow)
         if self.follow_mode {
             self.handle_follow_mode();
+            if self.follow_preserve_scroll && !self.pin_reserve_active {
+                self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+            }
         }
         // Scroll-up (no dirty heights) reveals estimated off-screen entries; this is the on-demand measurement path for plain scrolling
-        self.settle_visible_measurements(width);
+        self.settle_visible_measurements(width, layout::SettlementFollowPolicy::Evaluate);
         self.run_pending_warm_above(width);
         false
     }
@@ -1690,6 +1773,7 @@ impl ScrollbackState {
             scroll_offset: self.scroll_offset,
             follow_mode: self.follow_mode,
             follow_preserve_scroll: self.follow_preserve_scroll,
+            follow_preserve_content_generation: self.follow_preserve_content_generation,
             viewport_height: self.viewport_height,
             last_width: self.last_width,
             selected: self.selected,
@@ -1703,6 +1787,7 @@ impl ScrollbackState {
         self.scroll_offset = snap.scroll_offset;
         self.follow_mode = snap.follow_mode;
         self.follow_preserve_scroll = snap.follow_preserve_scroll;
+        self.follow_preserve_content_generation = snap.follow_preserve_content_generation;
         self.viewport_height = snap.viewport_height;
         self.last_width = snap.last_width;
         self.selected = snap.selected;
@@ -1730,7 +1815,6 @@ impl ScrollbackState {
             .saturating_sub(self.viewport_height as usize);
         self.scroll_offset = offset.min(max_offset);
         self.follow_mode = false;
-        self.maybe_release_pin_reserve();
         self.bump_generation();
     }
 

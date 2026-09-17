@@ -661,6 +661,11 @@ pub struct AppView {
     pub notification_service: NotificationService,
     /// The status row follows whichever agent is on screen, so the app owns it.
     pub(crate) status_line: crate::app::status_line::StatusLineState,
+    /// Out-of-band terminal escapes enqueued on the writer thread instead of written inline
+    /// under the stderr lock; see [`EscapeWriter`](crate::render::draw::EscapeWriter).
+    /// Taking that lock on the event-loop thread mid-session deadlocks the UI when the terminal
+    /// stops reading the pty (the writer thread is parked inside its own tty write holding it).
+    pub(crate) escape_writer: crate::render::draw::EscapeWriter,
     /// Escape sequences (title, progress bar) accumulated by the last `update_notifications()` tick.
     /// Consumed by `draw()` and appended to the frame's `post_flush_escapes` so they are written inside the synchronized output block.
     pub(crate) pending_notification_escapes: Option<String>,
@@ -1513,6 +1518,7 @@ impl AppView {
         acp_tx: AcpAgentTx,
         models: ModelState,
         bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
+        escape_writer: crate::render::draw::EscapeWriter,
     ) -> Self {
         let slash_mru =
             std::rc::Rc::new(std::cell::RefCell::new(crate::slash::mru::SlashMru::new()));
@@ -1544,8 +1550,12 @@ impl AppView {
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::from_settings(),
             appearance: AppearanceConfig::default(),
-            notification_service: NotificationService::new(Default::default()),
+            notification_service: NotificationService::new(
+                Default::default(),
+                escape_writer.clone(),
+            ),
             status_line: Default::default(),
+            escape_writer,
             pending_notification_escapes: None,
             deferred_notification: None,
             tracing_rx: None,
@@ -2219,8 +2229,7 @@ impl AppView {
         }
     }
     /// App-level Esc owners that consume the key BEFORE any agent input routing.
-    /// This is the render-boundary decision handed to the agent hint path (`AgentView::draw`, then `esc_would_cancel_turn`).
-    /// A hint bar rendered beneath one of these thus never advertises `Esc cancel`.
+    /// This is the render-boundary decision handed to the agent hint path (`AgentView::draw`).
     ///
     /// Mirrors `handle_input`'s intercepts, in their order:
     /// - the focused dev tracing pane (step 1a consumes all non-global keys)

@@ -25,8 +25,7 @@ pub(super) fn push_and_page_flip(scrollback: &mut ScrollbackState, block: Render
         return;
     }
     let idx = scrollback.len() - 1;
-    scrollback.scroll_to_entry_top(idx);
-    scrollback.enable_follow_with_preserve();
+    scrollback.page_flip_to_entry(idx);
 }
 
 fn combine_queued_prompts_enabled() -> bool {
@@ -777,6 +776,11 @@ pub(super) fn push_send_now_user_block(
     agent
         .send_now_painted_blocks
         .insert(prompt_id.to_string(), (entry_id, edited));
+    // The shell still broadcasts its own user echo for this prompt; remember the
+    // painted text so `take_send_now_user_echo` can swallow that echo once.
+    agent
+        .send_now_echo_pending
+        .insert(prompt_id.to_string(), text.trim().to_string());
 }
 
 /// Whether a Send Now row should paint an optimistic block.
@@ -881,7 +885,14 @@ pub(crate) fn apply_turn_start_shim(
         text = %text.as_deref().unwrap_or("").chars().take(48).collect::<String>(),
         "adopting server-driven running turn (turn-start shim)",
     );
+    let send_now_paint = agent.send_now_painted_blocks.contains_key(&prompt_id)
+        || agent.send_now_echo_pending.contains_key(&prompt_id);
     agent.start_turn_boundary(Some(&prompt_id));
+    if send_now_paint {
+        // `start_turn` armed the echo skip; a send-now paint resolves the duplicate by
+        // id instead, so the skip must not swallow an unrelated later echo.
+        agent.session.tracker.clear_user_echo_skip();
+    }
     agent.session.current_prompt_id = Some(prompt_id.clone());
     agent.attached_as_viewer = adopted_from_other_client;
     // A new (adopted) turn is starting: drop the prior turn's chips but keep the seen ring
@@ -955,6 +966,18 @@ pub(crate) fn apply_turn_start_shim(
                 };
                 if text.as_deref() != Some(ub.text.as_str()) && !edited {
                     agent.scrollback.remove_entry(id);
+                    // The adoption's text is the one now on screen: the pending echo
+                    // must follow it, or the stale paint text would swallow the wrong echo.
+                    match text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        Some(fresh) => {
+                            agent
+                                .send_now_echo_pending
+                                .insert(prompt_id.clone(), fresh.to_string());
+                        }
+                        None => {
+                            agent.send_now_echo_pending.remove(&prompt_id);
+                        }
+                    }
                     return None;
                 }
                 // Drop an unarmed echo's duplicate copy of this prompt
@@ -969,16 +992,22 @@ pub(crate) fn apply_turn_start_shim(
                         .any(|(v, _)| *v == dup)
                 {
                     agent.scrollback.remove_entry(dup);
+                    agent.send_now_echo_pending.remove(&prompt_id);
                 }
                 Some((agent.scrollback.index_of_id(id)?, id))
             },
         );
+        let reused_echo = map_painted.is_none();
         let already_painted = map_painted.or_else(|| {
             text.as_deref()
                 .and_then(|t| trailing_user_prompt_matching(agent, t, claim_interjection))
                 // Never claim a block owned by another pending send-now.
                 .filter(|(_, id)| !agent.send_now_painted_blocks.values().any(|(v, _)| v == id))
         });
+        // The already-landed echo is the block being adopted: nothing left to swallow.
+        if reused_echo && already_painted.is_some() {
+            agent.send_now_echo_pending.remove(&prompt_id);
+        }
         let (prompt_idx, prompt_entry_id) = if let Some(found) = already_painted {
             if claim_interjection
                 && let Some(RenderBlock::UserPrompt(ub)) =
@@ -2694,6 +2723,110 @@ mod tests {
         agent.scrollback.push_block(RenderBlock::user_prompt("ty"));
         apply_turn_start_shim(agent, "p-echo".into(), Some("ty".into()), "prompt", None);
         assert_eq!(user_prompt_count(agent, "ty"), 1);
+    }
+
+    /// Deliver the shell's live user echo the way the leader emits it: a text chunk
+    /// with no prompt id of its own.
+    fn deliver_user_echo(app: &mut crate::app::app_view::AppView, text: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new("test-session"),
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text),
+            ))),
+        );
+        let _ = crate::app::acp_handler::handle(
+            fuigo_acp_lib::AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            app,
+        );
+    }
+
+    fn agent_ref(app: &crate::app::app_view::AppView) -> &crate::app::agent_view::AgentView {
+        app.agents.get(&AgentId(0)).expect("test agent")
+    }
+
+    /// A queued message sent immediately paints optimistically; the shell's racing
+    /// user echo for the same text must be swallowed, not painted a second time.
+    #[test]
+    fn send_now_paint_swallows_racing_user_echo() {
+        let mut app = test_app_with_agent();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.note_self_originated_prompt("p-first");
+            push_send_now_user_block(agent, "p-first", "prompt", "first queued", false);
+        }
+
+        deliver_user_echo(&mut app, "first queued");
+        assert_eq!(user_prompt_count(agent_ref(&app), "first queued"), 1);
+
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            apply_turn_start_shim(
+                agent,
+                "p-first".into(),
+                Some("first queued".into()),
+                "prompt",
+                None,
+            );
+        }
+        assert_eq!(user_prompt_count(agent_ref(&app), "first queued"), 1);
+
+        deliver_user_echo(&mut app, "next real message");
+        assert_eq!(user_prompt_count(agent_ref(&app), "next real message"), 1);
+    }
+
+    /// The echo matches on trimmed text and is consumed exactly once per paint:
+    /// a second identical echo with nothing pending still paints.
+    #[test]
+    fn send_now_echo_matches_trimmed_text_and_expires_same_text_paints() {
+        let mut app = test_app_with_agent();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            push_send_now_user_block(agent, "p-ws", "prompt", "hello\n", false);
+        }
+        deliver_user_echo(&mut app, "hello");
+        assert_eq!(user_prompt_count(agent_ref(&app), "hello\n"), 1);
+        deliver_user_echo(&mut app, "hello");
+        assert_eq!(user_prompt_count(agent_ref(&app), "hello"), 1);
+
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            push_send_now_user_block(agent, "p-a", "prompt", "same", false);
+            push_send_now_user_block(agent, "p-b", "prompt", "same", false);
+        }
+        deliver_user_echo(&mut app, "same");
+        deliver_user_echo(&mut app, "same");
+        assert_eq!(user_prompt_count(agent_ref(&app), "same"), 2);
+        deliver_user_echo(&mut app, "same");
+        assert_eq!(user_prompt_count(agent_ref(&app), "same"), 3);
+    }
+
+    /// When the adoption's text differs from the paint, the pending echo follows the
+    /// adopted text: that echo is swallowed, a later repeat is painted.
+    #[test]
+    fn send_now_echo_follows_adoption_text_when_paint_drifts() {
+        let mut app = test_app_with_agent();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.note_self_originated_prompt("p-drift");
+            push_send_now_user_block(agent, "p-drift", "prompt", "old paint", false);
+            apply_turn_start_shim(
+                agent,
+                "p-drift".into(),
+                Some("fresh".into()),
+                "prompt",
+                None,
+            );
+        }
+        assert_eq!(user_prompt_count(agent_ref(&app), "old paint"), 0);
+        assert_eq!(user_prompt_count(agent_ref(&app), "fresh"), 1);
+        deliver_user_echo(&mut app, "fresh");
+        assert_eq!(user_prompt_count(agent_ref(&app), "fresh"), 1);
+        deliver_user_echo(&mut app, "fresh");
+        assert_eq!(user_prompt_count(agent_ref(&app), "fresh"), 2);
     }
 
     /// A painted-pending row stays hidden after the arm drops; the pair resolves at adoption or retire, never by the arm's lifetime.

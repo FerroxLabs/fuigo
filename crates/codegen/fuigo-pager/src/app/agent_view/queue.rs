@@ -147,6 +147,33 @@ impl AgentView {
         self.follow_without_jump_prompt_id = None;
     }
 
+    /// Claim the shell's live user echo for a send-now-painted prompt, if one is pending.
+    /// Returns `true` when the caller must drop the echo: the optimistic paint already
+    /// shows this text, so rendering the echo too would duplicate the message.
+    pub(crate) fn take_send_now_user_echo(&mut self, text: &str, prompt_id: Option<&str>) -> bool {
+        let echo = text.trim();
+        if let Some(id) = prompt_id
+            && self
+                .send_now_echo_pending
+                .get(id)
+                .is_some_and(|pending| pending == echo)
+        {
+            self.send_now_echo_pending.remove(id);
+            return true;
+        }
+        let matched = self
+            .send_now_echo_pending
+            .iter()
+            .find(|(_, pending)| pending.as_str() == echo)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = matched {
+            self.send_now_echo_pending.remove(&id);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Whether `prompt_id` names a Send Now painted block still awaiting its authoritative interjection notification.
     /// That notification claims (and restyles) the block in place.
     /// This is the active-goal Send Now flow: painted optimistically without arming a cancel expectation.
@@ -460,6 +487,9 @@ impl AgentView {
         if self.send_now_awaiting_confirm.as_deref() == Some(old_id) {
             self.send_now_awaiting_confirm = None;
         }
+        if let Some(text) = self.send_now_echo_pending.remove(old_id) {
+            self.send_now_echo_pending.insert(new_id.to_string(), text);
+        }
         if let Some(entry) = self.send_now_painted_blocks.remove(old_id) {
             match self.send_now_painted_blocks.entry(new_id.to_string()) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
@@ -475,6 +505,7 @@ impl AgentView {
 
     /// Remove the optimistic block for a send-now'd prompt that will never run (send failure, removal); a leftover would duplicate on requeue.
     pub(crate) fn retire_send_now_painted_block(&mut self, prompt_id: &str) {
+        self.send_now_echo_pending.remove(prompt_id);
         if let Some((id, _)) = self.send_now_painted_blocks.remove(prompt_id) {
             self.scrollback.remove_entry(id);
         }

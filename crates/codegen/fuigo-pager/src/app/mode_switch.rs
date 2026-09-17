@@ -220,15 +220,16 @@ pub(crate) fn push_block_behind_live_stream(
 
 /// Close user-opened overlays minimal never paints (they would keep owning input while invisible); agent-initiated prompts are left alone.
 pub(crate) fn dismiss_fullscreen_only_surfaces(app: &mut AppView) {
+    let writer = app.escape_writer.clone();
     for agent in app.agents.values_mut() {
-        dismiss_agent_surfaces(agent);
+        dismiss_agent_surfaces(agent, &writer);
     }
 }
 
-fn dismiss_agent_surfaces(agent: &mut AgentView) {
+fn dismiss_agent_surfaces(agent: &mut AgentView, writer: &crate::render::draw::EscapeWriter) {
     if agent.gboom.take().is_some() {
         // Pop the game's kitty layer or later keys carry unexpected release events.
-        super::pop_gboom_keyboard_flags();
+        super::pop_gboom_keyboard_flags(writer);
     }
     agent.image_viewer = None;
     agent.video_viewer = None;
@@ -238,7 +239,7 @@ fn dismiss_agent_surfaces(agent: &mut AgentView) {
     agent.agents_modal = None;
     agent.show_goal_detail = false;
     for child in agent.subagent_views.values_mut() {
-        dismiss_agent_surfaces(child);
+        dismiss_agent_surfaces(child, writer);
     }
 }
 

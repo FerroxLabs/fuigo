@@ -19,7 +19,25 @@ impl ScrollbackState {
     }
 
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
         self.view_mode = mode;
+        // The visible slice just changed: a reserve whose prompt left it is released, and one that
+        // stays is re-derived against the new coordinates instead of keeping a stale row target
+        self.release_pin_reserve_outside_view();
+        if self.pin_reserve_active {
+            self.reset_pin_reserve_target();
+            self.compute_total_height_from_cache();
+            if self.follow_mode
+                && self.follow_preserve_scroll
+                && let Some(target) = self.pin_reserve_target
+            {
+                self.scroll_offset = target;
+            } else {
+                self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+            }
+        }
     }
 
     /// Get the range of entry indices visible in the current view mode.
