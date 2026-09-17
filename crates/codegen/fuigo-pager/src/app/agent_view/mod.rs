@@ -181,6 +181,8 @@ mod selection;
 mod session;
 mod shell_completion;
 #[cfg(test)]
+mod dock_input_tests;
+#[cfg(test)]
 mod extensions_row_hint_tests;
 #[cfg(test)]
 mod task_status_tests;
@@ -269,6 +271,37 @@ fn record_dot_pulse() -> (bool, f32) {
     let brightness = 0.4 + 0.6 * (0.5 + 0.5 * s);
     (s >= 0.0, brightness)
 }
+/// Painted kill hit. A click is ignored unless this identity still occupies the cell.
+#[derive(Clone, Debug)]
+pub struct CachedDockStop {
+    pub rect: Rect,
+    pub(crate) id: DockKillId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DockKillId {
+    Subagent(String),
+    Task(String),
+    Loop(String),
+    Workflow(String),
+}
+
+impl DockKillId {
+    pub(crate) fn from_action(action: &crate::app::actions::Action) -> Option<Self> {
+        use crate::app::actions::Action;
+        match action {
+            Action::KillSubagent(id) => Some(Self::Subagent(id.clone())),
+            Action::KillBgTask(id) => Some(Self::Task(id.clone())),
+            Action::CancelScheduledTask(id) => Some(Self::Loop(id.clone())),
+            Action::SendSlashCommandPreservingDraft(cmd) => cmd
+                .strip_prefix("/workflow stop ")
+                .filter(|name| !name.is_empty())
+                .map(|name| Self::Workflow(name.to_owned())),
+            _ => None,
+        }
+    }
+}
+
 /// A clickable/hoverable screen region.
 ///
 /// Tracks an optional screen rect (set during render) and whether the
@@ -934,16 +967,38 @@ pub struct AgentView {
     pub active_pane: AgentPane,
     /// Cursor over the dock's visible items (headers + rows).
     pub dock_cursor: usize,
+    pub dock_workflows_expanded: bool,
     pub dock_subagents_expanded: bool,
     pub dock_tasks_expanded: bool,
     pub dock_watchers_expanded: bool,
+    /// A section the user opened with `show N more`; it alone may grow the dock
+    /// past [`crate::views::dock::MAX_DOCK_ROWS`].
+    pub dock_workflows_show_all: bool,
+    pub dock_subagents_show_all: bool,
+    pub dock_tasks_show_all: bool,
+    pub dock_watchers_show_all: bool,
+    /// First row each dock section paints. Sections scroll inside their own
+    /// band, so headers never scroll away.
+    pub dock_offsets: crate::views::dock::SectionSlots<usize>,
+    /// A reveal is waiting for the frame to assign it rows. Until then the dock
+    /// budgets its full ask, so the cursor can reach a row the reveal uncovered.
+    /// Every path that ends a frame clears this.
+    pub dock_reveal_pending: bool,
+    /// Hover is independent of dock keyboard focus.
+    pub dock_hovered: Option<crate::views::dock::DockItem>,
+    pub dock_stop_button: Option<CachedDockStop>,
     /// Sticky: render enforces the queue overlay's visibility from this each
     /// frame, so the queue's auto-show can't re-open a manual collapse.
     pub dock_queued_expanded: bool,
+    /// Last frame: the dock replaced the Tasks/Queue panes, even if every
+    /// section is empty.
+    pub dock_on: bool,
     /// Set each render: dock enabled, terminal tall enough, ≥1 non-empty
     /// section. Key handling reads it so `Ctrl+G` only focuses the dock when it
     /// exists (and short terminals fall back to the tasks pane).
     pub dock_shown: bool,
+    /// Sticky: Ctrl+G hid the dock; paint stays off until the next Ctrl+G.
+    pub dock_hidden: bool,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
     /// Current special prompt input mode (Normal/Bash/Remember).

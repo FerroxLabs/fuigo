@@ -40,6 +40,14 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if key.code == KeyCode::Tab
+                && self.dock_shown
+                && !self.dock_hidden
+                && self.set_active_pane(AgentPane::Dock, false)
+            {
+                self.dock_cursor = 0;
+                return InputOutcome::Changed;
+            }
+            if key.code == KeyCode::Tab
                 && self.tasks.overlay.visible
                 && self.set_active_pane(AgentPane::Tasks, false)
             {
@@ -301,6 +309,28 @@ impl AgentView {
             InputOutcome::Unchanged
         }
     }
+    /// Non-terminal workflow runs, newest first: `(run_id, row)`.
+    pub(crate) fn dock_workflow_rows(&self) -> Vec<(String, crate::views::dock::DockRow)> {
+        self.workflow_runs_newest_first()
+            .into_iter()
+            .filter(|run| !run.is_terminal())
+            .map(|run| {
+                let activity = run.activity_label();
+                (
+                    run.run_id.clone(),
+                    crate::views::dock::DockRow {
+                        kind: "Workflow".into(),
+                        description: run.name.clone(),
+                        activity: (!activity.is_empty()).then_some(activity),
+                        meta: crate::views::dock::fmt_elapsed(run.live_elapsed_ms() / 1000),
+                        killable: run.can_stop(),
+                        openable: true,
+                        spinning: run.is_active(),
+                    },
+                )
+            })
+            .collect()
+    }
     /// Running non-workflow subagents in dock display order:
     /// `(child_session_id, subagent_id, row)`.
     pub(crate) fn dock_subagent_rows(&self) -> Vec<(String, String, crate::views::dock::DockRow)> {
@@ -329,6 +359,8 @@ impl AgentView {
                         activity: info.activity_label.clone(),
                         meta,
                         killable: !info.pending_kill,
+                        openable: true,
+                        spinning: true,
                     },
                 )
             })
@@ -360,6 +392,8 @@ impl AgentView {
                         activity: None,
                         meta: crate::views::dock::fmt_elapsed(elapsed),
                         killable: !t.pending_kill,
+                        openable: false,
+                        spinning: true,
                     },
                 )
             })
@@ -391,6 +425,8 @@ impl AgentView {
                         activity: None,
                         meta: crate::views::dock::fmt_elapsed(elapsed),
                         killable: !t.pending_kill,
+                        openable: false,
+                        spinning: true,
                     },
                 )
             })
@@ -398,6 +434,7 @@ impl AgentView {
         let mut loops: Vec<&crate::app::agent::ScheduledTaskInfo> =
             self.session.scheduled_tasks.values().collect();
         loops.sort_by_key(|s| s.created_at);
+        let now = chrono::Utc::now();
         rows.extend(loops.into_iter().map(|s| {
             (
                 DockWatcherId::Loop(s.task_id.clone()),
@@ -405,64 +442,385 @@ impl AgentView {
                     kind: "Loop".into(),
                     description: s.prompt.clone(),
                     activity: None,
-                    meta: s.human_schedule.clone(),
+                    meta: format!(
+                        "{}{}",
+                        s.human_schedule,
+                        crate::views::scheduled_next::next_suffix(s, now)
+                    ),
                     killable: true,
+                    openable: false,
+                    spinning: false,
                 },
             )
         }));
         rows
     }
-    /// Section counts without materializing rows — filters must match the
-    /// `dock_*_rows` builders so the item list and hit-testing line up with
-    /// what render paints.
+    /// The counts the dock lays out from, carrying the ceiling every consumer
+    /// obeys. Filters must match the `dock_*_rows` builders so the item list and
+    /// hit-testing line up with what render paints.
     pub(crate) fn dock_counts(&self) -> crate::views::dock::DockCounts {
-        use crate::app::agent::BgTaskStatus;
-        let running_bg = |monitor: bool| {
-            self.session
-                .bg_tasks
-                .values()
-                .filter(move |t| t.status == BgTaskStatus::Running && t.is_monitor == monitor)
-                .count()
-        };
         crate::views::dock::DockCounts {
-            subagents: self
-                .subagent_sessions
-                .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-                .count(),
-            tasks: running_bg(false),
-            watchers: running_bg(true) + self.session.scheduled_tasks.len(),
+            workflows: self.dock_workflow_rows().len(),
+            subagents: self.dock_subagent_rows().len(),
+            tasks: self.dock_task_rows().len(),
+            watchers: self.dock_watcher_rows().len(),
             queued: self.visible_held_queue_len(),
+            workflows_expanded: self.dock_workflows_expanded,
             subagents_expanded: self.dock_subagents_expanded,
             tasks_expanded: self.dock_tasks_expanded,
             watchers_expanded: self.dock_watchers_expanded,
+            workflows_show_all: self.dock_workflows_show_all,
+            subagents_show_all: self.dock_subagents_show_all,
+            tasks_show_all: self.dock_tasks_show_all,
+            watchers_show_all: self.dock_watchers_show_all,
+            queue_body_rows: self.queue.desired_height(),
+            offsets: self.dock_offsets,
+            max_rows: self.dock_max_rows(),
         }
     }
-    pub(crate) fn dock_items(&self) -> Vec<crate::views::dock::DockItem> {
-        crate::views::dock::items(&self.dock_counts())
+
+    /// Rows the dock may take: its resting height, raised for a revealed section
+    /// to what is left above the prompt once the scrollback keeps its floor.
+    /// `paint_cap` stretches this when the section floors need more, and the
+    /// frame's layout has the last word.
+    fn dock_max_rows(&self) -> crate::views::dock::MaxRows {
+        use crate::views::dock::{MAX_DOCK_ROWS, MaxRows};
+        let above_prompt = self
+            .pane_areas
+            .scrollback
+            .height
+            .saturating_add(self.pane_areas.dock.height);
+        let ceiling = above_prompt
+            .saturating_sub(crate::views::agent::SCROLLBACK_MIN_ROWS)
+            .max(MAX_DOCK_ROWS);
+        let revealed = self.dock_workflows_show_all
+            || self.dock_subagents_show_all
+            || self.dock_tasks_show_all
+            || self.dock_watchers_show_all;
+        if revealed {
+            MaxRows::new(ceiling)
+        } else {
+            MaxRows::default()
+        }
     }
-    /// Activate a dock item; shared by Enter and mouse click.
-    pub(crate) fn dock_activate(&mut self, item: crate::views::dock::DockItem) -> InputOutcome {
+
+    /// Item painted at `row` on screen, or `None` for the queue body and rows
+    /// past the content.
+    pub(crate) fn dock_item_at(
+        &self,
+        dock: ratatui::layout::Rect,
+        row: u16,
+    ) -> Option<crate::views::dock::DockItem> {
+        self.dock_layout_for(dock.height)
+            .item_at(row.checked_sub(dock.y)?)
+    }
+
+    /// Spends the pending reveal. Every path that ends a frame calls this, so a
+    /// takeover that never paints the dock cannot leave it budgeting rows
+    /// nothing put on screen.
+    pub(crate) fn take_dock_row_request(&mut self) -> bool {
+        std::mem::take(&mut self.dock_reveal_pending)
+    }
+
+    /// Keyboard, wheel, and clamp budget the same rows paint used. A reveal
+    /// budgets against the rows it asked for until the frame assigns them, so
+    /// the cursor can reach a row it just uncovered.
+    pub(crate) fn dock_layout(&self) -> crate::views::dock::DockLayout {
+        let assigned = self.pane_areas.dock.height;
+        if self.dock_reveal_pending || assigned == 0 {
+            crate::views::dock::DockLayout::new(&self.dock_counts())
+        } else {
+            self.dock_layout_for(assigned)
+        }
+    }
+
+    /// Budget rows against `height`, not `dock_max_rows` / a prior frame's
+    /// `pane_areas.dock`. Paint, hover, and the wheel all pass this frame's
+    /// assigned rect so they cannot drift from what is on screen.
+    fn dock_layout_for(&self, height: u16) -> crate::views::dock::DockLayout {
+        let counts = self.dock_counts();
+        match height {
+            0 => crate::views::dock::DockLayout::new(&counts),
+            assigned => crate::views::dock::DockLayout::with_cap(&counts, assigned as usize),
+        }
+    }
+
+    pub(crate) fn is_dock_section_expanded(&self, section: crate::views::dock::Section) -> bool {
+        use crate::views::dock::Section;
+        match section {
+            Section::Workflows => self.dock_workflows_expanded,
+            Section::Subagents => self.dock_subagents_expanded,
+            Section::Tasks => self.dock_tasks_expanded,
+            Section::Watchers => self.dock_watchers_expanded,
+            Section::Queued => self.dock_queued_expanded,
+        }
+    }
+
+    fn set_dock_section_expanded(
+        &mut self,
+        section: crate::views::dock::Section,
+        expanded: bool,
+    ) -> InputOutcome {
+        use crate::views::dock::Section;
+        let slot = match section {
+            Section::Workflows => &mut self.dock_workflows_expanded,
+            Section::Subagents => &mut self.dock_subagents_expanded,
+            Section::Tasks => &mut self.dock_tasks_expanded,
+            Section::Watchers => &mut self.dock_watchers_expanded,
+            Section::Queued => &mut self.dock_queued_expanded,
+        };
+        if *slot == expanded {
+            return InputOutcome::Unchanged;
+        }
+        *slot = expanded;
+        if !expanded {
+            match section {
+                Section::Workflows => self.dock_workflows_show_all = false,
+                Section::Subagents => self.dock_subagents_show_all = false,
+                Section::Tasks => self.dock_tasks_show_all = false,
+                Section::Watchers => self.dock_watchers_show_all = false,
+                Section::Queued => {}
+            }
+        }
+        InputOutcome::Changed
+    }
+
+    /// Raise one section. A section already showing all its rows keeps them:
+    /// the lift is bounded by [`Self::dock_max_rows`] and the layout shares it,
+    /// and `clamp_dock_overflow` drops any raise a shrunk section no longer
+    /// needs. (Upstream `4827113` sets the one flag here too; clearing the
+    /// others would close a section the user had just opened.)
+    fn set_dock_section_show_all(&mut self, section: crate::views::dock::Section) {
+        use crate::views::dock::Section;
+        match section {
+            Section::Workflows => self.dock_workflows_show_all = true,
+            Section::Subagents => self.dock_subagents_show_all = true,
+            Section::Tasks => self.dock_tasks_show_all = true,
+            Section::Watchers => self.dock_watchers_show_all = true,
+            Section::Queued => return,
+        }
+        self.dock_reveal_pending = true;
+    }
+
+    pub(super) fn clamp_dock_overflow(&mut self) {
+        use crate::views::dock::{Section, is_show_all_needed};
+        let counts = self.dock_counts();
+        if !is_show_all_needed(&counts, Section::Workflows) {
+            self.dock_workflows_show_all = false;
+        }
+        if !is_show_all_needed(&counts, Section::Subagents) {
+            self.dock_subagents_show_all = false;
+        }
+        if !is_show_all_needed(&counts, Section::Tasks) {
+            self.dock_tasks_show_all = false;
+        }
+        if !is_show_all_needed(&counts, Section::Watchers) {
+            self.dock_watchers_show_all = false;
+        }
+        let layout = self.dock_layout();
+        for section in [
+            Section::Workflows,
+            Section::Subagents,
+            Section::Tasks,
+            Section::Watchers,
+        ] {
+            self.dock_offsets.set(section, layout.row_offset(section));
+        }
+        let n = self.dock_items().len();
+        self.dock_cursor = if n == 0 {
+            0
+        } else {
+            self.dock_cursor.min(n - 1)
+        };
+    }
+
+    /// Pre-paint dock reconciliation, run from the draw state-update step rather
+    /// than the paint pass. Section counts change from background events (task
+    /// and subagent completion, queue refills), so a section that shrank back to
+    /// the preview must drop its `show-all` and the cursor must stay in bounds
+    /// even when no dock key was pressed since the change. Gated on the prior
+    /// frame's `dock_on` so it does no work while the dock is off.
+    pub(crate) fn reconcile_dock_before_paint(&mut self) {
+        if self.dock_on {
+            self.clamp_dock_overflow();
+        }
+    }
+
+    pub(crate) fn dock_snapshot(&self) -> crate::views::dock::DockData {
+        crate::views::dock::DockData {
+            workflows: self
+                .dock_workflow_rows()
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect(),
+            subagents: self
+                .dock_subagent_rows()
+                .into_iter()
+                .map(|(_, _, row)| row)
+                .collect(),
+            tasks: self
+                .dock_task_rows()
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect(),
+            watchers: self
+                .dock_watcher_rows()
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect(),
+            queued: self.visible_held_queue_len(),
+            workflows_expanded: self.dock_workflows_expanded,
+            subagents_expanded: self.dock_subagents_expanded,
+            tasks_expanded: self.dock_tasks_expanded,
+            watchers_expanded: self.dock_watchers_expanded,
+            workflows_show_all: self.dock_workflows_show_all,
+            subagents_show_all: self.dock_subagents_show_all,
+            tasks_show_all: self.dock_tasks_show_all,
+            watchers_show_all: self.dock_watchers_show_all,
+            focused: self.active_pane == ActivePane::Dock,
+            cursor: self.dock_cursor,
+            queue_body_rows: self.queue.desired_height(),
+            offsets: self.dock_offsets,
+            max_rows: self.dock_max_rows(),
+            hovered: self.dock_hovered,
+            stop_hovered: false,
+            spinner_tick: self.tasks.tick_count(),
+        }
+    }
+
+    pub(crate) fn cache_dock_stop_at(
+        &mut self,
+        area: ratatui::layout::Rect,
+        data: &crate::views::dock::DockData,
+    ) {
+        self.dock_stop_button =
+            crate::views::dock::hovered_stop_button_rect(area, data).and_then(|hit| {
+                self.dock_stop_action(hit.item)
+                    .and_then(|action| super::DockKillId::from_action(&action))
+                    .map(|id| super::CachedDockStop { rect: hit.rect, id })
+            });
+    }
+
+    pub(crate) fn cache_dock_stop_button(&mut self) {
+        let snapshot = self.dock_snapshot();
+        self.cache_dock_stop_at(self.pane_areas.dock, &snapshot);
+    }
+
+    /// Re-derive `dock_hovered` from the last pointer position against `dock`
+    /// (this frame's dock rect) and the current viewport. Pass the live
+    /// `layout.dock` rather than reading `pane_areas.dock`, which still holds
+    /// the previous frame's rect during paint.
+    pub(crate) fn sync_dock_hover_from_pointer(&mut self, dock: ratatui::layout::Rect) {
+        let (col, row) = self.last_mouse_pos;
+        self.dock_hovered = dock
+            .contains((col, row).into())
+            .then(|| self.dock_item_at(dock, row))
+            .flatten();
+    }
+
+    /// Headers stay put, so scrolling a section can never push another off the
+    /// dock.
+    pub(crate) fn scroll_dock_section(
+        &mut self,
+        section: crate::views::dock::Section,
+        delta: isize,
+    ) -> bool {
+        let layout = self.dock_layout();
+        if layout.visible_rows(section) == 0 {
+            return false;
+        }
+        let current = layout.row_offset(section);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current + (delta as usize).min(layout.rows_below(section))
+        };
+        if next == current && next == self.dock_offsets.get(section) {
+            return false;
+        }
+        self.dock_offsets.set(section, next);
+        true
+    }
+
+    pub(crate) fn dock_section_at(
+        &self,
+        dock: ratatui::layout::Rect,
+        row: u16,
+    ) -> Option<crate::views::dock::Section> {
+        match self.dock_item_at(dock, row)? {
+            crate::views::dock::DockItem::Header(section)
+            | crate::views::dock::DockItem::Row(section, _)
+            | crate::views::dock::DockItem::RevealRemaining(section) => Some(section),
+        }
+    }
+
+    pub(crate) fn dock_items(&self) -> Vec<crate::views::dock::DockItem> {
+        self.dock_layout().rows().to_vec()
+    }
+
+    /// The kill action behind a dock row's `[stop]` control, if it has one.
+    pub(crate) fn dock_stop_action(&self, item: crate::views::dock::DockItem) -> Option<Action> {
         use crate::views::dock::{DockItem, Section};
         match item {
-            DockItem::Header(Section::Subagents) => {
-                self.dock_subagents_expanded = !self.dock_subagents_expanded;
-                InputOutcome::Changed
+            DockItem::Row(Section::Workflows, i) => {
+                self.dock_workflow_rows().get(i).and_then(|(_, row)| {
+                    row.killable.then(|| {
+                        Action::SendSlashCommandPreservingDraft(format!(
+                            "/workflow stop {}",
+                            row.description
+                        ))
+                    })
+                })
             }
-            DockItem::Header(Section::Tasks) => {
-                self.dock_tasks_expanded = !self.dock_tasks_expanded;
-                InputOutcome::Changed
+            DockItem::Row(Section::Subagents, i) => self
+                .dock_subagent_rows()
+                .get(i)
+                .filter(|(_, _, row)| row.killable)
+                .map(|(_, subagent_id, _)| Action::KillSubagent(subagent_id.clone())),
+            DockItem::Row(Section::Tasks, i) => self
+                .dock_task_rows()
+                .get(i)
+                .filter(|(_, row)| row.killable)
+                .map(|(task_id, _)| Action::KillBgTask(task_id.clone())),
+            DockItem::Row(Section::Watchers, i) => {
+                self.dock_watcher_rows().get(i).and_then(|(id, row)| {
+                    row.killable.then(|| match id {
+                        DockWatcherId::Monitor(task_id) => Action::KillBgTask(task_id.clone()),
+                        DockWatcherId::Loop(task_id) => Action::CancelScheduledTask(task_id.clone()),
+                    })
+                })
             }
-            DockItem::Header(Section::Watchers) => {
-                self.dock_watchers_expanded = !self.dock_watchers_expanded;
-                InputOutcome::Changed
+            DockItem::Row(Section::Queued, _)
+            | DockItem::Header(_)
+            | DockItem::RevealRemaining(_) => None,
+        }
+    }
+
+    /// Activate a dock item; shared by Enter and mouse click.
+    pub(crate) fn activate_dock_item(
+        &mut self,
+        item: crate::views::dock::DockItem,
+    ) -> InputOutcome {
+        use crate::views::dock::{DockItem, Section};
+        match item {
+            DockItem::Header(sec) => {
+                let next = !self.is_dock_section_expanded(sec);
+                self.set_dock_section_expanded(sec, next)
             }
-            DockItem::Header(Section::Queued) => {
-                self.dock_queued_expanded = !self.dock_queued_expanded;
-                InputOutcome::Changed
+            DockItem::Row(Section::Workflows, i) => {
+                if let Some((run_id, _)) = self.dock_workflow_rows().get(i) {
+                    let run_id = run_id.clone();
+                    self.open_workflow_detail_by_run_id(&run_id);
+                    InputOutcome::Changed
+                } else {
+                    InputOutcome::Unchanged
+                }
             }
             DockItem::Row(Section::Subagents, i) => {
-                if let Some((child_sid, _, _)) = self.dock_subagent_rows().get(i) {
+                if let Some((child_sid, _, row)) = self.dock_subagent_rows().get(i) {
+                    if !row.openable || child_sid.is_empty() {
+                        return InputOutcome::Unchanged;
+                    }
                     let sid = child_sid.clone();
                     self.open_subagent_fullscreen(sid);
                     InputOutcome::Changed
@@ -470,19 +828,48 @@ impl AgentView {
                     InputOutcome::Unchanged
                 }
             }
-            DockItem::Row(..) => InputOutcome::Unchanged,
+            DockItem::RevealRemaining(section) => {
+                if section == Section::Queued {
+                    return InputOutcome::Unchanged;
+                }
+                let layout = self.dock_layout();
+                let first_hidden = layout.row_offset(section) + layout.visible_rows(section);
+                self.set_dock_section_show_all(section);
+                if let Some(next) = self
+                    .dock_items()
+                    .iter()
+                    .position(|item| *item == DockItem::Row(section, first_hidden))
+                {
+                    self.dock_cursor = next;
+                }
+                InputOutcome::Changed
+            }
+            // Fuigo has no background-task viewer, so Tasks/Watchers/Queued rows
+            // have nothing to open.
+            DockItem::Row(Section::Tasks | Section::Watchers | Section::Queued, _) => {
+                InputOutcome::Unchanged
+            }
         }
     }
+
     /// Dock-focused key handling (experimental `FUIGO_DOCK_V2`).
     pub(super) fn handle_dock_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        use crate::views::dock::{DockItem, Section};
+        use crate::views::dock::DockItem;
         use crossterm::event::KeyCode;
+        if !self.dock_shown || self.dock_hidden {
+            return InputOutcome::Unchanged;
+        }
+        let shift_tab = matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+            && key.modifiers == KeyModifiers::SHIFT;
+        if !key.modifiers.is_empty() && !shift_tab {
+            return InputOutcome::Unchanged;
+        }
+        self.clamp_dock_overflow();
         let items = self.dock_items();
         if items.is_empty() {
             self.set_active_pane(AgentPane::Scrollback, false);
             return InputOutcome::Changed;
         }
-        self.dock_cursor = self.dock_cursor.min(items.len() - 1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.dock_cursor = self.dock_cursor.saturating_sub(1);
@@ -492,31 +879,34 @@ impl AgentView {
                 self.dock_cursor = (self.dock_cursor + 1).min(items.len() - 1);
                 InputOutcome::Changed
             }
-            KeyCode::Enter | KeyCode::Char(' ') => self.dock_activate(items[self.dock_cursor]),
-            KeyCode::Char('x') => match items[self.dock_cursor] {
-                DockItem::Row(Section::Subagents, i) => self.dock_subagent_rows().get(i).map_or(
-                    InputOutcome::Unchanged,
-                    |(_, subagent_id, _)| {
-                        InputOutcome::Action(Action::KillSubagent(subagent_id.clone()))
-                    },
-                ),
-                DockItem::Row(Section::Tasks, i) => self
-                    .dock_task_rows()
-                    .get(i)
-                    .map_or(InputOutcome::Unchanged, |(task_id, _)| {
-                        InputOutcome::Action(Action::KillBgTask(task_id.clone()))
-                    }),
-                DockItem::Row(Section::Watchers, i) => match self.dock_watcher_rows().get(i) {
-                    Some((DockWatcherId::Monitor(task_id), _)) => {
-                        InputOutcome::Action(Action::KillBgTask(task_id.clone()))
-                    }
-                    Some((DockWatcherId::Loop(task_id), _)) => {
-                        InputOutcome::Action(Action::CancelScheduledTask(task_id.clone()))
-                    }
-                    None => InputOutcome::Unchanged,
-                },
-                DockItem::Row(Section::Queued, _) | DockItem::Header(_) => InputOutcome::Unchanged,
+            KeyCode::Right | KeyCode::Char('l') => match items.get(self.dock_cursor) {
+                Some(DockItem::Header(sec)) => self.set_dock_section_expanded(*sec, true),
+                Some(DockItem::Row(..) | DockItem::RevealRemaining(_)) | None => {
+                    InputOutcome::Unchanged
+                }
             },
+            KeyCode::Left => match items.get(self.dock_cursor) {
+                Some(DockItem::Header(sec)) => self.set_dock_section_expanded(*sec, false),
+                Some(DockItem::Row(..) | DockItem::RevealRemaining(_)) | None => {
+                    InputOutcome::Unchanged
+                }
+            },
+            KeyCode::Tab if !shift_tab => InputOutcome::Action(Action::FocusPrompt),
+            KeyCode::BackTab | KeyCode::Tab => {
+                self.set_active_pane(AgentPane::Scrollback, false);
+                InputOutcome::Changed
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => items
+                .get(self.dock_cursor)
+                .copied()
+                .map_or(InputOutcome::Unchanged, |item| {
+                    self.activate_dock_item(item)
+                }),
+            KeyCode::Char('x') => items
+                .get(self.dock_cursor)
+                .copied()
+                .and_then(|item| self.dock_stop_action(item))
+                .map_or(InputOutcome::Unchanged, InputOutcome::Action),
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.set_active_pane(AgentPane::Scrollback, false);
                 InputOutcome::Changed
@@ -524,6 +914,7 @@ impl AgentView {
             _ => InputOutcome::Unchanged,
         }
     }
+
     /// Bg-task-pane-focused key handling.
     pub(super) fn handle_bg_tasks_key(
         &mut self,
@@ -882,7 +1273,18 @@ impl AgentView {
             ActivePane::Catalog => {
                 self.catalog.handle_scroll(lines, col, row);
             }
-            ActivePane::Dock => {}
+            ActivePane::Dock => match self.dock_section_at(self.pane_areas.dock, row) {
+                Some(crate::views::dock::Section::Queued) | None => {
+                    self.queue.handle_scroll(lines, col, row);
+                }
+                Some(section) => {
+                    self.scroll_dock_section(section, lines as isize);
+                    if self.active_pane == ActivePane::Dock {
+                        let items = self.dock_items();
+                        self.dock_cursor = self.dock_cursor.min(items.len().saturating_sub(1));
+                    }
+                }
+            },
             ActivePane::Prompt => {
                 if self.question_view.is_some() {
                     return;

@@ -268,6 +268,11 @@ impl AgentView {
         self.is_parked_on_sendable_wait() && !self.is_waiting_on_subagent()
     }
 
+    /// A Ctrl+G-hidden dock is unpainted, so the idle cues stay.
+    pub(crate) fn dock_covers_idle_cues(&self, dock_on: bool) -> bool {
+        dock_on && !self.dock_hidden
+    }
+
     /// Live counts for the turn-status watching cue; see [`crate::views::turn_status::Watchers`].
     pub(crate) fn watchers(&self) -> crate::views::turn_status::Watchers {
         let mut watchers = crate::views::turn_status::Watchers::default();
