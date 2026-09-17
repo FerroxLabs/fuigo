@@ -175,7 +175,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// Counts are computed here, not at call sites: a queued spawn counts
     /// itself in `queue_depth` (the notice fires before the push), a rejected
     /// spawn does not.
-    fn notify_limit(&self, request: &SubagentRequest, decision: SubagentLimitDecision) {
+    pub(super) fn notify_limit(&self, request: &SubagentRequest, decision: SubagentLimitDecision) {
         let Some(sink) = &self.config.limit_sink else {
             return;
         };

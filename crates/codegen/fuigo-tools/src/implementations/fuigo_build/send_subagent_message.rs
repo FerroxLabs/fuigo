@@ -188,7 +188,7 @@ impl crate::types::tool_metadata::ToolMetadata for SendSubagentMessageTool {
     }
 
     fn description_template(&self) -> &str {
-        "Send a follow-up message to an active subagent owned by this session. The subagent must still be active and accepting messages."
+        "Send a follow-up message to a subagent owned by this session. An active subagent receives it as a message; an eligible completed subagent (not cancelled, not workflow-owned) resumes with the same identity and runs the text as its next turn, reporting like a background completion. For an active target, `delivery` selects how the message lands: `queue` (default) waits as a later turn; `steer` joins the current turn at its next safe point; `interject` is urgent — it is delivered ahead of pending steers at the earliest safe point and interrupts a subagent blocked waiting on background work."
     }
 }
 

@@ -1106,24 +1106,31 @@ async fn bootstrap_initial_context(
             ..Default::default()
         };
         use crate::session::storage::StorageAdapter as _;
-        return match storage
-            .copy_session_data(&source_session_info, child_session_info, copy_options)
-            .await
-        {
+        // A woken child continues its own session in place: copying a
+        // session onto itself would truncate the files it is read from.
+        let is_same_session = source.child_session_id == child_session_info.id.0.as_ref()
+            && source.child_cwd == child_session_info.cwd;
+        let copy_result = if is_same_session {
+            Ok(None)
+        } else {
+            storage
+                .copy_session_data(&source_session_info, child_session_info, copy_options)
+                .await
+                .map(Some)
+        };
+        return match copy_result {
             Ok(result) => {
                 let conversation = match storage.load_chat_history_from_dir(child_session_dir) {
                     Ok(items) if !items.is_empty() => items,
                     Ok(_) => {
                         return BootstrapInitialContext::ResumeAbort(format!(
-                            "Cannot resume from subagent '{}': \
-                             copied transcript is empty",
+                            "Cannot resume from subagent '{}': transcript is empty",
                             source.subagent_id,
                         ));
                     }
                     Err(e) => {
                         return BootstrapInitialContext::ResumeAbort(format!(
-                            "Cannot resume from subagent '{}': \
-                             failed to load copied transcript: {e}",
+                            "Cannot resume from subagent '{}': failed to load transcript: {e}",
                             source.subagent_id,
                         ));
                     }
@@ -1160,14 +1167,22 @@ async fn bootstrap_initial_context(
                     resume_window::ResumeForceCompact::Arm => true,
                     resume_window::ResumeForceCompact::NotNeeded => false,
                 };
-                tracing::info!(
-                    subagent_id = %request.id,
-                    source_subagent = %source.subagent_id,
-                    chat_messages = result.chat_messages_copied,
-                    tool_state = result.tool_state_copied,
-                    estimated_tokens,
-                    "Resume-copied source child session data into new child"
-                );
+                match result {
+                    Some(result) => tracing::info!(
+                        subagent_id = %request.id,
+                        source_subagent = %source.subagent_id,
+                        chat_messages = result.chat_messages_copied,
+                        tool_state = result.tool_state_copied,
+                        estimated_tokens,
+                        "Resume-copied source child session data into new child"
+                    ),
+                    None => tracing::info!(
+                        subagent_id = %request.id,
+                        chat_messages = conversation.len(),
+                        estimated_tokens,
+                        "Resumed child session in place (wake)"
+                    ),
+                }
                 BootstrapInitialContext::Ready(resume_initial_context(conversation, force_compact))
             }
             Err(e) => BootstrapInitialContext::ResumeAbort(format!(
