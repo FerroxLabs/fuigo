@@ -114,6 +114,56 @@ fn test_push_user_prompt_appends_prompt_descriptor() {
     assert_eq!(pd.y_virtual, cache.virtual_y[prompt_idx]);
 }
 
+/// A collapsed turn marker keeps its blank row against collapsed tool and subagent rows on both sides.
+/// The incremental extend path and the full recompute must agree.
+#[test]
+fn collapsed_turn_marker_keeps_gap_from_collapsed_neighbors() {
+    use crate::scrollback::blocks::{SessionEvent, SubagentBlock};
+    use std::time::Duration;
+
+    let gaps = |state: &ScrollbackState| -> Vec<u16> {
+        state
+            .layout_cache
+            .as_ref()
+            .expect("layout cache")
+            .entries
+            .iter()
+            .map(|e| e.gap_after)
+            .collect()
+    };
+
+    let mut state = ScrollbackState::new();
+    state.push_block(tool_block("wait one"));
+    state.push_block(tool_block("wait two"));
+    let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+        elapsed: Some(Duration::from_secs(3)),
+    }));
+    state
+        .get_by_id_mut(marker)
+        .unwrap()
+        .set_display_mode(DisplayMode::Collapsed);
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        state.get_by_id(marker).unwrap().display_mode,
+        DisplayMode::Collapsed
+    );
+    // Two collapsed tool rows stack; the collapsed marker after them does not
+    assert_eq!(gaps(&state), vec![0, 1, 1]);
+
+    // Extend path: the child's completion row appended under the marker keeps the blank row
+    state.push_block(RenderBlock::Subagent(SubagentBlock::completed(
+        "spacing probe",
+        "child-1",
+        Duration::from_secs(1),
+    )));
+    assert_eq!(gaps(&state), vec![0, 1, 1, 1]);
+
+    // Full recompute agrees with the extend path
+    state.layout_cache = None;
+    state.prepare_layout(80, 40);
+    assert_eq!(gaps(&state), vec![0, 1, 1, 1]);
+}
+
 /// Build a LayoutCache with the given entry heights.
 /// virtual_y is computed with 1-row gaps between entries (matching current gap_after=1).
 fn make_cache(heights: &[u16]) -> LayoutCache {
