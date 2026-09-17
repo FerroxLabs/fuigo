@@ -3849,6 +3849,202 @@ fn picker_mode_mouse_click_is_noop() {
     assert_eq!(s.selected, selected_before);
 }
 
+fn picker_choice_idx(s: &SettingsModalState) -> usize {
+    match s.mode() {
+        SettingsModalMode::PickingEnum { choices_idx, .. } => choices_idx,
+        other => panic!("expected PickingEnum, got {other:?}"),
+    }
+}
+
+fn install_picker_choice_rects(s: &mut SettingsModalState) {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 30,
+    };
+    let mut buf = Buffer::empty(area);
+    render_picking_enum(&mut buf, area, s, &Theme::current());
+    s.picker_choice_rects = take_picker_choice_rects();
+}
+
+fn click_picker_choice(s: &mut SettingsModalState, idx: usize) -> SettingsKeyOutcome {
+    let Some(&rect) = s.picker_choice_rects.get(idx) else {
+        panic!("picker_choice_rects[{idx}] missing");
+    };
+    assert!(
+        rect.width > 0 && rect.height > 0,
+        "choice {idx} must be visible, got {rect:?}"
+    );
+    handle_settings_mouse(
+        s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        rect.x.saturating_add(2),
+        rect.y,
+    )
+}
+
+fn unfocused_visible_choice(s: &SettingsModalState) -> usize {
+    let focused = picker_choice_idx(s);
+    s.picker_choice_rects
+        .iter()
+        .enumerate()
+        .find(|(i, r)| *i != focused && r.height > 0)
+        .map(|(i, _)| i)
+        .expect("need a visible unfocused radio")
+}
+
+/// A click on the focused radio does not select. A click on another radio only focuses it.
+/// The second click on that radio selects and leaves the chooser.
+#[test]
+fn picker_double_click_selects_radio() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let focused = picker_choice_idx(&s);
+    let target = unfocused_visible_choice(&s);
+
+    let on_focused = click_picker_choice(&mut s, focused);
+    assert!(
+        matches!(on_focused, SettingsKeyOutcome::Unchanged),
+        "click on the focused radio must not select, got {on_focused:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), focused);
+
+    let first = click_picker_choice(&mut s, target);
+    assert!(
+        matches!(first, SettingsKeyOutcome::Changed),
+        "first click on another radio must only focus, got {first:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), target);
+
+    let second = click_picker_choice(&mut s, target);
+    match second {
+        SettingsKeyOutcome::Action(Action::SetCodingDataSharing { opted_in }) => {
+            assert!(
+                opted_in,
+                "opt-in is the unfocused radio on the default snapshot"
+            );
+        }
+        other => panic!("double-click must select like Enter, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "select must leave the chooser"
+    );
+}
+
+/// Two quick clicks on different radios move focus only; they are not a double-click.
+#[test]
+fn picker_clicks_on_different_radios_do_not_select() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let first_idx = unfocused_visible_choice(&s);
+    let second_idx = picker_choice_idx(&s);
+    assert_ne!(first_idx, second_idx);
+
+    let _ = click_picker_choice(&mut s, first_idx);
+    let outcome = click_picker_choice(&mut s, second_idx);
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Action(_) | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "clicking a different radio must not select, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), second_idx);
+}
+
+/// Click A, move focus with the keyboard, then click A again is a new single click.
+#[test]
+fn picker_keyboard_move_cancels_double_click() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let first = unfocused_visible_choice(&s);
+    let _ = click_picker_choice(&mut s, first);
+    assert_eq!(picker_choice_idx(&s), first);
+
+    let nav = if picker_choice_idx(&s) + 1 < s.picker_choice_rects.len() {
+        KeyCode::Down
+    } else {
+        KeyCode::Up
+    };
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(nav, KeyModifiers::NONE));
+    assert_ne!(picker_choice_idx(&s), first);
+    assert!(
+        s.picker_last_click.is_none(),
+        "keyboard focus move must clear the pending double-click"
+    );
+
+    let outcome = click_picker_choice(&mut s, first);
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Action(_) | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "click after keyboard nav must not select, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), first);
+}
+
+/// A click outside the double-click window focuses only, even on the same radio.
+#[test]
+fn picker_stale_click_does_not_select() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let target = unfocused_visible_choice(&s);
+    s.picker_last_click = Some((
+        target,
+        std::time::Instant::now() - std::time::Duration::from_millis(301),
+    ));
+
+    let outcome = click_picker_choice(&mut s, target);
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "stale click must only focus, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), target);
+}
+
+/// Deep-link choosers close the modal on double-click, same as Enter.
+#[test]
+fn picker_double_click_deep_link_closes() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    s.close_on_picker_exit = true;
+    install_picker_choice_rects(&mut s);
+    let focused = picker_choice_idx(&s);
+
+    let _ = click_picker_choice(&mut s, focused);
+    let outcome = click_picker_choice(&mut s, focused);
+    match outcome {
+        SettingsKeyOutcome::ActionThenClose(Action::SetCodingDataSharing { opted_in }) => {
+            assert!(!opted_in);
+        }
+        other => panic!("deep-link double-click must close, got {other:?}"),
+    }
+}
+
+/// Preview enums still preview on the first click; the second click commits.
+#[test]
+fn picker_double_click_commits_preview_enum() {
+    let mut s = enter_picker_for("theme");
+    install_picker_choice_rects(&mut s);
+    let target = unfocused_visible_choice(&s);
+
+    let first = click_picker_choice(&mut s, target);
+    match first {
+        SettingsKeyOutcome::Action(Action::PreviewTheme(_)) => {}
+        other => panic!("first click must preview, not select, got {other:?}"),
+    }
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+    let second = click_picker_choice(&mut s, target);
+    match second {
+        SettingsKeyOutcome::Action(Action::SetTheme(_)) => {}
+        other => panic!("double-click must commit the previewed theme, got {other:?}"),
+    }
+    assert!(matches!(s.mode(), SettingsModalMode::Browse));
+}
+
 /// Random keypresses in PickingEnum mode are Unchanged and don't leak to other handlers (e.g., the filter query).
 #[test]
 fn picker_ignores_random_keypress() {
@@ -6174,7 +6370,7 @@ fn consent_chooser_drops_tip_and_reset() {
         "consent chooser must not offer reset:\n{text}"
     );
     assert!(
-        text.contains("Enter select"),
+        text.contains("Enter select") && text.contains("double-click select"),
         "the other footer hints must survive:\n{text}"
     );
 
@@ -6199,7 +6395,9 @@ fn consent_chooser_drops_tip_and_reset() {
         "ordinary pickers keep the tip and the reset hint:\n{text}"
     );
     assert!(
-        text.contains("Enter select") && !text.contains("Enter commit"),
+        text.contains("Enter select")
+            && text.contains("double-click select")
+            && !text.contains("Enter commit"),
         "every chooser selects an answer rather than committing a value:\n{text}"
     );
 }
