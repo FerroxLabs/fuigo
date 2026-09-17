@@ -1171,7 +1171,10 @@ fn make_test_handle(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
-        scheduler_background_loops: true,
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+            scheduler_background_loops: true,
+        },
         reasoning_effort: None,
         yolo_mode: yolo,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
@@ -2532,7 +2535,7 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
     let sid = acp::SessionId::new("loop-mode-sess");
     let mut handle = make_test_handle("test-model", false, None);
     handle.info.id = sid.clone();
-    handle.scheduler_background_loops = false;
+    handle.spawn_snapshot.scheduler_background_loops = false;
     agent.insert_resident(&sid, handle);
     let model_state = agent.model_state(Some(&sid));
     let mut meta = serde_json::Map::new();

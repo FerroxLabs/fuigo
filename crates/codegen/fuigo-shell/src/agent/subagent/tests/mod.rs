@@ -234,7 +234,10 @@ fn wedged_child_handle() -> (
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new("test-model"),
-        scheduler_background_loops: true,
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+            scheduler_background_loops: true,
+        },
         reasoning_effort: None,
         yolo_mode: false,
         origin_client: None,

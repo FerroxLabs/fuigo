@@ -2076,6 +2076,9 @@ mod session_thread_tests;
 #[path = "acp_session_tests/status_line_payload_tests.rs"]
 mod status_line_payload_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/startup_tasks_tests.rs"]
+mod startup_tasks_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
 mod tool_layer_images_bridge_tests;
 #[cfg(test)]

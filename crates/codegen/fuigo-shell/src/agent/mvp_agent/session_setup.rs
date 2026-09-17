@@ -36,6 +36,12 @@ async fn read_applied_tool_overrides(
         }
     }
 }
+/// The default-model `session/new` echo: the signature admits only spawn-time data, never an actor channel, so this reply path cannot wait on session startup.
+fn spawn_snapshot_tool_overrides(
+    snapshot: &crate::session::SpawnSnapshot,
+) -> Option<fuigo_sampling_types::ToolOverrides> {
+    snapshot.applied_tool_overrides.clone()
+}
 fn insert_applied_tool_overrides(
     meta: &mut serde_json::Map<String, serde_json::Value>,
     echo: Option<&fuigo_sampling_types::ToolOverrides>,
@@ -695,6 +701,9 @@ impl MvpAgent {
             self.model_state(Some(&session_id))
         };
         let applied_tool_overrides = match self.session_handle_waiting_for_load(&session_id).await {
+            Some(handle) if resolved_custom_model.is_none() => {
+                spawn_snapshot_tool_overrides(&handle.spawn_snapshot)
+            }
             Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
             None => {
                 tracing::warn!(

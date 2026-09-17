@@ -2247,6 +2247,10 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let spawn_snapshot = crate::session::SpawnSnapshot {
+        applied_tool_overrides: session.effective_tool_overrides(),
+        scheduler_background_loops,
+    };
     let telemetry_ctx = fuigo_telemetry::session_ctx::TelemetryCtx::new(
         session.session_info.id.0.to_string(),
         session.tool_context.prompt_index.clone(),
@@ -2310,7 +2314,7 @@ pub(crate) async fn spawn_session_actor(
             upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
-            scheduler_background_loops,
+            spawn_snapshot,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
             origin_client: origin_client.clone(),
