@@ -1112,6 +1112,28 @@ pub fn action_key_display(ch: char) -> &'static str {
     }
 }
 
+/// Row-scoped action verbs shared by the footer labels and the row hints, so the two cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionVerb {
+    Install,
+    Update,
+    Uninstall,
+    RemoveSource,
+    EnableDisable,
+}
+
+impl ActionVerb {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Update => "update",
+            Self::Uninstall => "uninstall",
+            Self::RemoveSource => "remove source",
+            Self::EnableDisable => "enable/disable",
+        }
+    }
+}
+
 /// Per-tab action keys for the extensions modal (footer, picker, telemetry).
 ///
 /// Space stays labeled `"toggle"` on the wire for telemetry / picker identity.
@@ -2059,6 +2081,26 @@ impl ExtensionsModalState {
     /// Returns `None` if the selection is on a header or out of range.
     pub fn selected_data_index(&self) -> Option<usize> {
         data_index_at(&self.entry_data_indices, self.picker_state.selected)
+    }
+
+    /// Guidance for a row-scoped key pressed where the selection has no target: a group/source header,
+    /// or a plugin row for a source verb. The key stays bound even when the footer hides it.
+    pub fn post_select_row_hint(&mut self, noun: &str, verb: ActionVerb) {
+        if self.entry_data_indices.is_empty() {
+            return;
+        }
+        let sel = self.picker_state.selected;
+        let collapsed_header = self
+            .entry_group_keys
+            .get(sel)
+            .and_then(|key| key.as_deref())
+            .is_some_and(|key| !self.is_group_expanded(sel, key));
+        let verb = verb.label();
+        self.modal_message = Some(ModalMessage::Info(if collapsed_header {
+            format!("Expand this row (Enter), then select a {noun} row to {verb}.")
+        } else {
+            format!("Select a {noun} row to {verb}.")
+        }));
     }
 
     pub fn selected_item_enabled(&self) -> Option<bool> {
@@ -5052,6 +5094,29 @@ mod tests {
             "loading spinner shown instead of the empty placeholder"
         );
         assert_eq!(buffer_count(&buf, "No workflows available"), 0);
+    }
+
+    #[test]
+    fn select_row_hint_on_collapsed_header_asks_to_expand_first() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        state.entry_group_keys = vec![Some("user".into())];
+        state.entry_data_indices = vec![None];
+        state.picker_state.selected = 0;
+
+        state.post_select_row_hint("plugin", ActionVerb::Update);
+        assert_eq!(
+            state.modal_message,
+            Some(ModalMessage::Info("Select a plugin row to update.".into()))
+        );
+
+        state.plugins_collapsed_groups.insert("user".into());
+        state.post_select_row_hint("plugin", ActionVerb::Update);
+        assert_eq!(
+            state.modal_message,
+            Some(ModalMessage::Info(
+                "Expand this row (Enter), then select a plugin row to update.".into()
+            ))
+        );
     }
 
     #[test]
