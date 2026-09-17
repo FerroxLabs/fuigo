@@ -1378,8 +1378,6 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         }
     }
 
-    /// Apply inline-code styling to a code/math span: dim the delimiters, style the content.
-    /// Shared by `Event::Code` and the inline-math fallback path.
     /// Push text into the current table cell (no-op outside a table), tagging
     /// bare URLs/emails as link spans. The post-render URL scan runs after the
     /// table has wrapped the cell, so it would only catch the first line of a
@@ -1416,6 +1414,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         }
     }
 
+    /// Apply inline-code styling to a code/math span: dim the delimiters, style the content.
+    /// Shared by `Event::Code` and the inline-math fallback path.
     fn style_inline_code_span(&mut self, code: &CowStr<'_>, range: &Range<usize>) {
         // Find the actual content range (excluding the delimiters).
         let outer_text = &self.text[range.clone()];
