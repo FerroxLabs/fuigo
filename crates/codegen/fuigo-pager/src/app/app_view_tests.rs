@@ -6873,3 +6873,222 @@ fn access_gate_screen_leaves_g_unbound() {
         InputOutcome::Action(Action::Logout)
     ));
 }
+// ---------------------------------------------------------------------------------------------------------------------
+// Dashboard repaint gating: a tick requests a redraw exactly when the painted frame would change
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Paint the dashboard exactly as `AppView::draw` does (same `render_dashboard` call, same inputs) into a fresh buffer.
+/// Two consecutive paints that compare equal are what the terminal's cell diff would turn into zero bytes on the wire.
+fn paint_dashboard(app: &mut AppView) -> ratatui::buffer::Buffer {
+    let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let AppView {
+        dashboard,
+        agents,
+        registry,
+        ..
+    } = app;
+    crate::views::dashboard::render_dashboard(
+        &mut buf,
+        area,
+        dashboard.as_mut().expect("dashboard state"),
+        agents,
+        registry,
+        None,
+        &[],
+        false,
+        None,
+        false,
+        None,
+    );
+    buf
+}
+fn dashboard_test_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
+    crate::app::agent::BgTaskState {
+        task_id: task_id.into(),
+        tool_call_id: String::new(),
+        command: "sleep 99".into(),
+        description: None,
+        cwd: String::new(),
+        output_file: String::new(),
+        status: crate::app::agent::BgTaskStatus::Running,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: None,
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id: None,
+        is_monitor: true,
+        restored_from_replay: false,
+    }
+}
+/// One full spinner (4-tick) × blink (10-tick) cycle, twice over. Written as a literal so the measurement compiles
+/// on a tree without the dashboard animation module; the cadence constants themselves are pinned in
+/// `views::dashboard::render_tests`.
+const DASHBOARD_TICK_CYCLE: u64 = 40;
+/// Tick the dashboard through a full cycle. Every tick must request a redraw iff the frame that follows differs
+/// from the one before it. Returns how many frames actually changed.
+fn tick_a_full_cycle(app: &mut AppView) -> u64 {
+    let mut previous = paint_dashboard(app);
+    let mut frames = 0;
+    for _ in 0..DASHBOARD_TICK_CYCLE {
+        let before = app.dashboard.as_ref().unwrap().spinner_tick;
+        let requested = app.tick();
+        let tick = app.dashboard.as_ref().unwrap().spinner_tick;
+        assert_eq!(before + 1, tick, "every tick advances the spinner counter");
+        let frame = paint_dashboard(app);
+        let changed = frame != previous;
+        assert_eq!(
+            changed, requested,
+            "tick {tick}: redraw requested iff the painted dashboard changed"
+        );
+        previous = frame;
+        frames += u64::from(changed);
+    }
+    frames
+}
+fn painted_tick_demand(app: &mut AppView) -> TickDemand {
+    let _ = paint_dashboard(app);
+    app.tick_demand()
+}
+/// A visible Working row repaints once per spinner frame and never in between.
+#[test]
+fn dashboard_tick_requests_a_redraw_exactly_when_the_frame_changes() {
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    let frames = tick_a_full_cycle(&mut app);
+    assert!(
+        frames > 0 && frames < DASHBOARD_TICK_CYCLE,
+        "the spinner must advance during the cycle, but not on every tick (got {frames} of {DASHBOARD_TICK_CYCLE})"
+    );
+}
+/// A Working row hidden by the filter paints no spinner: no tick may request a redraw and no frame may change.
+#[test]
+fn dashboard_tick_requests_no_redraw_when_nothing_animated_is_painted() {
+    use crate::views::dashboard::Filter;
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    app.dashboard.as_mut().unwrap().filter = Filter::Substring("no-such-row".to_owned());
+    assert_eq!(
+        0,
+        tick_a_full_cycle(&mut app),
+        "a hidden Working row paints no spinner and owes no frames"
+    );
+}
+/// A NeedsInput row blinks once per blink phase while visible; collapsed away it paints no blinking cell.
+#[test]
+fn collapsed_needs_input_row_paints_no_blink() {
+    use crate::views::dashboard::{RowState, SectionKey};
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .permission_queue
+        .push_back(crate::app::agent_view::test_fixtures::make_followup_permission_state());
+    let frames = tick_a_full_cycle(&mut app);
+    assert!(
+        frames > 0 && frames < DASHBOARD_TICK_CYCLE,
+        "a visible NeedsInput row repaints once per blink phase, not per tick (got {frames})"
+    );
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .collapsed_sections
+        .insert(SectionKey::State(RowState::NeedsInput));
+    assert_eq!(
+        0,
+        tick_a_full_cycle(&mut app),
+        "a collapsed NeedsInput row has no blinking cell on screen"
+    );
+    assert_eq!(
+        TickDemand::None,
+        app.tick_demand(),
+        "and the tick gate parks: nothing painted animates"
+    );
+}
+/// The dashboard's tick demand follows what the last frame painted, not which agents are busy.
+#[test]
+fn tick_demand_dashboard_parks_when_filter_hides_the_working_row() {
+    use crate::views::dashboard::Filter;
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    assert_eq!(TickDemand::Fast, painted_tick_demand(&mut app));
+    app.dashboard.as_mut().unwrap().filter = Filter::Substring("no-such-row".to_owned());
+    assert_eq!(
+        TickDemand::None,
+        painted_tick_demand(&mut app),
+        "a hidden Working row paints no spinner, so it owes no frames"
+    );
+    app.dashboard.as_mut().unwrap().filter = Filter::None;
+    assert_eq!(
+        TickDemand::Fast,
+        painted_tick_demand(&mut app),
+        "clearing the filter brings the spinner (and the demand) back"
+    );
+}
+/// The demand is read from the last paint, so the event loop's post-paint `schedule_tick` is what arms the first
+/// spinner tick: before the frame the gate still reflects the idle dashboard that was painted last.
+#[test]
+fn first_spinner_frame_arms_the_tick_only_after_the_paint() {
+    use crate::app::event_loop::schedule_tick;
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    let _ = paint_dashboard(&mut app);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    let interval = std::time::Duration::from_millis(33);
+    let mut tick_at = None;
+    schedule_tick(&mut tick_at, &app, interval);
+    assert!(
+        tick_at.is_none(),
+        "before the frame, the demand still reflects the idle dashboard that was last painted"
+    );
+    let _ = paint_dashboard(&mut app);
+    schedule_tick(&mut tick_at, &app, interval);
+    assert!(
+        tick_at.is_some(),
+        "the loop-bottom re-check after the paint must arm the spinner's next tick"
+    );
+}
