@@ -401,6 +401,26 @@ pub(crate) mod test_support {
     }
 }
 
+/// True when a scrollback holds nothing but `TurnCompleted` footers.
+/// A finalize recreates that content, so it must not pin the view `MemoryOnly`.
+/// A `UserPrompt` counts as content: it came from the session stream and may be the only copy.
+fn scrollback_is_footer_only(scrollback: &crate::scrollback::state::ScrollbackState) -> bool {
+    for i in 0..scrollback.len() {
+        let Some(entry) = scrollback.entry(i) else {
+            continue;
+        };
+        match &entry.block {
+            crate::scrollback::block::RenderBlock::SessionEvent(b)
+                if matches!(
+                    b.event,
+                    crate::scrollback::blocks::SessionEvent::TurnCompleted { .. }
+                ) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// True when a scrollback holds nothing beyond injected task prompts.
 fn scrollback_is_prompt_only(scrollback: &crate::scrollback::state::ScrollbackState) -> bool {
     let len = scrollback.len();
