@@ -3617,6 +3617,60 @@ mod tests {
     }
 
     #[test]
+    fn tabs_focused_keys_reach_the_shared_handlers() {
+        // The tab bar holding focus only claims Up/Down/Enter: action keys (Space included) and the advertised `f`
+        // filter key act on the still-selected row, h/l cycle tabs, `/` and any other printable char start a query.
+        let focused = || PickerState {
+            tabs_focused: true,
+            ..PickerState::default()
+        };
+        for vim in [false, true] {
+            let mut config = cfg(true, vim);
+            config.tabs = Some(&["a", "b", "c"]);
+            config.action_keys = &[('u', "update"), (' ', "toggle")];
+            config.filter_label = Some("All");
+
+            for c in ['u', ' '] {
+                let mut state = focused();
+                let outcome = handle_picker_input(&press(c), &mut state, 3, &config);
+                assert!(
+                    matches!(outcome, PickerOutcome::Action(ch) if ch == c),
+                    "vim={vim} c={c:?}"
+                );
+                assert!(state.query().is_empty(), "vim={vim} c={c:?}");
+                assert!(!state.search_active, "vim={vim} c={c:?}");
+            }
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('f'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::FilterCycled), "vim={vim}");
+            assert!(!state.search_active, "vim={vim}");
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('l'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::TabChanged(1)), "vim={vim}");
+            let outcome = handle_picker_input(&press('h'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::TabChanged(2)), "vim={vim}");
+            assert!(state.query().is_empty(), "vim={vim}");
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('/'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::Changed), "vim={vim}");
+            assert!(state.search_active, "vim={vim}");
+            assert!(!state.tabs_focused, "vim={vim}");
+        }
+
+        let mut config = cfg(true, false);
+        config.tabs = Some(&["a", "b"]);
+        let mut state = focused();
+        let outcome = handle_picker_input(&press('a'), &mut state, 3, &config);
+        assert!(matches!(outcome, PickerOutcome::QueryChanged));
+        assert_eq!(state.query(), "a");
+        assert!(state.search_active);
+        assert!(!state.tabs_focused);
+    }
+
+    #[test]
     fn paste_search_leaves_expansion_to_the_host() {
         let mut config = cfg(true, false);
         config.expandable = true;
