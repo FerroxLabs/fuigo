@@ -211,3 +211,58 @@
             "the failure gets its line; the deny beside it is still the shell's to report"
         );
     }
+
+    /// Old session files still carry the `hook_execution` records that used to feed the removed tool-row and
+    /// lifecycle hook blocks. The pager never serialised those blocks, so the persisted record is the shell's wire
+    /// DTO, and replaying one must keep deserialising and rendering the way today's handler does: nothing for
+    /// success, skip or deny, one outcome line per failure, and no tool-call or lifecycle block. The literal also
+    /// carries fields no current type has, the shape a future or older writer could leave behind.
+    #[test]
+    fn replayed_legacy_hook_execution_record_still_loads() {
+        let mut app = make_app_with_agent("sess-legacy");
+        // A replayed record only applies inside a `session/load` window, which is where an old session file is read.
+        app.agents.get_mut(&AgentId(0)).unwrap().session.loading_replay = true;
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let record = serde_json::json!({
+            "sessionId": "sess-legacy",
+            "update": {
+                "sessionUpdate": "hook_execution",
+                "event_name": "stop",
+                "tool_name": "Edit",
+                "prompt_id": "pid-old",
+                "phase": "post",
+                "runs": [
+                    {"name": "global/notify", "status": {"status": "success", "elapsed_ms": 12}, "output": "ok"},
+                    {"name": "global/off", "status": {"status": "skipped"}},
+                    {"name": "global/gate", "status": {"status": "failed", "error": "blocked stop", "elapsed_ms": 7, "blocked": true}},
+                    {"name": "global/broken", "status": {"status": "failed", "error": "exit code 1", "elapsed_ms": 3}, "lifecycle": true}
+                ]
+            },
+            "_meta": {"isReplay": true}
+        });
+        // The load itself, asserted directly so a shape drift reports serde's own error rather than a silent no-op.
+        let loaded: fuigo_shell::extensions::notification::SessionNotification =
+            serde_json::from_value(record.clone()).unwrap_or_else(|e| panic!("legacy record must load: {e}"));
+        assert!(
+            matches!(loaded.update, FuigoSessionUpdate::HookExecution { ref runs, .. } if runs.len() == 4),
+            "{:?}",
+            loaded.update
+        );
+        let notif = acp::ExtNotification::new(
+            "fuigo/session/update",
+            serde_json::value::to_raw_value(&record).unwrap().into(),
+        );
+        let affected = handle_ext_notification(&notif, &mut app);
+
+        assert!(affected, "the record must deserialise and render its failure line");
+        let sb = &app.agents[&AgentId(0)].scrollback;
+        assert_eq!(sb.len(), len_before + 1, "exactly one block: the failure line");
+        assert!(
+            (0..sb.len()).all(|i| !matches!(sb.get(i).map(|e| &e.block), Some(RenderBlock::ToolCall(_)))),
+            "a hook record never becomes a tool-call block"
+        );
+        assert_eq!(
+            annotation_lines(sb),
+            vec!["stop hook (global/broken) failed, ignored: exit code 1".to_string()],
+        );
+    }

@@ -1941,14 +1941,6 @@ impl AgentView {
                     buf,
                 );
             }
-            agent::render_hook_hover_popup(
-                buf,
-                layout.scrollback,
-                &self.scrollback,
-                self.hovered_entry,
-                self.last_mouse_pos,
-                &theme,
-            );
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
             if !any_drag_active

@@ -86,9 +86,6 @@ pub struct ScrollbackEntry {
     /// Raw mode: if true and block has_raw_mode(), render markdown as raw.
     pub raw: bool,
 
-    /// Hook data attached to this entry (only meaningful for ToolCall blocks).
-    pub hook_data: Option<super::blocks::tool::ToolCallHookData>,
-
     pub created_at: Option<DateTime<Local>>,
 
     /// When this entry finished running (monotonic). Used by the renderer to flash the accent briefly after completion.
@@ -172,7 +169,6 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
-            hook_data: None,
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
@@ -203,7 +199,6 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
-            hook_data: None,
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
@@ -385,7 +380,7 @@ impl ScrollbackEntry {
             is_selected: effective_selected,
             cwd: cwd_key.clone(),
         };
-        let rendered = self.rendered_output_with_hooks(&ctx);
+        let rendered = self.block.rendered_output(&ctx);
         *self.cached_output.borrow_mut() = Some(CachedOutput {
             width,
             raw: self.raw,
@@ -519,9 +514,8 @@ impl ScrollbackEntry {
         }
     }
 
-    /// Whether this entry is foldable: considers both the block and attached hooks.
     pub fn is_foldable(&self) -> bool {
-        self.block.is_foldable() || self.hook_data.as_ref().is_some_and(|hd| hd.has_content())
+        self.block.is_foldable()
     }
 
     /// True for a thinking block hidden by the Appearance toggle. Takes the flag as a param so hot layout loops can hoist the cache read.
@@ -529,55 +523,9 @@ impl ScrollbackEntry {
         self.block.is_thinking() && !show_thinking
     }
 
-    fn rendered_output_with_hooks(&self, ctx: &BlockContext) -> RenderedBlockOutput {
-        let mut rendered = self.block.rendered_output(ctx);
-        let output = &mut rendered.output;
-        if let Some(ref hd) = self.hook_data {
-            use super::blocks::tool::ToolCallBlock;
-            use super::blocks::tool::hook::{
-                render_hook_separator, render_hooks_detail, render_hooks_for_mode,
-                render_hooks_inline_suffix,
-            };
-            let is_lifecycle = matches!(
-                self.block,
-                super::block::RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_))
-            );
-            match ctx.mode {
-                DisplayMode::Collapsed => {
-                    if let Some(suffix_spans) = render_hooks_inline_suffix(hd)
-                        && let Some(first_line) = output.lines.first_mut()
-                    {
-                        first_line.content.spans.extend(suffix_spans);
-                    }
-                }
-                _ => {
-                    let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, ctx.mode);
-                    let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, ctx.mode);
-                    let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
-                    // Lifecycle blocks already use the event name as their header, so a separator before their detail is redundant
-                    if has_any && !is_lifecycle {
-                        output.lines.push(render_hook_separator());
-                    }
-                    output.lines.extend(pre);
-                    output.lines.extend(post);
-                    for (event_name, runs) in &hd.lifecycle {
-                        if is_lifecycle {
-                            output.lines.extend(render_hooks_detail(runs, ctx.mode));
-                        } else {
-                            output
-                                .lines
-                                .extend(render_hooks_for_mode(event_name, runs, ctx.mode));
-                        }
-                    }
-                }
-            }
-        }
-        rendered
-    }
-
-    /// Produce block output with hook lines injected (tool first, then hooks).
-    pub fn output_with_hooks(&self, ctx: &BlockContext) -> BlockOutput {
-        self.rendered_output_with_hooks(ctx).output
+    /// Render without touching the entry's cache (dashboard peek renders at a foreign width).
+    pub fn output_uncached(&self, ctx: &BlockContext) -> BlockOutput {
+        self.block.rendered_output(ctx).output
     }
 
     pub fn context_with_budget(

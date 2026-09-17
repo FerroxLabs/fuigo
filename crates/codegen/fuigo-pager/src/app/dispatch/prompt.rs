@@ -1314,13 +1314,6 @@ pub(super) fn handle_prompt_response(
             "turn ended; client returning to idle",
         );
 
-        // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
-        let ending_prompt_id = agent
-            .session
-            .current_prompt_id
-            .clone()
-            .or_else(|| response_pid.clone());
-
         agent.session.finish_turn(&mut agent.scrollback);
 
         // Insert the session event message (skip TurnCompleted for bash-mode, which has no agent turn)
@@ -1354,11 +1347,7 @@ pub(super) fn handle_prompt_response(
                 )
             }
         };
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            ending_prompt_id.as_deref(),
-        );
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event);
 
         let notification = match (&result, was_cancelling) {
             (Ok(_), false) if !agent.bash_turn => {

@@ -208,7 +208,7 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
         ),
     };
     if event.is_some() {
-        crate::app::turn_completion::push_turn_terminal_marker(agent, event, Some(prompt_id));
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event);
     }
     // Wake turns are synthetic and never gated, so no hook detail exists here.
     crate::app::turn_completion::note_hook_blocked_turn(
