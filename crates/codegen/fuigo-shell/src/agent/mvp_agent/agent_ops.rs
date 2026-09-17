@@ -2524,6 +2524,9 @@ impl MvpAgent {
                 );
                 continue;
             }
+            if let Some(handle) = self.resident_handle(&id) {
+                handle.persist_resume_status().await;
+            }
             self.request_session_shutdown(&id);
             if self.take_session(&id).is_some() {
                 self.session_registry.clear_resident(&id);

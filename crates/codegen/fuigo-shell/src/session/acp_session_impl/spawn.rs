@@ -214,6 +214,12 @@ mod subagent_rate_limit_threshold_tests {
     use super::{session_max_retries_source, subagent_sampler_rate_limit_threshold};
     use fuigo_sampler::{RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD};
     #[test]
+    fn model_retry_budget_wins_over_legacy_spawn_budget() {
+        assert_eq!(session_max_retries_source(Some(6), Some(3)), Some(6));
+        assert_eq!(session_max_retries_source(Some(6), None), Some(6));
+        assert_eq!(session_max_retries_source(None, Some(3)), Some(3));
+    }
+    #[test]
     fn main_session_always_keeps_sampler_retry() {
         assert_eq!(
             subagent_sampler_rate_limit_threshold(false, 0),
@@ -610,21 +616,26 @@ pub(crate) async fn spawn_session_actor(
             "FUIGO_DEBUG_CONTEXT_WINDOW override active"
         );
     }
-    let max_retries = session_max_retries_source(sampling_config.max_retries, max_retries);
-    let resolved_max_retries = fuigo_sampler::resolve_max_retries(max_retries);
+    let resolved_max_retries = fuigo_sampler::resolve_max_retries(session_max_retries_source(
+        sampling_config.max_retries,
+        max_retries,
+    ));
     let chat_state_sampling_config = fuigo_sampling_types::SamplingConfig {
         base_url: sampling_config.base_url.clone(),
+        mtls_cert_dir: sampling_config.mtls_cert_dir.clone(),
         model: sampling_config.model.clone(),
         max_completion_tokens: sampling_config.max_completion_tokens,
         temperature: sampling_config.temperature,
         top_p: sampling_config.top_p,
         max_retries: Some(resolved_max_retries),
+        rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
         api_backend: sampling_config.api_backend.clone(),
         extra_headers: sampling_config.extra_headers.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
         context_window: context_window_override.unwrap_or(baseline_context_window),
         reasoning_effort: sampling_config.reasoning_effort,
+        reasoning_summary: sampling_config.reasoning_summary,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
     let actor_pruning_config = fuigo_chat_state::PruningConfig {
@@ -749,6 +760,7 @@ pub(crate) async fn spawn_session_actor(
             auto_wake_enabled: tool_context.auto_wake_enabled,
             queue_exit_reminder_on_approved_exit: queue_exit_reminder_on_approved_exit.clone(),
             goal_loop_active: tool_context.goal_loop_active_gate.clone(),
+            background_tasks_snapshot_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     );
     let tool_context_for_handle = tool_context.clone();
@@ -1383,7 +1395,9 @@ pub(crate) async fn spawn_session_actor(
         sampler_config_initial.doom_loop_recovery = None;
     }
     let sampler_retry_policy = fuigo_sampler::RetryPolicy {
-        max_retries: max_retries.unwrap_or(5),
+        // The actor policy keeps Fuigo's 5-attempt default; only the source of an explicit budget changed
+        max_retries: session_max_retries_source(sampling_config.max_retries, max_retries)
+            .unwrap_or(5),
         rate_limit_retry_threshold: subagent_sampler_rate_limit_threshold(
             is_subagent_spawn,
             subagent_rate_limit_max_attempts,
@@ -1444,6 +1458,45 @@ pub(crate) async fn spawn_session_actor(
     >();
     crate::session::workflow::registry::warm_builtin_cache();
     let workflow_session_dir = crate::session::persistence::session_dir(&session_info);
+    // Crash path: teardown never wrote `resume_status.json`, so rebuild it from what is left on disk
+    // (scheduler state, running subagent metas, restored workflow runs, the goal) before the first prompt consumes it
+    let resume_workflows: Vec<crate::session::resume_status::ResumeWorkflow> =
+        persisted_workflow_runs
+            .iter()
+            .filter(|run| {
+                use crate::session::workflow::tracker::WorkflowRunStatus;
+                let status = run.manifest.state.status;
+                status == WorkflowRunStatus::Active
+                    || status == WorkflowRunStatus::Interrupted
+                    || status.is_paused()
+            })
+            .map(|run| {
+                let state = &run.manifest.state;
+                crate::session::resume_status::ResumeWorkflow {
+                    run_id: state.run_id.clone(),
+                    objective: state.objective.clone(),
+                }
+            })
+            .collect();
+    let resume_goal = goal_tracker.lock().snapshot().and_then(|g| {
+        use crate::session::goal_tracker::GoalStatus;
+        if matches!(g.status, GoalStatus::Complete | GoalStatus::BudgetLimited) {
+            None
+        } else {
+            Some(crate::session::resume_status::ResumeGoal {
+                objective: g.objective.clone(),
+            })
+        }
+    });
+    if !startup_hints.is_subagent && !crate::session::resume_status::exists(&workflow_session_dir) {
+        let snapshot = crate::session::resume_status::reconstruct_from_disk(
+            &workflow_session_dir,
+            session_info.id.0.as_ref(),
+            resume_workflows,
+            resume_goal,
+        );
+        crate::session::resume_status::persist(&workflow_session_dir, &snapshot);
+    }
     let (workflow_store, workflow_snapshots) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
             Some(workflow_session_dir.clone()),

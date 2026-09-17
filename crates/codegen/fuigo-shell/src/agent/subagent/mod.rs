@@ -744,6 +744,9 @@ async fn read_parent_sampling_config(
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: ctx.sampling_config.header_injector.clone(),
+                mtls_cert_dir: cfg.mtls_cert_dir,
+                rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
+                reasoning_summary: cfg.reasoning_summary,
             };
             crate::auth::subscription::inference::inherit(&mut inherited,&ctx.sampling_config);
             if let Some(provider) = crate::auth::subscription::inference::selected_for_endpoint(&inherited.model,&inherited.base_url) {

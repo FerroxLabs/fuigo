@@ -480,6 +480,7 @@ pub(crate) mod replay_events;
 pub mod repo_changes;
 #[path = "restore_stub.rs"]
 pub mod restore;
+pub(crate) mod resume_status;
 pub mod result;
 pub mod signals;
 pub(crate) mod slash_authority;

@@ -1116,11 +1116,14 @@ fn test_model_entry(
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
             variants: Vec::new(),
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         },
         api_key: api_key.map(|s| s.to_string()),
         env_key: env_key.map(EnvKeys::single),
         auth_provider: None,
         api_base_url: api_base_url.map(|s| s.to_string()),
+        mtls_cert_dir: None,
     }
 }
 /// The effective-model RE-support lookup must use the model ACTUALLY used: the resolved aux model when present, else the session model.
@@ -2251,6 +2254,8 @@ fn model_info_from_config_propagates_use_concise() {
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
     let info = ModelInfo::from_config(&entry);
     assert!(info.use_concise);
@@ -2414,6 +2419,8 @@ fn model_info_from_config_propagates_agent_type() {
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
     let info = ModelInfo::from_config(&entry);
     assert_eq!(info.agent_type, "codex");
@@ -2869,6 +2876,8 @@ fn inference_idle_timeout_propagates_to_model_info() {
         stream_tool_calls: None,
         laziness_detector: LazinessDetectorPerModelConfig::default(),
         variants: Vec::new(),
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
     let info = ModelInfo::from_config(&entry);
     assert_eq!(info.inference_idle_timeout_secs, Some(120));
@@ -6967,11 +6976,14 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
             variants: Vec::new(),
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         },
         api_key: None,
         env_key: None,
         auth_provider: None,
         api_base_url: None,
+        mtls_cert_dir: None,
     }
 }
 #[test]
@@ -7108,6 +7120,163 @@ fn global_model_defaults_apply_to_model_without_override() {
     assert_eq!(info.inference_idle_timeout_secs, Some(600));
     assert_eq!(info.subagent_rate_limit_max_attempts, Some(12));
     assert_eq!(info.stream_tool_calls, Some(true));
+}
+/// F023: `[models] rate_limit_retry_threshold` fills unset models, a prefetched value beats it, a per-model
+/// `[model.<key>]` value beats both, and the resolved value reaches `SamplerConfig`.
+#[test]
+fn rate_limit_retry_threshold_resolves_toml_precedence_and_propagates() {
+    let global_only = prefetch_model_entry("global-only", 200_000, ApiBackend::default());
+    let mut prefetched = prefetch_model_entry("prefetched", 200_000, ApiBackend::default());
+    prefetched.info.rate_limit_retry_threshold = Some(5);
+    let mut overridden = prefetch_model_entry("per-model", 200_000, ApiBackend::default());
+    overridden.info.rate_limit_retry_threshold = Some(6);
+    let prefetched = IndexMap::from([
+        ("global-only".to_owned(), global_only),
+        ("prefetched".to_owned(), prefetched),
+        ("per-model".to_owned(), overridden),
+    ]);
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [models]
+            rate_limit_retry_threshold = 4
+
+            [model."per-model"]
+            rate_limit_retry_threshold = 7
+        "#,
+        Some(prefetched),
+    );
+    assert_eq!(
+        models
+            .get("global-only")
+            .and_then(|m| m.info.rate_limit_retry_threshold),
+        Some(4),
+        "the global scalar must fill an unset prefetched model"
+    );
+    assert_eq!(
+        models
+            .get("prefetched")
+            .and_then(|m| m.info.rate_limit_retry_threshold),
+        Some(5),
+        "a prefetched value must beat the global fallback"
+    );
+    assert_eq!(
+        models
+            .get("per-model")
+            .and_then(|m| m.info.rate_limit_retry_threshold),
+        Some(7),
+        "a per-model TOML value must beat prefetched and global values"
+    );
+    assert_eq!(
+        models
+            .get("per-model")
+            .and_then(|m| resolve_sampling(m, None).rate_limit_retry_threshold),
+        Some(7),
+        "the resolved model value must reach SamplerConfig"
+    );
+}
+/// F055: `[model.<key>] reasoning_summary = "detailed"` round-trips to `ModelInfo` and `SamplerConfig`.
+#[test]
+fn reasoning_summary_flows_from_config_toml_to_sampler() {
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [model.x]
+            model = "x-upstream"
+            base_url = "https://inference.example.com/v1"
+            context_window = 200000
+            api_key = "test-key"
+            reasoning_summary = "detailed"
+            "#,
+        None,
+    );
+    let model = models.get("x").expect("configured model should resolve");
+    assert_eq!(
+        model.info.reasoning_summary,
+        Some(fuigo_sampling_types::ReasoningSummary::Detailed)
+    );
+    assert_eq!(
+        resolve_sampling(model, None).reasoning_summary,
+        Some(fuigo_sampling_types::ReasoningSummary::Detailed)
+    );
+}
+/// F024: `[model.<key>] mtls_cert_dir` reaches `ModelEntry` and `SamplerConfig` next to its explicit HTTPS `base_url`.
+#[test]
+fn model_mtls_cert_dir_flows_from_config_toml_to_sampler() {
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [model.secure-model]
+            model = "secure-upstream"
+            base_url = "https://inference.example.com/v1"
+            context_window = 200000
+            api_key = "test-key"
+            mtls_cert_dir = "/run/secrets/secure-model"
+            "#,
+        None,
+    );
+    let model = models
+        .get("secure-model")
+        .expect("configured model should resolve");
+    assert_eq!(
+        model.mtls_cert_dir.as_deref(),
+        Some(std::path::Path::new("/run/secrets/secure-model"))
+    );
+    let sampling = resolve_sampling(model, None);
+    assert_eq!(
+        sampling.mtls_cert_dir.as_deref(),
+        Some(std::path::Path::new("/run/secrets/secure-model"))
+    );
+    assert_eq!(sampling.base_url, "https://inference.example.com/v1");
+}
+#[test]
+fn model_mtls_configuration_requires_one_explicit_https_destination() {
+    for (config, expected_error) in [
+        (
+            r#"[model.secure]
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "mtls_cert_dir requires base_url in the same model table",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "http://inference.example.com/v1"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "base_url must be an HTTPS URL with a host",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "not a URL"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "base_url is invalid",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "https://inference.example.com/v1"
+               mtls_cert_dir = """#,
+            "mtls_cert_dir must not be empty",
+        ),
+        (
+            r#"[model.secure]
+               base_url = "https://inference.example.com/v1"
+               api_base_url = "https://api.example.com/v1"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "cannot set both mtls_cert_dir and api_base_url",
+        ),
+        (
+            r#"[model_providers.gateway]
+               api_base_url = "https://api.example.com/v1"
+
+               [model.secure]
+               base_url = "https://inference.example.com/v1"
+               model_provider = "gateway"
+               mtls_cert_dir = "/run/secrets/secure-model""#,
+            "cannot use model_providers.gateway.api_base_url with mtls_cert_dir",
+        ),
+    ] {
+        let raw: toml::Value = toml::from_str(config).expect("test config should parse as TOML");
+        let error = Config::new_from_toml_cfg(&raw).expect_err("invalid mTLS config must fail");
+        assert!(
+            error.contains(expected_error),
+            "expected {expected_error:?} in {error:?}"
+        );
+    }
 }
 #[test]
 fn per_model_value_overrides_global_model_default() {

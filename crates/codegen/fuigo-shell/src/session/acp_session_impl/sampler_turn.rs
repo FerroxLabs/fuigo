@@ -719,6 +719,10 @@ impl SessionActor {
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                mtls_cert_dir: None,
+                max_retries: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let (mut model_facts, mut selected_provider) = self.model_auth_state(cfg.model.as_str());
@@ -841,6 +845,9 @@ impl SessionActor {
             // The sampler sends the opt-in header itself when this is set.
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            mtls_cert_dir: cfg.mtls_cert_dir,
+            rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
+            reasoning_summary: cfg.reasoning_summary,
         };
         if let Some(provider) = selected_provider {
             crate::auth::subscription::inference::configure(&mut sampler,&provider,false);

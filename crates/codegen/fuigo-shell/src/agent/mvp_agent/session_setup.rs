@@ -14,6 +14,8 @@ pub(super) const RESUME_REFUSES_CHAT: &str =
 pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
     "session/resume does not support additionalDirectories";
 const TOOL_OVERRIDES_ECHO_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long `session/load` waits for the actor to enqueue the durable `background_tasks` snapshot.
+const BACKGROUND_TASKS_SNAPSHOT_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
 ) -> Option<fuigo_sampling_types::ToolOverrides> {
@@ -1091,6 +1093,8 @@ impl MvpAgent {
             });
             false
         };
+        self.emit_background_tasks_snapshot_and_wait(&session_id)
+            .await;
         {
             let init_meta = self
                 .initialize_request
@@ -1315,6 +1319,42 @@ impl MvpAgent {
             let _ = rx.await;
         }
         Ok((initial_total_tokens, unfinished_subagents))
+    }
+    /// Enqueue a persist+broadcast of the live task list before `session/load`
+    /// returns. Cold spawn has an empty registry, so this writes `tasks: []` and
+    /// supersedes a stale persisted Running snapshot.
+    async fn emit_background_tasks_snapshot_and_wait(&self, session_id: &acp::SessionId) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "skipping background_tasks snapshot: session is not resident"
+            );
+            return;
+        };
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        if handle
+            .cmd_tx
+            .send(crate::session::SessionCommand::EmitBackgroundTasksSnapshot {
+                respond_to: Some(respond_to),
+                pending: None,
+            })
+            .is_err()
+        {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "skipping background_tasks snapshot: session command channel closed"
+            );
+            return;
+        }
+        if tokio::time::timeout(BACKGROUND_TASKS_SNAPSHOT_ACK_BUDGET, rx)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "background_tasks snapshot timed out before session/load returned"
+            );
+        }
     }
     /// Reconnect phase: re-apply per-client capability and permission state to the resident handle, which still reflects the client that spawned it.
     fn refresh_reconnect_session_state(

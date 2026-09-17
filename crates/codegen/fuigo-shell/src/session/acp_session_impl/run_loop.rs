@@ -116,7 +116,7 @@ async fn finish_session_exit_feedback(session: &SessionActor, timer: &SharedSess
     }
     if !session.startup_hints.is_subagent {
         let _tasks = session_end::timed_child(timer, Phase::BackgroundTasksSave, span.span());
-        session.persist_background_task_manifest().await;
+        session.persist_resume_status().await;
     }
     cleanup_session_scratch(session);
 }
@@ -177,6 +177,10 @@ impl SessionActor {
     }
 }
 async fn shutdown_workflows(session: &SessionActor, timer: &SharedSessionEndTimer) {
+    // Snapshot the live workflows before cancel_all turns them terminal (first snapshot wins)
+    if !session.startup_hints.is_subagent {
+        session.persist_resume_status().await;
+    }
     let span = session_end::span(Phase::Workflows);
     {
         let _drain = session_end::timed_child(timer, Phase::WorkflowsDrain, span.span());
@@ -2190,6 +2194,19 @@ pub(super) async fn run_session(
                                 (!cap.is_empty()).then_some(cap)
                             });
                             let _ = respond_to.send(result);
+                        }
+                        SessionCommand::EmitBackgroundTasksSnapshot {
+                            respond_to,
+                            pending,
+                        } => {
+                            session.emit_background_tasks_snapshot(pending).await;
+                            if let Some(respond_to) = respond_to {
+                                let _ = respond_to.send(());
+                            }
+                        }
+                        SessionCommand::PersistResumeStatus { respond_to } => {
+                            session.persist_resume_status().await;
+                            let _ = respond_to.send(());
                         }
                         SessionCommand::PersistGitHead { commit, branch } => {
                             let _ = session.notifications.persistence_tx.send(

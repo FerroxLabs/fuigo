@@ -33,6 +33,18 @@ async fn handle_notification_with_admission(
     notification.await;
 }
 
+/// The durable `background_tasks` snapshot every task start/finish queues; assert it explicitly so a
+/// test that then requires silence still pins the snapshot instead of swallowing it.
+fn assert_emit_background_tasks_snapshot(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) {
+    match cmd_rx
+        .try_recv()
+        .expect("expected EmitBackgroundTasksSnapshot")
+    {
+        SessionCommand::EmitBackgroundTasksSnapshot { .. } => {}
+        _ => panic!("expected EmitBackgroundTasksSnapshot"),
+    }
+}
+
 fn make_test_config() -> (
     NotificationBridgeConfig,
     mpsc::UnboundedReceiver<SessionCommand>,
@@ -92,6 +104,7 @@ fn make_test_config_full_raw() -> (
         auto_wake_enabled: true,
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         goal_loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        background_tasks_snapshot_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     (config, gateway_rx, persistence_rx, session_cmd_rx)
 }
@@ -210,6 +223,7 @@ async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "goal-loop-active bash completion must not inject auto-wake commands"
@@ -470,6 +484,7 @@ async fn timed_out_monitor_admission_queues_one_fallback_and_late_actor_drops_pr
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(cmd_rx.try_recv().is_err());
     assert_eq!(task_completed_will_wake(&mut gateway_rx), Some(false));
     assert!(
@@ -536,6 +551,7 @@ async fn bash_task_completed_auto_wake_disabled_still_suppressed_during_goal_loo
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "goal-loop-active completion must not InjectNotification with auto-wake disabled"
@@ -641,6 +657,7 @@ async fn declined_quiet_monitor_wake_queues_canonical_deferred_completion() {
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(cmd_rx.try_recv().is_err());
     let mut persisted_completion = false;
     while let Ok(message) = persistence_rx.try_recv() {
@@ -714,6 +731,7 @@ async fn monitor_explicitly_killed_skips_auto_wake() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "model-tool-killed monitor must not auto-wake"
@@ -795,6 +813,7 @@ async fn monitor_task_completed_suppressed_during_goal_loop() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "goal-loop-active monitor completion must not auto-wake"
@@ -1084,6 +1103,72 @@ async fn task_backgrounded_persisted_line_is_stamped() {
     }
 }
 
+/// F044: a task starting or finishing queues one durable `background_tasks` snapshot; a burst shares one
+/// queued emit (the pending bit stays set until the actor drains it) and the actor's clear re-arms it.
+#[tokio::test]
+async fn task_lifecycle_requests_one_coalesced_background_tasks_snapshot() {
+    let (config, _gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+    let backgrounded = || {
+        ToolNotification::BashExecutionBackgrounded(
+            fuigo_tools::notification::types::BashExecutionBackgrounded {
+                base: fuigo_tools::notification::types::BashNotificationBase {
+                    tool_call_id: "call-bg".into(),
+                    command: "sleep 100".into(),
+                    output: Vec::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                    cwd: PathBuf::from("/tmp"),
+                },
+                output_file: PathBuf::from("/tmp/out.log"),
+                task_id: "task-bg".into(),
+                monitor_description: None,
+                description: None,
+            },
+        )
+    };
+    let mut offsets = HashMap::new();
+
+    handle_notification(&config, backgrounded(), &mut offsets).await;
+    let pending = match cmd_rx.try_recv().expect("task start must queue a snapshot") {
+        SessionCommand::EmitBackgroundTasksSnapshot {
+            respond_to: None,
+            pending: Some(pending),
+        } => pending,
+        _ => panic!("expected a coalesced EmitBackgroundTasksSnapshot"),
+    };
+    assert!(pending.load(std::sync::atomic::Ordering::Acquire));
+
+    // A second start before the actor drains the first request shares the queued emit.
+    handle_notification(&config, backgrounded(), &mut offsets).await;
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "a burst must not queue a second snapshot while one is pending"
+    );
+
+    // The actor clears the bit when it emits; the next completion re-arms it.
+    pending.store(false, std::sync::atomic::Ordering::Release);
+    let snapshot = make_task_snapshot("mon-1", TaskKind::Monitor);
+    handle_notification(
+        &config,
+        ToolNotification::TaskCompleted(snapshot),
+        &mut offsets,
+    )
+    .await;
+    let mut saw_snapshot = false;
+    while let Ok(command) = cmd_rx.try_recv() {
+        if matches!(
+            command,
+            SessionCommand::EmitBackgroundTasksSnapshot {
+                respond_to: None,
+                pending: Some(_)
+            }
+        ) {
+            saw_snapshot = true;
+        }
+    }
+    assert!(saw_snapshot, "task completion must queue a snapshot once re-armed");
+}
+
 #[tokio::test]
 async fn task_completed_persisted_line_is_stamped() {
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
@@ -1283,6 +1368,7 @@ async fn block_waited_task_skips_auto_wake_prompt() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "block_waited completion should not send Prompt or InjectNotification"
@@ -1324,6 +1410,7 @@ async fn explicitly_killed_task_skips_auto_wake_prompt() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "delivered kill completion should not send Prompt or InjectNotification"
@@ -1359,6 +1446,7 @@ async fn teardown_killed_task_skips_auto_wake_prompt() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "teardown kill with no waiter must not enqueue Prompt"
