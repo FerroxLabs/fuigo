@@ -163,6 +163,17 @@ impl SettingsCacheWrite {
         }
         .persist(&self.identity, &self.origin, &self.settings);
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            ttl: SETTINGS_CACHE_TTL,
+            identity: "test-identity".to_string(),
+            origin: "https://proxy.example".to_string(),
+            settings: crate::util::config::RemoteSettings::default(),
+        }
+    }
 }
 
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;

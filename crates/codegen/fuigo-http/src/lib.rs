@@ -41,6 +41,16 @@ const _: () = assert!(
         > STARTUP_FETCH_TIMEOUT.as_millis() * (1 + SETTINGS_FETCH_MAX_ATTEMPTS as u128),
     "SETTINGS_REAPPLY_TIMEOUT must exceed STARTUP_FETCH_TIMEOUT * (1 + MAX_ATTEMPTS)"
 );
+/// How long a boot waits for the shared startup settings prefetch before first paint proceeds
+/// without settings. Covers one fetch timeout plus one backoff step; must stay under
+/// `SETTINGS_REAPPLY_TIMEOUT`. A miss spends the boot's one settings budget (no re-fetch); the
+/// still-running prefetch commits its caches itself when it finishes.
+pub const STARTUP_SETTINGS_WAIT_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(5_500);
+const _: () = assert!(
+    STARTUP_SETTINGS_WAIT_DEADLINE.as_millis() < SETTINGS_REAPPLY_TIMEOUT.as_millis(),
+    "STARTUP_SETTINGS_WAIT_DEADLINE must stay under SETTINGS_REAPPLY_TIMEOUT"
+);
 
 /// Lower bound for the timeout a client puts on connecting to the leader.
 /// A slow but valid boot (bounded startup auth, plus the rest of leader startup and the connect handshake) must never be aborted.
