@@ -1582,8 +1582,8 @@
         }
 
         #[test]
-        fn an_on_disk_prompt_echo_dedups_against_the_injected_prompt_on_open() {
-            // Same echo-dedup on open whether the view is freshly spawned or was first evicted back to the task-prompt baseline
+        fn the_persisted_echo_paints_the_prompt_once_on_open() {
+            // Same echo-paints-once on open whether the view is freshly spawned or was first evicted back to the empty baseline
             enum Entry {
                 FreshSpawn,
                 Evicted,
