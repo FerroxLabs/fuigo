@@ -45,6 +45,10 @@ impl State {
 #[derive(Default)]
 pub(super) struct SettingsManager {
     state: RefCell<State>,
+    /// Test-only: how many callers have entered [`Self::fetch`]. Lets a wiring test prove that a
+    /// post-auth caller goes *through* the coalescer instead of fetching around it.
+    #[cfg(test)]
+    entries: std::cell::Cell<usize>,
 }
 
 enum Plan {
@@ -55,11 +59,19 @@ enum Plan {
 impl SettingsManager {
     const MAX_DROPPED_LEADER_REATTEMPTS: u32 = 3;
 
+    /// Test-only: the number of callers that have entered [`Self::fetch`].
+    #[cfg(test)]
+    pub(super) fn entries_for_test(&self) -> usize {
+        self.entries.get()
+    }
+
     pub(super) async fn fetch<F, Fut>(&self, auth: &FuigoAuth, leader: F) -> Option<SettingsFetch>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = SettingsFetch>,
     {
+        #[cfg(test)]
+        self.entries.set(self.entries.get() + 1);
         let identity = CredentialIdentity::from(auth);
         let mut leader = Some(leader);
         let mut dropped_leader_reattempts = 0u32;
