@@ -5,17 +5,40 @@
 
 use agent_client_protocol as acp;
 use fuigo_tools::implementations::fuigo_build::send_subagent_message::{
-    SEND_SUBAGENT_MESSAGE_TOOL_NAME, SendSubagentMessageDisposition, SendSubagentMessageInput,
-    SendSubagentMessageOutput,
+    SEND_SUBAGENT_MESSAGE_TOOL_NAME, SendSubagentMessageDisposition, SendSubagentMessageOutput,
 };
 use fuigo_tools::tool_taxonomy::{CanonicalToolMeta, TOOL_META_KEY, TOOL_META_VERSION};
 use fuigo_tools::types::output::ToolOutput;
 use fuigo_tools::types::tool::ToolKind;
+use serde::Deserialize;
 
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::tool::{
-    SentMessagePresentation, SentMessageToolCallBlock, ToolCallBlock,
+    SentMessageDelivery, SentMessagePresentation, SentMessageToolCallBlock, ToolCallBlock,
 };
+
+/// Unknown fields are ignored, so the direct input and the `variant`-tagged `ToolInput`
+/// envelope both parse.
+#[derive(Deserialize)]
+struct SentMessageWireInput {
+    subagent_id: String,
+    text: String,
+    /// Kept raw: a newer shell may send a delivery this pager does not know.
+    #[serde(default)]
+    delivery: Option<serde_json::Value>,
+}
+
+impl SentMessageWireInput {
+    /// `None` when the wire named no delivery or one this pager does not know.
+    fn recognized_delivery(&self) -> Option<SentMessageDelivery> {
+        match self.delivery.as_ref()?.as_str()? {
+            "steer" => Some(SentMessageDelivery::Steer),
+            "queue" => Some(SentMessageDelivery::Queue),
+            "interject" => Some(SentMessageDelivery::Interject),
+            _ => None,
+        }
+    }
+}
 
 pub(super) fn is_tool(tool_call: &acp::ToolCall) -> bool {
     match tool_call
@@ -31,16 +54,10 @@ pub(super) fn is_tool(tool_call: &acp::ToolCall) -> bool {
 }
 
 pub(super) fn to_block(tool_call: &acp::ToolCall) -> RenderBlock {
-    let input = tool_call.raw_input.clone().and_then(|input| {
-        serde_json::from_value::<SendSubagentMessageInput>(input.clone())
-            .ok()
-            .or_else(|| {
-                match serde_json::from_value::<fuigo_tools::types::ToolInput>(input).ok()? {
-                    fuigo_tools::types::ToolInput::SendSubagentMessage(input) => Some(input),
-                    _ => None,
-                }
-            })
-    });
+    let input = tool_call
+        .raw_input
+        .as_ref()
+        .and_then(|input| SentMessageWireInput::deserialize(input).ok());
     let output =
         tool_call
             .raw_output
@@ -52,15 +69,14 @@ pub(super) fn to_block(tool_call: &acp::ToolCall) -> RenderBlock {
                 },
             );
     let presentation = presentation(tool_call, output);
-    let (subagent_id, text) = input.map_or((None, None), |input| {
-        (Some(input.subagent_id), Some(input.text))
+    let (subagent_id, text, delivery) = input.map_or((None, None, None), |input| {
+        let delivery = input.recognized_delivery();
+        (Some(input.subagent_id), Some(input.text), delivery)
     });
 
-    RenderBlock::ToolCall(ToolCallBlock::SentMessage(SentMessageToolCallBlock::new(
-        presentation,
-        subagent_id,
-        text,
-    )))
+    RenderBlock::ToolCall(ToolCallBlock::SentMessage(
+        SentMessageToolCallBlock::new(presentation, subagent_id, text).with_delivery(delivery),
+    ))
 }
 
 fn presentation(

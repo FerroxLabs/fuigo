@@ -631,11 +631,15 @@ pub struct SubagentCompletionSummary {
     /// `SubagentResult.output` (no allocation on the path from coordinator
     /// to between-turn drain).
     ///
-    /// Surfaced inline in completion notifications when the parent agent's
-    /// toolset has no `BackgroundTaskAction` tool. Toolsets
-    /// that DO have a polling tool keep the existing metadata-only line +
-    /// "Use get_task_output(...)" pointer.
+    /// Inlined in completion notifications: capped at
+    /// [`crate::reminders::task_completion::INLINE_SUBAGENT_OUTPUT_BYTES`]
+    /// when the parent's toolset has a `BackgroundTaskAction` tool (the rest
+    /// is one poll away), uncapped otherwise. May already be shorter than
+    /// the child's text when the request set a `completion_output_cap`.
     pub output: Arc<str>,
+    /// Byte length of the child's full output; `output.len()` below it means
+    /// the text was cut and the notice renders one truncation marker.
+    pub full_output_bytes: usize,
 }
 
 /// Multi-wait request: block until one or all of the listed subagents finish.
@@ -1508,6 +1512,7 @@ mod tests {
             tool_calls: 7,
             turns: 3,
             output: std::sync::Arc::from("subagent answer"),
+            full_output_bytes: "subagent answer".len(),
         }];
         req.respond_to.send(summaries).unwrap();
 

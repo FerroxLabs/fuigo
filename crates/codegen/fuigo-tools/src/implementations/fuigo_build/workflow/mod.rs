@@ -46,12 +46,31 @@ pub enum WorkflowSource {
         )]
         resume_from_run_id: String,
     },
+    Pause {
+        #[schemars(
+            description = "Pause an active run this session launched, by its `run_id` or display name. Its child agents are cancelled and the run is marked paused; continue it with the `resume` source."
+        )]
+        run_id: String,
+    },
+    Stop {
+        #[schemars(
+            description = "Stop a run this session launched, by its `run_id` or display name. Its child agents are cancelled and the run is marked cancelled (finished). It keeps its journal, so `resume` can still continue it later."
+        )]
+        run_id: String,
+    },
+}
+
+/// Control the workflow tool applies to a run the calling session owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowControl {
+    Pause,
+    Stop,
 }
 
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct WorkflowToolInput {
     #[schemars(
-        description = "Exactly one workflow source. The `type` tag selects a registered name, inline script, script path, or same-process resume."
+        description = "Exactly one workflow source. The `type` tag selects a registered name, inline script, script path, same-process resume, or a pause/stop of a run this session launched."
     )]
     pub source: WorkflowSource,
 
@@ -170,8 +189,12 @@ impl WorkflowToolInput {
             WorkflowSource::ScriptPath { script_path } => {
                 *script_path = script_path.trim().to_owned();
             }
-            WorkflowSource::Resume { resume_from_run_id } => {
-                *resume_from_run_id = resume_from_run_id.trim().to_owned();
+            WorkflowSource::Resume {
+                resume_from_run_id: run_id,
+            }
+            | WorkflowSource::Pause { run_id }
+            | WorkflowSource::Stop { run_id } => {
+                *run_id = run_id.trim().to_owned();
             }
         }
     }
@@ -192,17 +215,32 @@ impl WorkflowToolInput {
             WorkflowSource::Name { name } => name,
             WorkflowSource::Script { script } => script,
             WorkflowSource::ScriptPath { script_path } => script_path,
-            WorkflowSource::Resume { resume_from_run_id } => {
+            WorkflowSource::Resume {
+                resume_from_run_id: run_id,
+            }
+            | WorkflowSource::Pause { run_id }
+            | WorkflowSource::Stop { run_id } => {
                 if self.args.is_some() {
                     return Err(
-                        "resume uses the original immutable source and arguments; do not provide `args`"
+                        "`args` only applies to a launch; resume, pause, and stop act on an existing run"
                             .into(),
                     );
                 }
                 if self.validate_only {
-                    return Err("`validate_only` cannot be used when resuming a run".into());
+                    return Err(
+                        "`validate_only` cannot be used when resuming, pausing, or stopping a run"
+                            .into(),
+                    );
                 }
-                resume_from_run_id
+                if self.agent_budget.is_some()
+                    && !matches!(self.source, WorkflowSource::Resume { .. })
+                {
+                    return Err(
+                        "`agent_budget` only applies to a launch or resume; pause and stop take no options"
+                            .into(),
+                    );
+                }
+                run_id
             }
         };
         if value.trim().is_empty() {
@@ -229,6 +267,11 @@ pub enum WorkflowLaunchAck {
         name: String,
         phases: usize,
         summary: String,
+    },
+    Controlled {
+        run_id: String,
+        name: String,
+        control: WorkflowControl,
     },
     Rejected {
         code: &'static str,
@@ -280,11 +323,11 @@ impl crate::types::tool_metadata::ToolMetadata for WorkflowTool {
     }
 
     fn description_template(&self) -> &str {
-        r##"Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one `source`: a registered workflow `name`, an inline `script`, a `script_path`, or a same-process `resume`. Optionally pass `args` (bound to the script's `args`) and `agent_budget`, an absolute cap on cumulative child-agent calls: every agent() and parallel() item consumes one slot (schema retries do not); default 128. The host also caps live children per run (32 by default, host-configured) — larger parallel() panels are queued and still act as a barrier. The call returns immediately; progress appears in `/workflow runs`${%- if system_reminders_enabled %} and completion is reported automatically — do not poll or sleep-wait${%- endif %}.
+        r##"Launch or control a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one `source`: a registered workflow `name`, an inline `script`, a `script_path`, a same-process `resume`, or a `pause` / `stop` of a run this session launched (by `run_id` or display name). Optionally pass `args` (bound to the script's `args`) and `agent_budget`, an absolute cap on cumulative child-agent calls: every agent() and parallel() item consumes one slot (schema retries do not); default 128. The host also caps live children per run (32 by default, host-configured) — larger parallel() panels are queued and still act as a barrier. The call returns immediately; progress appears in `/workflow runs`${%- if system_reminders_enabled %} and completion is reported automatically — do not poll or sleep-wait${%- endif %}.
 
 Prefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.
 
-A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use the `resume` source only for a same-process paused run (process restarts are terminal); it reuses the run's original immutable source and args, and a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.fuigo/workflows/<name>.rhai`."##
+A started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user, who manages runs with `/workflow pause|resume|stop <name>`; keep run IDs internal. To stop or pause a run yourself, call this tool with `source: { type: "stop", run_id }` or `{ type: "pause", run_id }` (run id or display name); both cancel the run's child agents and keep its journal, so either can be continued later with `resume`. Pause only applies to an active run; stop applies to any run that has not finished or hit its agent budget (a budget-limited run is already stopped and needs `resume` with a higher `agent_budget`). Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use the `resume` source only for a same-process paused run (process restarts are terminal); it reuses the run's original immutable source and args, and a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.fuigo/workflows/<name>.rhai`."##
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -419,6 +462,27 @@ impl fuigo_tool_runtime::Tool for WorkflowTool {
                 name,
                 script_path: None,
             }),
+            Ok(WorkflowLaunchAck::Controlled {
+                run_id,
+                name,
+                control,
+            }) => Ok(WorkflowToolOutput {
+                message: {
+                    let verb = match control {
+                        WorkflowControl::Pause => "Paused",
+                        WorkflowControl::Stop => "Stopped",
+                    };
+                    format!(
+                        "{verb} workflow '{name}'; its child agents were cancelled. It keeps its \
+                         journal, so it can be continued later with source: {{ type: \"resume\", \
+                         resume_from_run_id: \"{run_id}\" }}."
+                    )
+                },
+                task_id: run_id.clone(),
+                run_id,
+                name,
+                script_path: None,
+            }),
             Ok(WorkflowLaunchAck::Rejected { code, detail }) => {
                 Err(fuigo_tool_runtime::ToolError::custom(code, detail))
             }
@@ -446,7 +510,7 @@ mod tests {
         let source = &schema["properties"]["source"];
         assert_eq!(
             source["oneOf"].as_array().map(Vec::len),
-            Some(4),
+            Some(6),
             "{source}"
         );
         assert!(schema["properties"].get("name").is_none());
@@ -471,6 +535,8 @@ mod tests {
             serde_json::json!({"source": {"type": "script", "script": "let meta = #{};"}}),
             serde_json::json!({"source": {"type": "script_path", "script_path": "flow.rhai"}}),
             serde_json::json!({"source": {"type": "resume", "resume_from_run_id": "wf_123"}}),
+            serde_json::json!({"source": {"type": "pause", "run_id": "wf_123"}}),
+            serde_json::json!({"source": {"type": "stop", "run_id": "review-changes-2"}}),
         ];
         for case in cases {
             let input = parse(case.clone()).unwrap();
@@ -565,7 +631,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             resume_with_args.validate().unwrap_err(),
-            "resume uses the original immutable source and arguments; do not provide `args`"
+            "`args` only applies to a launch; resume, pause, and stop act on an existing run"
         );
 
         let legacy_resume_with_args = parse(serde_json::json!({
@@ -574,6 +640,46 @@ mod tests {
         }))
         .unwrap();
         assert!(legacy_resume_with_args.validate().is_err());
+    }
+
+    #[test]
+    fn control_sources_reject_launch_options() {
+        let cases = [
+            (
+                serde_json::json!({"args": {"changed": true}}),
+                "`args` only applies to a launch; resume, pause, and stop act on an existing run",
+            ),
+            (
+                serde_json::json!({"validate_only": true}),
+                "`validate_only` cannot be used when resuming, pausing, or stopping a run",
+            ),
+            (
+                serde_json::json!({"agent_budget": 10}),
+                "`agent_budget` only applies to a launch or resume; pause and stop take no options",
+            ),
+        ];
+        for control in ["pause", "stop"] {
+            for (option, expected) in &cases {
+                let mut request =
+                    serde_json::json!({"source": {"type": control, "run_id": "wf_123"}});
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(option.as_object().unwrap().clone());
+                assert_eq!(
+                    parse(request).unwrap().validate().unwrap_err(),
+                    *expected,
+                    "{control} with {option}"
+                );
+            }
+        }
+
+        let resume_with_budget = parse(serde_json::json!({
+            "source": {"type": "resume", "resume_from_run_id": "wf_123"},
+            "agent_budget": 10
+        }))
+        .unwrap();
+        assert!(resume_with_budget.validate().is_ok());
     }
 
     #[test]
@@ -587,6 +693,8 @@ mod tests {
             WorkflowSource::Resume {
                 resume_from_run_id: "".into(),
             },
+            WorkflowSource::Pause { run_id: " ".into() },
+            WorkflowSource::Stop { run_id: "".into() },
         ] {
             let input = WorkflowToolInput {
                 source,

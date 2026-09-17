@@ -8,7 +8,7 @@ use super::super::*;
 use super::*;
 use crate::implementations::fuigo_build::task::active_message::SubagentActiveMessageRequest;
 use crate::implementations::fuigo_build::task::types::{
-    ActiveAgentMessageOperation, ActiveAgentMessageRequest,
+    ActiveAgentMessageOperation, ActiveAgentMessageRequest, SubagentResumeLookup,
 };
 
 const TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -135,6 +135,382 @@ impl ChildRunner for TestRunner {
 
 type TestCoordinator = SubagentCoordinator<TestRunner>;
 
+/// Any runner the shared helpers can drive: the test control and unit completion data.
+trait TestChildRunner: ChildRunner<Control = TestControl, CompletionData = ()> {}
+impl<R: ChildRunner<Control = TestControl, CompletionData = ()>> TestChildRunner for R {}
+
+/// Runs each spawn: reports it, promotes the child, and finishes on `finish`.
+struct WakeRunner {
+    admissions: mpsc::UnboundedSender<AdmissionCall>,
+    runs: mpsc::UnboundedSender<crate::implementations::fuigo_build::task::types::SubagentRequest>,
+    finish: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl ChildRunner for WakeRunner {
+    type Control = TestControl;
+    type CompletionData = ();
+    type RunFuture = SendBoxFuture<ChildRunOutput<()>>;
+    type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
+    type DescribeFuture = SendBoxFuture<SubagentDescribeOutcome>;
+
+    fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
+        let admissions = self.admissions.clone();
+        let runs = self.runs.clone();
+        let finish = self.finish.clone();
+        Box::pin(async move {
+            let request = run.request;
+            let _ = runs.send(request.clone());
+            assert!(
+                run.reporter
+                    .started(StartedChild {
+                        child_session_id: request.id.clone(),
+                        persona: None,
+                        resumed_from: request.resume_from.clone(),
+                        child_cwd: String::new(),
+                        worktree_path: None,
+                        effective_model_id: "test-model".to_owned(),
+                        definition_background: false,
+                        control: TestControl { admissions },
+                    })
+                    .await
+            );
+            finish.notified().await;
+            ChildRunOutput {
+                result: SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from(request.prompt.as_str()),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                },
+                completion_data: (),
+                snapshot_ref: None,
+            }
+        })
+    }
+
+    fn validate_type(&self, _: String, _: String) -> Self::ValidateFuture {
+        Box::pin(std::future::pending())
+    }
+
+    fn describe_type(&self, _: String, _: Option<String>, _: String) -> Self::DescribeFuture {
+        Box::pin(std::future::pending())
+    }
+
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(&self, _: ChildCompletion<()>) {}
+}
+
+type WakeCoordinator = SubagentCoordinator<WakeRunner>;
+
+struct WakeFixture {
+    runs:
+        mpsc::UnboundedReceiver<crate::implementations::fuigo_build::task::types::SubagentRequest>,
+    finish: std::sync::Arc<tokio::sync::Notify>,
+}
+
+fn wake_fixture() -> (
+    WakeCoordinator,
+    crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
+    mpsc::UnboundedSender<AdmissionCall>,
+    mpsc::UnboundedReceiver<AdmissionCall>,
+) {
+    let (coordinator, command_tx, admission_tx, admissions, _wake) = wake_fixture_with_runs();
+    (coordinator, command_tx, admission_tx, admissions)
+}
+
+fn wake_fixture_with_runs() -> (
+    WakeCoordinator,
+    crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
+    mpsc::UnboundedSender<AdmissionCall>,
+    mpsc::UnboundedReceiver<AdmissionCall>,
+    WakeFixture,
+) {
+    wake_fixture_with_limits(CoordinatorConfig::default().limits)
+}
+
+/// A wake fixture whose spawn admission can be saturated, so the wake's
+/// `Enqueue` and `Reject` branches are reachable.
+fn wake_fixture_with_limits(
+    limits: crate::implementations::fuigo_build::task::admission::SubagentLimits,
+) -> (
+    WakeCoordinator,
+    crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
+    mpsc::UnboundedSender<AdmissionCall>,
+    mpsc::UnboundedReceiver<AdmissionCall>,
+    WakeFixture,
+) {
+    let config = CoordinatorConfig {
+        limits,
+        ..CoordinatorConfig::default()
+    };
+    let (command_tx, command_rx) =
+        SubagentCoordinatorReceiver::with_capacity(MAX_ACTIVE_MESSAGE_ADMISSIONS);
+    let (admission_tx, admissions) = mpsc::unbounded_channel();
+    let (runs_tx, runs) = mpsc::unbounded_channel();
+    let finish = std::sync::Arc::new(tokio::sync::Notify::new());
+    let coordinator = SubagentCoordinator::from_channel(
+        command_rx,
+        WakeRunner {
+            admissions: admission_tx.clone(),
+            runs: runs_tx,
+            finish: finish.clone(),
+        },
+        config,
+    );
+    (
+        coordinator,
+        command_tx,
+        admission_tx,
+        admissions,
+        WakeFixture { runs, finish },
+    )
+}
+
+/// Drive the coordinator's run futures and internal events until `done`.
+async fn drive_until<R: ChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
+    done: impl Fn(&InternalEvent<R::Control>) -> bool,
+) {
+    await_with_timeout(async {
+        loop {
+            tokio::select! {
+                Some((id, output)) = coordinator.runs.next(), if !coordinator.runs.is_empty() => {
+                    match output {
+                        Ok(output) => coordinator.begin_terminalization(&id, output),
+                        Err(_) => coordinator.begin_panicked_terminalization(&id),
+                    }
+                }
+                Some(event) = coordinator.internal_rx.recv() => {
+                    let is_done = done(&event);
+                    coordinator.handle_internal(event);
+                    if is_done {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+}
+
+/// Drive until the next child reports started.
+async fn run_until_started<R: ChildRunner>(coordinator: &mut SubagentCoordinator<R>) {
+    drive_until(coordinator, |event| {
+        matches!(event, InternalEvent::Started { .. })
+    })
+    .await;
+}
+
+async fn resume_lookup(
+    coordinator: &mut WakeCoordinator,
+    source_id: &str,
+    parent: &str,
+) -> SubagentResumeLookup {
+    let (respond_to, response) = oneshot::channel();
+    coordinator.handle_internal(InternalEvent::ResumeSource {
+        source_id: source_id.to_owned(),
+        parent_session_id: parent.to_owned(),
+        respond_to,
+    });
+    await_with_timeout(response)
+        .await
+        .expect("resume lookup response dropped")
+}
+
+#[tokio::test]
+async fn message_to_completed_owned_child_wakes_same_id_resuming_from_itself() {
+    let (mut coordinator, command_tx, admission_tx, mut admissions, mut wake) =
+        wake_fixture_with_runs();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    assert!(coordinator.completed.contains_key("child"));
+
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    // The reply waits for the new incarnation to start; the record moved aside.
+    assert!(response.try_recv().is_err());
+    assert!(coordinator.pending.contains_key("child"));
+    assert!(!coordinator.completed.contains_key("child"));
+    assert!(!coordinator.completed_order.contains(&"child".to_owned()));
+    assert!(coordinator.woken.contains_key("child"));
+    // The runner resolves the wake's own resume source from the displaced record.
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "parent").await,
+        SubagentResumeLookup::Completed(source) if source.child_session_id == "child"
+    ));
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "foreign").await,
+        SubagentResumeLookup::Missing
+    ));
+
+    run_until_started(&mut coordinator).await;
+    let run = wake.runs.try_recv().expect("wake incarnation ran");
+    assert_eq!(run.id, "child");
+    assert_eq!(run.resume_from.as_deref(), Some("child"));
+    assert_eq!(run.prompt, "follow up");
+    assert!(!run.fork_context);
+    assert!(run.run_in_background);
+    assert_eq!(run.parent_prompt_id, None);
+    assert_eq!(run.parent_session_id, "parent");
+    let outcome = response_outcome(response).await;
+    assert!(
+        matches!(&outcome, ActiveAgentMessageOutcome::Accepted { message_id } if !message_id.is_empty()),
+        "{outcome:?}"
+    );
+    // The text was the child's prompt: nothing is delivered a second time.
+    assert!(admissions.try_recv().is_err());
+    let active = coordinator
+        .active
+        .get("child")
+        .expect("woken child is active");
+    assert_eq!(active.resumed_from.as_deref(), Some("child"));
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "parent").await,
+        SubagentResumeLookup::Active
+    ));
+
+    // A second message while it runs is an ordinary active-message delivery.
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    let call = recv_with_timeout(&mut admissions).await;
+    let message_id = call.message_id.clone();
+    release_admission(&mut coordinator, call, ActiveMessageAdmission::Admitted).await;
+    assert_eq!(
+        ActiveAgentMessageOutcome::Accepted { message_id },
+        response_outcome(response).await
+    );
+}
+
+#[tokio::test]
+async fn woken_child_completion_replaces_the_displaced_record() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, mut wake) =
+        wake_fixture_with_runs();
+    insert_child(&mut coordinator, admission_tx, "child", "parent");
+    finish_child(&mut coordinator, "child");
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+    run_until_started(&mut coordinator).await;
+    let _ = wake.runs.try_recv().expect("wake incarnation ran");
+    assert!(matches!(
+        response_outcome(response).await,
+        ActiveAgentMessageOutcome::Accepted { .. }
+    ));
+    wake.finish.notify_one();
+    await_with_timeout(async {
+        while coordinator.active.contains_key("child") {
+            let Some((id, output)) = coordinator.runs.next().await else {
+                break;
+            };
+            match output {
+                Ok(output) => coordinator.begin_terminalization(&id, output),
+                Err(_) => coordinator.begin_panicked_terminalization(&id),
+            }
+        }
+    })
+    .await;
+    let completed = coordinator.completed.get("child").expect("completed again");
+    assert_eq!(completed.result.output.as_ref(), "follow up");
+    assert_eq!(completed.resumed_from.as_deref(), Some("child"));
+    assert!(!coordinator.woken.contains_key("child"));
+    assert_eq!(
+        coordinator
+            .completed_order
+            .iter()
+            .filter(|id| id.as_str() == "child")
+            .count(),
+        1
+    );
+}
+
+/// A wake that arrives at a saturated spawn limit under
+/// `FUIGO_SUBAGENT_LIMIT_BEHAVIOR=fail` starts nothing, so the terminal record
+/// it displaced must go back exactly where it was. Only the ResumeSource
+/// lookup falls back to `woken`; if the restore is wrong, `get_task_output`
+/// and every completed lookup return not-found for that child forever.
+#[tokio::test]
+async fn wake_rejected_at_the_spawn_limit_restores_the_displaced_completion() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) =
+        wake_fixture_with_limits(
+            crate::implementations::fuigo_build::task::admission::SubagentLimits {
+                max_concurrent: 1,
+                behavior: crate::implementations::fuigo_build::task::admission::LimitBehavior::Fail,
+            },
+        );
+    insert_child(&mut coordinator, admission_tx.clone(), "child", "parent");
+    finish_child(&mut coordinator, "child");
+    // Saturate the parent's single slot so the wake cannot start.
+    insert_child(&mut coordinator, admission_tx, "other", "parent");
+    assert!(coordinator.completed.contains_key("child"));
+
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(response).await
+    );
+    // Displaced record restored, and restored to the completed ORDER too.
+    assert!(coordinator.completed.contains_key("child"));
+    assert!(coordinator.completed_order.contains(&"child".to_owned()));
+    assert!(!coordinator.woken.contains_key("child"));
+    // Nothing was started or left parked.
+    assert!(!coordinator.pending.contains_key("child"));
+    assert!(!coordinator.queued.contains_id("child"));
+    assert!(coordinator.spawn_ready.is_empty());
+    // The restored record is reachable again as a resume source.
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "parent").await,
+        SubagentResumeLookup::Completed(source) if source.child_session_id == "child"
+    ));
+}
+
+/// A wake that arrives at a saturated spawn limit under the default `queue`
+/// behaviour is queued, not rejected: the record STAYS in `woken` (the queued
+/// incarnation will resume from it), the sender's reply stays outstanding, and
+/// the park carries no deadline, so nothing expires it while the wake waits
+/// for a slot. `deadline: None` is deliberate and matches upstream
+/// (`coordinator/wake.rs`): the message text has already been committed as the
+/// woken child's own prompt, so replying `NotAcceptedBeforeDeadline` would tell
+/// the sender its text was dropped when the child is still going to run it.
+#[tokio::test]
+async fn wake_queued_at_the_spawn_limit_holds_the_record_and_never_expires() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) =
+        wake_fixture_with_limits(
+            crate::implementations::fuigo_build::task::admission::SubagentLimits {
+                max_concurrent: 1,
+                behavior:
+                    crate::implementations::fuigo_build::task::admission::LimitBehavior::Queue,
+            },
+        );
+    insert_child(&mut coordinator, admission_tx.clone(), "child", "parent");
+    finish_child(&mut coordinator, "child");
+    insert_child(&mut coordinator, admission_tx, "other", "parent");
+
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+
+    // Queued, not started and not rejected.
+    assert!(coordinator.queued.contains_id("child"));
+    assert!(!coordinator.pending.contains_key("child"));
+    // The displaced record stays aside until the queued incarnation finishes.
+    assert!(coordinator.woken.contains_key("child"));
+    assert!(!coordinator.completed.contains_key("child"));
+    assert!(!coordinator.completed_order.contains(&"child".to_owned()));
+    // It is still the resume source the queued incarnation will read.
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "parent").await,
+        SubagentResumeLookup::Completed(source) if source.child_session_id == "child"
+    ));
+    // The sender is still waiting, and no deadline can cut the wait short.
+    assert!(response.try_recv().is_err());
+    assert!(!coordinator.spawn_ready.is_empty());
+    assert!(coordinator.spawn_ready.deadlines().next().is_none());
+    coordinator.expire_spawn_ready_messages(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(86_400),
+    );
+    assert!(!coordinator.spawn_ready.is_empty());
+    assert!(response.try_recv().is_err());
+}
+
 fn fixture_with_capacity(
     active_message_capacity: usize,
 ) -> (
@@ -160,8 +536,8 @@ fn fixture() -> (
     fixture_with_capacity(MAX_ACTIVE_MESSAGE_ADMISSIONS)
 }
 
-fn insert_child(
-    coordinator: &mut TestCoordinator,
+fn insert_child<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
     admissions: mpsc::UnboundedSender<AdmissionCall>,
     id: &str,
     parent: &str,
@@ -194,7 +570,11 @@ fn insert_child(
     );
 }
 
-fn insert_pending(coordinator: &mut TestCoordinator, id: &str, parent: &str) {
+fn insert_pending<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
+    id: &str,
+    parent: &str,
+) {
     let mut request =
         crate::implementations::fuigo_build::task::coordinator::tests::request(id, true);
     request.parent_session_id = parent.to_owned();
@@ -214,8 +594,8 @@ fn insert_pending(coordinator: &mut TestCoordinator, id: &str, parent: &str) {
     );
 }
 
-fn promote_pending(
-    coordinator: &mut TestCoordinator,
+fn promote_pending<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
     admissions: mpsc::UnboundedSender<AdmissionCall>,
     id: &str,
 ) {
@@ -236,8 +616,8 @@ fn promote_pending(
     });
 }
 
-fn begin_send(
-    coordinator: &mut TestCoordinator,
+fn begin_send<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
     command_tx: &crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
     id: &str,
     parent: &str,
@@ -273,15 +653,15 @@ async fn recv_with_timeout<T>(receiver: &mut mpsc::UnboundedReceiver<T>) -> T {
         .expect("active-message test channel closed")
 }
 
-async fn finish_next_active_message(coordinator: &mut TestCoordinator) {
+async fn finish_next_active_message<R: TestChildRunner>(coordinator: &mut SubagentCoordinator<R>) {
     let completion = await_with_timeout(coordinator.active_messages.next())
         .await
         .expect("active-message completion stream ended");
     coordinator.finish_active_message(completion);
 }
 
-async fn release_admission(
-    coordinator: &mut TestCoordinator,
+async fn release_admission<R: TestChildRunner>(
+    coordinator: &mut SubagentCoordinator<R>,
     call: AdmissionCall,
     admission: ActiveMessageAdmission,
 ) {
@@ -311,7 +691,7 @@ async fn finalization_outcome(response: oneshot::Receiver<bool>) -> bool {
         .expect("active-message finalization response dropped")
 }
 
-fn finish_child(coordinator: &mut TestCoordinator, id: &str) {
+fn finish_child<R: TestChildRunner>(coordinator: &mut SubagentCoordinator<R>, id: &str) {
     coordinator.begin_terminalization(
         id,
         ChildRunOutput {
@@ -848,6 +1228,8 @@ async fn stale_admission_and_completed_lookup_preserve_terminal_authority() {
             response_outcome(begin_send(&mut coordinator, &command_tx, id, "foreign")).await
         );
     }
+    // `TestRunner` does not support a wake, so the completed child stays down.
+    assert!(!coordinator.runner.supports_wake());
     assert_eq!(
         ActiveAgentMessageOutcome::NotActiveOrFinalizing,
         response_outcome(begin_send(
@@ -858,6 +1240,8 @@ async fn stale_admission_and_completed_lookup_preserve_terminal_authority() {
         ))
         .await
     );
+    assert!(coordinator.completed.contains_key("completed"));
+    assert!(!coordinator.pending.contains_key("completed"));
 }
 
 #[tokio::test]
@@ -987,13 +1371,58 @@ async fn send_to_owned_pending_that_fails_is_not_active() {
 }
 
 #[tokio::test]
-async fn send_to_owned_completed_is_immediate() {
+async fn send_to_owned_completed_without_wake_support_is_immediate() {
     let (mut coordinator, command_tx, admission_tx, _admissions) = fixture();
     insert_child(&mut coordinator, admission_tx, "child", "parent");
     finish_child(&mut coordinator, "child");
+    assert!(!coordinator.runner.supports_wake());
     assert_eq!(
         ActiveAgentMessageOutcome::NotActiveOrFinalizing,
         response_outcome(begin_send(&mut coordinator, &command_tx, "child", "parent")).await
+    );
+    assert!(coordinator.completed.contains_key("child"));
+}
+
+/// The wake-capable fixture: `WakeRunner` runs each spawn, so a completed
+/// child's message becomes a new incarnation of the same id.
+#[tokio::test]
+async fn send_to_completed_workflow_or_cancelled_child_does_not_start_replacement() {
+    let (mut coordinator, command_tx, admission_tx, _admissions) = wake_fixture();
+    insert_child(&mut coordinator, admission_tx.clone(), "wf", "parent");
+    coordinator
+        .active
+        .get_mut("wf")
+        .expect("active")
+        .request
+        .owner = crate::implementations::fuigo_build::task::types::SubagentOwner::workflow("run-1");
+    finish_child(&mut coordinator, "wf");
+    insert_child(&mut coordinator, admission_tx, "killed", "parent");
+    coordinator.begin_terminalization(
+        "killed",
+        ChildRunOutput {
+            result: SubagentResult {
+                success: false,
+                cancelled: true,
+                subagent_id: "killed".to_owned(),
+                child_session_id: "killed".to_owned(),
+                ..Default::default()
+            },
+            completion_data: (),
+            snapshot_ref: None,
+        },
+    );
+    for id in ["wf", "killed"] {
+        assert_eq!(
+            ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+            response_outcome(begin_send(&mut coordinator, &command_tx, id, "parent")).await,
+            "{id}"
+        );
+        assert!(!coordinator.pending.contains_key(id), "{id}");
+        assert!(coordinator.completed.contains_key(id), "{id}");
+    }
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotFoundOrNotOwned,
+        response_outcome(begin_send(&mut coordinator, &command_tx, "wf", "foreign")).await
     );
 }
 
@@ -1176,7 +1605,8 @@ async fn cancel_workflow_run_rejects_parked_send() {
             parent_session_id: "parent".to_owned(),
             request: ActiveAgentMessageRequest::try_new("child", "hello").unwrap(),
             respond_to: Some(tx),
-            deadline: tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT,
+            deadline: Some(tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT),
+            initial_message_id: None,
         });
     coordinator.cancel_workflow_children("run-1", Some("parent"));
     assert_eq!(

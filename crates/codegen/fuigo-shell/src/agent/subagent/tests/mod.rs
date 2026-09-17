@@ -1611,6 +1611,72 @@ async fn bootstrap_no_fork_is_new() {
         BootstrapInitialContext::ResumeAbort(m) => panic!("unexpected abort: {m}"),
     }
 }
+/// A woken child (`resume_from` == its own id) continues its own session dir
+/// in place: no copy, the transcript on disk is the conversation, untouched.
+#[tokio::test]
+async fn bootstrap_same_session_resume_reads_transcript_in_place_without_copying() {
+    use fuigo_sampling_types::conversation::ConversationItem;
+    let mut req = bootstrap_test_request(false);
+    req.id = "child-boot-wake".into();
+    req.resume_from = Some("child-boot-wake".into());
+    let ctx = ctx_with_toggle(HashMap::new());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let chat_file = dir
+        .path()
+        .join(crate::session::storage::CHAT_HISTORY_FILE);
+    let mut chat = String::new();
+    for item in [
+        ConversationItem::system("sys"),
+        ConversationItem::user("first turn"),
+        ConversationItem::assistant("done"),
+    ] {
+        chat.push_str(&serde_json::to_string(&item).expect("serialize item"));
+        chat.push('\n');
+    }
+    std::fs::write(&chat_file, &chat).expect("write chat history");
+    let child = SessionInfo {
+        id: acp::SessionId::new("child-boot-wake"),
+        cwd: "/tmp".into(),
+    };
+    let source = ResumeSourceData {
+        subagent_id: "child-boot-wake".into(),
+        subagent_type: "general-purpose".into(),
+        persona: None,
+        model_id: Some("m".into()),
+        child_cwd: "/tmp".into(),
+        worktree_path: None,
+        snapshot_ref: None,
+        child_session_id: "child-boot-wake".into(),
+    };
+    let out = bootstrap_initial_context(
+        &req,
+        Some(&source),
+        &ctx,
+        &child,
+        dir.path(),
+        "m",
+        super::resume_window::ResumeWindowPolicy {
+            context_window: 128_000,
+            auto_compact_threshold_percent: 85,
+        },
+    )
+    .await;
+    match out {
+        BootstrapInitialContext::Ready(ic) => {
+            assert_eq!(ic.source, InitialContextSource::Resumed);
+            assert!(ic.copy_error.is_none());
+            assert_eq!(ic.conversation.len(), 3, "{:?}", ic.conversation);
+            assert!(matches!(ic.conversation[1], ConversationItem::User(_)));
+        }
+        BootstrapInitialContext::ResumeAbort(m) => panic!("in-place resume must not abort: {m}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&chat_file).expect("chat history still readable"),
+        chat,
+        "the session's own transcript must not be rewritten"
+    );
+}
+
 #[tokio::test]
 async fn bootstrap_fork_without_parent_fails_open() {
     let req = bootstrap_test_request(true);

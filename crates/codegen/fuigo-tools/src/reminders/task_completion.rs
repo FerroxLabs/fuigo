@@ -21,7 +21,7 @@ use crate::types::TaskSnapshot;
 use crate::types::output::ToolOutput;
 use crate::types::resources::{SharedResources, State, Terminal};
 use crate::types::tool::{Reminder, ToolKind};
-use crate::util::truncate::{PREVIEW_SIZE, PartialOutput, truncate_with_preview};
+use crate::util::truncate::{PREVIEW_SIZE, PartialOutput, truncate_str, truncate_with_preview};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use fuigo_tool_types::KillTaskOutput;
@@ -39,10 +39,31 @@ fn user_killed_notice(task: &TaskSnapshot) -> &'static str {
     }
 }
 /// Inline preview cap applied ONLY to bash completion reminders that ship
-/// with a disk-pointer footer. Subagent completions (which have no
-/// disk-backed output file) are never truncated -- the inline branch is
-/// their only chance to see the output.
+/// with a disk-pointer footer.
 const MAX_INLINE_COMPLETION_BYTES: usize = 4_000;
+/// Byte cap for the child's final text inlined next to a polling tool; the rest is one poll away.
+pub const INLINE_SUBAGENT_OUTPUT_BYTES: usize = 16_000;
+/// Total bytes of child output ONE between-turn drain may inline across the
+/// whole batch.
+///
+/// Per-completion the cap above is upstream's and is not raised. The batch is
+/// the unbounded part: `drain_between_turn_subagent_completions` hands the
+/// entire buffer to [`format_between_turn_completions`] in a single system
+/// reminder, production leaves `buffered_completion_output_cap: None`
+/// (`fuigo-shell` `agent/subagent/spawn.rs`), and the coordinator bounds the
+/// buffer only at `MAX_PENDING_COMPLETIONS = 256` entries. Unbounded, one
+/// drain can therefore inject 256 x 16 KB of output into a single turn —
+/// measured at 4_151_645 bytes, roughly a million tokens, by
+/// `between_turn_batch_shares_one_inline_budget` run against the unbounded
+/// formatter — where before the output was inlined each entry carried only a
+/// ~55-byte `get_task_output` pointer.
+///
+/// Entries past the budget keep their `[output truncated: ...]` marker and
+/// their `get_task_output` pointer, so nothing is lost: the text is one poll
+/// away, exactly as it was before it was inlined. A batch whose outputs fit
+/// inside the budget — the ordinary case, including every single-completion
+/// drain — renders byte-identically to the uncapped version.
+pub const BETWEEN_TURN_INLINE_OUTPUT_BYTES: usize = INLINE_SUBAGENT_OUTPUT_BYTES;
 #[derive(Clone, Debug, Default)]
 pub struct TaskCompletionReservations(pub Arc<std::sync::Mutex<HashMap<String, usize>>>);
 impl TaskCompletionReservations {
@@ -349,25 +370,22 @@ pub(crate) fn task_owned_by_session(task: &TaskSnapshot, my_owner: Option<&str>)
         _ => true,
     }
 }
-/// Append the completion-output delivery section for a bash task or subagent.
+/// Append the completion-output delivery section for a bash task.
 ///
-/// - `Some(name)` writes `Use {name}("{subagent_id}") to see the full output.`
+/// - `Some(name)` writes `Use {name}("{task_id}") to see the full output.`
 ///   (polling tool available; the model can pull the full output via that
 ///   tool on demand).
 /// - `None` writes `response:\n{output}`. When `disk_pointer_footer` is
 ///   `Some(line)`, the output is capped at [`MAX_INLINE_COMPLETION_BYTES`]
 ///   and the footer line is appended so the model can recover the full log
-///   from disk -- this is the bash-completion path. When
-///   `disk_pointer_footer` is `None`, the full output is inlined verbatim
-///   -- this is the subagent path (there is no disk-backed output file and
-///   this notification is the model's only chance to see the output).
+///   from disk. When `disk_pointer_footer` is `None`, the full output is
+///   inlined verbatim (no disk-backed file to point at).
 ///
-/// The pointer-vs-inline decision is centralised here so all completion
-/// notification surfaces stay in lock-step. Callers control any leading
-/// indentation or newlines around the section.
+/// Subagent completions go through [`inline_subagent_output`] instead.
+/// Callers control any leading indentation or newlines around the section.
 pub fn render_completion_output_delivery(
     buf: &mut String,
-    subagent_id: &str,
+    task_id: &str,
     output: PartialOutput<'_>,
     task_output_name: Option<&str>,
     disk_pointer_footer: Option<&str>,
@@ -375,7 +393,7 @@ pub fn render_completion_output_delivery(
     use std::fmt::Write as _;
     match task_output_name {
         Some(name) => {
-            let _ = write!(buf, "Use {name}(\"{subagent_id}\") to see the full output.");
+            let _ = write!(buf, "Use {name}(\"{task_id}\") to see the full output.");
         }
         None => match disk_pointer_footer {
             Some(footer) => {
@@ -459,13 +477,52 @@ fn append_scheduled_wakeup_footer(
     out.push_str(prefix);
     out.push_str(&footer);
 }
+/// The one place a cut is rendered: whatever cut the text, fewer bytes than `full_output_bytes`
+/// means one marker and, with a polling tool, one pointer.
+fn inline_subagent_output(c: &SubagentCompletionSummary, poll_tool: Option<&str>) -> String {
+    inline_subagent_output_capped(c, poll_tool, INLINE_SUBAGENT_OUTPUT_BYTES).0
+}
+/// As [`inline_subagent_output`], with the inline cap supplied by the caller
+/// so a batch can share one budget. Returns the rendered block and the bytes
+/// of child output it actually inlined. `poll_tool: None` still inlines the
+/// output verbatim whatever `cap` says: with no polling tool this notice is
+/// the model's only chance to see it.
+fn inline_subagent_output_capped(
+    c: &SubagentCompletionSummary,
+    poll_tool: Option<&str>,
+    cap: usize,
+) -> (String, usize) {
+    use std::fmt::Write as _;
+    let mut head: &str = &c.output;
+    if poll_tool.is_some() {
+        head = truncate_str(head, cap);
+    }
+    let mut output = head.to_owned();
+    if head.len() < c.full_output_bytes {
+        let _ = write!(
+            output,
+            "\n[output truncated: {} of {} bytes shown]",
+            head.len(),
+            c.full_output_bytes
+        );
+        if let Some(poll_tool) = poll_tool {
+            let _ = write!(
+                output,
+                "\nUse {poll_tool}(\"{}\") to see the full output.",
+                c.subagent_id
+            );
+        }
+    }
+    (output, head.len())
+}
 /// Format a model-facing message from a [`SubagentCompletionSummary`] for
-/// the next-tool-call reminder surface.
+/// the auto-wake prompt and the next-tool-call reminder surface.
 ///
 /// `task_output_name`: the resolved name of the BackgroundTaskAction tool
-/// in the current agent's toolset. When `None`, the subagent's full
-/// `output` is inlined verbatim -- this notification is the only place
-/// the model will see it (no disk-backed output file exists for subagents).
+/// in the current agent's toolset. The child's text is inlined either way:
+/// capped at [`INLINE_SUBAGENT_OUTPUT_BYTES`] with a pointer to the polling
+/// tool when one exists, uncapped when `None` (this notification is then
+/// the only place the model will see it).
 ///
 /// KEEP IN SYNC: the exact wording of this message is a compatibility
 /// surface — downstream mirrors reproduce it verbatim (grep for
@@ -492,17 +549,8 @@ pub fn format_subagent_completion(
         c.tool_calls,
         c.turns,
     );
-    out.push_str(match task_output_name {
-        Some(_) => "\n",
-        None => "\n\n",
-    });
-    render_completion_output_delivery(
-        &mut out,
-        &c.subagent_id,
-        PartialOutput::whole(&c.output),
-        task_output_name,
-        None,
-    );
+    out.push_str("\n\nresponse:\n");
+    out.push_str(&inline_subagent_output(c, task_output_name));
     append_scheduled_wakeup_footer(
         &mut out,
         c,
@@ -515,8 +563,9 @@ pub fn format_subagent_completion(
     out
 }
 /// Format buffered between-turn subagent completions into a system-reminder
-/// string. When `task_output_name` is `None` each subagent's full output is
-/// inlined verbatim; see [`render_completion_output_delivery`].
+/// string; each entry inlines the child's text per [`inline_subagent_output`],
+/// and the batch shares one [`BETWEEN_TURN_INLINE_OUTPUT_BYTES`] budget so a
+/// 256-entry drain cannot inject megabytes into a single turn.
 pub fn format_between_turn_completions(
     completions: &[SubagentCompletionSummary],
     task_output_name: Option<&str>,
@@ -527,6 +576,7 @@ pub fn format_between_turn_completions(
     let n = completions.len();
     let label = if n == 1 { "subagent" } else { "subagents" };
     let mut buf = format!("While you were idle, {n} background {label} completed:\n");
+    let mut budget = BETWEEN_TURN_INLINE_OUTPUT_BYTES;
     for c in completions {
         let status = if c.success {
             "completed successfully"
@@ -539,17 +589,14 @@ pub fn format_between_turn_completions(
             "- [{}] {:?} \u{2014} {status} ({secs:.1}s, {} tool calls)\n  subagent_id: {}",
             c.subagent_type, c.description, c.tool_calls, c.subagent_id,
         );
-        match task_output_name {
-            Some(_) => buf.push_str(". "),
-            None => buf.push_str("\n  "),
-        }
-        render_completion_output_delivery(
-            &mut buf,
-            &c.subagent_id,
-            PartialOutput::whole(&c.output),
+        buf.push_str("\n  response:\n");
+        let (block, inlined) = inline_subagent_output_capped(
+            c,
             task_output_name,
-            None,
+            budget.min(INLINE_SUBAGENT_OUTPUT_BYTES),
         );
+        budget = budget.saturating_sub(inlined);
+        buf.push_str(&block);
         append_scheduled_wakeup_footer(
             &mut buf,
             c,
@@ -1865,7 +1912,16 @@ mod tests {
             tool_calls: 3,
             turns: 2,
             output: std::sync::Arc::from(format!("output for {id}")),
+            full_output_bytes: format!("output for {id}").len(),
         }
+    }
+    /// The child's text as inlined in a wake notice: the block after
+    /// `response:\n`, up to the first truncation marker or the end.
+    fn inlined_child_text(msg: &str) -> &str {
+        let (_, body) = msg.split_once("response:\n").expect("response section");
+        body.split("\n[output truncated:")
+            .next()
+            .expect("split yields at least one piece")
     }
     #[tokio::test]
     async fn subagent_completion_surfaced() {
@@ -2054,34 +2110,77 @@ mod tests {
     fn format_subagent_completion_success_with_poll_tool() {
         let c = make_subagent_completion("sub-abc", true);
         let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
-        assert!(msg.contains("sub-abc"));
-        assert!(msg.contains("successfully"));
-        assert!(msg.contains("general-purpose"));
-        assert!(msg.contains("test task"));
-        assert!(msg.contains("5.0s"));
-        assert!(msg.contains("Tool calls: 3"));
-        assert!(msg.contains("Turns: 2"));
-        assert!(msg.contains(r#"get_task_output("sub-abc")"#));
+        assert_eq!(
+            msg,
+            "Background subagent \"sub-abc\" (general-purpose: \"test task\") completed successfully.\n\
+             Duration: 5.0s | Tool calls: 3 | Turns: 2\n\
+             \n\
+             response:\n\
+             output for sub-abc"
+        );
+        assert!(!msg.contains("to see the full output"), "{msg}");
+        assert!(!msg.contains("[output truncated"), "{msg}");
     }
     #[test]
-    fn format_scheduler_loop_completion_includes_cleanup_instruction() {
+    fn format_subagent_completion_caps_inline_output_next_to_poll_tool() {
+        let mut c = make_subagent_completion("sub-big", true);
+        c.output = std::sync::Arc::from("z".repeat(20_000));
+        c.full_output_bytes = 20_000;
+        let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
+        let head = "z".repeat(INLINE_SUBAGENT_OUTPUT_BYTES);
+        assert!(
+            msg.ends_with(&format!(
+                "response:\n{head}\n\
+                 [output truncated: 16000 of 20000 bytes shown]\n\
+                 Use get_task_output(\"sub-big\") to see the full output."
+            )),
+            "{}",
+            &msg[..200]
+        );
+        assert_eq!(msg.matches("[output truncated:").count(), 1);
+        assert_eq!(msg.matches("to see the full output").count(), 1);
+        let digest = format_between_turn_completions(&[c], Some("get_task_output"), None, None);
+        assert!(
+            digest.contains(&format!(
+                "  subagent_id: sub-big\n  response:\n{head}\n\
+                 [output truncated: 16000 of 20000 bytes shown]\n\
+                 Use get_task_output(\"sub-big\") to see the full output.\n"
+            )),
+            "{}",
+            &digest[..200]
+        );
+        assert_eq!(digest.matches("[output truncated:").count(), 1);
+    }
+    #[test]
+    fn format_scheduler_loop_completion_pre_capped_by_request() {
         let mut c = make_subagent_completion("sub-loop", true);
         c.loop_task_id = Some("loop-123".into());
+        c.output = std::sync::Arc::from("q".repeat(4_000));
+        c.full_output_bytes = 50_000;
         let msg = format_subagent_completion(
             &c,
             Some("get_task_output"),
             Some("renamed_scheduler_delete"),
             Some("renamed_scheduler_create"),
         );
+        let head = "q".repeat(4_000);
         assert_eq!(
             msg,
-            "Background subagent \"sub-loop\" (general-purpose: \"test task\") completed successfully.\n\
-             Duration: 5.0s | Tool calls: 3 | Turns: 2\n\
-             Use get_task_output(\"sub-loop\") to see the full output.\n\
-             \n\
-             Check the subagent output using get_task_output(\"sub-loop\"). If there are issues, proactively debug and fix them, do not just report it to the user.\n\
-             If this schedule is no longer relevant, run renamed_scheduler_delete(\"loop-123\"). If it is outdated, you can update it with renamed_scheduler_create(new_prompt, interval, \"loop-123\")."
+            format!(
+                "Background subagent \"sub-loop\" (general-purpose: \"test task\") completed successfully.\n\
+                 Duration: 5.0s | Tool calls: 3 | Turns: 2\n\
+                 \n\
+                 response:\n\
+                 {head}\n\
+                 [output truncated: 4000 of 50000 bytes shown]\n\
+                 Use get_task_output(\"sub-loop\") to see the full output.\n\
+                 \n\
+                 Check the subagent output using get_task_output(\"sub-loop\"). If there are issues, proactively debug and fix them, do not just report it to the user.\n\
+                 If this schedule is no longer relevant, run renamed_scheduler_delete(\"loop-123\"). If it is outdated, you can update it with renamed_scheduler_create(new_prompt, interval, \"loop-123\")."
+            )
         );
+        assert_eq!(msg.matches("[output truncated:").count(), 1);
+        assert_eq!(msg.matches("to see the full output").count(), 1);
     }
     #[test]
     fn format_scheduler_loop_completion_includes_update_instruction() {
@@ -2101,6 +2200,31 @@ mod tests {
             msg.contains("If this schedule is no longer relevant, run renamed_scheduler_delete(\"loop-123\"). If it is outdated, you can update it with renamed_scheduler_create(new_prompt, interval, \"loop-123\")."),
             "{msg}"
         );
+    }
+    #[test]
+    fn inline_output_cap_boundary_multibyte() {
+        let cap = INLINE_SUBAGENT_OUTPUT_BYTES;
+        for len in (cap - 2)..=(cap + 2) {
+            let text = format!("{}{}", "a".repeat(len % 3), "\u{20ac}".repeat(len / 3));
+            assert_eq!(text.len(), len);
+            let mut c = make_subagent_completion("sub-utf8", true);
+            c.output = std::sync::Arc::from(text.as_str());
+            c.full_output_bytes = len;
+            let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
+            let body = inlined_child_text(&msg);
+            let shown = body.len();
+            assert!(shown <= cap, "len={len}: body is {shown} bytes");
+            assert!(text.starts_with(body), "len={len}: body must be a prefix");
+            let is_cut = len > cap;
+            assert_eq!(shown < len, is_cut, "len={len}");
+            let marker = format!("\n[output truncated: {shown} of {len} bytes shown]\n");
+            assert_eq!(msg.contains(&marker), is_cut, "len={len}: {msg}");
+            assert_eq!(
+                msg.contains("Use get_task_output(\"sub-utf8\") to see the full output."),
+                is_cut,
+                "len={len}: {msg}"
+            );
+        }
     }
     #[test]
     fn cleanup_instruction_requires_nonempty_id_and_delete_tool() {
@@ -2164,6 +2288,18 @@ mod tests {
             msg.contains("response:\noutput for sub-abc"),
             "must inline the subagent's output text: {msg}"
         );
+        // Without a polling tool the text is uncapped: nothing to poll for.
+        let mut big = make_subagent_completion("sub-abc", true);
+        big.output = std::sync::Arc::from("y".repeat(INLINE_SUBAGENT_OUTPUT_BYTES * 5));
+        big.full_output_bytes = big.output.len();
+        let wake = format_subagent_completion(&big, None, None, None);
+        let digest = format_between_turn_completions(std::slice::from_ref(&big), None, None, None);
+        for msg in [&wake, &digest] {
+            assert!(msg.contains(&*big.output), "{}", msg.len());
+            assert!(!msg.contains("get_task_output"), "{msg}");
+            assert!(!msg.contains("to see the full output"), "{msg}");
+            assert!(!msg.contains("[output truncated"), "{msg}");
+        }
     }
     #[test]
     fn task_completion_reservations_are_reference_counted() {
@@ -2270,6 +2406,7 @@ mod tests {
         let mut c = make_subagent_completion("sub-large", true);
         let large_output = "y".repeat(MAX_INLINE_COMPLETION_BYTES * 5);
         c.output = std::sync::Arc::from(large_output.as_str());
+        c.full_output_bytes = large_output.len();
         let msg = format_subagent_completion(&c, None, None, None);
         assert!(
             msg.contains(&large_output),
@@ -2287,12 +2424,100 @@ mod tests {
         let mut c = make_subagent_completion("sub-batch", true);
         let large_output = "z".repeat(MAX_INLINE_COMPLETION_BYTES * 3);
         c.output = std::sync::Arc::from(large_output.as_str());
+        c.full_output_bytes = large_output.len();
         let msg = format_between_turn_completions(&[c], None, None, None);
         assert!(
             msg.contains(&large_output),
             "between-turn subagent inline output must be preserved verbatim"
         );
         assert!(!msg.contains("[Output truncated"));
+    }
+    /// A saturated between-turn drain: `MAX_PENDING_COMPLETIONS` (256) entries,
+    /// each with the full per-completion cap of output, in ONE system reminder.
+    /// Measured on the unbounded formatter this renders 4_151_645 bytes —
+    /// roughly a million tokens injected into a single turn. The shared batch
+    /// budget holds it to the size of one completion's inline cap plus the
+    /// per-entry headers and pointers.
+    #[test]
+    fn between_turn_batch_shares_one_inline_budget() {
+        const BATCH: usize = 256;
+        let completions: Vec<SubagentCompletionSummary> = (0..BATCH)
+            .map(|i| {
+                let mut c = make_subagent_completion(&format!("sub-{i}"), true);
+                let output = "z".repeat(INLINE_SUBAGENT_OUTPUT_BYTES * 2);
+                c.full_output_bytes = output.len();
+                c.output = std::sync::Arc::from(output.as_str());
+                c
+            })
+            .collect();
+        let msg = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
+        // Headroom for 256 entries of header, truncation marker and pointer.
+        const CEILING: usize = BETWEEN_TURN_INLINE_OUTPUT_BYTES + 64 * 1024;
+        assert!(
+            msg.len() <= CEILING,
+            "between-turn batch inlined {} bytes; the shared budget must hold it to {CEILING}",
+            msg.len()
+        );
+        // Nothing is lost: every entry that was cut says so and says where to look.
+        assert_eq!(msg.matches("[output truncated:").count(), BATCH);
+        assert_eq!(
+            msg.matches("Use get_task_output(").count(),
+            BATCH,
+            "every truncated entry keeps its pointer to the full output"
+        );
+        // The budget is spent, not merely unused: the first entry is inlined in full.
+        assert!(msg.contains(&"z".repeat(BETWEEN_TURN_INLINE_OUTPUT_BYTES)));
+    }
+    /// The batch budget must not change the ordinary drain. One completion at
+    /// the per-completion cap renders exactly as it did before the budget
+    /// existed.
+    #[test]
+    fn between_turn_batch_budget_leaves_a_fitting_batch_byte_identical() {
+        let small: Vec<SubagentCompletionSummary> = (0..8)
+            .map(|i| make_subagent_completion(&format!("sub-{i}"), true))
+            .collect();
+        let msg = format_between_turn_completions(&small, Some("get_task_output"), None, None);
+        assert!(!msg.contains("[output truncated:"));
+        for c in &small {
+            assert!(msg.contains(c.output.as_ref()));
+        }
+
+        let mut one = make_subagent_completion("sub-solo", true);
+        let output = "y".repeat(INLINE_SUBAGENT_OUTPUT_BYTES);
+        one.full_output_bytes = output.len();
+        one.output = std::sync::Arc::from(output.as_str());
+        let solo = format_between_turn_completions(
+            std::slice::from_ref(&one),
+            Some("get_task_output"),
+            None,
+            None,
+        );
+        assert!(solo.contains(&output));
+        assert!(!solo.contains("[output truncated:"));
+    }
+    /// With no polling tool the reminder is the model's ONLY copy of the
+    /// output, so the batch budget must not cut it — for a batch, not just for
+    /// the single completion the sibling test covers.
+    #[test]
+    fn between_turn_batch_budget_never_cuts_when_there_is_no_poll_tool() {
+        let completions: Vec<SubagentCompletionSummary> = (0..4)
+            .map(|i| {
+                let mut c = make_subagent_completion(&format!("sub-{i}"), true);
+                let output = format!("{i}").repeat(INLINE_SUBAGENT_OUTPUT_BYTES);
+                c.full_output_bytes = output.len();
+                c.output = std::sync::Arc::from(output.as_str());
+                c
+            })
+            .collect();
+        let msg = format_between_turn_completions(&completions, None, None, None);
+        assert!(!msg.contains("[output truncated:"));
+        for c in &completions {
+            assert!(
+                msg.contains(c.output.as_ref()),
+                "no-poll-tool batch must keep {} verbatim",
+                c.subagent_id
+            );
+        }
     }
     /// The reminder pipeline ignores `MonitorEventBuffer` — the turn loop
     /// owns the drain. Guards against the tool-result append path being
