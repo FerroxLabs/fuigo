@@ -67,13 +67,19 @@ pub(crate) fn detect_plain_urls_with_offset(
     (result, current_id)
 }
 
+/// One finder for the whole process. `LinkFinder::new` + `kinds` rebuilds the matcher config on
+/// every call, and [`detect_plain_urls_with_offset`] calls this once per *rendered line*, so
+/// building it per call put that cost on every line of every re-render.
+static PLAIN_LINK_FINDER: std::sync::LazyLock<LinkFinder> = std::sync::LazyLock::new(|| {
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
+    finder
+});
+
 /// Call `f` with the byte range and destination of every plain URL or email
 /// in `text`. Emails become `mailto:`; scp remotes (`git@host:path`) are skipped.
 pub(crate) fn for_each_plain_link(text: &str, mut f: impl FnMut(Range<usize>, String)) {
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
-
-    for link in finder.links(text) {
+    for link in PLAIN_LINK_FINDER.links(text) {
         let start = link.start();
         let end = link.end();
         if start > end
