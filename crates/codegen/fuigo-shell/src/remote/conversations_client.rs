@@ -5,7 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthManager, FuigoAuth};
 
-const FUIGO_WEB_URL: &str = "https://grok.com";
+/// Env vars that can name the conversations host, in precedence order.
+///
+/// No compiled default (upstream: the vendor's web origin). With none set the
+/// chat conversations lane is not available and [`ConvError::NotConfigured`] says so.
+pub(crate) const CONVERSATIONS_BASE_URL_ENV_CHAIN: [&str; 2] =
+    ["FUIGO_CONVERSATIONS_BASE_URL", "FUIGO_CODE_WEB_URL"];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +64,11 @@ pub struct UpdateConversationBody {
 pub enum ConvError {
     #[error("no OAuth credentials for conversations:read")]
     NoOauth,
+    /// No conversations host is configured; the feature is unavailable rather than pointed at a vendor.
+    #[error(
+        "chat conversations need FUIGO_CONVERSATIONS_BASE_URL (or FUIGO_CODE_WEB_URL) to be configured; they are not available otherwise"
+    )]
+    NotConfigured,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("request blocked by egress policy: {0}")]
@@ -98,26 +108,24 @@ struct ListConversationsMatchWire {
 
 pub struct ConversationsClient {
     http: reqwest::Client,
-    base_url: String,
+    /// `None` when no env var in [`CONVERSATIONS_BASE_URL_ENV_CHAIN`] is set: every
+    /// request fails closed with [`ConvError::NotConfigured`].
+    base_url: Option<String>,
     auth: Arc<AuthManager>,
 }
 
 impl ConversationsClient {
     pub fn new(auth: Arc<AuthManager>) -> Self {
-        let base_url = std::env::var("FUIGO_CONVERSATIONS_BASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("FUIGO_CODE_WEB_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or_else(|| FUIGO_WEB_URL.to_string());
         Self {
             http: crate::http::shared_client(),
-            base_url,
+            base_url: super::skills_client::first_nonempty_env(&CONVERSATIONS_BASE_URL_ENV_CHAIN),
             auth,
         }
+    }
+
+    /// The configured host, or the fail-closed error every request returns without one.
+    fn base(&self) -> Result<&str, ConvError> {
+        self.base_url.as_deref().ok_or(ConvError::NotConfigured)
     }
 
     async fn require_fuigo_auth(&self) -> Result<FuigoAuth, ConvError> {
@@ -161,8 +169,9 @@ impl ConversationsClient {
         q: &ConvQuery,
     ) -> Result<ListConversationsPage, ConvError> {
         let auth = self.require_fuigo_auth().await?;
+        let base = self.base()?;
 
-        let url = format!("{}/rest/app-chat/conversations", self.base_url);
+        let url = format!("{}/rest/app-chat/conversations", base);
         let mut query: Vec<(&str, String)> = vec![("pageSize", q.page_size.to_string())];
         if let Some(token) = q.page_token.as_deref().filter(|s| !s.is_empty()) {
             query.push(("pageToken", token.to_owned()));
@@ -213,9 +222,10 @@ impl ConversationsClient {
         body: &UpdateConversationBody,
     ) -> Result<(), ConvError> {
         let auth = self.require_fuigo_auth().await?;
+        let base = self.base()?;
         let url = format!(
             "{}/rest/app-chat/conversations/{}",
-            self.base_url,
+            base,
             urlencoding::encode(conversation_id)
         );
         let builder = self
@@ -238,9 +248,10 @@ impl ConversationsClient {
         conversation_id: &str,
     ) -> Result<(), ConvError> {
         let auth = self.require_fuigo_auth().await?;
+        let base = self.base()?;
         let url = format!(
             "{}/rest/app-chat/conversations/soft/{}",
-            self.base_url,
+            base,
             urlencoding::encode(conversation_id)
         );
         let builder = self.apply_auth_headers(self.http.delete(&url), &auth);
@@ -317,6 +328,70 @@ mod tests {
             serde_json::to_value(&both).unwrap(),
             serde_json::json!({ "title": "T", "starred": true })
         );
+    }
+
+    // ===== No vendor host as a default (1.0.20, REM-1 / REM-3) =====
+
+    /// Row 6: with none of the env vars set the client resolves NO host.
+    /// Upstream fell back to its vendor's web origin here.
+    /// (Inspects `Debug` output only, so it compiles against the pre-fix `String` too.)
+    #[test]
+    #[serial_test::serial]
+    fn conversations_client_without_env_names_no_vendor_host() {
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client =
+            ConversationsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        let rendered = format!("{:?}", client.base_url);
+        assert!(
+            !rendered.contains("grok.com"),
+            "conversations base fell back to a vendor host: {rendered}"
+        );
+    }
+
+    /// Row 6, typed: unset means `None`; list, rename and soft-delete all fail closed naming
+    /// the variable (after the auth gate, so a no-OAuth caller still sees `NoOauth`).
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn conversations_client_without_env_fails_closed_with_a_true_message() {
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client =
+            ConversationsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        assert_eq!(client.base_url, None);
+        let err = client
+            .list_conversations(&ConvQuery {
+                page_size: 10,
+                ..ConvQuery::default()
+            })
+            .await
+            .expect_err("no host, no request");
+        let shown = err.to_string();
+        assert!(matches!(err, ConvError::NotConfigured), "{shown}");
+        assert!(shown.contains("FUIGO_CONVERSATIONS_BASE_URL"), "{shown}");
+        assert!(!shown.contains("grok.com"), "{shown}");
+        let err = client
+            .update_conversation("c1", &UpdateConversationBody::default())
+            .await
+            .expect_err("no host, no request");
+        assert!(matches!(err, ConvError::NotConfigured));
+        let err = client
+            .soft_delete_conversation("c1")
+            .await
+            .expect_err("no host, no request");
+        assert!(matches!(err, ConvError::NotConfigured));
+    }
+
+    /// Row 6, set: precedence `FUIGO_CONVERSATIONS_BASE_URL` > `FUIGO_CODE_WEB_URL`, verbatim.
+    #[test]
+    #[serial_test::serial]
+    fn conversations_client_env_chain_precedence_is_unchanged() {
+        let am = crate::remote::skills_client::tests::test_auth_manager;
+        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        assert_eq!(ConversationsClient::new(am()).base_url.as_deref(), Some("https://web.example.test"));
+        let _conv =
+            fuigo_test_support::EnvGuard::set("FUIGO_CONVERSATIONS_BASE_URL", "https://conv.example.test");
+        assert_eq!(ConversationsClient::new(am()).base_url.as_deref(), Some("https://conv.example.test"));
     }
 }
 

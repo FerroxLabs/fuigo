@@ -391,10 +391,10 @@ auth_provider = "litellm"
 
 ### Using auth.json for API Access
 
-If you've authenticated with `fuigo login`, you can use the stored credentials to call the CLI chat proxy directly via curl. The proxy requires specific headers that mirror what the fuigo CLI sends internally:
+If you've authenticated with `fuigo login` against an installation that runs a CLI chat proxy (there is no default one; `FUIGO_CLI_CHAT_PROXY_BASE_URL` names it), you can use the stored credentials to call that proxy directly via curl. The proxy requires specific headers that mirror what the fuigo CLI sends internally:
 
 ```bash
-curl -s -N -X POST "https://cli-chat-proxy.grok.com/v1/chat/completions" \
+curl -s -N -X POST "$FUIGO_CLI_CHAT_PROXY_BASE_URL/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $(jq -r '."https://accounts.x.ai/sign-in".key' ~/.fuigo/auth.json)" \
   -H "X-XAI-Token-Auth: xai-grok-cli" \
@@ -2501,7 +2501,10 @@ The agent persists all session updates automatically. Clients can reconnect and 
 | Variable                         | Description                                                                                              |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `FUIGO_API_KEY`         | API key from [console.x.ai](https://console.x.ai). Used for custom endpoint auth and API key login      |
-| `FUIGO_CLI_CHAT_PROXY_BASE_URL`  | Override the cli-chat-proxy URL (default: `https://cli-chat-proxy.grok.com/v1`)                          |
+| `FUIGO_CLI_CHAT_PROXY_BASE_URL`  | Auxiliary-service base URL (gen tools, web search, trace upload, `/deployment/config`). **No default**: unset means those features are off and say so; the shell and the workspace server never dial a host you did not name |
+| `FUIGO_CODE_BACKEND_URL`         | Session-history backend for share links, writeback, fork sync and remote delete. **No default**: unset means those features report "not configured" instead of contacting anything |
+| `FUIGO_CODE_WEB_URL`             | Web origin that renders shared sessions (`<origin>/build/share/<id>`, relay `<origin>/build/<session>`). **No default**: unset means no share URL is shown or sent; the relay still syncs |
+| `FUIGO_SKILLS_BASE_URL` / `FUIGO_MODES_BASE_URL` / `FUIGO_WORKSPACES_BASE_URL` / `FUIGO_CONVERSATIONS_BASE_URL` | Hosts for the product Skills catalog, chat model catalog, workspaces and chat conversations REST (each falls through to `FUIGO_CONVERSATIONS_BASE_URL`, then `FUIGO_CODE_WEB_URL`). **No default**: unset means that feature is unavailable and its error names the variable |
 | `FUIGO_MODELS_BASE_URL`          | Custom base URL for inference. Model list auto-fetched from `{base_url}/models` (see [Custom Models Endpoint](#custom-models-endpoint)) |
 | `FUIGO_MODELS_LIST_URL`          | Override the model list URL if it differs from `{FUIGO_MODELS_BASE_URL}/models`                                              |
 | `FUIGO_AUTH_PROVIDER_COMMAND`     | External auth binary (alternative to config file). See [External Auth Provider](#external-auth-provider) |

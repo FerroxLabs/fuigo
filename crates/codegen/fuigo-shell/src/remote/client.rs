@@ -5,13 +5,39 @@ use indexmap::IndexMap;
 use prod_mc_cli_chat_proxy_types::SubagentBundle;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-const FUIGO_CODE_BACKEND_URL: &str = "https://code.grok.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const FUIGO_CODE_WEB_URL: &str = "https://grok.com";
-pub fn share_url(permission_id: &str) -> String {
-    let web_url =
-        std::env::var("FUIGO_CODE_WEB_URL").unwrap_or_else(|_| FUIGO_CODE_WEB_URL.to_string());
-    format!("{}/build/share/{}", web_url, permission_id)
+/// Env var naming the session-history ("code") backend this client talks to.
+///
+/// There is **no compiled default**. Upstream this fell back to the vendor's
+/// `https://code.grok.com`; Fuigo runs no such backend, so an unset var means
+/// the features built on it (share links, session writeback, fork sync,
+/// remote delete) are not available, and every request says so instead of
+/// dialling a host the user never configured.
+pub const FUIGO_CODE_BACKEND_URL_ENV: &str = "FUIGO_CODE_BACKEND_URL";
+/// Env var naming the web origin that renders shared sessions.
+///
+/// No compiled default either (upstream: `https://grok.com`). Without it there
+/// is no share URL to show, so [`share_url`] returns `None`.
+pub const FUIGO_CODE_WEB_URL_ENV: &str = "FUIGO_CODE_WEB_URL";
+/// An env value, with empty treated as unset (the convention the sibling
+/// `remote/*_client.rs` resolvers already use). Set values pass through verbatim.
+pub(crate) fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+/// The configured share-link origin, or `None` when `FUIGO_CODE_WEB_URL` is unset.
+pub(crate) fn code_web_url() -> Option<String> {
+    nonempty_env(FUIGO_CODE_WEB_URL_ENV)
+}
+/// The share URL for a permission id, or `None` when no web origin is configured.
+///
+/// Never invents a destination: with `FUIGO_CODE_WEB_URL` unset there is no
+/// page that can render the share, so there is no URL.
+pub fn share_url(permission_id: &str) -> Option<String> {
+    code_web_url().map(|web_url| share_url_on(&web_url, permission_id))
+}
+/// `<web_url>/build/share/<permission_id>` on an origin the caller has already resolved.
+fn share_url_on(web_url: &str, permission_id: &str) -> String {
+    format!("{web_url}/build/share/{permission_id}")
 }
 fn add_cli_chat_proxy_headers_blocking(
     builder: reqwest::blocking::RequestBuilder,
@@ -276,6 +302,10 @@ pub enum BackendError {
     },
     #[error("Auth error: {0}")]
     Auth(String),
+    /// The feature depends on a service Fuigo does not run by default and the
+    /// operator has not pointed it anywhere. The message names the env var.
+    #[error("{0}")]
+    NotConfigured(String),
 }
 
 impl From<fuigo_extra_ca::dispatch::DispatchError> for BackendError {
@@ -289,7 +319,9 @@ impl From<fuigo_extra_ca::dispatch::DispatchError> for BackendError {
 pub struct BackendClient {
     reqwest_client: reqwest::Client,
     client: reqwest_middleware::ClientWithMiddleware,
-    base_url: String,
+    /// `None` when `FUIGO_CODE_BACKEND_URL` is unset: every request fails
+    /// closed with [`BackendError::NotConfigured`].
+    base_url: Option<String>,
     pub(crate) auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
 }
 impl Default for BackendClient {
@@ -314,8 +346,7 @@ impl BackendClient {
                 .with(fuigo_auth::EgressMiddleware)
                 .build(),
             reqwest_client,
-            base_url: std::env::var("FUIGO_CODE_BACKEND_URL")
-                .unwrap_or_else(|_| FUIGO_CODE_BACKEND_URL.to_string()),
+            base_url: nonempty_env(FUIGO_CODE_BACKEND_URL_ENV),
             auth_manager: None,
         }
     }
@@ -326,9 +357,18 @@ impl BackendClient {
                 .with(fuigo_auth::EgressMiddleware)
                 .build(),
             reqwest_client,
-            base_url: base_url.into(),
+            base_url: Some(base_url.into()),
             auth_manager: None,
         }
+    }
+    /// The configured backend origin, or the fail-closed error every request returns without one.
+    fn base(&self) -> Result<&str, BackendError> {
+        self.base_url.as_deref().ok_or_else(|| {
+            BackendError::NotConfigured(format!(
+                "session sharing and history sync need {FUIGO_CODE_BACKEND_URL_ENV} to be configured; \
+                 they are not available otherwise"
+            ))
+        })
     }
     /// Attach a live `AuthManager` so every request resolves a fresh token instead of requiring the caller to pass `&FuigoAuth`.
     pub(crate) fn with_auth_manager(
@@ -357,8 +397,20 @@ impl BackendClient {
             .await
             .map_err(|e| BackendError::Auth(format!("{e}")))
     }
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    /// The configured backend origin, or `None` when `FUIGO_CODE_BACKEND_URL` is unset.
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+    /// Everything a share needs before any byte is uploaded: a backend to store
+    /// the session and a web origin to view it on. Returns the origin.
+    pub(crate) fn share_link_origin(&self) -> Result<String, BackendError> {
+        self.base()?;
+        code_web_url().ok_or_else(|| {
+            BackendError::NotConfigured(format!(
+                "session share links need {FUIGO_CODE_WEB_URL_ENV} to be configured; \
+                 sharing is not available otherwise"
+            ))
+        })
     }
     /// The session data (`save_session_data`) is sent inline to the backend.
     /// If the backend responds with 413 (payload too large), the error is logged as a warning and the share continues.
@@ -368,6 +420,9 @@ impl BackendClient {
         session: &ExportedSession,
         agent_id: &str,
     ) -> Result<String, BackendError> {
+        // Fail closed BEFORE uploading anything: a share with no page to view
+        // it on is not a share, and no host is ever invented for the link.
+        let web_url = self.share_link_origin()?;
         self.upsert_session(&session.session_id, &session.metadata, agent_id)
             .await?;
         match self
@@ -389,7 +444,7 @@ impl BackendClient {
             Err(e) => return Err(e),
         }
         let share_response = self.create_share_link(&session.session_id).await?;
-        Ok(share_url(&share_response.permission_id))
+        Ok(share_url_on(&web_url, &share_response.permission_id))
     }
     /// Must include X-XAI-Token-Auth so nginx auth subrequest routes to OAuth.
     /// See: crates/codegen/fuigo-shell/src/agent/app.rs:run_headless
@@ -444,7 +499,7 @@ impl BackendClient {
         metadata: &ExportedMetadata,
         agent_id: &str,
     ) -> Result<(), BackendError> {
-        let url = format!("{}/sessions/{}", self.base_url, session_id);
+        let url = format!("{}/sessions/{}", self.base()?, session_id);
         let request = UpsertSessionRequest {
             session: SessionUpdate {
                 title: metadata.title.clone(),
@@ -470,7 +525,7 @@ impl BackendClient {
         messages: &[ExportedMessage],
         metadata: Option<&ExportedMetadata>,
     ) -> Result<(), BackendError> {
-        let url = format!("{}/sessions/{}/data", self.base_url, session_id);
+        let url = format!("{}/sessions/{}/data", self.base()?, session_id);
         let request = SaveDataRequest {
             messages: messages.to_vec(),
             metadata: metadata.and_then(|m| serde_json::to_value(m).ok()),
@@ -486,7 +541,7 @@ impl BackendClient {
         Ok(())
     }
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>, BackendError> {
-        let url = format!("{}/sessions", self.base_url);
+        let url = format!("{}/sessions", self.base()?);
         let response = self.send_with_auth(self.reqwest_client.get(&url)).await?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -504,7 +559,7 @@ impl BackendClient {
         &self,
         session_id: &str,
     ) -> Result<LoadDataResponse, BackendError> {
-        let url = format!("{}/sessions/{}/data", self.base_url, session_id);
+        let url = format!("{}/sessions/{}/data", self.base()?, session_id);
         let response = self.send_with_auth(self.reqwest_client.get(&url)).await?;
         if response.status().as_u16() == 404 {
             return Err(BackendError::SessionNotFound {
@@ -523,7 +578,7 @@ impl BackendClient {
         &self,
         session_id: &str,
     ) -> Result<ShareResponse, BackendError> {
-        let url = format!("{}/sessions/{}/share", self.base_url, session_id);
+        let url = format!("{}/sessions/{}/share", self.base()?, session_id);
         let response = self.send_with_auth(self.reqwest_client.post(&url)).await?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -534,7 +589,7 @@ impl BackendClient {
         Ok(share_response)
     }
     pub(crate) async fn delete_session_data(&self, session_id: &str) -> Result<(), BackendError> {
-        let url = format!("{}/sessions/{}/data", self.base_url, session_id);
+        let url = format!("{}/sessions/{}/data", self.base()?, session_id);
         let response = self
             .send_with_auth(self.reqwest_client.delete(&url))
             .await?;
