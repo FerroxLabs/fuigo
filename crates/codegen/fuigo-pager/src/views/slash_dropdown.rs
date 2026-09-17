@@ -863,4 +863,88 @@ mod tests {
             let _ = render_dropdown(&mut nb, na, &narrow, None, &theme);
         }
     }
+
+    #[test]
+    fn overlong_untagged_command_renders_ellipsized_label() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::current();
+        let display = "/principles-redesign-from-first-principles";
+        let snap = SlashSnapshot {
+            open: true,
+            matches: vec![row(display, "short desc")],
+            selected: 0,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        let line0: String = (0..80)
+            .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+            .collect();
+        let ellipsized = "/principles-redesign-from-first-princip\u{2026}";
+        assert!(
+            line0.contains(ellipsized),
+            "missing ellipsized label: {line0:?}"
+        );
+        assert!(
+            !line0.contains(display),
+            "full 42-col name must not render: {line0:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_short_and_overlong_keeps_long_names_readable() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::default();
+        let short = "/cache";
+        let long_display = "/principles-redesign-from-first-principles";
+        let width: u16 = 80;
+        let snap = SlashSnapshot {
+            open: true,
+            matches: vec![row(short, "cache help"), row(long_display, "long name")],
+            selected: 0,
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 2));
+        let area = Rect::new(0, 0, width, 2);
+        render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        let row_text = |y: u16| -> String {
+            (0..width)
+                .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect()
+        };
+        let desc_col = |y: u16, needle: &str| -> u16 {
+            let needle_chars: Vec<char> = needle.chars().collect();
+            (0..width)
+                .find(|&start| {
+                    needle_chars.iter().enumerate().all(|(i, ch)| {
+                        let x = start + i as u16;
+                        x < width
+                            && buf
+                                .cell((x, y))
+                                .is_some_and(|c| c.symbol() == ch.to_string())
+                    })
+                })
+                .unwrap_or_else(|| panic!("row {y} missing {needle:?}: {}", row_text(y)))
+        };
+
+        assert!(row_text(0).contains(short), "{}", row_text(0));
+        assert!(
+            row_text(1).contains("/principles-redesign-from-first-princip\u{2026}"),
+            "{}",
+            row_text(1)
+        );
+        assert!(!row_text(1).contains(long_display), "{}", row_text(1));
+
+        // First-line gap is one column, not LABEL_DESC_GAP.
+        let desc_x = (PREFIX_W + LABEL_CAP + 1) as u16;
+        assert_eq!(desc_col(0, "cache help"), desc_x, "{}", row_text(0));
+        assert_eq!(desc_col(1, "long name"), desc_x, "{}", row_text(1));
+    }
 }

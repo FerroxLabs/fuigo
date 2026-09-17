@@ -1501,13 +1501,37 @@ mod history_browse_panel_tests {
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
     }
 
-    /// Ctrl+R is deliberately unbound: it must not open the history panel (search mode is reachable via /history only).
+    /// Ctrl+R opens the session picker; the history panel stays reachable only through /history.
     #[test]
-    fn ctrl_r_is_unbound_and_does_not_open_history() {
+    fn ctrl_r_opens_the_picker_and_not_history() {
         let mut agent = agent_with_history(&["say cherry"]);
-        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        let outcome = agent
+            .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
+    }
+
+    /// With a redo waiting after Ctrl+Z, Ctrl+R still opens the session picker; the composer redoes on Ctrl+Shift+Z or Alt+Z.
+    #[test]
+    fn ctrl_r_opens_the_picker_even_with_a_redo_stack() {
+        let mut agent = agent_with_history(&[]);
+        agent.handle_prompt_key_for_test(&key(KeyCode::Char('d')));
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+        let outcome = agent
+            .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
+        assert_eq!(agent.prompt.text(), "", "redo must not run");
     }
 
     #[test]

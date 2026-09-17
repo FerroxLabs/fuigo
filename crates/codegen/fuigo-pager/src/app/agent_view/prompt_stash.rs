@@ -509,7 +509,7 @@ mod tests {
         );
     }
 
-    /// Ctrl+S belongs to the stash on every path: even declined, it must not reach the session picker, which lives on F3.
+    /// Ctrl+S belongs to the stash on every path: even when the stash declines the key, it must not reach the session picker on Ctrl+R.
     #[test]
     fn ctrl_s_never_opens_the_session_picker() {
         let registry = crate::actions::ActionRegistry::defaults();
@@ -534,14 +534,14 @@ mod tests {
         }
     }
 
-    /// The picker Ctrl+S gave up has to answer on F3.
+    /// Ctrl+S stashes the draft, so the session picker opens on Ctrl+R.
     #[test]
-    fn f3_opens_the_session_picker() {
+    fn ctrl_r_opens_the_session_picker() {
         let registry = crate::actions::ActionRegistry::defaults();
         let mut agent = test_fixtures::make_agent();
-        let f3 = KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE);
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
 
-        let outcome = agent.handle_input(&crossterm::event::Event::Key(f3), &registry);
+        let outcome = agent.handle_input(&crossterm::event::Event::Key(ctrl_r), &registry);
 
         assert!(
             matches!(

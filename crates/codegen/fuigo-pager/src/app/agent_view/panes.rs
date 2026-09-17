@@ -906,9 +906,11 @@ impl AgentView {
 #[cfg(test)]
 mod scroll_granularity_tests {
     use super::super::test_fixtures::make_agent;
+    use crate::views::prompt_widget::PromptStyle;
     use crate::views::suggestion_controller::{
         CompletionDropdownState, CompletionItemParsed, SuggestionSource,
     };
+    use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     /// Selection dropdowns step exactly one item per wheel dispatch: a 3-line notch (or accelerated trackpad flush) must not skip items.
     #[test]
@@ -972,6 +974,68 @@ mod scroll_granularity_tests {
             agent.prompt.suggestions.dropdown.selected, 0,
             "-3-line wheel notch must move the completion selection by exactly -1"
         );
+    }
+    #[test]
+    fn wheel_over_prompt_scrolls_conversation() {
+        let mut agent = make_agent();
+        agent.pane_areas.prompt = Rect::new(0, 10, 80, 4);
+        let mut buf = Buffer::empty(agent.pane_areas.prompt);
+        agent.prompt.draw(
+            &mut buf,
+            agent.pane_areas.prompt,
+            None,
+            &PromptStyle::default(),
+            None,
+            None,
+        );
+        for i in 0..30 {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    format!("line {i}"),
+                ));
+        }
+        agent.scrollback.prepare_layout(80, 10);
+        agent.scrollback.goto_bottom();
+        let before = agent.scrollback.scroll_info().0;
+        assert!(before > 0, "setup: conversation has earlier content");
+        agent.handle_scroll(-3, 5, 11);
+        assert_eq!(agent.scrollback.scroll_info().0, before - 3);
+    }
+    #[test]
+    fn wheel_over_scrollable_prompt_keeps_conversation_position() {
+        let mut agent = make_agent();
+        agent.pane_areas.prompt = Rect::new(0, 10, 20, 4);
+        agent.prompt.set_text(
+            &(0..20)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        agent.prompt.set_cursor(0);
+        agent.prompt.set_scroll(0);
+        let mut buf = Buffer::empty(agent.pane_areas.prompt);
+        agent.prompt.draw(
+            &mut buf,
+            agent.pane_areas.prompt,
+            None,
+            &PromptStyle::default(),
+            None,
+            None,
+        );
+        for i in 0..30 {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    format!("message {i}"),
+                ));
+        }
+        agent.scrollback.prepare_layout(80, 10);
+        agent.scrollback.goto_bottom();
+        agent.scrollback.scroll_up(5);
+        let conversation_before = agent.scrollback.scroll_info().0;
+        agent.handle_scroll(3, 5, 11);
+        assert_eq!(agent.scrollback.scroll_info().0, conversation_before);
     }
     #[test]
     fn wheel_over_fullscreen_overlays_never_scrolls_panes_beneath() {
