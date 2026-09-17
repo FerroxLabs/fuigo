@@ -9,18 +9,19 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 pub const SEND_SUBAGENT_MESSAGE_TOOL_NAME: &str = "send_subagent_message";
 
-/// How the message reaches an active subagent.
+/// How the SENDER meant the message. This engine lands all three the same way
+/// (see [`SendSubagentMessageTool::description_template`]); the class is
+/// recorded and named on the message's row, and does not route the delivery.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SendSubagentMessageDelivery {
-    /// Join the current turn at its next safe point.
+    /// Meant as a correction to the turn already in flight.
     Steer,
-    /// Wait as a later turn (default when omitted).
+    /// Meant as a later instruction (the class of every send before this field existed).
     Queue,
-    /// Urgent: delivered ahead of pending steers at the earliest safe point; also interrupts a
-    /// wait on background work.
+    /// Meant as urgent.
     Interject,
 }
 
@@ -49,7 +50,8 @@ pub struct SendSubagentMessageInput {
     pub subagent_id: String,
     /// Text to send to the subagent.
     pub text: String,
-    /// Delivery operation; omitted means `queue`.
+    /// How you mean the message; omitted means `queue`. Recorded and shown on
+    /// the message's row — it does not change how the message lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<SendSubagentMessageDelivery>,
 }
@@ -187,8 +189,23 @@ impl crate::types::tool_metadata::ToolMetadata for SendSubagentMessageTool {
         ToolNamespace::FuigoBuild
     }
 
+    /// INVARIANT: this text may promise the model only what the engine
+    /// implements. Fuigo has ONE delivery for all three classes. The class is
+    /// carried as far as authorization (`fuigo-shell`
+    /// `session/message_delivery.rs` and `agent/subagent/child_runtime.rs`
+    /// are the only readers of `ActiveAgentMessageOperation`) and is never
+    /// routed on: `admit_parent_agent_message`
+    /// (`session/acp_session_impl/parent_message.rs`) commits every class
+    /// through `commit_queued_delivery`, `promote_parent_agent_messages`
+    /// then lifts every parent-agent row into the running turn at the next
+    /// safe point, and the commit raises `ParentMessageSignal`, which
+    /// interrupts an in-flight `get_task_output` wait. Upstream's
+    /// `ParentInterjectSignal` / `order_for_delivery` ordering is not ported.
+    /// If the classes are ever made to differ, rewrite this text in the same
+    /// commit: `tool_description_promises_only_the_delivery_the_engine_implements`
+    /// pins the pair.
     fn description_template(&self) -> &str {
-        "Send a follow-up message to a subagent owned by this session. An active subagent receives it as a message; an eligible completed subagent (not cancelled, not workflow-owned) resumes with the same identity and runs the text as its next turn, reporting like a background completion. For an active target, `delivery` selects how the message lands: `queue` (default) waits as a later turn; `steer` joins the current turn at its next safe point; `interject` is urgent — it is delivered ahead of pending steers at the earliest safe point and interrupts a subagent blocked waiting on background work."
+        "Send a follow-up message to a subagent owned by this session. An active subagent receives it as a message; an eligible completed subagent (not cancelled, not workflow-owned) resumes with the same identity and runs the text as its next turn, reporting like a background completion. `delivery` (`queue` by default, `steer`, `interject`) records how you mean the message and is named on its row in the transcript; it does not change how the message lands. Every class lands the same way here: an active subagent's message joins the turn it is running at that turn's next safe point, interrupting it if it is blocked waiting on background work, and starts a turn of its own if the subagent is idle. Do not pick a class expecting a different arrival order or a different priority."
     }
 }
 
