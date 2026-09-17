@@ -2278,6 +2278,28 @@ fn render_row(
             }
         }
     }
+
+    // Terminal theme (Reset band slots): the selection/hover cue is reverse video over the content
+    // lines; `bg_highlight`/`bg_hover` paint nothing there. RGB themes keep their baked band.
+    if theme.is_bandless() {
+        let hovered = state.hovered_row.as_ref().is_some_and(|h| *h == row.id);
+        // Skip while renaming (editable line), like the narrow path.
+        if (selected || hovered) && !renaming {
+            let content = Rect {
+                x: rect.x,
+                y: rect.y + row_content_offset(rect.height, row),
+                width: rect.width,
+                height: row_content_height(row).min(rect.height),
+            };
+            // Normalize fgs first: colored glyphs (the state symbol, the `Pending:` badge) would
+            // invert into colored background patches; on the band they take the text's default fg.
+            crate::render::color::force_area_fg(buf, content, Color::Reset);
+            buf.set_style(
+                content,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
+        }
+    }
 }
 
 fn render_narrow_rows(
@@ -2477,6 +2499,15 @@ fn render_narrow_rows(
                     .row_delete_rects
                     .push((row.id.clone(), Rect::new(dx, y, delete_w, 1)));
             }
+        }
+        // Terminal theme (Reset band slots): same uniform reverse-video cue as the wide rows.
+        // Skip while renaming (editable line).
+        if theme.is_bandless() && (selected || hovered) && !renaming {
+            crate::render::color::force_area_fg(buf, line_rect, Color::Reset);
+            buf.set_style(
+                line_rect,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
         }
         if !row.is_more_placeholder {
             state.row_rects.push((row.id.clone(), line_rect));
@@ -2944,7 +2975,9 @@ fn render_slash_dropdown(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3067,7 +3100,9 @@ fn render_file_search_dropdown_for(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);

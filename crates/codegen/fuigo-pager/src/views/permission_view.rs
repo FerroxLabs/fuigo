@@ -725,7 +725,12 @@ fn render_pattern_editor_line(
     let start = (cursor_idx + 1).saturating_sub(window);
 
     let text_style = Style::default().fg(theme.text_primary);
-    let caret_style = Style::default().fg(theme.bg_light).bg(theme.accent_user);
+    // Accent-colored block on RGB themes; reverse video on the bandless palette, whose `Reset` accent would paint no block at all.
+    let caret_style = if theme.is_bandless() {
+        theme.block_cursor_over(theme.bg_light)
+    } else {
+        Style::default().fg(theme.bg_light).bg(theme.accent_user)
+    };
 
     let end = (start + window).min(chars.len());
     let mut col: u16 = 0;

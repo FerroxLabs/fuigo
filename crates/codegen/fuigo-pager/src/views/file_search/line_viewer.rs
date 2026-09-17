@@ -1393,11 +1393,16 @@ fn build_shortcut_button<'a>(
     } else {
         theme.bg_base
     };
-    let key_style = Style::default()
+    let mut key_style = Style::default()
         .fg(theme.text_primary)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(theme.gray).bg(bg);
+    let mut label_style = Style::default().fg(theme.gray).bg(bg);
+    // Terminal theme (Reset band slots): the bg_highlight hover underlay is invisible — reverse video carries the cue, as in render_modal_shortcuts.
+    if hovered && theme.is_bandless() {
+        key_style = key_style.add_modifier(Modifier::REVERSED);
+        label_style = label_style.add_modifier(Modifier::REVERSED);
+    }
     vec![
         Span::styled(key.to_string(), key_style),
         Span::styled(format!(" {rest}"), label_style),

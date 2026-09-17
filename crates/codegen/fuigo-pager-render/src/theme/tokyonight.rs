@@ -302,6 +302,16 @@ impl Theme {
         }
     }
 
+    /// Hairline fg for panel dividers/borders that RGB themes draw in the `bg_highlight` tone.
+    /// On the bandless palette that would be a full-brightness line, so decoration falls back to bright black (`gray_dim`).
+    pub const fn panel_border_fg(&self) -> Color {
+        if self.is_bandless() {
+            self.gray_dim
+        } else {
+            self.bg_highlight
+        }
+    }
+
     pub const fn bold(&self) -> Style {
         Style::new().add_modifier(Modifier::BOLD)
     }

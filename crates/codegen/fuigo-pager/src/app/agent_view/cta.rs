@@ -210,7 +210,8 @@ impl AgentView {
         let connect_x = area.x + area.width - right_w;
         let connect_w = connect_label.width() as u16 + hint_w;
         let connect_style = if self.plugin_cta.hit_connect.hovered {
-            Style::default().fg(theme.link_fg).bg(theme.bg_hover)
+            // hover_overlay: the bg_hover band on RGB, reverse video on the bandless terminal palette (bg_hover is Reset there).
+            theme.hover_overlay().fg(theme.link_fg)
         } else {
             Style::default().fg(theme.text_secondary)
         };
@@ -233,7 +234,7 @@ impl AgentView {
 
         let dismiss_x = connect_x + connect_w + 1;
         let dismiss_style = if self.plugin_cta.hit_dismiss.hovered {
-            Style::default().fg(theme.text_secondary).bg(theme.bg_hover)
+            theme.hover_overlay().fg(theme.text_secondary)
         } else {
             Style::default().fg(theme.gray)
         };
@@ -979,6 +980,41 @@ mod plugin_cta_notify_tests {
             let cell = buf.cell((x, 0)).unwrap();
             assert_eq!(cell.fg, theme.link_fg, "col {x}");
             assert_eq!(cell.bg, theme.bg_hover, "col {x}");
+        }
+    }
+
+    /// Bandless palette: `bg_hover` is `Reset`, so a `.bg(theme.bg_hover)` hover paints no cue at
+    /// all and the hovered button is indistinguishable from the unhovered one. `hover_overlay()`
+    /// carries reverse video there instead.
+    #[test]
+    fn hovered_cta_buttons_reverse_on_the_terminal_palette() {
+        use crate::app::agent_view::CtaPhase;
+        use ratatui::style::Modifier;
+        let theme = crate::theme::Theme::terminal();
+        assert!(theme.is_bandless(), "the fixture must be the bandless palette");
+
+        let mut agent = make_agent();
+        agent.plugin_cta.phase = CtaPhase::Matched {
+            plugin_relative_path: "plugins/figma".into(),
+            name: "figma".into(),
+        };
+        agent.plugin_cta.hit_connect.hovered = true;
+        agent.plugin_cta.hit_dismiss.hovered = true;
+        let area = ratatui::layout::Rect::new(0, 0, 60, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        agent.draw_plugin_cta(&mut buf, area, &theme);
+
+        for (label, rect) in [
+            ("connect", agent.plugin_cta.hit_connect.rect.unwrap()),
+            ("dismiss", agent.plugin_cta.hit_dismiss.rect.unwrap()),
+        ] {
+            for x in rect.x..rect.x + rect.width {
+                let cell = buf.cell((x, 0)).unwrap();
+                assert!(
+                    cell.modifier.contains(Modifier::REVERSED),
+                    "{label} col {x}: hover must reverse, got {cell:?}"
+                );
+            }
         }
     }
 

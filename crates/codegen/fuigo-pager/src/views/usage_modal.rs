@@ -1010,7 +1010,7 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
             let value_idx = lines.len();
             let hovered = state.hovered_copy_line == Some(value_idx);
             let label_style = if hovered {
-                theme.muted().bg(theme.bg_hover)
+                theme.muted().patch(theme.hover_overlay())
             } else {
                 theme.muted()
             };
@@ -1049,7 +1049,7 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
 fn copy_value_style(theme: &Theme, hovered: bool) -> Style {
     let mut style = Style::default().fg(theme.text_primary);
     if hovered {
-        style = style.bg(theme.bg_hover);
+        style = style.patch(theme.hover_overlay());
     }
     style
 }

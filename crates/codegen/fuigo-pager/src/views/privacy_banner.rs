@@ -250,12 +250,12 @@ pub(crate) fn render(
         height: 1,
     };
     let opt_out_style = if hovered(opt_out_rect) {
-        Style::default().fg(theme.text_primary).bg(theme.bg_hover)
+        theme.hover_overlay().fg(theme.text_primary)
     } else {
         Style::default().fg(theme.gray_bright)
     };
     let opt_in_style = if hovered(opt_in_rect) {
-        Style::default().fg(theme.link_fg).bg(theme.bg_hover)
+        theme.hover_overlay().fg(theme.link_fg)
     } else {
         Style::default().fg(theme.text_primary)
     };

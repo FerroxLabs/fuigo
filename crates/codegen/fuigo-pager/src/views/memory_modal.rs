@@ -511,7 +511,7 @@ fn render_file_list(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, 
         if cursor_x < area.x + area.width
             && let Some(cell) = buf.cell_mut((cursor_x, search_y))
         {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
 
@@ -617,6 +617,11 @@ fn render_file_list(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, 
                         meta_w,
                     );
                 }
+            }
+
+            // Terminal theme (Reset bands): reverse video; no-op on RGB.
+            if is_selected {
+                buf.set_style(row_rect, theme.selection_overlay());
             }
         }
     }
