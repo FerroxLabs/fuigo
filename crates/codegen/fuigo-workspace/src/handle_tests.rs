@@ -6372,16 +6372,14 @@ async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
-    // Twenty seconds: the smallest deadline that still carves a FULL probe window out, so a
-    // transport-blind budget leaves stdio `20 - DISCOVER_PROBE_TIMEOUT_SECS` = 10 s of
-    // `initialize` against the 20 s v1.0.19 gave it.
-    let discovery_timeout = std::time::Duration::from_secs(20);
+    // Eight seconds, kept short so this test does not distort the rest of the lib suite's
+    // scheduling. A transport-blind budget still halves stdio's window: deadlines under
+    // `2 * DISCOVER_PROBE_TIMEOUT_SECS` split evenly, so stdio is handed 4 s of `initialize`
+    // against the 8 s v1.0.19 gave it.
+    let discovery_timeout = std::time::Duration::from_secs(8);
     let blind_budget =
         fuigo_mcp::servers::McpClient::max_startup_within_deadline(discovery_timeout.as_secs());
-    assert_eq!(
-        blind_budget, 10,
-        "premise: the probe reservation is visible"
-    );
+    assert_eq!(blind_budget, 4, "premise: the probe reservation is visible");
 
     let factory = Arc::new(TestSessionContextFactory::new());
     let mut config =
@@ -6432,10 +6430,10 @@ async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
         "a server that never answers `initialize` cannot start"
     );
     assert!(
-        elapsed >= discovery_timeout - std::time::Duration::from_secs(5),
-        "the stdio server's `initialize` was cut off after {elapsed:?}: it was handed \
-         `deadline - DISCOVER_PROBE_TIMEOUT_SECS` ({blind_budget}s) for a probe phase stdio \
-         never runs, instead of the whole {discovery_timeout:?} deadline",
+        elapsed >= discovery_timeout - std::time::Duration::from_secs(2),
+        "the stdio server's `initialize` was cut off after {elapsed:?}: it was handed the \
+         PROBING split of the deadline ({blind_budget}s) — a reservation for a phase stdio \
+         never runs — instead of the whole {discovery_timeout:?} deadline",
     );
     drive.await.unwrap().expect("the drive must finish");
 }
@@ -6443,21 +6441,22 @@ async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
 ///
 /// This is what the per-server sizing is for, and the quantity it has to fit is the whole
 /// `ensure_initialized` worst case, not one attempt: a plain-HTTP server that fails its first
-/// `initialize` short of the window gets a protocol-version fallback on a fresh transport, for
-/// `2 * deadline - DISCOVER_PROBE_TIMEOUT_SECS` against a `deadline`-long drive. The drive then
-/// cancels mid-retry and every such server is reported as the generic
+/// `initialize` short of the window gets a protocol-version fallback on a fresh transport: at
+/// the shipped 30 s deadline that is probe 10 + startup 20 + a second startup 20 = 50 s against
+/// a 30 s drive. The drive then cancels mid-retry and every such server is reported as the
+/// generic
 /// "MCP discovery timed out after …" — precisely the failure the sizing exists to prevent.
 /// The fix is not to shrink the first attempt (that regresses the same class as the stdio case
 /// above) but to bound the RETRY by the deadline's remainder.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() {
-    // 12 s deadline: probing transports get startup 6, probe 6. The fake then burns the probe
-    // phase (6 s), rejects `initialize` #0 at 4 s — a `HandshakeFailed`, which is what fires the
-    // fallback — and hangs `initialize` #1 forever. Unclamped, that retry runs to 16 s.
-    let discovery_timeout = std::time::Duration::from_secs(12);
+    // 8 s deadline: probing transports get startup 4, probe 4. The fake then burns the probe
+    // phase (4 s), rejects `initialize` #0 at 2 s — a `HandshakeFailed`, which is what fires the
+    // fallback — and hangs `initialize` #1 forever. Unclamped, that retry runs to 10 s.
+    let discovery_timeout = std::time::Duration::from_secs(8);
     let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
         swallow_discover: true,
-        init_reject_after_ms: Some(4_000),
+        init_reject_after_ms: Some(2_000),
         init_hang_from: Some(1),
         ..Default::default()
     })
