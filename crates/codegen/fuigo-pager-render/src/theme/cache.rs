@@ -27,6 +27,19 @@ static AUTO_MODE: AtomicBool = AtomicBool::new(false);
 /// Whether the theme is locked to `Theme::terminal_default` for the whole session (minimal mode, no theming).
 static TERMINAL_NATIVE_LOCK: AtomicBool = AtomicBool::new(false);
 
+/// The `terminal` theme rollout gate (`[features] terminal_theme`, `FUIGO_TERMINAL_THEME`).
+///
+/// Fail-closed in production: off until `set_terminal_theme_enabled` seeds it from the resolved
+/// feature flag, so an early-startup path that never seeds it behaves like the shipped default and
+/// `theme = "terminal"` falls back like any unknown name.
+///
+/// On in test builds. The gate is a process global that no test-local fixture can scope, so a
+/// default of `false` would make every terminal-theme assertion in the suite depend on whether some
+/// other test had already called `reset_for_test`. The gated-off behaviour is pinned instead by the
+/// tests that flip it explicitly while holding [`TEST_LOCK`].
+static TERMINAL_THEME_ENABLED: AtomicBool =
+    AtomicBool::new(cfg!(any(test, feature = "test-support")));
+
 /// Decode the u8 stored in `CURRENT` back to a `ThemeKind`.
 /// Falls back to `FuigoNight` for an out-of-range byte, which `set` can't produce but a future variant missing from this match could.
 fn theme_kind_from_u8(byte: u8) -> ThemeKind {
@@ -109,6 +122,21 @@ pub fn terminal_native_active() -> bool {
 pub fn set_terminal_native_lock(locked: bool) {
     TERMINAL_NATIVE_LOCK.store(locked, Ordering::Relaxed);
     sync_markdown_polarity();
+}
+
+/// Read the `terminal` theme rollout gate (see [`TERMINAL_THEME_ENABLED`]).
+#[must_use]
+pub fn terminal_theme_enabled() -> bool {
+    TERMINAL_THEME_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Seed the `terminal` theme rollout gate from the resolved feature flag.
+/// A flip re-reads the auto dark/light overrides: they were parsed under the old gate, so a cached `Terminal` must neither survive the kill switch nor stay dropped after a reveal.
+pub fn set_terminal_theme_enabled(enabled: bool) {
+    let was = TERMINAL_THEME_ENABLED.swap(enabled, Ordering::Relaxed);
+    if was != enabled {
+        invalidate_auto_theme_config();
+    }
 }
 
 /// Terminal-native: cap at ANSI-16 and use the dual-polarity accent map. Night pastels otherwise collapse to White and vanish on light profiles.
@@ -285,6 +313,11 @@ pub fn reset_for_test() {
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);
+    // The test-build default; a prior gating test may have turned it off.
+    set_terminal_theme_enabled(true);
+    // Deterministic level regardless of the ambient environment, and regardless of what a prior
+    // color-level test pinned (see `color_support::set_level_for_test`).
+    super::color_support::set_level_for_test(super::color_support::ColorLevel::TrueColor);
     *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -309,9 +342,11 @@ pub fn test_lock() -> &'static Mutex<()> {
 pub fn pin_theme() -> std::sync::MutexGuard<'static, ()> {
     let guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     set(ThemeKind::FuigoNight);
-    // Color level is a write-once `OnceLock`; tests run without a TTY so it resolves to `TrueColor` anyway
-    // Pin it explicitly (best-effort: ignore the already-initialized `Err`) so the measure path that reads it stays fixed
-    let _ = super::color_support::set(super::color_support::ColorLevel::TrueColor);
+    // Tests run without a TTY so detection resolves to `TrueColor` anyway; pin it explicitly so the
+    // measure path that reads it stays fixed even after a test that forced a lower level.
+    super::color_support::set_level_for_test(super::color_support::ColorLevel::TrueColor);
+    // A prior gating test may have turned the rollout gate off.
+    set_terminal_theme_enabled(true);
     guard
 }
 
@@ -412,6 +447,52 @@ mod tests {
             assert!(
                 !fuigo_markdown::polarity_safe_syntax(),
                 "switching away must restore the RGB syntax palette"
+            );
+        });
+    }
+
+    /// The `is_terminal_native()` early return in `Theme::current()` is what keeps the transparent
+    /// palette transparent on a 16-color terminal (`TERM=xterm`, `TERM=ansi`, `FUIGO_FORCE_COLOR_LEVEL=basic`).
+    /// Delete it and `ansi16_chrome_overrides` runs on the way out: every band slot
+    /// (`bg_light`/`bg_highlight`/`bg_hover`/`bg_visual`) turns `DarkGray`, the scrollbar, paste and
+    /// code backgrounds turn `Black`, and the `Reset` foregrounds pin to named ANSI — exactly the
+    /// opaque chrome the theme exists to avoid. The sibling test above never reaches the adaptation
+    /// because the runner's level is TrueColor and the overrides only fire at Basic.
+    #[test]
+    fn terminal_theme_stays_bandless_at_basic_color() {
+        with_test_env(|| {
+            super::super::color_support::set_level_for_test(
+                super::super::color_support::ColorLevel::Basic,
+            );
+            set(ThemeKind::Terminal);
+            assert_eq!(
+                super::super::color_support::detect(),
+                super::super::color_support::ColorLevel::Basic,
+                "the override must reach detection or the adaptation never fires"
+            );
+
+            let theme = super::super::Theme::current();
+            assert_eq!(
+                theme,
+                super::super::Theme::terminal(),
+                "ANSI16 chrome overrides must not touch the terminal palette"
+            );
+            assert!(
+                theme.is_bandless(),
+                "every band slot must still be `Reset`; `DarkGray` means the overrides ran"
+            );
+            assert_eq!(
+                theme.scrollbar_bg,
+                ratatui::style::Color::Reset,
+                "the scrollbar track must still defer to the canvas"
+            );
+
+            // A real RGB theme at the same level does take the overrides: the guard is specific, not a no-op.
+            set(ThemeKind::FuigoNight);
+            assert_eq!(
+                super::super::Theme::current().bg_base,
+                ratatui::style::Color::Black,
+                "the ANSI16 chrome overrides must still fire for RGB themes"
             );
         });
     }
@@ -547,6 +628,42 @@ mod tests {
             set_test_auto_config(AutoThemeConfig::default());
             let config2 = auto_theme_config();
             assert!(config2.dark_theme.is_none());
+        });
+    }
+
+    /// A gate flip drops the cached auto dark/light overrides (parsed under the old gate); same-value seeding keeps the cache.
+    #[test]
+    fn terminal_gate_flip_invalidates_auto_theme_config() {
+        with_test_env(|| {
+            set_test_auto_config(AutoThemeConfig {
+                dark_theme: Some(ThemeKind::Terminal),
+                light_theme: None,
+            });
+            set_terminal_theme_enabled(true);
+            assert!(
+                AUTO_THEME_CONFIG
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some(),
+                "same-value seed keeps the cache"
+            );
+            set_terminal_theme_enabled(false);
+            assert!(
+                AUTO_THEME_CONFIG
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none(),
+                "kill switch drops the cached Terminal override"
+            );
+            set_test_auto_config(AutoThemeConfig::default());
+            set_terminal_theme_enabled(true);
+            assert!(
+                AUTO_THEME_CONFIG
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_none(),
+                "reveal re-reads so a dropped Terminal comes back"
+            );
         });
     }
 

@@ -224,6 +224,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `features.subagent_worktree_snapshot` | `boolean` | `pin` | `user` | Enable or disable `subagent_worktree_snapshot`. Default false. Also `FUIGO_SUBAGENT_WORKTREE_SNAPSHOT`. |
 | `features.support_permission` | `boolean` | `yes` | `user` | Allow the agent to ask permission for tool executions. |
 | `features.telemetry` | `boolean / session_metrics / off` | `pin` | `user` | Product telemetry mode. Enterprise default is off. |
+| `features.terminal_theme` | `boolean` | `pin` | `user` | Reveal the transparent `terminal` theme in `/theme` and the settings chooser. Default false. Also `FUIGO_TERMINAL_THEME`. |
 | `features.title_refresh` | `boolean` | `pin` | `user` | Early-session auto-title refresh. Pin this in requirements to beat FUIGO_TITLE_REFRESH. |
 | `features.turn_summary` | `boolean` | `pin` | `user` | Enable or disable `turn_summary`. Default true. Also `FUIGO_TURN_SUMMARY`. |
 | `features.two_pass_compaction` | `boolean` | `pin` | `user` | Enable or disable `two_pass_compaction`. Default true. Also `FUIGO_TWO_PASS_COMPACTION`. |
