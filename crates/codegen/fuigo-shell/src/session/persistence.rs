@@ -790,7 +790,8 @@ fn most_recent_local_summary_for_cwd_in_view(
             }
             Err(error) => return Err(error),
         };
-        if summary.is_hidden() || !selection.admits(&summary) {
+        if summary.is_hidden() || summary.is_unused_optimistic_husk() || !selection.admits(&summary)
+        {
             continue;
         }
         if best.as_ref().is_none_or(|current| {
@@ -1202,7 +1203,16 @@ impl Summary {
     /// Worktree stamps do not exempt. `session_kind == "fork"` or
     /// `parent_session_id` / `forked_at` do (worktree forks keep kind `worktree`).
     pub fn is_unused_optimistic_husk(&self) -> bool {
-        false
+        if matches!(self.session_kind.as_deref(), Some("fork"))
+            || self
+                .parent_session_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+            || self.forked_at.is_some()
+        {
+            return false;
+        }
+        self.num_messages == 0 && self.display_title().trim().is_empty()
     }
 
     /// [`Self::display_title`] as an `Option`, `None` when blank.

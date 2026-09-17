@@ -752,7 +752,7 @@ async fn most_recent_session_id(
     let summaries = fuigo_shell::session::persistence::list_summaries(Some(cwd)).await?;
     let first = summaries
         .iter()
-        .find(|summary| selection.admits(summary))
+        .find(|summary| selection.admits(summary) && !summary.is_unused_optimistic_husk())
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "No session found for current directory. \
