@@ -1,6 +1,6 @@
 use super::{
     resolve_local_session_any_cwd_in_root, resolve_local_session_ids_any_cwd_in_root,
-    session_exists_for_cwd_in_root, session_exists_in_root,
+    session_exists_for_cwd_in_root, session_exists_in_root, storage_view_loads,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -114,6 +114,9 @@ fn resolve_local_session_any_cwd_skips_stub_and_finds_real() {
     );
 }
 
+/// The batch resolver must load the storage view ONCE for the whole batch, not once per id:
+/// loading a [`RelocationView`] walks the entire local session tree, so a per-id loop is O(ids x tree).
+/// The load count is measured, not assumed, and the per-id path is measured alongside it as the control.
 #[test]
 fn batch_resolver_loads_one_view_and_keeps_only_persisted_sessions() {
     let tmp = TempDir::new().unwrap();
@@ -126,13 +129,36 @@ fn batch_resolver_loads_one_view_and_keeps_only_persisted_sessions() {
     fs::create_dir_all(&stub).unwrap();
     fs::write(stub.join("image.png"), b"png").unwrap();
 
-    let resolved =
-        resolve_local_session_ids_any_cwd_in_root(&["persisted", "stub", "missing"], &root)
-            .unwrap();
+    let ids = ["persisted", "stub", "missing"];
+
+    let before = storage_view_loads();
+    let resolved = resolve_local_session_ids_any_cwd_in_root(&ids, &root).unwrap();
+    let batch_loads = storage_view_loads() - before;
 
     assert_eq!(
         resolved,
         std::collections::HashSet::from(["persisted".into()])
+    );
+    assert_eq!(
+        batch_loads, 1,
+        "the batch resolver must load exactly one storage view for {} ids, not one per id",
+        ids.len()
+    );
+
+    // Control: the per-id API this batch API exists to replace pays one view load per id.
+    let before = storage_view_loads();
+    for id in ids {
+        let _ = resolve_local_session_any_cwd_in_root(id, &root).unwrap();
+    }
+    let loop_loads = storage_view_loads() - before;
+    assert_eq!(
+        loop_loads,
+        ids.len(),
+        "control: the per-id resolver loads one view per id",
+    );
+    assert!(
+        batch_loads < loop_loads,
+        "the batch resolver must cost strictly fewer view loads than the per-id loop ({batch_loads} vs {loop_loads})",
     );
 }
 
