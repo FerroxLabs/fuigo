@@ -147,28 +147,85 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
                 );
             }
 
-            let persisted_texts = std::iter::from_fn(|| persistence_rx.try_recv().ok())
-                .filter_map(|message| match message {
-                    PersistenceMsg::Update(SessionUpdate::Acp(notification)) => {
-                        match &notification.update {
-                            acp::SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
-                                acp::ContentBlock::Text(text) => Some(text.text.clone()),
-                                _ => None,
-                            },
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+            let persisted = persisted_user_text_chunks(&mut persistence_rx);
+            let expected = |typed: &str| PersistedUserText {
+                text: format_interjection(typed.to_string()),
+                display_text: Some(typed.to_string()),
+                interjection: true,
+            };
             assert_eq!(
-                persisted_texts,
+                persisted,
                 [
-                    format_interjection("first steer".to_string()),
-                    format_interjection("second steer".to_string()),
-                    format_interjection("third steer".to_string()),
+                    expected("first steer"),
+                    expected("second steer"),
+                    expected("third steer")
                 ],
-                "the drain must preserve replay formatting and FIFO order"
+                "the drain must persist the model-facing frame, the typed displayText, and the interjection flag, in FIFO order"
+            );
+        })
+        .await;
+}
+
+/// The persisted text block of a user chunk: wire text, `displayText`, and the `interjection` chunk flag.
+#[derive(Debug, PartialEq)]
+struct PersistedUserText {
+    text: String,
+    display_text: Option<String>,
+    interjection: bool,
+}
+
+fn persisted_user_text_chunks(
+    persistence_rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+) -> Vec<PersistedUserText> {
+    std::iter::from_fn(|| persistence_rx.try_recv().ok())
+        .filter_map(|message| match message {
+            PersistenceMsg::Update(SessionUpdate::Acp(notification)) => {
+                match &notification.update {
+                    acp::SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                        acp::ContentBlock::Text(text) => Some(PersistedUserText {
+                            text: text.text.clone(),
+                            display_text: text
+                                .meta
+                                .as_ref()
+                                .and_then(|m| m.get("displayText"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            interjection: crate::session::storage::is_interjection_chunk(chunk),
+                        }),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The permission-panel followup path shares the persist helper but is a plain synthetic user message:
+/// no `interjection` flag, no `displayText`, so replay numbers it like any prompt and the rebuilders leave it untagged.
+#[tokio::test]
+async fn followup_message_persists_without_interjection_flag() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            actor
+                .add_followup_message_as_user_turn("use the staging bucket")
+                .await;
+
+            assert_eq!(
+                persisted_user_text_chunks(&mut persistence_rx),
+                [PersistedUserText {
+                    text: "use the staging bucket".to_string(),
+                    display_text: None,
+                    interjection: false,
+                }]
             );
         })
         .await;
