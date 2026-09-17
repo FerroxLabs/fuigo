@@ -1385,6 +1385,11 @@ fn into_registration_validates_qualified_name() {
         .expect("should register");
     assert_eq!(registration.name, "linear__list_issues");
 
+    let digit_tool = make_mcp_tool("auth", "2fa_enable")
+        .into_registration()
+        .expect("digit-leading tool segments are catalog-valid");
+    assert_eq!(digit_tool.name, "auth__2fa_enable");
+
     for (server, tool) in [
         ("server__part", "tool"),
         ("server", "tool__part"),
@@ -1393,32 +1398,27 @@ fn into_registration_validates_qualified_name() {
         ("foo_", "_bar"),
         ("", "tool"),
         ("server", ""),
+        ("123", "lookup"),
+        ("server:scope", "tool"),
     ] {
         assert!(
-            make_mcp_tool(server, tool).into_registration().is_none(),
+            make_mcp_tool(server, tool).into_registration().is_err(),
             "unexpectedly registered {server:?} and {tool:?}"
         );
     }
 }
 
 #[test]
-fn into_registration_preserves_provider_name_policy() {
-    for qualified in ["123__lookup", "server:scope__tool"] {
-        assert!(parse_mcp_qualified_name(qualified).is_some());
-        let (server, tool) = qualified.split_once("__").unwrap();
-        assert!(make_mcp_tool(server, tool).into_registration().is_none());
-    }
-
-    let server_61 = format!("a{}", "b".repeat(60));
+fn into_registration_admits_qualified_names_longer_than_provider_64() {
     let server_62 = format!("a{}", "b".repeat(61));
-    let valid_64 = format!("{server_61}__b");
-    let invalid_65 = format!("{server_62}__b");
-    assert_eq!(valid_64.len(), 64);
-    assert_eq!(invalid_65.len(), 65);
-    assert!(parse_mcp_qualified_name(&valid_64).is_some());
-    assert!(parse_mcp_qualified_name(&invalid_65).is_some());
-    assert!(make_mcp_tool(&server_61, "b").into_registration().is_some());
-    assert!(make_mcp_tool(&server_62, "b").into_registration().is_none());
+    let qualified = format!("{server_62}__b");
+    assert_eq!(qualified.len(), 65);
+    assert!(parse_mcp_qualified_name(&qualified).is_some());
+    assert!(validate_tool_name(&qualified).is_err());
+    let registration = make_mcp_tool(&server_62, "b")
+        .into_registration()
+        .expect("qualified catalog keys may exceed the 64-char provider budget");
+    assert_eq!(registration.name, qualified);
 }
 
 #[test]
@@ -4633,56 +4633,16 @@ async fn grok_agent_id_header_rejects_invalid_session_id() {
     assert!(error.to_string().contains("invalid X-Grok-Agent-ID value"));
 }
 
-mod tool_name_length_projection {
+mod tool_name_admission {
     use super::*;
 
     const SERVER: &str = "io-github-taylorwilsdon-google-workspace-mcp";
 
+    /// A reverse-DNS server plus a descriptive tool name (79 chars qualified) is admitted
+    /// verbatim: the registry key, the `Tool::id` and the registration name all agree on the
+    /// full `server__tool` key, and nothing is shortened.
     #[test]
-    fn identity_for_a_name_that_fits() {
-        assert_eq!(
-            project_qualified_tool_name("browser", "navigate").as_deref(),
-            Some("browser__navigate")
-        );
-        let exactly_64 = "x".repeat(MAX_TOOL_NAME_LEN - SERVER.len() - 2);
-        let full = project_qualified_tool_name(SERVER, &exactly_64).unwrap();
-        assert_eq!(full.len(), MAX_TOOL_NAME_LEN);
-        assert_eq!(full, format!("{SERVER}__{exactly_64}"));
-    }
-
-    #[test]
-    fn shortens_the_tool_segment_to_the_provider_limit_and_keeps_the_server() {
-        let name =
-            project_qualified_tool_name(SERVER, "batch_modify_gmail_message_labels").unwrap();
-        assert!(name.len() <= MAX_TOOL_NAME_LEN, "{name}");
-        // 44-char server + `__` + 7-char digest leaves an 11-char stem.
-        assert_eq!(name, format!("{SERVER}__batch_modif-580aef"));
-        assert_eq!(name.len(), MAX_TOOL_NAME_LEN);
-        assert!(validate_tool_name(&name).is_ok(), "{name}");
-        let (_id, server, _tool) =
-            parse_mcp_qualified_name(&name).expect("still parses as server__tool");
-        assert_eq!(server, SERVER);
-    }
-
-    #[test]
-    fn siblings_sharing_a_long_prefix_stay_distinct_and_stable() {
-        let a = project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v1").unwrap();
-        let b = project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v2").unwrap();
-        assert_ne!(a, b);
-        assert_eq!(
-            a,
-            project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v1").unwrap()
-        );
-    }
-
-    #[test]
-    fn refuses_when_the_server_leaves_no_room() {
-        let huge_server = "s".repeat(60);
-        assert_eq!(project_qualified_tool_name(&huge_server, "tool"), None);
-    }
-
-    #[test]
-    fn registration_and_tool_id_agree_on_the_projected_name() {
+    fn registration_and_tool_id_agree_on_the_qualified_name() {
         let tool = McpTool::new(
             "batch_modify_gmail_message_labels".to_string(),
             "desc".to_string(),
@@ -4691,13 +4651,19 @@ mod tool_name_length_projection {
             serde_json::json!({"type": "object"}),
             None,
         );
-        let projected = tool.qualified_name().unwrap();
+        let qualified = format!("{SERVER}__batch_modify_gmail_message_labels");
+        assert_eq!(qualified.len(), 79);
+        assert!(validate_tool_name(&qualified).is_err());
         let erased = McpErasedTool { tool: tool.clone() };
-        assert_eq!(fuigo_tool_runtime::Tool::id(&erased).as_str(), projected);
+        assert_eq!(fuigo_tool_runtime::Tool::id(&erased).as_str(), qualified);
         let registration = tool
             .into_registration()
-            .expect("registers under the projected name");
-        assert_eq!(registration.name, projected);
+            .expect("registers under the full qualified name");
+        assert_eq!(registration.name, qualified);
+        let (_id, server, name) =
+            parse_mcp_qualified_name(&registration.name).expect("parses as server__tool");
+        assert_eq!(server, SERVER);
+        assert_eq!(name, "batch_modify_gmail_message_labels");
     }
 }
 
