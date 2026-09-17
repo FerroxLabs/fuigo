@@ -876,11 +876,8 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::InjectNotification { prompt_id, prompt_blocks, priority, source } => {
                             let is_turn_active = session
-                                .tool_context
-                                .is_turn_active
-                                .as_ref()
-                                .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                                .unwrap_or(false);
+                                .session_turn_active
+                                .load(std::sync::atomic::Ordering::SeqCst);
 
                             if is_turn_active && priority == NotificationPriority::Next {
                                 // Mid-turn and `Next` priority: push to the shared buffer for the turn loop's `inject_pending_monitor_events`
