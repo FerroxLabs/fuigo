@@ -50,7 +50,7 @@
 
     /// A live stop batch mid-turn used to be stashed for the turn marker; it now leaves nothing behind at all.
     #[test]
-    fn successful_stop_batch_mid_turn_neither_stashes_nor_renders() {
+    fn successful_stop_batch_mid_turn_leaves_nothing_behind() {
         let mut app = make_app_with_agent("sess-stop");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -65,7 +65,6 @@
         assert!(!affected);
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(agent.scrollback.len(), len_before);
-        assert!(agent.pending_stop_hooks.is_none(), "nothing is held for the marker");
     }
 
     #[test]
@@ -168,4 +167,47 @@
         );
         let agent = &app.agents[&AgentId(0)];
         assert_eq!(agent.scrollback.len(), len_before);
+    }
+
+    /// One batch carrying a deny AND a plain failure: the two are still treated differently.
+    /// The base suite pinned this mix in `blocked_wire_flag_maps_to_blocked_status`; after the
+    /// silent-success feature the reporting moved, but the split stays a per-run decision, not a
+    /// per-batch one. A batch-level "any deny silences the batch" rule passes both single-run
+    /// tests above and loses the failure line here.
+    #[test]
+    fn a_deny_beside_a_failure_silences_only_the_deny() {
+        let mut app = make_app_with_agent("sess-hooks");
+        let affected = handle_ext_notification(
+            &fuigo_hook_execution_notif_with_runs(
+                "sess-hooks",
+                "stop",
+                Some("pid-1"),
+                false,
+                vec![
+                    run(
+                        "global/gate",
+                        HookRunStatusDto::Failed {
+                            error: "blocked stop: run the tests".into(),
+                            elapsed_ms: 7,
+                            blocked: true,
+                        },
+                    ),
+                    run(
+                        "global/broken",
+                        HookRunStatusDto::Failed {
+                            error: "exit code 1".into(),
+                            elapsed_ms: 3,
+                            blocked: false,
+                        },
+                    ),
+                ],
+            ),
+            &mut app,
+        );
+        assert!(affected, "the failure line is new output, so the frame is dirty");
+        assert_eq!(
+            annotation_lines(&app.agents[&AgentId(0)].scrollback),
+            vec!["stop hook (global/broken) failed, ignored: exit code 1".to_string()],
+            "the failure gets its line; the deny beside it is still the shell's to report"
+        );
     }

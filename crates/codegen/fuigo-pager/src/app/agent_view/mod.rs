@@ -622,16 +622,6 @@ pub(crate) struct PendingCancelResend {
     /// Replayed so a resend still enables the shell's task-wake barrier.
     pub trigger: crate::app::actions::CancelTrigger,
 }
-/// Turn-end hook runs held for the live turn's marker. See [`AgentView::pending_stop_hooks`].
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PendingStopHooks {
-    /// The turn the stash belongs to; a stash that can't be matched to the
-    /// ending turn flushes standalone instead of attaching to its marker.
-    pub prompt_id: Option<String>,
-    /// `(event_name, runs)` per hook batch, in arrival order
-    /// (`stop_failure` before `stop` on error turns).
-    pub groups: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
-}
 /// Components for the deferred fork banner. Stored by
 /// `dispatch_fork_resolved` and formatted into the final banner text
 /// in `TaskResult::SessionLoaded` once the child's session id is known.
@@ -1030,9 +1020,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// Turn-end hook runs waiting for the turn's marker, which they race. Consumed or flushed
-    /// by `push_turn_terminal_marker`; dropped on every replay-window entry.
-    pub(crate) pending_stop_hooks: Option<PendingStopHooks>,
     /// Goal id of the most recently cleared goal, captured from the dropped
     /// state (the `cleared` event itself carries an empty id). Drops a late
     /// in-flight `GoalUpdated` that would otherwise resurrect the cleared
