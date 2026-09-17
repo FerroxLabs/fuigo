@@ -2219,8 +2219,10 @@ async fn read_parent_sampling_config_keeps_catalog_threshold_when_routing_slug_i
     assert_eq!(config.max_retries, Some(6));
     assert_eq!(config.rate_limit_retry_threshold, Some(6));
 }
+/// g-shell cd97cb2: the retry budget is inherited from the catalog entry for the routing slug without the parent's
+/// live config being primed first.
 #[tokio::test]
-async fn read_parent_sampling_config_keeps_catalog_threshold_when_routing_slug_is_also_key() {
+async fn read_parent_sampling_config_inherits_catalog_retry_budget_when_routing_slug_is_also_key() {
     let mut models = indexmap::IndexMap::new();
     let mut entry = test_model_entry("grok-4.5");
     entry.info.max_retries = Some(6);
