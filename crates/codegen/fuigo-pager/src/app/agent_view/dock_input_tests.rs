@@ -335,19 +335,28 @@ fn tab_cycles_scrollback_to_dock_to_prompt() {
 
 #[test]
 fn tab_from_dock_is_one_stop() {
-    let mut agent = dock_with_task();
+    let mut agent = make_agent();
     insert_running_subagent(&mut agent, "child-1");
+    agent
+        .session
+        .pending_prompts
+        .push_back(crate::app::agent::QueuedPrompt::plain(
+            1,
+            "queued",
+            crate::app::agent::QueueEntryKind::Prompt,
+        ));
+    agent.dock_shown = true;
+    agent.dock_on = true;
+    agent.dock_queued_expanded = false;
+    agent.active_pane = AgentPane::Dock;
     agent.dock_cursor = agent
         .dock_items()
         .iter()
-        .position(|item| *item == DockItem::Header(Section::Tasks))
-        .expect("tasks header");
+        .position(|item| *item == DockItem::Header(Section::Queued))
+        .expect("queued");
 
     let outcome = agent.handle_dock_key(&key(KeyCode::Tab, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::FocusPrompt)),
-        "Tab inside the dock must leave it, not walk to the next header: {outcome:?}"
-    );
+    assert!(matches!(outcome, InputOutcome::Action(Action::FocusPrompt)));
 
     let outcome = agent.handle_dock_key(&key(KeyCode::BackTab, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Changed));
@@ -356,6 +365,22 @@ fn tab_from_dock_is_one_stop() {
 
 #[test]
 fn tab_from_scrollback_skips_dock_when_hidden() {
+    let mut agent = dock_with_task();
+    agent.vim_mode = true;
+    agent.dock_shown = false;
+    agent.active_pane = AgentPane::Scrollback;
+    let registry = ActionRegistry::defaults();
+    let outcome = agent.handle_scrollback_key(&key(KeyCode::Tab, KeyModifiers::NONE), &registry);
+    assert!(
+        matches!(outcome, InputOutcome::Action(Action::FocusPrompt)),
+        "hidden dock stays out of the Tab cycle, got {outcome:?}"
+    );
+}
+
+/// Fuigo addition: the other half of the scrollback Tab guard. A dock that is
+/// painted but hidden with Ctrl+G must also stay out of the cycle.
+#[test]
+fn tab_from_scrollback_skips_dock_when_ctrl_g_hidden() {
     let mut agent = dock_with_task();
     agent.vim_mode = true;
     agent.dock_hidden = true;
@@ -418,26 +443,38 @@ fn painted_header_bg(agent: &AgentView, section: Section) -> Option<ratatui::sty
 #[test]
 fn clicking_a_section_header_clears_selection_after_collapse() {
     let mut agent = dock_with_task();
+    agent
+        .session
+        .pending_prompts
+        .push_back(crate::app::agent::QueuedPrompt::plain(
+            1,
+            "queued",
+            crate::app::agent::QueueEntryKind::Prompt,
+        ));
+    agent.dock_queued_expanded = true;
     agent.active_pane = AgentPane::Prompt;
     agent.pane_areas.dock = Rect::new(0, 4, 80, 8);
-    let tasks = Section::Tasks;
-    let y = agent.pane_areas.dock.y + header_row(&agent, tasks);
+    let queued = Section::Queued;
+    let y = agent.pane_areas.dock.y + header_row(&agent, queued);
 
     let outcome = agent.handle_mouse(&mouse(MouseEventKind::Down(MouseButton::Left), 5, y));
     assert!(matches!(outcome, InputOutcome::Changed));
-    assert!(!agent.dock_tasks_expanded);
+    assert!(!agent.dock_queued_expanded);
     assert_eq!(agent.active_pane, AgentPane::Prompt);
     assert!(!agent.dock_snapshot().focused);
 
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, 5, 0));
     let theme = crate::theme::Theme::tokyonight();
-    assert_ne!(painted_header_bg(&agent, tasks), Some(theme.bg_highlight));
+    assert_ne!(painted_header_bg(&agent, queued), Some(theme.bg_highlight));
+    assert_ne!(
+        painted_header_bg(&agent, queued),
+        Some(crate::views::dock::row_hover_bg(&theme))
+    );
 
-    // Clicking a collapsed header expands it and does focus the dock.
-    let y = agent.pane_areas.dock.y + header_row(&agent, tasks);
+    let y = agent.pane_areas.dock.y + header_row(&agent, queued);
     let outcome = agent.handle_mouse(&mouse(MouseEventKind::Down(MouseButton::Left), 5, y));
     assert!(matches!(outcome, InputOutcome::Changed));
-    assert!(agent.dock_tasks_expanded);
+    assert!(agent.dock_queued_expanded);
     assert_eq!(agent.active_pane, AgentPane::Dock);
     assert!(agent.dock_snapshot().focused);
 }
@@ -1175,12 +1212,30 @@ fn hover_follows_the_pointer_after_the_dock_relayouts() {
     let x = 5;
     let y = agent.pane_areas.dock.y + 1;
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, x, y));
-    assert_eq!(agent.dock_hovered, agent.dock_items().get(1).copied());
+    assert_eq!(
+        agent.dock_hovered,
+        Some(
+            agent
+                .dock_items()
+                .get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"))
+        )
+    );
 
     agent.dock_tasks_show_all = true;
     let dock = agent.pane_areas.dock;
     agent.sync_dock_hover_from_pointer(dock);
-    assert_eq!(agent.dock_hovered, agent.dock_items().get(1).copied());
+    assert_eq!(
+        agent.dock_hovered,
+        Some(
+            agent
+                .dock_items()
+                .get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"))
+        )
+    );
 }
 
 #[test]
@@ -1196,7 +1251,16 @@ fn hover_sync_hit_tests_against_the_current_frame_dock_rect() {
     // stale pane area.
     let current = Rect::new(0, 4, 80, MAX_DOCK_ROWS);
     agent.sync_dock_hover_from_pointer(current);
-    assert_eq!(agent.dock_hovered, agent.dock_items().get(1).copied());
+    assert_eq!(
+        agent.dock_hovered,
+        Some(
+            agent
+                .dock_items()
+                .get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"))
+        )
+    );
 
     let stale = agent.pane_areas.dock;
     agent.sync_dock_hover_from_pointer(stale);
@@ -1534,10 +1598,15 @@ fn reveal_does_not_shrink_a_floor_taller_dock_assignment() {
     let _ = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert!(agent.dock_tasks_show_all);
+    // Upstream asserts `pane_areas.dock.height >= assigned`, but only a draw
+    // writes `pane_areas` (and the draw path reads the `FUIGO_DOCK_V2` env gate,
+    // which these tests deliberately never set), so that compared the preset
+    // with itself and could not fail. Pin what the next frame will be asked
+    // for instead: the reveal's request must not fall below the assignment.
+    let asked = crate::views::dock::desired_height(&agent.dock_snapshot());
     assert!(
-        agent.pane_areas.dock.height >= assigned,
-        "reveal must not shrink a floor-taller assignment ({assigned} -> {})",
-        agent.pane_areas.dock.height
+        asked >= assigned,
+        "reveal must not shrink a floor-taller assignment ({assigned} -> {asked})"
     );
 }
 
