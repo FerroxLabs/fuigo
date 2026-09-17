@@ -2266,7 +2266,6 @@ pub(crate) async fn spawn_session_actor(
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
     let spawn_snapshot = crate::session::SpawnSnapshot {
         applied_tool_overrides: session.effective_tool_overrides(),
-        scheduler_background_loops,
     };
     let telemetry_ctx = fuigo_telemetry::session_ctx::TelemetryCtx::new(
         session.session_info.id.0.to_string(),
@@ -2333,6 +2332,7 @@ pub(crate) async fn spawn_session_actor(
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
             spawn_snapshot,
+            scheduler_background_loops,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
             origin_client: origin_client.clone(),

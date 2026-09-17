@@ -30,19 +30,13 @@ pub(crate) enum SessionLiveState {
     /// A load or resume is building the actor.
     Attaching,
 }
-/// `_meta` key carrying [`SpawnSnapshot::scheduler_background_loops`] on the `session/new` and `session/load` responses.
+/// `_meta` key carrying [`SessionHandle::scheduler_background_loops`] on the `session/new` and `session/load` responses.
 /// Defined here so the shell that publishes it and the clients that read it share one spelling.
 pub const SCHEDULER_BACKGROUND_LOOPS_META_KEY: &str = "fuigo/schedulerBackgroundLoops";
 /// Everything the `session/new` reply reads from session state; built before the actor task starts so the reply cannot wait on it.
 #[derive(Clone)]
 pub struct SpawnSnapshot {
     pub applied_tool_overrides: Option<fuigo_sampling_types::ToolOverrides>,
-    /// Whether this session's scheduled fires run as detached background subagents.
-    /// Copied from the value the spawn resolved for the session's [`AgentRebuildSpec`](crate::session::agent_rebuild::AgentRebuildSpec).
-    /// It is pinned for the session's whole life exactly like the fire side.
-    /// Published to clients on the `session/new` / `session/load` response.
-    /// Clients then describe the fires this session will actually get rather than re-resolving a setting that may have flipped since spawn.
-    pub scheduler_background_loops: bool,
 }
 /// Permission event receivers are returned separately from `spawn_session_actor` and should be stored/managed by the caller.
 #[derive(Clone)]
@@ -110,6 +104,12 @@ pub struct SessionHandle {
     /// Per-session tracking prevents cross-client contamination in leader mode where `MvpAgent.current_model_id` is shared mutable state.
     pub model_id: acp::ModelId,
     pub spawn_snapshot: SpawnSnapshot,
+    /// Whether this session's scheduled fires run as detached background subagents.
+    /// Copied from the value the spawn resolved for the session's [`AgentRebuildSpec`](crate::session::agent_rebuild::AgentRebuildSpec).
+    /// It is pinned for the session's whole life exactly like the fire side.
+    /// Published to clients on the `session/new` / `session/load` response.
+    /// Clients then describe the fires this session will actually get rather than re-resolving a setting that may have flipped since spawn.
+    pub scheduler_background_loops: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     /// YOLO (auto-approve) mode for this session.
     /// Per-session tracking prevents cross-client contamination in leader mode where one client enabling YOLO could affect another client's sessions.

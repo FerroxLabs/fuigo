@@ -43,6 +43,31 @@ fn spawn_snapshot_tool_overrides(
 ) -> Option<fuigo_sampling_types::ToolOverrides> {
     snapshot.applied_tool_overrides.clone()
 }
+/// Where the `session/new` reply's `toolOverrides` echo comes from — the whole of U022's SpawnSnapshot half.
+///
+/// The default-model reply reads spawn-time data only, so `session/new` returns while MCP tools and
+/// the rest of the actor's startup work are still in flight. Only a custom-model switch round-trips
+/// to the actor, because the switch is the one thing that resolves an override after spawn.
+///
+/// The arm ORDER is load-bearing and is the thing the test pins: the guarded arm must come first, or
+/// the catch-all `Some(handle)` swallows the default-model case and the reply waits on the actor again.
+pub(super) async fn new_session_tool_overrides_echo(
+    handle: Option<&crate::session::SessionHandle>,
+    session_id: &acp::SessionId,
+    default_model: bool,
+) -> Option<fuigo_sampling_types::ToolOverrides> {
+    match handle {
+        Some(handle) if default_model => spawn_snapshot_tool_overrides(&handle.spawn_snapshot),
+        Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
+        None => {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "session/new toolOverrides echo: session handle not found"
+            );
+            None
+        }
+    }
+}
 fn insert_applied_tool_overrides(
     meta: &mut serde_json::Map<String, serde_json::Value>,
     echo: Option<&fuigo_sampling_types::ToolOverrides>,
@@ -707,19 +732,14 @@ impl MvpAgent {
         } else {
             self.model_state(Some(&session_id))
         };
-        let applied_tool_overrides = match self.session_handle_waiting_for_load(&session_id).await {
-            Some(handle) if resolved_custom_model.is_none() => {
-                spawn_snapshot_tool_overrides(&handle.spawn_snapshot)
-            }
-            Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
-            None => {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "session/new toolOverrides echo: session handle not found"
-                );
-                None
-            }
-        };
+        let applied_tool_overrides = new_session_tool_overrides_echo(
+            self.session_handle_waiting_for_load(&session_id)
+                .await
+                .as_ref(),
+            &session_id,
+            resolved_custom_model.is_none(),
+        )
+        .await;
         let mut meta = serde_json::json!({
             "currentWorkingDirectory": cwd.as_str().to_owned(),
             "codebaseIndexed": indexed_roots,
