@@ -19,7 +19,10 @@ pub mod tmux;
 pub mod tmux_probe;
 pub mod xtversion;
 
-pub use tmux::{passthrough_available, should_wrap_osc11, tmux_passthrough, tmux_passthrough_str};
+pub use tmux::{
+    passthrough_available, should_emit_synchronized_output, should_wrap_osc11, tmux_passthrough,
+    tmux_passthrough_str,
+};
 
 pub use embedded_editor::{EmbeddedEditor, embedded_editor_from_env};
 pub use hyperlinks::{

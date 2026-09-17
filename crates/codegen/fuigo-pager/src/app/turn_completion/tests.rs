@@ -264,7 +264,7 @@ fn viewer_finalize_hook_denied_renders_blocked_marker() {
         other => panic!("expected TurnBlockedByHook, got {other:?}"),
     }
 
-    // An unknown category keeps the user-cancel copy (no false hook attribution)
+    // An unknown category stays unnamed (no false hook attribution, no "by user")
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -278,7 +278,32 @@ fn viewer_finalize_hook_denied_renders_blocked_marker() {
     );
     assert!(matches!(
         last_session_event(&agent.scrollback),
-        Some(SessionEvent::TurnCancelled { .. })
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::Unspecified,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn viewer_finalize_names_passive_cancel_from_wire_meta() {
+    let mut agent = running_viewer("p1");
+    let _ = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("cancelled"),
+            cancel_trigger: Some("session_close"),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        last_session_event(&agent.scrollback),
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::SessionClosed,
+            ..
+        })
     ));
 }
 
@@ -874,21 +899,92 @@ fn unknown_card_index_never_discards() {
     );
 }
 
-/// One chooser for every rail: only the hook-denied category flips the copy.
+/// One chooser for every rail: only the hook-denied category flips the marker kind.
 #[test]
 fn cancelled_turn_event_picks_marker_by_category() {
     let d = std::time::Duration::from_millis(700);
     assert!(matches!(
-        cancelled_turn_event(Some(HOOK_DENIED_CATEGORY), d),
+        cancelled_turn_event(None, Some(HOOK_DENIED_CATEGORY), d),
         SessionEvent::TurnBlockedByHook { .. }
     ));
     assert!(matches!(
-        cancelled_turn_event(None, d),
+        cancelled_turn_event(None, None, d),
         SessionEvent::TurnCancelled { .. }
     ));
     assert_eq!(
-        cancelled_turn_event(Some(HOOK_DENIED_CATEGORY), d).message(),
+        cancelled_turn_event(None, Some(HOOK_DENIED_CATEGORY), d).message(),
         "Turn blocked by a hook in 0.7s."
+    );
+}
+
+/// The banner names the cause from the wire meta; missing or unknown meta is plain "Turn cancelled", never "by user".
+#[test]
+fn cancelled_turn_event_names_passive_causes() {
+    let d = std::time::Duration::from_secs(10);
+    let banner = |trigger: Option<&str>, category: Option<&str>| {
+        cancelled_turn_event(trigger, category, d).message()
+    };
+    assert_eq!(
+        banner(Some("ctrl_c"), None),
+        "Turn cancelled by user in 10s."
+    );
+    assert_eq!(banner(Some("esc"), None), "Turn cancelled by user in 10s.");
+    assert_eq!(
+        banner(Some("mouse"), None),
+        "Turn cancelled by user in 10s."
+    );
+    assert_eq!(
+        banner(Some("dashboard_stop"), None),
+        "Turn cancelled by user in 10s."
+    );
+    assert_eq!(
+        banner(Some("session_close"), None),
+        "Turn cancelled because the session closed in 10s."
+    );
+    assert_eq!(
+        banner(Some("session_delete"), None),
+        "Turn cancelled because the session closed in 10s."
+    );
+    assert_eq!(
+        banner(Some("shutdown"), None),
+        "Turn cancelled because the session shut down in 10s."
+    );
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::MAX_TURNS_REACHED_CATEGORY)
+        ),
+        "Turn cancelled after reaching the turn limit in 10s."
+    );
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::PERMISSION_REJECTED_CATEGORY)
+        ),
+        "Turn cancelled because a permission was denied in 10s."
+    );
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::PERMISSION_CANCELLED_CATEGORY)
+        ),
+        "Turn cancelled because a permission prompt was dismissed in 10s."
+    );
+    assert_eq!(
+        banner(Some("host_interrupt"), None),
+        "Turn cancelled by the agent host in 10s."
+    );
+    assert_eq!(banner(None, None), "Turn cancelled in 10s.");
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::MID_TURN_ABORT_CATEGORY)
+        ),
+        "Turn cancelled in 10s."
+    );
+    assert_eq!(
+        banner(Some("gateway_cancel"), None),
+        "Turn cancelled in 10s."
     );
 }
 
@@ -1349,8 +1445,35 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
     );
     assert!(matches!(
         last_session_event(&agent.scrollback),
-        Some(SessionEvent::TurnCancelled { .. })
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::User,
+            ..
+        })
     ));
+
+    // Wire `host_interrupt` is authoritative: a leaked stamp on Send Now paints the host banner.
+    let mut agent = running_viewer("p1");
+    agent.expect_send_now_cancel = Some("p-mine".into());
+    let _ = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("cancelled"),
+            cancel_trigger: Some("host_interrupt"),
+            ..Default::default()
+        },
+    );
+    match last_session_event(&agent.scrollback) {
+        Some(ev @ SessionEvent::TurnCancelled { .. }) => {
+            assert!(
+                ev.message().contains("agent host"),
+                "wire host_interrupt is authoritative: {}",
+                ev.message()
+            );
+        }
+        other => panic!("expected a host-interrupt banner, got {other:?}"),
+    }
 
     // Older shell (no meta): the local expectation is the fallback
     let mut agent = running_viewer("p1");
@@ -1434,6 +1557,7 @@ fn base_input<'a>(stop: TurnStopReason) -> TerminalMarkerInput<'a> {
         elapsed_ms: Some(1000),
         agent_result: None,
         send_now_cancel: false,
+        cancel_trigger: None,
         cancellation_category: None,
         error_kind: None,
         error_banner_present: false,
@@ -1502,7 +1626,13 @@ fn classifier_refusal_max_tokens_max_requests_unknown_are_completed() {
 #[test]
 fn classifier_cancelled_and_hook_denied() {
     let ev = terminal_marker(base_input(TurnStopReason::Cancelled)).unwrap();
-    assert!(matches!(ev, SessionEvent::TurnCancelled { .. }));
+    assert!(matches!(
+        ev,
+        SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::Unspecified,
+            ..
+        }
+    ));
     let mut input = base_input(TurnStopReason::Cancelled);
     input.cancellation_category = Some(HOOK_DENIED_CATEGORY);
     let ev = terminal_marker(input).unwrap();
@@ -1510,11 +1640,33 @@ fn classifier_cancelled_and_hook_denied() {
 }
 
 #[test]
+fn classifier_cancelled_uses_cancel_trigger() {
+    let mut input = base_input(TurnStopReason::Cancelled);
+    input.cancel_trigger = Some("ctrl_c");
+    assert!(matches!(
+        terminal_marker(input),
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::User,
+            ..
+        })
+    ));
+    let mut input = base_input(TurnStopReason::Cancelled);
+    input.cancel_trigger = Some("session_close");
+    assert!(matches!(
+        terminal_marker(input),
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::SessionClosed,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn classifier_cancelled_missing_elapsed_is_zero() {
     let mut input = base_input(TurnStopReason::Cancelled);
     input.elapsed_ms = None;
     match terminal_marker(input) {
-        Some(SessionEvent::TurnCancelled { elapsed }) => {
+        Some(SessionEvent::TurnCancelled { elapsed, .. }) => {
             assert_eq!(elapsed, std::time::Duration::ZERO);
         }
         other => panic!("expected cancelled, got {other:?}"),

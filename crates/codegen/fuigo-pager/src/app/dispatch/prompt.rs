@@ -1129,7 +1129,7 @@ pub(super) fn handle_prompt_response(
                 &result,
                 Ok(pr) if pr.stop_reason == acp::StopReason::Cancelled
             );
-        // Send-now cancel: suppress the "Turn cancelled by user" marker (the new prompt follows right under the partial)
+        // Send-now cancel: suppress the "Turn cancelled" marker (the new prompt follows right under the partial)
         // Wire `cancelTrigger` wins, else the client-side expectation; consumed at every turn end (no stale flag)
         let expected_send_now = agent.expect_send_now_cancel.take();
         let wire_cancel_trigger = result.as_ref().ok().and_then(|pr| {
@@ -1302,6 +1302,7 @@ pub(super) fn handle_prompt_response(
                         elapsed_ms: crate::app::turn_completion::duration_to_elapsed_ms(elapsed),
                         agent_result: None,
                         send_now_cancel,
+                        cancel_trigger: wire_cancel_trigger.as_deref(),
                         cancellation_category: wire_cancellation_category.as_deref(),
                         // Ok-path marker: the Error arm is unreachable here.
                         error_kind: None,
