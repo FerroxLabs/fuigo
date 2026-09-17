@@ -816,6 +816,11 @@ impl RenderBlock {
         matches!(self, RenderBlock::AgentMessage(_))
     }
 
+    /// A session event that closes a turn (`Worked for …`, cancelled, failed); see [`SessionEvent::is_turn_terminal`].
+    pub fn is_turn_terminal_marker(&self) -> bool {
+        matches!(self, RenderBlock::SessionEvent(b) if b.event.is_turn_terminal())
+    }
+
     /// Check if this block is a plan mode tool call (enter or exit).
     ///
     /// Exact-matches the canonical tool-name set rather than substring-matching the human title.

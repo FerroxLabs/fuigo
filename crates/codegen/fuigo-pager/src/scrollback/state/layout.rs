@@ -1296,8 +1296,6 @@ impl ScrollbackState {
             MAX_TRUNCATED_HEADER_HEIGHT
         };
         let is_foldable = new_entry.block.is_foldable();
-        let new_groupable = new_entry.block.is_groupable();
-        let new_collapsed = new_entry.display_mode == DisplayMode::Collapsed;
         let new_display_mode = new_entry.display_mode;
 
         // Recompute the previous entry's gap_after now that it's no longer the trailing entry
@@ -1307,13 +1305,7 @@ impl ScrollbackState {
         if new_idx > 0
             && let Some((_, prev_entry)) = self.entries.get_index(new_idx - 1)
         {
-            let both_groupable = prev_entry.block.is_groupable() && new_groupable;
-            let both_collapsed = prev_entry.display_mode == DisplayMode::Collapsed && new_collapsed;
-            cache.entries[new_idx - 1].gap_after = if both_groupable && both_collapsed {
-                0
-            } else {
-                1
-            };
+            cache.entries[new_idx - 1].gap_after = gap_after_between(prev_entry, new_entry);
         }
 
         // Compute the new entry's virtual_y (start position) using the previous entry's (now-correct) gap_after
@@ -1479,14 +1471,7 @@ impl ScrollbackState {
             }
 
             let (_, b) = entries.get_index(j).unwrap();
-            let both_groupable = a.block.is_groupable() && b.block.is_groupable();
-            let both_collapsed = a.display_mode == DisplayMode::Collapsed
-                && b.display_mode == DisplayMode::Collapsed;
-            cached.gap_after = if both_groupable && both_collapsed {
-                0
-            } else {
-                1
-            };
+            cached.gap_after = gap_after_between(a, b);
         }
     }
 
@@ -1517,10 +1502,7 @@ impl ScrollbackState {
             return idx..idx + 1;
         };
 
-        if !entry.block.is_groupable() {
-            return idx..idx + 1;
-        }
-        if collapsed_only && entry.display_mode != DisplayMode::Collapsed {
+        if !groups::can_join_dense_run(entry, collapsed_only) {
             return idx..idx + 1;
         }
 
@@ -1545,9 +1527,7 @@ impl ScrollbackState {
     /// Unclaimed entries (pure-thought runs, flag off) stay in, as in truncation.
     pub(super) fn joins_dense_run(&self, i: usize, collapsed_only: bool) -> bool {
         if let Some((_, e)) = self.entries.get_index(i) {
-            e.block.is_groupable()
-                && (!collapsed_only || e.display_mode == DisplayMode::Collapsed)
-                && self.verb_group_range_of(i).is_none()
+            groups::can_join_dense_run(e, collapsed_only) && self.verb_group_range_of(i).is_none()
         } else {
             false
         }
@@ -1725,6 +1705,19 @@ pub fn compute_paint_window(
         0
     };
     (paint_start..paint_end, content_y0)
+}
+
+/// Blank rows between two adjacent visible entries: consecutive collapsed tool chrome stacks with no gap.
+/// Membership is [`groups::can_join_dense_run`] in collapsed-only mode, so the gap and dense-run
+/// boundaries stay in step; a stop-hook-collapsed turn marker therefore never glues to the next row.
+fn gap_after_between(prev: &ScrollbackEntry, next: &ScrollbackEntry) -> u16 {
+    if groups::can_join_dense_run(prev, /*collapsed_only=*/ true)
+        && groups::can_join_dense_run(next, /*collapsed_only=*/ true)
+    {
+        0
+    } else {
+        1
+    }
 }
 
 #[cfg(test)]
