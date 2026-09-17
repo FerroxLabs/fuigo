@@ -1157,7 +1157,6 @@
             len_before,
             "a wake terminal pushes nothing (no marker, no lifecycle block)"
         );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
     }
 
     #[test]

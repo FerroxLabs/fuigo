@@ -911,8 +911,6 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
                     ToolCallBlock::SentMessage(_) => Some("Message"),
                     ToolCallBlock::Skill(_) => Some("Skill"),
                     ToolCallBlock::Other(_) => Some("Tool"),
-                    // Lifecycle events aren't real tool calls; keep scanning
-                    ToolCallBlock::Lifecycle(_) => None,
                 };
                 if let Some(label) = label {
                     return label.to_string();

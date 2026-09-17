@@ -752,42 +752,6 @@ impl ScrollbackState {
         removed
     }
 
-    /// Find the EntryId of the last real tool call block in the scrollback.
-    ///
-    /// Skips `ToolCallBlock::Lifecycle` entries (e.g. `user_prompt_submit`) so that tool-associated hooks only attach to actual tool calls.
-    pub fn last_tool_call_entry_id(&self) -> Option<EntryId> {
-        self.entries.iter().rev().find_map(|(id, entry)| {
-            if let RenderBlock::ToolCall(ref tcb) = entry.block {
-                // Skip lifecycle event blocks (e.g. user_prompt_submit): they are not real tool calls and shouldn't receive tool hooks.
-                if matches!(tcb, ToolCallBlock::Lifecycle(_)) {
-                    return None;
-                }
-                Some(*id)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Attach hook data to a tool call entry.
-    pub fn attach_hooks(
-        &mut self,
-        id: EntryId,
-        phase: super::blocks::tool::HookPhase,
-        hook_entries: Vec<super::blocks::tool::HookRunEntry>,
-    ) {
-        if let Some(entry) = self.entries.get_mut(&id) {
-            let data = entry.hook_data.get_or_insert_with(Default::default);
-            match phase {
-                super::blocks::tool::HookPhase::Pre => data.pre_hooks = hook_entries,
-                super::blocks::tool::HookPhase::Post => data.post_hooks = hook_entries,
-            }
-            entry.invalidate_cache();
-            // A height remeasure would revive a folded member whose cached height is zero; reapplying folds keeps hidden members hidden
-            self.mark_structurally_dirty(id);
-        }
-    }
-
     /// Push a text chunk to an agent message entry.
     ///
     /// This is the preferred way to append streaming content because it:

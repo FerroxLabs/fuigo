@@ -423,8 +423,6 @@ impl<'a> EntryRenderer<'a> {
             return lines;
         }
         // Collapsed / Truncated foldable entries render a compact ~1-line header, NOT their (often huge) hidden body
-        // Use the ENTRY-level foldability (`block.is_foldable()` OR attached hooks), matching the fold path
-        // A collapsed entry foldable only through hooks would otherwise be over-counted
         let lines = if self.entry.display_mode != DisplayMode::Expanded && self.entry.is_foldable()
         {
             1
@@ -1539,49 +1537,37 @@ mod tests {
         );
     }
 
+    /// Retargeted from the hook-foldable variant: foldability now comes only from the block, so the live contract is
+    /// "a collapsed non-foldable entry estimates its body; a collapsed foldable one takes the compact shortcut".
     #[test]
-    fn estimate_uses_entry_level_foldability_for_collapsed_shortcut() {
+    fn estimate_uses_foldability_for_collapsed_shortcut() {
         let _theme = pin_theme();
-        // An AgentMessage block is NOT block-foldable, but attaching hooks makes the ENTRY foldable (matching the fold path)
-        // A Collapsed foldable entry takes the compact ~1-line shortcut; a non-foldable one estimates its body
-        use crate::scrollback::blocks::tool::hook::{
-            HookRunEntry, HookRunStatus, ToolCallHookData,
-        };
         let theme = Theme::current();
         // AgentMessage renders as markdown (single newlines collapse to spaces), so force a multi-row body with length, not line count
         let body = "word ".repeat(60);
 
-        // With no hooks the entry is not foldable, so a Collapsed entry estimates its body, not the 1-line fold shortcut
+        // Not foldable: a Collapsed entry estimates its body, not the 1-line fold shortcut
         let mut plain = ScrollbackEntry::new(RenderBlock::agent_message(body.as_str()));
         plain.set_display_mode(DisplayMode::Collapsed);
+        assert!(!plain.is_foldable());
         let plain_est = EntryRenderer::new(&plain, &theme).estimate_height(80);
         assert!(
             plain_est > 1,
             "non-foldable collapsed entry estimates its body, not the shortcut (got {plain_est})"
         );
 
-        // With hooks the entry is foldable, so the compact shortcut applies (1 line, no vpad)
-        let mut hooked = ScrollbackEntry::new(RenderBlock::agent_message(body.as_str()));
-        hooked.set_display_mode(DisplayMode::Collapsed);
-        hooked.hook_data = Some(ToolCallHookData {
-            pre_hooks: vec![HookRunEntry {
-                name: "fmt".into(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }],
-            ..Default::default()
-        });
-        let hooked_est = EntryRenderer::new(&hooked, &theme).estimate_height(80);
-        assert_eq!(
-            hooked_est, 1,
-            "hook-foldable collapsed entry uses the compact shortcut"
-        );
+        // Foldable: the same long body collapsed costs far less than expanded (the shortcut, not the body)
+        let output = "line\n".repeat(200);
+        let mut folded = ScrollbackEntry::new(RenderBlock::execute_with_output("ls", output.as_str(), None::<String>));
+        folded.set_display_mode(DisplayMode::Collapsed);
+        assert!(folded.is_foldable());
+        let folded_est = EntryRenderer::new(&folded, &theme).estimate_height(80);
+        let mut opened = ScrollbackEntry::new(RenderBlock::execute_with_output("ls", output.as_str(), None::<String>));
+        opened.set_display_mode(DisplayMode::Expanded);
+        let opened_est = EntryRenderer::new(&opened, &theme).estimate_height(80);
         assert!(
-            plain_est > hooked_est,
-            "entry-level foldability must change the collapsed estimate \
-             (plain {plain_est} vs hooked {hooked_est})"
+            folded_est <= 3 && opened_est > folded_est + 100,
+            "collapsed foldable entry takes the compact shortcut (collapsed {folded_est} vs expanded {opened_est})"
         );
     }
 

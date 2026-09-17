@@ -357,7 +357,7 @@ pub(super) fn handle_session_notification_with_origin(
                         is_api_key_auth,
                     )
                 {
-                    agent.push_end_marker_block(event, Vec::new(), Some(prompt_id));
+                    agent.push_end_marker_block(event);
                 }
                 false
             } else if is_wake_prompt(&prompt_id) {
@@ -394,7 +394,7 @@ pub(super) fn handle_session_notification_with_origin(
                                     None,
                                 )
                             };
-                            agent.push_end_marker_block(event, Vec::new(), Some(prompt_id.clone()));
+                            agent.push_end_marker_block(event);
                             true
                         }
                     } else {
