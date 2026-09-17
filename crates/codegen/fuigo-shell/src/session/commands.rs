@@ -769,6 +769,8 @@ pub enum SessionCommand {
     /// The session snapshots the conversation context, makes a single tool-free model call, and returns the response text.
     SideQuestion {
         question: String,
+        /// Attached images, inlined on the side-question item only (never persisted to the parent session).
+        images: Vec<acp::ImageContent>,
         respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast it to clients via `SessionUpdate::SessionRecap`.

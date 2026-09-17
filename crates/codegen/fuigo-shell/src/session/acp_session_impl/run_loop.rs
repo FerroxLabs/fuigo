@@ -1921,10 +1921,10 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion { question, respond_to } => {
+                        SessionCommand::SideQuestion { question, images, respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_side_question(&question).await;
+                                let result = s.handle_side_question(&question, images).await;
                                 let _ = respond_to.send(result);
                             });
                         }

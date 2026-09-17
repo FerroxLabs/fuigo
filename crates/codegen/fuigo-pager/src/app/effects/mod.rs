@@ -3868,19 +3868,15 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
+        Effect::SendBtw { agent_id, session_id, question, blocks, minimal_request_id } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
+                    let params = build_btw_params(&session_id, &question, blocks.as_deref());
                     let request = acp::ExtRequest::new(
                         "fuigo/btw",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!({
-                        "sessionId": session_id.0.to_string(),
-                        "question": question,
-                    }),
-                            )
+                        serde_json::value::to_raw_value(&params)
                             .expect("serialize btw params")
                             .into(),
                     );
@@ -4985,6 +4981,23 @@ pub(crate) fn rewind_execute_params(
         "force": true,
         "mode": REWIND_MODE_WIRE,
     })
+}
+/// Build the `fuigo/btw` params.
+/// `content` is omitted when `None` so a text-only side question stays byte-identical on the wire.
+fn build_btw_params(
+    session_id: &acp::SessionId,
+    question: &str,
+    blocks: Option<&[acp::ContentBlock]>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "sessionId": session_id.0.to_string(),
+        "question": question,
+    });
+    if let Some(blocks) = blocks {
+        params["content"] = serde_json::to_value(blocks)
+            .expect("serialize btw content");
+    }
+    params
 }
 /// Build the `fuigo/interject` params.
 /// The optional structured `content` (text and images) is omitted ENTIRELY when `None` so the legacy wire shape stays byte-identical.

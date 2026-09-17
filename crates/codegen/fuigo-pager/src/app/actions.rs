@@ -763,7 +763,11 @@ pub enum Action {
     /// Save the currently displayed remember note from the review modal.
     SaveRememberNoteFromModal,
     /// Send a /btw side question (bypasses queue, works while agent is busy).
-    SendBtw(String),
+    /// `images` are composer attachments drained at submit; empty keeps the text-only wire.
+    SendBtw {
+        question: String,
+        images: Vec<crate::prompt_images::PastedImage>,
+    },
     /// Request a session recap ("where was I" summary).
     /// `auto` is `true` for the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
@@ -1963,6 +1967,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         question: String,
+        /// Text + image content blocks built from the composer's attachments; `None` keeps the text-only wire.
+        blocks: Option<Vec<acp::ContentBlock>>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
