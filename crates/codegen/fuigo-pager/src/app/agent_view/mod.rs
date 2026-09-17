@@ -26,27 +26,24 @@
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
-//!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
+//!       turn running, every mode → Changed (swallow) plus a
+//!         "Press <cancel key> to cancel the turn" hint (toast in fullscreen,
+//!         at most one committed system line per user turn in minimal); the
+//!         draft is preserved and the turn keeps running
+//!       turn cancelling → Changed (swallow) with no hint; Ctrl+C escalates to Quit
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
-//!         within ESC_CANCEL_REWIND_GRACE of an Esc-fired cancel) →
+//!         within ESC_CANCEL_REWIND_GRACE of a mid-turn Esc) →
 //!         ArmPending RewindShowPicker (2×, silent)
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
-//!         open history search / post-cancel grace, or empty + no messages) →
+//!         open history search / mid-turn Esc grace, or empty + no messages) →
 //!         Changed (swallow Esc; not FocusScrollback)
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!
-//! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
-//! (scrollback nav); everything else, and all of it with respect to
-//! `[ui].simple_mode` (prompt editor), is mode-independent. Tab remains
-//! leave-prompt in both modes.
+//! No Esc-policy branch depends on `[ui].vim_mode` (scrollback nav) or
+//! `[ui].simple_mode` (prompt editor). Tab remains leave-prompt in both modes.
 //!
 //! ## Future: data/view split
 //!
@@ -1185,9 +1182,12 @@ pub struct AgentView {
     /// completion, double-click, or triple-click. Cleared on next click
     /// elsewhere, Escape, or navigation.
     pub persistent_text_selection: Option<PersistentTextSelection>,
-    /// Table geometry backing a table-shaped drag / persistent selection,
-    /// keyed to that selection; ignored when the key doesn't match.
+    /// Table geometry for the held highlight. Not shared with an in-progress drag.
     pub table_selection_geometry: Option<TableSelectionGeometry>,
+    /// Table geometry for the active drag. A `/btw` drag must not steal the held slot.
+    pub drag_table_geometry: Option<TableSelectionGeometry>,
+    /// Wrap width the `/btw` selection was armed against. A mismatch invalidates it.
+    pub btw_selection_wrap_width: Option<u16>,
     /// Timestamp when the current persistent selection was created.
     /// Used for auto-dismissal after a configurable timeout.
     pub selection_created_at: Option<Instant>,
@@ -1644,13 +1644,17 @@ pub struct AgentView {
     /// Cleared on any non-`d` key press, after 500ms expiry, or once
     /// `try_handle_esc_policy` consumes the Esc. `pub(crate)` for policy tests.
     pub(crate) esc_pressed_at: Option<std::time::Instant>,
-    /// Post-cancel grace deadline: while `now` is before it, the Esc policy
-    /// holds the idle rewind ARM so Esc-mashing past a cancel cannot
+    /// Mid-turn Esc grace deadline: while `now` is before it, the Esc policy
+    /// holds the idle rewind ARM so Esc-mashing past a turn's end cannot
     /// silently arm the rewind picker. Set (`now + ESC_CANCEL_REWIND_GRACE`)
-    /// by `suppress_rewind_arm` on every Esc-fired cancel, consumed and
+    /// by `suppress_rewind_arm` on every mid-turn Esc, consumed and
     /// retired-on-expiry by `rewind_arm_suppressed`. `pub(crate)` for policy
     /// tests.
     pub(crate) rewind_suppress_deadline: Option<std::time::Instant>,
+    /// Minimal mode has no toast slot, so the mid-turn "press <cancel key>" hint is
+    /// a committed system line; this is the turn it was last committed for, so Esc
+    /// mashing commits at most one hint per user turn.
+    pub(crate) minimal_cancel_hint_turn: Option<usize>,
     /// First prompt to enqueue once the session finishes loading replay.
     /// Set by `/fork` when a directive is provided; drained in the
     /// `TaskResult::SessionLoaded` arm via `enqueue_prompt_front` so the
@@ -1777,6 +1781,11 @@ pub struct AgentView {
     /// adoption captures). Cleared on session reload.
     pub(crate) send_now_painted_blocks:
         std::collections::HashMap<String, (crate::scrollback::EntryId, bool)>,
+    /// Text of a send-now-painted prompt, keyed by prompt id, kept until the
+    /// shell's live user echo for it arrives (and is swallowed) or the paint is
+    /// adopted/retired. Without it a send-now'd queue row renders twice: once
+    /// from the optimistic paint and once from the racing `UserMessageChunk`.
+    pub(crate) send_now_echo_pending: std::collections::HashMap<String, String>,
     /// Cached official-marketplace candidates for the plugin CTA, populated on
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,

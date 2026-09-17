@@ -1382,13 +1382,15 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     push_reads(&mut state, 8);
     state.prepare_layout(80, 12);
 
-    // Mimic dispatch_send_prompt's page flip: prompt pinned at the viewport top, follow and preserve on, content below fits on screen
-    let pin = state.layout_cache.as_ref().unwrap().virtual_y[8];
-    state.scroll_offset = pin;
-    state.follow_mode = true;
-    state.follow_preserve_scroll = true;
+    // Use the production page-flip path so the prompt-top pose has owned trailing reserve.
+    state.page_flip_to_entry(8);
     state.prepare_layout(80, 12);
-    assert_eq!(state.scroll_offset, pin, "preserve pin holds before toggle");
+    let pin = state.scroll_offset;
+    assert_eq!(
+        state.max_scroll_offset(),
+        pin,
+        "preserve pin is a reachable bottom before toggle"
+    );
 
     // Expand the group (header at idx 9, right below the prompt).
     state.set_selected(Some(9));
@@ -1407,9 +1409,7 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     // The same invariant holds for a plain block fold in the same shape.
     state.collapse_group_if_expanded();
     state.prepare_layout(80, 12);
-    state.scroll_offset = pin;
-    state.follow_mode = true;
-    state.follow_preserve_scroll = true;
+    state.page_flip_to_entry(8);
     state.entry_mut(9).unwrap().block = RenderBlock::ToolCall(ToolCallBlock::Read(
         ReadToolCallBlock::new("f9.rs")
             .with_content("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl".to_owned(), 12),

@@ -2,14 +2,13 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **A single Esc from the SCROLLBACK pane cancels a running turn** in the default (non-vim) config.
-/// The cancel policy treats Prompt and Scrollback identically while a turn runs, so a user reading the transcript need not return to the prompt.
-/// Tab leaves the prompt (Esc is reserved for cancel).
-/// The footer's "Space:prompt" hint confirms the scrollback owns keys before the cancel Esc is sent.
+/// A single Esc from the prompt pane never cancels a running turn: it hints at the cancel key and preserves a non-empty draft.
+/// Proves the real binary routes a bare Esc through `try_handle_esc_policy`'s turn-running branch before the idle clear and rewind branches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn esc_cancels_running_turn_from_scrollback() {
+async fn esc_mid_turn_from_prompt_hints_and_preserves_draft() {
     let content = ContentController::start().await.expect("start content");
+    // Stream a long paced response so the turn is still visibly running when Esc lands
     let long_response = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",
         "streaming filler words for the cancellation window. ".repeat(120)
@@ -33,27 +32,32 @@ async fn esc_cancels_running_turn_from_scrollback() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("stream started");
 
-    // Leave the prompt with a SINGLE Tab (Esc is reserved for cancel/clear/rewind), then wait for the footer to prove the scrollback owns keys
-    // Tab TOGGLES focus, so a second press could bounce back to the prompt; press once and poll the render, as `drive_to_scrollback_with_turn` does
-    harness.inject_keys(b"\t").expect("tab to scrollback");
+    // Type a draft into the prompt while the turn streams (the prompt stays focused after submit)
+    // A distinctive single token avoids any wrapping ambiguity
+    let draft = "DRAFTKEEPME";
+    harness.inject_keys(draft.as_bytes()).expect("type draft");
     harness
-        .wait_for_text("Space:prompt", Duration::from_secs(10))
-        .expect("scrollback must own keys before the cancel Esc");
+        .wait_for_text(draft, Duration::from_secs(10))
+        .expect("draft renders in the composer");
 
-    // A single Esc from the scrollback cancels the running turn
+    // A single Esc hints at the cancel key (the turn-running branch wins over the idle clear)
     harness.inject_keys(keys::ESC).expect("press esc");
     harness.update(Duration::from_millis(200));
 
     harness
-        .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
-        .expect("turn cancelled marker (from scrollback)");
+        .wait_for_text("to cancel the turn", Duration::from_secs(15))
+        .expect("mid-turn Esc must hint at the cancel key");
 
     harness.update(Duration::from_millis(600));
     let screen = harness.screen_contents();
-    assert_eq!(
-        screen.matches("Turn cancelled by user").count(),
-        1,
-        "'Turn cancelled' must appear exactly once\nscreen:\n{screen}"
+
+    assert!(
+        screen.contains(draft),
+        "mid-turn Esc must preserve the draft (not clear it like Ctrl+C)\nscreen:\n{screen}"
+    );
+    assert!(
+        !screen.contains("press again to clear"),
+        "running-turn Esc must hint at the cancel key, never arm the idle clear\nscreen:\n{screen}"
     );
     assert!(
         !harness.contains_text("panicked"),

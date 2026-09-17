@@ -1189,7 +1189,7 @@ impl PlanModeKind {
 /// The shell's deny-list treats every gesture value as a stop, so new variants need no shell change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTrigger {
-    /// Wire value `"esc"` (bare Esc mid-turn cancel in minimal / non-vim mode, plus the Esc cancel-retry while TurnCancelling).
+    /// Wire value `"esc"`. Kept for the cancel-cause wire and its stored history; since 1.0.20 a bare Esc never cancels a turn, so nothing emits it from a key press.
     Esc,
     /// `Ctrl+C` pressed (the default cancel keybinding).
     CtrlC,
@@ -2053,6 +2053,9 @@ pub enum Effect {
     UnregisterActiveSession { session_id: acp::SessionId },
     /// Quit the application.
     Quit,
+    /// Reset a wedged xterm.js mouse tracker by toggling mouse reporting off and on.
+    /// Handled on the event-loop thread through the escape writer (never an inline tty write).
+    ResetMouseReporting,
     /// Toggle coding data sharing via ACP.
     SetCodingDataSharing {
         agent_id: AgentId,

@@ -37,7 +37,8 @@ const BG_SLEEP_SECS: &str = "6";
 #[cfg(unix)]
 const HOLD_SLEEP_SECS: &str = "15";
 
-/// Which cancel gesture the scenario drives. All three send the same `session/cancel`; only the input path differs.
+/// Which cancel gesture the scenario drives. All three end in the same `session/cancel`; only the input path differs.
+/// The Esc path first asserts the mid-turn hint (Esc never cancels) and then presses the advertised key.
 /// Esc and StopClick also gate on the wake stop affordance ([stop] while the pane is idle), which only exists with the wake-turn cancel support.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
@@ -188,7 +189,21 @@ pub(crate) async fn run_wake_cancel_scenario(gesture: WakeCancelGesture, cast_pr
             harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
         }
         WakeCancelGesture::Esc => {
+            // Esc no longer cancels: it names the cancel key and leaves the wake turn running.
+            // The cancel itself then comes from that advertised key, and the queued prompt must still survive it.
             harness.inject_keys(keys::ESC).expect("press esc");
+            harness.update(Duration::from_millis(500));
+            assert!(
+                !harness.contains_text("Turn cancelled by user"),
+                "Esc must not cancel the wake turn; screen:\n{}",
+                harness.screen_contents()
+            );
+            harness
+                .wait_for_text("to cancel the turn", Duration::from_secs(10))
+                .expect("mid-turn Esc must hint at the cancel key");
+            harness
+                .inject_keys(keys::CTRL_C)
+                .expect("press the advertised cancel key");
         }
         WakeCancelGesture::StopClick => {
             harness

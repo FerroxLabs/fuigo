@@ -365,7 +365,6 @@ impl ScrollbackState {
     pub fn scroll_up(&mut self, rows: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(rows as usize);
         self.follow_mode = false;
-        self.maybe_release_pin_reserve();
         self.bump_generation();
     }
 
@@ -382,12 +381,22 @@ impl ScrollbackState {
         self.scroll_offset = (self.scroll_offset + rows as usize).min(max_offset);
 
         // rows > 0 keeps degenerate page/half-page calls (0-row viewports) from engaging follow without a real scroll gesture
+        // The reserved pad is not the real tail: an overscroll against it must not re-engage follow,
+        // or a wheel residual at the padded bottom would silently end the page-flip pose
         if rows > 0
             && self.scroll_offset == before
             && self.scroll_offset >= max_offset
+            && self.pin_reserve_pad == 0
             && self.appearance.scrollback.scroll.follow_by_overscroll
         {
             self.follow_mode = true;
+            // Overscrolling past the real tail once the turn is over is the explicit "take me to the
+            // bottom" gesture: that, not scrolling away, is what ends the reserve
+            if self.follow_preserve_scroll && self.pin_reserve_after_turn {
+                self.follow_preserve_scroll = false;
+                self.release_pin_reserve();
+                self.scroll_offset = self.max_scroll_offset();
+            }
         }
         self.bump_generation();
     }
@@ -497,7 +506,6 @@ impl ScrollbackState {
     pub fn goto_top(&mut self) {
         self.scroll_offset = 0;
         self.follow_mode = false;
-        self.maybe_release_pin_reserve();
         let range = self.visible_entry_range();
         if !range.is_empty() {
             self.selected = self.find_first_selectable_in_range(range);
@@ -553,6 +561,7 @@ impl ScrollbackState {
     pub fn enable_follow_with_preserve(&mut self) {
         self.follow_mode = true;
         self.follow_preserve_scroll = true;
+        self.follow_preserve_content_generation = self.content_generation;
     }
 
     /// Viewport policy for a turn this client just started.
@@ -564,22 +573,33 @@ impl ScrollbackState {
     ///
     /// Always selects `prompt_idx` when present.
     pub fn follow_new_turn(&mut self, prompt_idx: Option<usize>, page_flip: bool) {
-        if page_flip {
-            if let Some(idx) = prompt_idx {
-                // Measurement runs release checks, so suppress release until the settled pose is captured after scrolling
-                self.arm_pin_reserve();
-                self.scroll_to_entry_top(idx);
-                self.pin_reserve_target = Some(self.scroll_offset);
-                self.pin_reserve_prompt_id = self.entries.get_index(idx).map(|(id, _)| *id);
-                self.compute_total_height_from_cache();
-            }
-            self.enable_follow_with_preserve();
-        } else if prompt_idx.is_none() {
-            self.enable_follow_with_preserve();
-        }
         if let Some(idx) = prompt_idx {
             self.set_selected(Some(idx));
         }
+        if page_flip {
+            if let Some(idx) = prompt_idx {
+                self.page_flip_to_entry(idx);
+            } else {
+                // A synthetic turn owns no prompt to pin: an earlier turn's reserve must go, or its
+                // pad would outlive the prompt it was armed for
+                self.release_pin_reserve();
+                self.enable_follow_with_preserve();
+            }
+        } else if prompt_idx.is_none() {
+            self.release_pin_reserve();
+            self.enable_follow_with_preserve();
+        }
+    }
+
+    /// Pin an entry at the viewport top with real trailing scroll extent.
+    pub(crate) fn page_flip_to_entry(&mut self, idx: usize) {
+        // Measurement runs release checks, so suppress release until the settled pose is captured after scrolling
+        self.arm_pin_reserve();
+        self.scroll_to_entry_top(idx);
+        self.pin_reserve_target = Some(self.scroll_offset);
+        self.pin_reserve_prompt_id = self.entries.get_index(idx).map(|(id, _)| *id);
+        self.compute_total_height_from_cache();
+        self.enable_follow_with_preserve();
     }
 
     pub fn is_follow_mode(&self) -> bool {
@@ -1103,20 +1123,25 @@ impl ScrollbackState {
             // The pad makes max_offset equal the pin pose, so comparing to the padded max would look like overflow on every frame and eat the pin
             let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
             let unpadded_max = unpadded_total.saturating_sub(self.viewport_height as usize);
-            if unpadded_max > self.scroll_offset && !self.pin_reserve_after_turn {
+            // Compare the overflow against the pin's LIVE position, not the current scroll offset:
+            // the user may have scrolled up into history, and the pose is still owed to them
+            let live_pin = if self.pin_reserve_active {
+                self.pin_reserve_prompt_scroll_target()
+                    .unwrap_or(self.scroll_offset)
+            } else {
+                self.scroll_offset
+            };
+            // A geometry-only rebuild (fold, group expand, remeasure) must not consume the pose:
+            // only appended content, or a live page-flip pin, can retire it
+            let content_changed = self.pin_reserve_active
+                || self.content_generation != self.follow_preserve_content_generation;
+            if content_changed && unpadded_max > live_pin && !self.pin_reserve_after_turn {
                 self.follow_preserve_scroll = false;
                 self.release_pin_reserve();
                 self.scroll_offset = self.max_scroll_offset();
-            } else if self.scroll_offset >= unpadded_total {
-                // Content shrank under the pin (e.g. a tall running tool demoted to a collapsed background task).
-                // That strands the pinned offset past the transcript end, where the live tail would freeze in empty rows
-                // Drop the reserve fully so max_offset becomes the real tail
-                self.follow_preserve_scroll = false;
-                self.clear_pin_reserve();
-                self.total_height = unpadded_total;
-                self.pin_reserve_pad = 0;
-                self.scroll_offset = self.max_scroll_offset();
             }
+            // A pin stranded past a shrunken transcript is healed by `prepare_layout`'s
+            // pin-entry-gone / shrink-target release, which owns the totals
             // Otherwise: all new content still fits below the prompt. Stay put.
         } else {
             // Normal follow: scroll to bottom, unconditionally
@@ -1556,64 +1581,6 @@ mod tests {
             "finish shrink cannot recreate the reserve"
         );
         h.assert_at_bottom("finish shrink remains at the real tail");
-    }
-
-    /// A height shrink above a pinned interjection must re-clamp the offset so later rows remain paintable without input.
-    #[test]
-    fn page_flip_pin_reclamps_after_shrink_past_end() {
-        let mut h = ScrollTestHarness::new(80, 10);
-        for i in 0..20 {
-            h.push_agent(&format!("history {i}"));
-        }
-        let tall_id = h.state.push_block(tall_agent_block());
-        let tall_idx = h.state.len() - 1;
-        h.frame();
-        h.send_prompt("interjected follow-up");
-
-        let pin = h.state.scroll_offset;
-        assert!(h.is_preserve(), "setup: preserve pin armed");
-        assert_eq!(
-            pin,
-            h.max_offset(),
-            "setup: pin pose is the padded bottom ({pin} == {})",
-            h.max_offset(),
-        );
-        assert!(
-            pin < h.state.total_height,
-            "setup: pin sits on real content ({pin} < {})",
-            h.state.total_height,
-        );
-
-        {
-            let entry = h.state.entry_mut(tall_idx).unwrap();
-            entry.block = stub_block("task started");
-            entry.display_mode = DisplayMode::Collapsed;
-            entry.invalidate_cache();
-        }
-        h.state.mark_height_dirty(tall_id);
-        h.frame();
-        assert!(
-            h.state.scroll_offset <= h.max_offset(),
-            "shrink under the pin must re-clamp the wedged offset ({} <= {})",
-            h.state.scroll_offset,
-            h.max_offset(),
-        );
-        assert!(
-            !h.is_preserve(),
-            "the wedged pin's referent is gone — it must be consumed"
-        );
-
-        h.push_agent("task completed");
-        h.push_agent("final answer");
-        let last_idx = h.state.len() - 1;
-        let visible = h.state.visible_entry_range();
-        let (window, _) = h
-            .state
-            .paint_window(visible, h.state.scroll_offset, h.height as usize);
-        assert!(
-            window.contains(&last_idx),
-            "appended rows must be inside the paint window (window {window:?}, last entry {last_idx})"
-        );
     }
 
     /// Explicit bottom-follow gestures must release the page-flip pin before resolving the measured tail.
@@ -2459,5 +2426,114 @@ mod tests {
         state.scroll_to_entry_top(8);
         assert_eq!(state.active_turn_for_viewport(), Some(1));
         assert!(!state.has_response_top_above());
+    }
+
+    #[test]
+    fn page_flip_pin_tracks_shrink_above_prompt() {
+        let mut h = ScrollTestHarness::new(80, 10);
+        for i in 0..20 {
+            h.push_agent(&format!("history {i}"));
+        }
+        let tall_id = h.state.push_block(tall_agent_block());
+        let tall_idx = h.state.len() - 1;
+        h.frame();
+        h.send_prompt("interjected follow-up");
+
+        let pin = h.state.scroll_offset;
+        assert!(h.is_preserve(), "setup: preserve pin armed");
+        assert_eq!(
+            pin,
+            h.max_offset(),
+            "setup: pin pose is the padded bottom ({pin} == {})",
+            h.max_offset(),
+        );
+        assert!(
+            pin < h.state.total_height,
+            "setup: pin sits on real content ({pin} < {})",
+            h.state.total_height,
+        );
+
+        {
+            let entry = h.state.entry_mut(tall_idx).unwrap();
+            entry.block = stub_block("task started");
+            entry.display_mode = DisplayMode::Collapsed;
+            entry.invalidate_cache();
+        }
+        h.state.mark_height_dirty(tall_id);
+        h.frame();
+        assert!(
+            h.state.scroll_offset <= h.max_offset(),
+            "shrink above the prompt must keep the moved pin reachable ({} <= {})",
+            h.state.scroll_offset,
+            h.max_offset(),
+        );
+        assert!(h.is_preserve(), "the prompt referent still exists");
+        assert!(h.state.is_pin_reserve_active());
+
+        for i in 0..20 {
+            if !h.is_preserve() {
+                break;
+            }
+            h.push_agent(&format!("tail growth {i}"));
+        }
+        assert!(
+            !h.is_preserve(),
+            "output below the prompt consumes preserve"
+        );
+        h.push_agent("task completed");
+        h.push_agent("final answer");
+        let last_idx = h.state.len() - 1;
+        let visible = h.state.visible_entry_range();
+        let (window, _) = h
+            .state
+            .paint_window(visible, h.state.scroll_offset, h.height as usize);
+        assert!(
+            window.contains(&last_idx),
+            "appended rows must be inside the paint window (window {window:?}, last entry {last_idx})"
+        );
+    }
+
+    #[test]
+    fn synthetic_preserve_releases_when_output_overflows_saved_viewport() {
+        let mut state = ScrollbackState::new();
+        for i in 0..30 {
+            state.push_block(agent_block(&format!("history {i}")));
+        }
+        state.prepare_layout(80, 8);
+        state.goto_bottom();
+        state.scroll_up(5);
+        let saved = state.scroll_offset();
+        state.follow_new_turn(None, false);
+        assert!(!state.is_pin_reserve_active());
+
+        state.push_block(tall_agent_block());
+        state.prepare_layout(80, 8);
+
+        assert!(!state.is_follow_preserve_scroll());
+        assert!(state.scroll_offset() > saved);
+        assert_eq!(state.scroll_offset(), state.max_scroll_offset());
+    }
+
+    #[test]
+    fn synthetic_turn_replaces_previous_page_flip_reserve() {
+        let mut state = ScrollbackState::new();
+        for i in 0..30 {
+            state.push_block(agent_block(&format!("history {i}")));
+        }
+        state.push_block(user_block("prompt"));
+        let prompt_idx = state.len() - 1;
+        state.prepare_layout(80, 8);
+        state.follow_new_turn(Some(prompt_idx), true);
+        state.note_pin_reserve_turn_finished();
+        assert!(state.is_pin_reserve_active());
+
+        state.follow_new_turn(None, false);
+
+        assert!(!state.is_pin_reserve_active());
+        assert!(state.is_follow_preserve_scroll());
+        state.push_block(tall_agent_block());
+        state.prepare_layout(80, 8);
+        assert!(!state.is_follow_preserve_scroll());
+        assert_eq!(state.scroll_offset(), state.max_scroll_offset());
     }
 }
