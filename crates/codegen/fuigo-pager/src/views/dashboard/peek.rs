@@ -423,36 +423,22 @@ fn paint_peek_config_badge(
     reply: &crate::views::prompt_widget::PromptWidget,
     multiline: bool,
 ) {
-    use crate::views::prompt_widget::{PromptFlag, PromptInfo};
+    use crate::app::actions::PermissionLabel;
+    use crate::views::prompt_widget::{PromptFlag, PromptInfo, mode_flags};
 
     if area.height < 3 || area.width < 6 {
         return;
     }
     let model_label = panel.model_name.clone().unwrap_or_default();
-    let mut flags: Vec<PromptFlag> = Vec::new();
-    // Mirror the chat prompt's flag precedence: plan wins over always-approve, which wins over auto
-    // Plan mode blocks edits regardless of the underlying permission mode (the gate in fuigo-shell)
-    // `plan` alone is therefore the honest badge even when yolo stays on underneath
-    if panel.plan_mode {
-        flags.push(PromptFlag {
-            text: "plan",
-            color: Some(theme.accent_plan),
-            bold: false,
-        });
-    } else if panel.auto_approve {
-        flags.push(PromptFlag {
-            text: "always-approve",
-            color: None,
-            bold: false,
-        });
+    // Mirror the chat prompt's info line: plan and permission are independent axes (`plan · always-approve`)
+    let permission = if panel.auto_approve {
+        PermissionLabel::AlwaysApprove
     } else if panel.auto {
-        // Auto (LLM classifier) mode. Blue `accent_system`.
-        flags.push(PromptFlag {
-            text: "auto",
-            color: Some(theme.accent_system),
-            bold: false,
-        });
-    }
+        PermissionLabel::Auto
+    } else {
+        PermissionLabel::Ask
+    };
+    let flags: Vec<PromptFlag> = mode_flags(panel.plan_mode.then_some("plan"), permission, theme);
     if model_label.is_empty() && flags.is_empty() && !multiline {
         return;
     }

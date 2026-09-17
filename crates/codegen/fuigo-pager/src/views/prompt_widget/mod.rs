@@ -292,6 +292,7 @@ pub struct PromptFlag<'a> {
 }
 
 /// Info-line mode flags shared by the chat prompt and the dashboard peek badge: plan label, then permission.
+/// Plan and permission are independent axes, so neither hides the other.
 pub fn mode_flags<'a>(
     plan_label: Option<&'a str>,
     permission: crate::app::actions::PermissionLabel,
@@ -305,7 +306,6 @@ pub fn mode_flags<'a>(
             color: Some(theme.accent_plan),
             bold: false,
         });
-        return flags;
     }
     if permission != PermissionLabel::Ask {
         flags.push(PromptFlag {
