@@ -512,7 +512,6 @@ impl AgentView {
             self.is_subagent_view,
             (self.session.state.is_turn_running() || self.wake_turn_active())
                 && !self.renders_parked(),
-            self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,
             selected_is_agent_message,

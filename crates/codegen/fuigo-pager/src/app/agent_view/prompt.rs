@@ -786,7 +786,11 @@ impl AgentView {
     ///
     /// Call only after overlay / dropdown / search / selection declined Esc.
     /// Returns `None` when the key is not a bare Esc press.
-    pub(super) fn try_handle_esc_policy(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
+    pub(super) fn try_handle_esc_policy(
+        &mut self,
+        key: &KeyEvent,
+        registry: &ActionRegistry,
+    ) -> Option<InputOutcome> {
         if key.kind == KeyEventKind::Release
             || key.code != KeyCode::Esc
             || !key.modifiers.is_empty()
@@ -802,30 +806,25 @@ impl AgentView {
         self.esc_pressed_at = None;
 
         // A blocking card is still pending, parked behind the scrollback (the only way its Esc reaches this policy)
-        // Swallow it like the idle arms below: cancelling here would kill the turn the card is blocking on
-        // `esc_would_cancel_turn`, which the bar reads, already promises it will not
+        // Swallow it like the idle arms below so the card's own Esc semantics stay the only ones advertised
         if !self.no_input_overlay_pending() {
             return Some(InputOutcome::Changed);
         }
 
-        // Mid-turn running, fullscreen vim mode: swallow Esc (do not cancel or arm clear/rewind; Ctrl+C stays the cancel gesture there)
-        // `is_minimal_mode` is the per-agent injected screen mode, not the process global, so tests stay race-free
+        // Mid-turn (running or already cancelling), every mode: Esc never cancels; point at the registry cancel binding instead
         // A streaming wake turn follows the same policy as a running turn (the pane state is Idle only because wake turns are not adopted)
-        // Once its cancel was sent it follows the cancelling retry below instead, in every mode
         // `stoppable_activity_running` also covers a running manual `/compact`
-        // Esc must route it to the compact cancel, not fall through to the idle arms below (dispatch already handles it)
-        if self.stoppable_activity_running()
-            && !crate::app::esc_cancels_turn(self.is_minimal_mode(), self.vim_mode)
-        {
-            return Some(InputOutcome::Changed);
-        }
-        // Mid-turn (minimal / non-vim): cancel immediately from prompt or scrollback, even with a draft
-        // Also, in every mode, while already cancelling, so a lost cancel notification is re-sent (Ctrl+C escalates to Quit instead)
-        // Push the grace deadline out so an Esc mash past the cancel cannot silently arm the rewind picker below
+        // While a cancel is already in flight there is no hint: Ctrl+C escalates to quit there, so naming it would mislead
+        // Push the grace deadline out so an Esc mash past the turn's end cannot silently arm the rewind picker below
         if self.stoppable_activity_running() || self.any_cancel_pending() {
-            self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::Esc);
+            if self.stoppable_activity_running()
+                && let Some(cancel_key) = registry.key_for(ActionId::CancelTurn)
+            {
+                let cancel_key = cancel_key.display();
+                self.show_cancel_key_hint(&format!("Press {cancel_key} to cancel the turn"));
+            }
             self.suppress_rewind_arm(std::time::Instant::now());
-            return Some(InputOutcome::Action(Action::CancelTurn));
+            return Some(InputOutcome::Changed);
         }
 
         // The two idle arms split on pane ownership
@@ -877,6 +876,21 @@ impl AgentView {
         // The cases: a scrollback pane with a draft, an empty prompt with no turns, or the post-cancel grace
         // Also a scrollback Esc under a latent composer mode / pending needs-input overlay / open history search
         Some(InputOutcome::Changed)
+    }
+
+    /// Minimal has no toast slot and cannot erase committed lines, so the hint is a scrollback system line there.
+    /// Repeated Esc presses must not stack copies of it, even with streamed blocks in between: commit at most one per user turn.
+    fn show_cancel_key_hint(&mut self, msg: &str) {
+        if !self.is_minimal_mode() {
+            self.show_toast(msg);
+            return;
+        }
+        let turn = self.scrollback.turn_count();
+        if self.minimal_cancel_hint_turn != Some(turn) {
+            self.minimal_cancel_hint_turn = Some(turn);
+            self.scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(msg));
+        }
     }
 
     /// Arm the post-cancel grace: push the rewind-ARM suppression deadline out to `now + ESC_CANCEL_REWIND_GRACE`.
