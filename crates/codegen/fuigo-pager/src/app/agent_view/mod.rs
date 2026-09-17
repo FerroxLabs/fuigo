@@ -2078,7 +2078,9 @@ pub(crate) fn render_dropdown_chrome(
             panel_area,
             Style::default().fg(theme.text_primary).bg(theme.bg_light),
         );
-        let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+        let border_style = Style::default()
+            .fg(theme.panel_border_fg())
+            .bg(theme.bg_base);
         let border_line = Line::styled("\u{2500}".repeat(panel_width as usize), border_style);
         buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
         buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);

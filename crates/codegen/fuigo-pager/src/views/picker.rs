@@ -520,7 +520,7 @@ fn render_search_bar_with_label_viewport(
                 // This matches the rename overlay's cursor style
                 if let Some(cell) = buf.cell_mut((cursor_x, y)) {
                     let cursor_fg = if let Some(c) = bg { c } else { theme.bg_base };
-                    cell.set_style(Style::default().fg(cursor_fg).bg(theme.text_primary));
+                    cell.set_style(theme.block_cursor_over(cursor_fg));
                 }
             }
         }
@@ -944,6 +944,10 @@ pub fn render_picker_row(
         None => base_bg,
     };
     let meta_fg = embed.map_or(theme.gray, |e| e.fg(theme.gray));
+    // Terminal theme: this row is about to take the reverse-video overlay, where the fold glyph's
+    // bright-black fg would invert into a background patch. Give it the row's normal text fg so it
+    // inverts like the title.
+    let reversed_row = embed.is_none() && (row.selected || hovered) && theme.is_bandless();
 
     // Fill row background.
     let row_rect = Rect {
@@ -1032,6 +1036,19 @@ pub fn render_picker_row(
                 fold_width,
             );
             cur_x += fold_width;
+        } else if reversed_row {
+            let glyph = if row.expanded {
+                format!("{} ", crate::glyphs::diamond_filled())
+            } else {
+                format!("{} ", crate::glyphs::chevron())
+            };
+            buf.set_span(
+                cur_x,
+                y,
+                &Span::styled(glyph, Style::default().fg(theme.text_primary).bg(row_bg)),
+                fold_width,
+            );
+            cur_x += fold_width;
         } else {
             cur_x += crate::views::modal_window::render_fold_indicator(
                 buf,
@@ -1045,7 +1062,11 @@ pub fn render_picker_row(
         }
     } else {
         // Non-expandable: show ◆ diamond to indicate a leaf entry.
-        let diamond_fg = embed.map_or(theme.gray_dim, |e| e.fg(theme.gray_dim));
+        let diamond_fg = if reversed_row {
+            theme.text_primary
+        } else {
+            embed.map_or(theme.gray_dim, |e| e.fg(theme.gray_dim))
+        };
         let style = Style::default().fg(diamond_fg).bg(row_bg);
         buf.set_span(
             cur_x,

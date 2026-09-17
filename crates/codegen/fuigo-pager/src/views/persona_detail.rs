@@ -365,7 +365,7 @@ fn render_detail_editor(
     if width > 0 {
         let cursor_x = x + viewport.cursor_display_column as u16;
         if let Some(cell) = buf.cell_mut((cursor_x, y)) {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
 }

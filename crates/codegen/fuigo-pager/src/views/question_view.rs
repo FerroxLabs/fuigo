@@ -1686,6 +1686,15 @@ fn build_freeform_line(
         None if is_hovered => hovered_bg(theme),
         None => theme.bg_light,
     };
+    // Bandless palette: `bg_visual`/`bg_hover` are `Reset`, so the cue is reverse video via the line
+    // style, which the painter applies to the whole row rect. No-op on RGB themes.
+    let overlay = if embed.is_none() && is_cursor && panel_focused {
+        Some(theme.selection_overlay())
+    } else if embed.is_none() && is_hovered {
+        Some(theme.hover_overlay())
+    } else {
+        None
+    };
 
     // Multi-select: [x]/[ ] checkboxes.  Single-select: (●)/(○) radio buttons.
     // Both are 3 display cells, same as option rows
@@ -1748,7 +1757,11 @@ fn build_freeform_line(
     }
     spans.push(Span::styled(label, label_style));
 
-    Line::from(spans).style(Style::default().bg(row_bg))
+    let mut style = Style::default().bg(row_bg);
+    if let Some(ov) = overlay {
+        style = style.patch(ov);
+    }
+    Line::from(spans).style(style)
 }
 
 /// Render the complete question view into the given area.

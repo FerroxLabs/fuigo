@@ -259,6 +259,18 @@ pub fn fade_region(buf: &mut Buffer, area: Rect, base_color: Color, opacity: f32
 ///   - `opacity = 0.0`: fully target (original gone)
 ///   - `opacity = 1.0`: no change (original kept)
 ///
+/// Post-pass: row builders bake their own fgs, so a uniform row must be repainted after it is drawn.
+/// Used before a reverse-video overlay, where a colored glyph would otherwise invert into a colored background patch.
+pub fn force_area_fg(buf: &mut Buffer, area: Rect, fg: Color) {
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_fg(fg);
+            }
+        }
+    }
+}
+
 /// Both RGB and Indexed colors are blended; named ANSI color cells are skipped.
 pub fn blend_area(
     buf: &mut Buffer,

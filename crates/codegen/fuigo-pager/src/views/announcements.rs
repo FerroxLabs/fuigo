@@ -81,7 +81,8 @@ pub(crate) fn render_cta_button(
         return None;
     }
     let cta_style = if hovered {
-        Style::default().fg(theme.warning).bg(theme.bg_hover)
+        // hover_overlay: bg_hover band on RGB, reverse video on the terminal theme (bg_hover is Reset there).
+        theme.hover_overlay().fg(theme.warning)
     } else {
         Style::default().fg(theme.warning).bg(theme.bg_base)
     };
