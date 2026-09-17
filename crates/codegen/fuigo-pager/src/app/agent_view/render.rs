@@ -21,7 +21,7 @@ use crate::views::agent::AgentViewLayoutParams;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
-use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle};
+use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle, mode_flags};
 use crate::views::question_view::{QUESTION_VIEW_HPAD, feedback_input};
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 use crate::views::{agent, turn_status};
@@ -1665,7 +1665,7 @@ impl AgentView {
         self.hit_context.rect = areas.get("context").copied();
         self.hit_credits.rect = areas.get("credits").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
-        let short = crate::util::abbreviate_path(&self.session.cwd.to_string_lossy()).into_owned();
+        let short = crate::util::display_location_path(&self.session.cwd);
         let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
         let mut parts: Vec<Span> = Vec::new();
@@ -1714,16 +1714,6 @@ impl AgentView {
             cwd_style
         };
         parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
-            ));
-        }
         let cwd_line = Line::from(parts);
         let max_cwd_width = areas
             .values()
@@ -2158,7 +2148,7 @@ impl AgentView {
                 queue_focused,
                 layout_cfg,
                 Some(layout.scrollback),
-                self.session.state.is_turn_running(),
+                self.can_send_now(),
             );
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
@@ -2188,7 +2178,7 @@ impl AgentView {
                     queue_focused,
                     layout_cfg,
                     Some(layout.scrollback),
-                    self.session.state.is_turn_running(),
+                    self.can_send_now(),
                 );
             }
         }
@@ -2545,12 +2535,11 @@ impl AgentView {
         let editing_label;
         let commenting_label;
         let theme = Theme::current();
-        let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
         let approval_is_commenting = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        if effective_plan || casual_commenting {
+        let plan_label: Option<&str> = if effective_plan || casual_commenting {
             let commenting_range: Option<&std::ops::Range<usize>> = if approval_is_commenting {
                 self.plan_approval_view
                     .as_ref()
@@ -2560,7 +2549,7 @@ impl AgentView {
             } else {
                 None
             };
-            let plan_label: &str = if approval_is_commenting || casual_commenting {
+            Some(if approval_is_commenting || casual_commenting {
                 commenting_label = match commenting_range {
                     Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
                     Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
@@ -2571,27 +2560,13 @@ impl AgentView {
                 "plan approval"
             } else {
                 "plan"
-            };
-            mode_flags_vec.push(PromptFlag {
-                text: plan_label,
-                color: Some(theme.accent_plan),
-                bold: false,
-            });
-        }
-        if self.session.is_yolo() && !effective_plan {
-            mode_flags_vec.push(PromptFlag {
-                text: "always-approve",
-                color: None,
-                bold: false,
-            });
-        }
-        if self.auto_flag_visible(effective_plan) {
-            mode_flags_vec.push(PromptFlag {
-                text: "auto",
-                color: Some(theme.accent_system),
-                bold: false,
-            });
-        }
+            })
+        } else {
+            None
+        };
+        // Plan and permission are independent axes: entering plan mode never hides the permission flag
+        let mode_flags_vec: Vec<PromptFlag> =
+            mode_flags(plan_label, self.session.permission_label(), &theme);
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
         let warning = self.credit_balance.as_ref().and_then(|bal| {

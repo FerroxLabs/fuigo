@@ -181,7 +181,11 @@ mod selection;
 mod session;
 mod shell_completion;
 #[cfg(test)]
+mod extensions_row_hint_tests;
+#[cfg(test)]
 mod task_status_tests;
+#[cfg(test)]
+mod header_tests;
 mod viewer;
 mod workflows_overlay;
 use super::actions;

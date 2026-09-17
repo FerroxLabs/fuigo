@@ -20,12 +20,14 @@ fn write_session(
     let encoded = crate::util::fuigo_home::encode_cwd_dirname(cwd);
     let dir = root.join(&encoded).join(session_id);
     fs::create_dir_all(&dir).unwrap();
+    // A used, titled session: a 0-message untitled summary is an unused husk that most-recent
+    // resolution now skips (see `Summary::is_unused_optimistic_husk`)
     let mut summary = serde_json::json!({
         "info": { "id": session_id, "cwd": cwd },
-        "session_summary": "",
+        "session_summary": session_id,
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": updated_at,
-        "num_messages": 0,
+        "num_messages": 1,
         "current_model_id": "grok-3",
     });
     if let Some(la) = last_active_at {

@@ -406,9 +406,14 @@ impl MarkdownContent {
                         .map(|(line, joiner)| {
                             let mut content = line.clone();
                             let selectable = strip.selectable(&mut content);
+                            // For list/blockquote lines, even the first wrapped line includes the
+                            // "│ " prefix. Measure indent_width from the actual line content to
+                            // correctly exclude it from logical width calculations.
+                            let indent_width = compute_subsequent_indent_width(line);
                             let mut block_line = BlockLine::styled(content)
                                 .with_selection_range(Some(MARKDOWN_BODY_RANGE))
                                 .with_joiner(joiner.clone());
+                            block_line.indent_width = indent_width;
                             block_line.selectable = selectable;
                             if let Some(bg) = line.style.bg {
                                 block_line.with_background(bg)
@@ -421,6 +426,28 @@ impl MarkdownContent {
             }
         })
     }
+}
+
+/// Compute the display width of the `subsequent_indent` prefix on a wrapped continuation line. This width is NOT
+/// part of the logical pre-wrap content, so hyperlink column mapping must exclude it. Returns 0 for lines without
+/// recognizable indent prefixes.
+pub(super) fn compute_subsequent_indent_width(line: &Line<'_>) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    // Flatten the line's spans into plain text
+    let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+    // Blockquote/list lines start with one or more "│ " (U+2502 + space) prefixes
+    let mut width = 0;
+    let mut chars = flat.chars();
+    while let Some('\u{2502}') = chars.next() {
+        if chars.next() == Some(' ') {
+            width += UnicodeWidthStr::width("\u{2502} ");
+        } else {
+            break;
+        }
+    }
+    width
 }
 
 #[cfg(test)]

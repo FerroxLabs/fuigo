@@ -546,7 +546,6 @@ impl AgentView {
                     {
                         if matches!(self.prompt_mode, PromptMode::Normal)
                             && self.prompt.text().trim().is_empty()
-                            && self.session.state.is_turn_running()
                             && let Some(outcome) = self.try_send_now_queued_from_prompt()
                         {
                             return outcome;
@@ -574,7 +573,6 @@ impl AgentView {
                     // That Enter must only insert the newline, not fire a queued follow-up
                     if matches!(self.prompt_mode, PromptMode::Normal)
                         && self.prompt.text().trim().is_empty()
-                        && self.session.state.is_turn_running()
                         && let Some(outcome) = self.try_send_now_queued_from_prompt()
                     {
                         return outcome;
@@ -597,9 +595,9 @@ impl AgentView {
                     // 2) Empty composer with a visible follow-up in the queue: same as bare Enter, send the top row now
                     // 3) Idle / nothing to send: promote to ToggleYolo when that chord matches (Apple Terminal Ctrl+O opens YOLO / free-tier CTA)
                     let text = self.prompt.text().trim().to_string();
-                    let turn_running = self.session.state.is_turn_running();
+                    let can_send_now = self.can_send_now();
                     if !text.is_empty() {
-                        if turn_running {
+                        if can_send_now {
                             // Paste-then-immediate-send: an image probe is still off-thread
                             // Stash (draft untouched) and re-issue on completion so the not-yet-attached chip isn't dropped
                             if self.paste_probe_in_flight > 0 {
@@ -612,9 +610,7 @@ impl AgentView {
                             self.note_draft_consumed();
                             return InputOutcome::Action(Action::SendPromptNow { text, images });
                         }
-                    } else if turn_running
-                        && let Some(outcome) = self.try_send_now_queued_from_prompt()
-                    {
+                    } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
                     }
                     if registry.matches_id(ActionId::ToggleYolo, key) {
@@ -668,7 +664,7 @@ impl AgentView {
         // The `When::AgentScreen` registry currently binds `?+SHIFT` as the alt key for CommandPalette
         // See the parallel guard at the top-of-file `?` handler in `handle_input` (`active_pane != Prompt`)
         let is_text_char = crate::input::key::is_text_input_key(key);
-        // Mouse toggle is scrollback-only (Ctrl+R); the prompt leaves Ctrl+R unbound.
+        // Ctrl+R is consumed here for the session picker, so the textarea never sees it.
         if !is_text_char && let Some(action_id) = registry.lookup(key, When::AgentScreen) {
             // Ctrl+C is a two-step "clear, then cancel" gesture when the prompt has a draft
             // The first press clears the textarea; the second (now on an empty prompt) cancels the running turn
@@ -1501,13 +1497,37 @@ mod history_browse_panel_tests {
         assert_eq!(agent.prompt_input_mode, PromptInputMode::Normal);
     }
 
-    /// Ctrl+R is deliberately unbound: it must not open the history panel (search mode is reachable via /history only).
+    /// Ctrl+R opens the session picker; the history panel stays reachable only through /history.
     #[test]
-    fn ctrl_r_is_unbound_and_does_not_open_history() {
+    fn ctrl_r_opens_the_picker_and_not_history() {
         let mut agent = agent_with_history(&["say cherry"]);
-        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        let outcome = agent
+            .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
         assert!(!agent.prompt.history_search.is_active());
         assert_eq!(agent.prompt.text(), "");
+    }
+
+    /// With a redo waiting after Ctrl+Z, Ctrl+R still opens the session picker; the composer redoes on Ctrl+Shift+Z or Alt+Z.
+    #[test]
+    fn ctrl_r_opens_the_picker_even_with_a_redo_stack() {
+        let mut agent = agent_with_history(&[]);
+        agent.handle_prompt_key_for_test(&key(KeyCode::Char('d')));
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+        let outcome = agent
+            .handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
+        assert_eq!(agent.prompt.text(), "", "redo must not run");
     }
 
     #[test]

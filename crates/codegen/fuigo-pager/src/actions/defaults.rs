@@ -578,9 +578,9 @@ pub(super) fn default_actions(
             id: ActionId::OpenSessions,
             label: "sessions",
             description: "Open sessions",
-            default_key: key!(F(3)),
+            default_key: key!('r', CONTROL),
             alt_keys: vec![],
-            category: Category::Panels,
+            category: Category::Session,
             context: When::AgentScreen,
             hint_priority: None,
             hint_key_display: None,
@@ -689,7 +689,7 @@ pub(super) fn default_actions(
                 "Microphone capture for dictation, bound to Ctrl+Space (or F8: handy where Ctrl+Space is taken, e.g. macOS input-source switching; use Fn+F8 on a laptop).\nBehavior follows the Voice capture setting: toggle (press to start, press again to stop) or hold-to-talk (hold to record, release to stop), where hold needs a Kitty-protocol terminal and falls back to toggle elsewhere. `/voice` toggles everywhere.\nSpeech is transcribed straight into the prompt.",
             ),
         },
-        // Prompt history has no key chord (Ctrl+R is deliberately unbound):
+        // Prompt history has no key chord of its own:
         // `/history` opens the search panel; Up on an empty prompt browses.
         ActionDef {
             id: ActionId::ToggleMultiline,
@@ -862,7 +862,7 @@ pub(super) fn default_actions(
     // Toggle terminal mouse reporting (mouse capture). Opt-in via `[ui] mouse_reporting_toggle = true` in config.toml.
     // Disabling capture hands mouse selection back to the terminal for native click-drag copy/paste; re-enabling restores in-app mouse support
     //
-    // Single binding: Ctrl+R on scrollback only (not prompt, where Ctrl+R remains prompt history search)
+    // Single binding: Ctrl+R on scrollback only, which takes that chord from OpenSessions while scrollback is focused.
     // Plain Ctrl+letter passes through Apple Terminal; this avoids Ctrl+Shift+… chords that Terminal.app often swallows
     // Under Panels (not Essentials): advanced/opt-in only
     if mouse_reporting_toggle_enabled {

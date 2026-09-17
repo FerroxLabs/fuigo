@@ -2075,10 +2075,12 @@ fn main() {
     if let Err(e) = result {
         fuigo_tty_utils::restore_native_stderr();
         finalize_span_profile();
-        match e.downcast_ref::<fuigo_pager::app::StartupFailure>() {
-            Some(startup) => eprintln!("{}", startup.user_report()),
-            None => eprintln!("Error: {e:#}"),
-        }
+        // fd 2 is very likely the pane the user just closed; a panicking write would abort the process
+        let report = match e.downcast_ref::<fuigo_pager::app::StartupFailure>() {
+            Some(startup) => startup.user_report(),
+            None => format!("Error: {e:#}"),
+        };
+        fuigo_pager::best_effort_stderr::eprint_line(&report);
         drop(_sentry_guard);
         std::process::exit(1);
     }

@@ -210,6 +210,44 @@ struct WelcomeLayoutInput<'a> {
     prompt_height: Option<u16>,
 }
 
+/// Cap for the composer rows the welcome layout reserves: half the screen, and never more than the
+/// column can give up once the logo is hidden, but never less than the default box.
+fn prompt_max_height(input: &WelcomeLayoutInput<'_>) -> u16 {
+    let content_height = input.content_area.height;
+    // The stacked info slot (announcement or changelog) keeps its rows: the draft pushes the logo out, never the announcement
+    let info = match input.announcement {
+        Some(ann) => {
+            let avail = input
+                .content_area
+                .width
+                .saturating_sub(prompt::prompt_inset(input.prompt_compact) * 2);
+            let width = stacked_info_width(avail, content_height, MENU_MIN_WIDTH);
+            hero_box::announcement_desired_rows(ann, width, input.expanded, input.has_upgrade_cta)
+                .min(stacked_info_budget(
+                    input.content_area,
+                    input.error_height,
+                    input.menu_height,
+                    input.tip_height,
+                    input.compact,
+                ))
+        }
+        None => input.changelog_height,
+    };
+    let info_gap = if info > 0 { 1u16 } else { 0 };
+    let gap_after_logo = if input.error_height > 0 { 1u16 } else { 0 };
+    // Logo hidden: its gap row, the error slot, the menu, the info slot and the one-row flex gap stay
+    let fixed_above = 1 + gap_after_logo + input.error_height;
+    let column_fit = content_height.saturating_sub(
+        fixed_above
+            + input.menu_height
+            + info_gap
+            + info
+            + 1
+            + WelcomeLayout::fixed_below_with_prompt(input.tip_height, 0),
+    );
+    (content_height / 2).min(column_fit).max(PROMPT_HEIGHT)
+}
+
 impl WelcomeLayout {
     /// Whether the hero box (side-by-side logo and menu inside a border) is active.
     pub(super) fn has_hero_box(&self) -> bool {
@@ -220,7 +258,7 @@ impl WelcomeLayout {
         Self::fixed_below_with_prompt(tip_height, PROMPT_HEIGHT)
     }
 
-    fn fixed_below_with_prompt(tip_height: u16, prompt_height: u16) -> u16 {
+    pub(super) fn fixed_below_with_prompt(tip_height: u16, prompt_height: u16) -> u16 {
         let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
         tip_height + tip_gap + prompt_height + VERSION_GAP + 1
     }
@@ -282,12 +320,19 @@ impl WelcomeLayout {
         } else {
             changelog_height
         };
+        let hero_prompt_height = prompt_height.unwrap_or(PROMPT_HEIGHT);
         let use_hero_box = allow_hero_box
             && !compact
             && content_area.width >= HERO_BOX_MIN_WIDTH
             && menu_height > 0
             && content_area.height
-                >= hero_box::min_content_height(error_height, menu_height, tip_height, gate_info);
+                >= hero_box::min_content_height_with_prompt(
+                    error_height,
+                    menu_height,
+                    tip_height,
+                    gate_info,
+                    hero_prompt_height,
+                );
 
         if use_hero_box {
             // The hero box measures and clamps the announcement itself
@@ -300,6 +345,7 @@ impl WelcomeLayout {
                 announcement,
                 expanded,
                 has_upgrade_cta,
+                hero_prompt_height,
             );
         }
 
@@ -919,15 +965,25 @@ fn render_welcome_blocked(
 
     let msg_height = if message.is_some() { 2u16 } else { 0u16 };
     let menu_height = menu_items.len() as u16;
-    // Force the stacked layout: this renderer only paints the stacked logo/menu rects, which the hero-box layout would leave empty
-    let layout = WelcomeLayout::compute_stacked(WelcomeLayoutInput {
+    let mut layout_input = WelcomeLayoutInput {
         content_area,
         error_height: msg_height,
         menu_height,
         compact,
         prompt_compact: compact,
         ..Default::default()
-    });
+    };
+    // The login screen paints the home draft (logout keeps it), so it measures the box the same way home does
+    if let Some((prompt_widget, _)) = prompt.as_ref() {
+        layout_input.prompt_height = Some(prompt::desired_prompt_height(
+            prompt_widget,
+            content_area.width,
+            compact,
+            prompt_max_height(&layout_input),
+        ));
+    }
+    // Force the stacked layout: this renderer only paints the stacked logo/menu rects, which the hero-box layout would leave empty
+    let layout = WelcomeLayout::compute_stacked(layout_input);
 
     render_logo(layout.logo, buf, &theme, content_area.height);
 
@@ -1912,7 +1968,7 @@ fn render_welcome_done(
     let content_height = menu_height + picker_height;
     // The layout measures the announcement slot itself
     // Collapsed is the title plus up to 2 wrapped lines; expanded is the full message, clamped so the box fits
-    let layout = WelcomeLayout::compute(WelcomeLayoutInput {
+    let mut layout_input = WelcomeLayoutInput {
         content_area,
         error_height: hint_height,
         menu_height: content_height,
@@ -1924,7 +1980,18 @@ fn render_welcome_done(
         expanded: p.welcome_announcement_expanded,
         has_upgrade_cta: p.upgrade_cta.is_some(),
         prompt_height: None,
-    });
+    };
+    // The composer grows with its draft (one row per line / wrapped row) up to the column's cap
+    // The picker and the access gate paint no composer
+    if !show_picker && p.has_access {
+        layout_input.prompt_height = Some(prompt::desired_prompt_height(
+            prompt,
+            content_area.width,
+            p.compact,
+            prompt_max_height(&layout_input),
+        ));
+    }
+    let layout = WelcomeLayout::compute(layout_input);
 
     // Render startup warning in the error area (same slot as auth errors).
     let import_banner_rect = render_startup_warnings(layout.error, buf, theme, p.startup_warnings);
@@ -3603,6 +3670,89 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(layout.changelog.height, 5);
+    }
+
+    fn places_every_row(layout: &WelcomeLayout, input: &WelcomeLayoutInput<'_>) -> bool {
+        let prompt_height = input.prompt_height.unwrap_or(PROMPT_HEIGHT);
+        let stacked_rows =
+            layout.menu.height == input.menu_height && layout.error.height == input.error_height;
+        (layout.has_hero_box() || stacked_rows)
+            && layout.tip.height == input.tip_height
+            && layout.prompt.height == prompt_height
+            && layout.version.height == 1
+    }
+
+    fn assert_places_every_row(layout: &WelcomeLayout, input: &WelcomeLayoutInput<'_>) {
+        assert!(
+            places_every_row(layout, input),
+            "a row lost height: menu {} tip {} prompt {} version {} for prompt {:?} in {:?}",
+            layout.menu.height,
+            layout.tip.height,
+            layout.prompt.height,
+            layout.version.height,
+            input.prompt_height,
+            input.content_area
+        );
+    }
+
+    #[test]
+    fn hero_box_prompt_grows_into_the_flex_gap_and_holds_the_box_still() {
+        let area = Rect::new(0, 0, 90, 50);
+        let input = |prompt_height| WelcomeLayoutInput {
+            content_area: area,
+            menu_height: 4,
+            prompt_height,
+            ..Default::default()
+        };
+        let one_line = WelcomeLayout::compute(input(None));
+        let five_lines = WelcomeLayout::compute(input(Some(PROMPT_HEIGHT + 4)));
+        assert!(one_line.has_hero_box() && five_lines.has_hero_box());
+        assert_eq!(one_line.prompt.height, PROMPT_HEIGHT);
+        assert_eq!(five_lines.prompt.height, PROMPT_HEIGHT + 4);
+        assert_eq!(five_lines.version, one_line.version);
+        assert_eq!(five_lines.prompt.bottom(), one_line.prompt.bottom());
+        assert_eq!(
+            five_lines.hero_box, one_line.hero_box,
+            "a taller draft eats the flex gap before moving the hero box"
+        );
+        assert_places_every_row(&five_lines, &input(Some(PROMPT_HEIGHT + 4)));
+    }
+
+    #[test]
+    fn stacked_layout_reserves_the_requested_prompt_rows() {
+        let area = Rect::new(0, 0, 60, 40);
+        let input = |prompt_height| WelcomeLayoutInput {
+            content_area: area,
+            menu_height: 4,
+            prompt_height,
+            ..Default::default()
+        };
+        let one_line = WelcomeLayout::compute_stacked(input(None));
+        let tall = WelcomeLayout::compute_stacked(input(Some(PROMPT_HEIGHT + 4)));
+        assert_eq!(one_line.prompt.height, PROMPT_HEIGHT);
+        assert_eq!(tall.prompt.height, PROMPT_HEIGHT + 4);
+        assert_eq!(tall.version, one_line.version);
+        assert_places_every_row(&tall, &input(Some(PROMPT_HEIGHT + 4)));
+    }
+
+    /// The composer may grow to half the screen but never below its default, and never past what the
+    /// column can give up once the logo is gone.
+    #[test]
+    fn prompt_max_height_is_bounded_by_the_column_and_half_the_screen() {
+        let input = |height| WelcomeLayoutInput {
+            content_area: Rect::new(0, 0, 90, height),
+            menu_height: 4,
+            ..Default::default()
+        };
+        assert_eq!(prompt_max_height(&input(60)), 30);
+        assert_eq!(prompt_max_height(&input(10)), PROMPT_HEIGHT);
+        // 14 rows minus logo gap(1), menu(4), flex gap(1) and the version rows: the column, not half the screen, caps it
+        let column_only = 14u16 - (1 + 4 + 1 + WelcomeLayout::fixed_below_with_prompt(0, 0));
+        assert!(
+            (PROMPT_HEIGHT..7).contains(&column_only),
+            "column_only={column_only}"
+        );
+        assert_eq!(prompt_max_height(&input(14)), column_only);
     }
 
     #[test]

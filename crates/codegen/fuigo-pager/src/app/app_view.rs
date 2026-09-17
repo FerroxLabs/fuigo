@@ -2843,6 +2843,7 @@ impl AppView {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
                 &mut WelcomeInputCtx {
+                    registry: &self.registry,
                     auth_state: &self.auth_state,
                     trust_state: &self.trust_state,
                     consent_state: &self.consent_state,
@@ -3461,6 +3462,8 @@ use crate::views::session_picker::{
 };
 /// Context for welcome-view input handling.
 struct WelcomeInputCtx<'a> {
+    /// The welcome screen looks up `ActionId::OpenSessions` here, so it opens the session picker on the same key the agent screen uses.
+    registry: &'a crate::actions::ActionRegistry,
     auth_state: &'a AuthState,
     /// Folder-trust state.
     /// When `Pending` (and auth is `Done`), the trust question intercepts keys and swallows the rest so no session starts.
@@ -4072,7 +4075,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
             }
-            if key!(F(3)).matches(key) {
+            if ctx.registry.matches_id(ActionId::OpenSessions, key) {
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
@@ -5798,6 +5801,11 @@ impl AppView {
                 agent.btw_state,
                 Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
             ) && spinner_frame_tick;
+            needs_redraw |= agent
+                .extensions_modal
+                .as_ref()
+                .is_some_and(|m| m.needs_spinner_tick())
+                && spinner_frame_tick;
             needs_redraw |= matches!(
                 agent.active_modal.as_ref(),
                 Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -6126,7 +6134,7 @@ impl AppView {
                     || agent
                         .extensions_modal
                         .as_ref()
-                        .is_some_and(|m| m.result_notice.is_some())
+                        .is_some_and(|m| m.result_notice.is_some() || m.needs_spinner_tick())
                     || agent.ephemeral_tip_needs_tick()
                     || agent.mode_switch_banner.is_some()
                     || agent.has_drag_autoscroll()

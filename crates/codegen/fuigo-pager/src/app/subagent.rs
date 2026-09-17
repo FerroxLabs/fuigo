@@ -401,35 +401,15 @@ pub(crate) mod test_support {
     }
 }
 
-/// True when a scrollback holds nothing beyond injected task prompts.
-fn scrollback_is_prompt_only(scrollback: &crate::scrollback::state::ScrollbackState) -> bool {
-    let len = scrollback.len();
-    if len == 0 {
-        return true;
-    }
-    for i in 0..len {
-        let Some(entry) = scrollback.entry(i) else {
-            continue;
-        };
-        match &entry.block {
-            crate::scrollback::block::RenderBlock::UserPrompt(_) => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-/// True when a scrollback holds only injected prompts plus the `TurnCompleted` footer.
-/// A rebuild recreates that content, so it must not pin the view `MemoryOnly`.
-fn scrollback_is_prompt_and_footer_only(
-    scrollback: &crate::scrollback::state::ScrollbackState,
-) -> bool {
+/// True when a scrollback holds nothing but `TurnCompleted` footers.
+/// A finalize recreates that content, so it must not pin the view `MemoryOnly`.
+/// A `UserPrompt` counts as content: it came from the session stream and may be the only copy.
+fn scrollback_is_footer_only(scrollback: &crate::scrollback::state::ScrollbackState) -> bool {
     for i in 0..scrollback.len() {
         let Some(entry) = scrollback.entry(i) else {
             continue;
         };
         match &entry.block {
-            crate::scrollback::block::RenderBlock::UserPrompt(_) => {}
             crate::scrollback::block::RenderBlock::SessionEvent(b)
                 if matches!(
                     b.event,
@@ -483,9 +463,9 @@ pub(crate) fn ensure_subagent_child_replayed(
     let Some(child_view) = parent.subagent_views.get(child_sid) else {
         return ChildReplayOutcome::UnknownChild;
     };
-    // Ordering barrier: a running or background view is filled only while it holds nothing but the task prompt
-    // Disk history therefore never lands after a live block
-    if (!finished || is_background) && !scrollback_is_prompt_only(&child_view.scrollback) {
+    // Ordering barrier: a running or background view is filled only while it holds nothing
+    // (the live echo of the task prompt already closes the window). Disk history therefore never lands after a live block
+    if (!finished || is_background) && !child_view.scrollback.is_empty() {
         tracing::debug!(
             child_session_id = %child_sid,
             finished,
@@ -496,12 +476,12 @@ pub(crate) fn ensure_subagent_child_replayed(
     }
     // Reset to the evicted baseline first: the rebuild trusts disk only, never appending onto a stray or unpersisted live block
     let detached_state = if finished && !is_background {
-        let detached_state = reset_child_view_to_prompt(parent, child_sid);
+        let detached_state = detach_child_view_content(parent, child_sid);
         debug_assert!(
             parent
                 .subagent_views
                 .get(child_sid)
-                .is_none_or(|view| scrollback_is_prompt_only(&view.scrollback)),
+                .is_none_or(|view| view.scrollback.is_empty()),
             "the reset must leave the view showing nothing but the task prompt, \
              or the replay below appends disk history after live blocks"
         );
@@ -547,7 +527,7 @@ fn restore_or_finalize_after_replay(
         Ok(ReplayEmission::Emitted) => false,
         Ok(ReplayEmission::Empty) => detached_state
             .as_ref()
-            .is_some_and(|t| !scrollback_is_prompt_and_footer_only(&t.scrollback)),
+            .is_some_and(|t| !scrollback_is_footer_only(&t.scrollback)),
         Err(_) => true,
     };
     let mut restored = false;
@@ -608,7 +588,7 @@ pub(crate) fn replay_resumed_child_before_live_block(
     if !parent
         .subagent_views
         .get(child_sid)
-        .is_some_and(|view| scrollback_is_prompt_only(&view.scrollback))
+        .is_some_and(|view| view.scrollback.is_empty())
     {
         return;
     }
@@ -652,33 +632,20 @@ fn replay_child_and_record_outcome(
     outcome
 }
 
-/// Reset a child view to the resume-state baseline: detach every replay-rebuilt field, drop the media caches, and re-inject the task prompt.
-/// `expect_user_echo` lets a later replay dedup the persisted echo against this injected prompt.
+/// Reset a child view to the evicted baseline: detach every replay-rebuilt field and drop the media caches.
+/// The view is left EMPTY: the child stream's (live or persisted) echo is the only writer of the task prompt.
 ///
 /// Returns the detached state so a rebuild that emitted nothing can restore it losslessly (eviction drops it instead).
 #[must_use = "dropping the detached state destroys the only in-memory copy; eviction must drop it explicitly"]
-fn reset_child_view_to_prompt(
+fn detach_child_view_content(
     parent: &mut crate::app::agent_view::AgentView,
     child_sid: &str,
 ) -> Option<crate::app::agent_view::ReplayRebuiltState> {
-    let prompt = parent
-        .subagent_sessions
-        .get(child_sid)
-        .and_then(|info| info.prompt.clone())
-        .filter(|p| !p.trim().is_empty());
     let child_view = parent.subagent_views.get_mut(child_sid)?;
     let detached = child_view.take_replay_rebuilt_state();
     // Drop the byte cache and failed-load markers; keep inline_media_ids so transmitted placements stay valid and re-place from disk
     child_view.inline_media_cache = Default::default();
     child_view.inline_media_load_failed = Default::default();
-    if let Some(prompt) = prompt {
-        child_view
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
-                prompt.as_ref(),
-            ));
-        child_view.session.tracker.expect_user_echo();
-    }
     Some(detached)
 }
 
@@ -722,8 +689,8 @@ pub(crate) fn evict_finished_child_view(
         return EvictOutcome::Evicted;
     };
     // Purge only after a real drop: re-evicting a bare view frees nothing.
-    let had_content = !scrollback_is_prompt_only(&child_view.scrollback)
-        || !child_view.inline_media_cache.is_empty();
+    let had_content =
+        !child_view.scrollback.is_empty() || !child_view.inline_media_cache.is_empty();
     if !info.transcript.evictable() && had_content {
         let child_cwd = info.child_cwd.clone();
         // Hinted-only: the probe stays cheap; a relocated copy the hints miss is found by the open-path rebuild
@@ -740,7 +707,7 @@ pub(crate) fn evict_finished_child_view(
     if let Some(info) = parent.subagent_sessions.get_mut(child_sid) {
         info.transcript.evicted();
     }
-    drop(reset_child_view_to_prompt(parent, child_sid));
+    drop(detach_child_view_content(parent, child_sid));
     if had_content {
         // Deferred so the purge cost lands between frames, not inside this notification.
         crate::memory_release::request_release_after_draw("subagent-evict");

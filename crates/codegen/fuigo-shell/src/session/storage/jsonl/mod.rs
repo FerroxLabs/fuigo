@@ -346,7 +346,9 @@ impl JsonlStorageAdapter {
                             &summary_path,
                             &lock_path,
                         );
-                        summaries.push(summary);
+                        if !summary.is_unused_optimistic_husk() {
+                            summaries.push(summary);
+                        }
                     }
                 }
                 Err(_) => continue,

@@ -147,8 +147,8 @@ fn join_agent_thread(handle: thread::JoinHandle<Result<()>>, timeout: Duration) 
         Err(RecvTimeoutError::Disconnected) => JoinOutcome::HelperLost,
         Err(RecvTimeoutError::Timeout) => {
             if std::io::stderr().is_terminal() {
-                eprintln!("{JOIN_NOTICE}");
-                notice_shown = true;
+                // The pane may already be gone: report the failure instead of panicking on it
+                notice_shown = crate::best_effort_stderr::eprint_line_reported(JOIN_NOTICE);
             }
             match rx.recv_timeout(timeout.saturating_sub(quiet)) {
                 Ok(result) => classify_join(result),

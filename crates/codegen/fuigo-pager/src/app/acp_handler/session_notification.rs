@@ -655,22 +655,9 @@ pub(super) fn handle_session_notification_with_origin(
                 .registry()
                 .restricted_commands();
             child_view.set_restricted_commands(&restricted);
+            // The child stream's own `UserMessageChunk` echo is the single writer of the task prompt:
+            // seeding a copy here (and arming an echo skip for it) painted it twice on first open
             agent.insert_subagent_view(child_session_id.clone(), Box::new(child_view));
-            let prompt_to_inject = agent
-                .subagent_sessions
-                .get(&child_session_id)
-                .and_then(|info| info.prompt.as_deref())
-                .filter(|p| !p.trim().is_empty())
-                .map(str::to_owned);
-            if let (Some(prompt), Some(child_view)) = (
-                prompt_to_inject,
-                agent.subagent_views.get_mut(&child_session_id),
-            ) {
-                child_view
-                    .scrollback
-                    .push_block(RenderBlock::user_prompt(prompt));
-                child_view.session.tracker.expect_user_echo();
-            }
             if workflow_run_id.is_none() {
                 let block = crate::scrollback::blocks::SubagentBlock::started(
                     &description,

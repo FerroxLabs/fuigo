@@ -277,6 +277,11 @@ impl ThinkingBlock {
     ) -> BlockLine {
         let mut content = line.clone();
         let selectable = strip.selectable(&mut content);
+        let indent_width = if joiner.is_some() {
+            super::markdown_content::compute_subsequent_indent_width(line)
+        } else {
+            0
+        };
         let mut blended = blend_line_with_default(content, bg_base, fg_default, blend_factor);
         if let Some(emphasis) = emphasis {
             for span in &mut blended.spans {
@@ -287,6 +292,7 @@ impl ThinkingBlock {
             .with_selection_range(Some(0))
             .with_joiner(joiner.clone());
         block_line.selectable = selectable;
+        block_line.indent_width = indent_width;
         block_line
     }
 

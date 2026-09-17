@@ -3245,20 +3245,10 @@ fn overlay_pretty_link_url_with_cjk_text() {
 }
 
 /// Long URL inside a blockquote. The OverlayLink for the URL must cover continuation rows so OSC 8 is present on every wrapped row.
-///
-/// KNOWN-BUG: `map_hyperlinks_to_overlay` accumulates `cumulative_col` using `line.content.width()`.
-/// That width INCLUDES the `│ ` indent injected by `word_wrap_line_with_joiners` on continuation rows.
-/// Two consequences for blockquote/list URL wraps:
-///   (a) Cosmetic: the OverlayLink on continuation rows starts at `content_x`, covering the `│ ` indent.
-///       The indent characters are OSC 8 wrapped and inherit the terminal's auto-styling (underline/colour).
-///   (b) Functional: `cumulative_col` over-counts by `indent_width` cells per continuation row.
-///       The last `indent_width` cells of the URL on each continuation row are therefore not covered by an OverlayLink and are not clickable.
-///       With N continuation rows the unclickable tail accumulates to `N * indent_width` cells.
-/// The invariant that OSC 8 is present on every wrapped row of the URL IS satisfied, and this test pins it.
-/// Once the bug is fixed (needs `BlockLine` to carry the `subsequent_indent` width), tighten the assertions:
-/// `col_start == content_x + indent_width` on continuation rows, and `sum(fragment_widths) == url.display_width()`.
+/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
 #[test]
 fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/blockquote/path/with/many/hyphens-and-segments-here";
     let markdown = format!("> See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3278,6 +3268,20 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // The indent width for blockquote continuation is 2 ("│ ")
+    let indent_width: u16 = 2;
+
+    // Continuation rows (all but the first) must start after the indent
+    for frag in group.get(1..).into_iter().flatten() {
+        assert_eq!(
+            frag.col_start,
+            content_x + indent_width,
+            "OverlayLink on continuation row must start exactly at content_x + indent_width; got col_start={} but expected {}",
+            frag.col_start,
+            content_x + indent_width
+        );
+    }
+
     // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
@@ -3289,14 +3293,25 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Long URL inside a list item. Same OSC-coverage invariant as the blockquote test above.
-/// See that test for the rationale and the related indent-inclusion bug.
-/// Both its symptoms apply here too.
-/// The indent inherits the URL styling, and the last `indent_width` URL cells of each continuation row are not clickable.
+/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
 #[test]
 fn overlay_pretty_link_url_in_list_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/list/item/path/with/many/hyphens-and-segments-here";
     let markdown = format!("- See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3316,6 +3331,17 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // Top-level list items render as "\u{2022} \u{2026}" with no quote-bar indent on continuation rows
+    // Continuation OverlayLinks start at content_x (no indent offset)
+    for frag in group.get(1..).into_iter().flatten() {
+        assert_eq!(
+            frag.col_start, content_x,
+            "OverlayLink on list continuation row must start at content_x (no quote-bar indent); got col_start={} but expected {}",
+            frag.col_start, content_x
+        );
+    }
+
+    // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
             frag.col_start >= content_x,
@@ -3326,6 +3352,18 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Width changes trigger `set_max_table_width` resets inside `MarkdownContent::ensure_wrapped`.

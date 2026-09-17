@@ -752,7 +752,7 @@ async fn most_recent_session_id(
     let summaries = fuigo_shell::session::persistence::list_summaries(Some(cwd)).await?;
     let first = summaries
         .iter()
-        .find(|summary| selection.admits(summary))
+        .find(|summary| selection.admits(summary) && !summary.is_unused_optimistic_husk())
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "No session found for current directory. \
@@ -1645,6 +1645,92 @@ mod tests {
                 .recent_session_selection,
             RecentSessionSelection::Any,
         );
+    }
+    #[serial_test::serial(FUIGO_HOME)]
+    #[tokio::test]
+    async fn continue_skips_empty_worktree_stamped_husk() {
+        let mut fx = crate::test_util::FuigoHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let real_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let husk_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            real_id,
+            serde_json::json!({
+                "updated_at": "2026-07-01T00:00:00Z",
+                "generated_title": "real work",
+                "num_messages": 3,
+            }),
+        );
+        fx.write_summary(
+            &cwd,
+            husk_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "worktree",
+                "worktree_label": "fix-bug",
+                "num_messages": 0,
+                "session_summary": "",
+            }),
+        );
+        let args = parse(&["fuigo", "-c"]);
+        let result = materialize_startup_for_cwd(
+            MaterializeCtx::from_pager_args(&args),
+            args.session_startup_intent().unwrap(),
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match result {
+            MaterializedStartup::Resume { session_id, .. } => {
+                assert_eq!(session_id, real_id)
+            }
+            other => panic!("expected Resume of the prior session, got {other:?}"),
+        }
+    }
+    #[serial_test::serial(FUIGO_HOME)]
+    #[tokio::test]
+    async fn continue_keeps_empty_worktree_fork() {
+        let mut fx = crate::test_util::FuigoHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let older_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let fork_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            older_id,
+            serde_json::json!({
+                "updated_at": "2026-07-01T00:00:00Z",
+                "generated_title": "older",
+                "num_messages": 3,
+            }),
+        );
+        fx.write_summary(
+            &cwd,
+            fork_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "worktree",
+                "worktree_label": "fix-bug",
+                "parent_session_id": older_id,
+                "forked_at": "2026-07-02T00:00:00Z",
+                "num_messages": 0,
+                "session_summary": "",
+            }),
+        );
+        let args = parse(&["fuigo", "-c"]);
+        let result = materialize_startup_for_cwd(
+            MaterializeCtx::from_pager_args(&args),
+            args.session_startup_intent().unwrap(),
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match result {
+            MaterializedStartup::Resume { session_id, .. } => {
+                assert_eq!(session_id, fork_id)
+            }
+            other => panic!("expected Resume of the empty worktree fork, got {other:?}"),
+        }
     }
     #[serial_test::serial(FUIGO_HOME)]
     #[tokio::test]
