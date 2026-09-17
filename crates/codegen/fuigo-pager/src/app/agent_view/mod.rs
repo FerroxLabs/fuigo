@@ -26,12 +26,11 @@
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
-//!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
+//!       turn running, every mode → Changed (swallow) plus a
+//!         "Press <cancel key> to cancel the turn" hint (toast in fullscreen,
+//!         at most one committed system line per user turn in minimal); the
+//!         draft is preserved and the turn keeps running
+//!       turn cancelling → Changed (swallow) with no hint; Ctrl+C escalates to Quit
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
@@ -1592,6 +1591,10 @@ pub struct AgentView {
     /// retired-on-expiry by `rewind_arm_suppressed`. `pub(crate)` for policy
     /// tests.
     pub(crate) rewind_suppress_deadline: Option<std::time::Instant>,
+    /// Minimal mode has no toast slot, so the mid-turn "press <cancel key>" hint is
+    /// a committed system line; this is the turn it was last committed for, so Esc
+    /// mashing commits at most one hint per user turn.
+    pub(crate) minimal_cancel_hint_turn: Option<usize>,
     /// First prompt to enqueue once the session finishes loading replay.
     /// Set by `/fork` when a directive is provided; drained in the
     /// `TaskResult::SessionLoaded` arm via `enqueue_prompt_front` so the

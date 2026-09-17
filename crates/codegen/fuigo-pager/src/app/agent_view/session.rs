@@ -380,6 +380,7 @@ impl AgentView {
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
             send_now_painted_blocks: std::collections::HashMap::new(),
+            minimal_cancel_hint_turn: None,
             send_now_echo_pending: std::collections::HashMap::new(),
             follow_without_jump_prompt_id: None,
             plugin_cta: PluginCtaState::default(),

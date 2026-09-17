@@ -2219,8 +2219,7 @@ impl AppView {
         }
     }
     /// App-level Esc owners that consume the key BEFORE any agent input routing.
-    /// This is the render-boundary decision handed to the agent hint path (`AgentView::draw`, then `esc_would_cancel_turn`).
-    /// A hint bar rendered beneath one of these thus never advertises `Esc cancel`.
+    /// This is the render-boundary decision handed to the agent hint path (`AgentView::draw`).
     ///
     /// Mirrors `handle_input`'s intercepts, in their order:
     /// - the focused dev tracing pane (step 1a consumes all non-global keys)

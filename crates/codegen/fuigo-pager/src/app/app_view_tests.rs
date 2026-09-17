@@ -3023,26 +3023,62 @@ fn ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn() {
     );
 }
 #[test]
-fn esc_from_prompt_pane_running_turn_cancels_in_non_vim_mode() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "1× Esc while running must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
+/// Mid-turn Esc is swallowed at the app level too: no `CancelTurn`, no armed double-press, no trigger stamp, draft intact, and a toast naming Ctrl+C.
+/// Covers both panes, vim on and off, and the minimal screen mode (which used to Esc-cancel regardless of vim).
+/// Replaces the pre-1.0.20 `esc_from_*_cancels_*` tests, which pinned the removed Esc-cancels-turn behaviour.
+fn esc_mid_turn_hints_ctrl_c_instead_of_cancelling() {
+    for (vim_mode, minimal, pane) in [
+        (false, false, crate::views::agent::ActivePane::Prompt),
+        (true, false, crate::views::agent::ActivePane::Prompt),
+        (true, true, crate::views::agent::ActivePane::Prompt),
+        (false, false, crate::views::agent::ActivePane::Scrollback),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.active_pane = pane;
+        agent.vim_mode = vim_mode;
+        if minimal {
+            agent
+                .prompt
+                .set_screen_mode(crate::app::ScreenMode::Minimal);
+        }
+        agent.prompt.textarea.set_text("draft while streaming");
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        let ctx = format!("vim={vim_mode} minimal={minimal} pane={pane:?}");
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "{ctx}: mid-turn Esc must swallow, got {outcome:?}"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "{ctx}: must not arm idle clear"
+        );
+        assert!(
+            app.agents[&id].cancel_trigger_hint.is_none(),
+            "{ctx}: no cancel trigger"
+        );
+        assert!(app.agents[&id].session.state.is_turn_running(), "{ctx}");
+        assert_eq!(
+            "draft while streaming",
+            app.agents[&id].prompt.textarea.text(),
+            "{ctx}: the draft is preserved"
+        );
+        if minimal {
+            assert!(app.agents[&id].toast.is_none(), "{ctx}");
+        } else {
+            assert_eq!(
+                Some("Press Ctrl+c to cancel the turn"),
+                app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str()),
+                "{ctx}: the toast names the cancel key"
+            );
+        }
+    }
 }
 #[test]
-fn esc_from_prompt_pane_running_compact_cancels_in_non_vim_mode() {
+/// A manual `/compact` in flight (CommandRunning) and a streaming wake turn (pane state Idle) get the same hint, not a cancel.
+fn esc_during_compact_or_wake_turn_hints_instead_of_cancelling() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
@@ -3051,70 +3087,45 @@ fn esc_from_prompt_pane_running_compact_cancels_in_non_vim_mode() {
         started_at: std::time::Instant::now(),
     };
     agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "1× Esc while /compact runs must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(
-        app.pending_action.is_none(),
-        "must not arm idle clear/rewind"
-    );
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
-}
-#[test]
-fn esc_from_prompt_pane_running_compact_vim_mode_is_swallowed() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::CommandRunning {
-        command: crate::app::agent::AgentCommand::Compact,
-        started_at: std::time::Instant::now(),
-    };
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = true;
-    agent.prompt.textarea.set_text("draft while compacting");
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
-        "1× Esc while /compact runs must swallow in vim mode, got {outcome:?}"
+        "Esc while /compact runs must swallow, got {outcome:?}"
     );
-    assert!(app.pending_action.is_none());
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
-    assert_eq!(
-        app.agents[&id].prompt.textarea.text(),
-        "draft while compacting",
-        "vim mid-compact Esc must not clear the draft or arm idle clear"
-    );
     assert!(app.agents[&id].session.state.is_compact_running());
-}
-#[test]
-fn esc_cancels_running_wake_turn_while_pane_is_idle() {
+    assert_eq!(
+        Some("Press Ctrl+c to cancel the turn"),
+        app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str())
+    );
+
     let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
         prompt_id: "task-completed-bg1".into(),
         cancel_sent: false,
     });
     agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "Esc during a wake turn must cancel, got {outcome:?}"
+        matches!(outcome, InputOutcome::Changed),
+        "Esc during a wake turn must swallow, got {outcome:?}"
     );
     assert!(
         app.pending_action.is_none(),
         "must not arm idle clear/rewind"
     );
+    assert!(app.agents[&id].cancel_trigger_hint.is_none());
+    assert!(
+        app.agents[&id]
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|wake| !wake.cancel_sent),
+        "the wake turn keeps streaming"
+    );
     assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
+        Some("Press Ctrl+c to cancel the turn"),
+        app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str())
     );
 }
 #[test]
@@ -3133,118 +3144,6 @@ fn streaming_wake_turn_counts_as_running_for_minimal_commit() {
     assert!(!crate::minimal_api::is_turn_or_wake_running(agent));
     agent.session.state = AgentState::TurnRunning;
     assert!(crate::minimal_api::is_turn_or_wake_running(agent));
-}
-#[test]
-fn esc_from_prompt_pane_running_turn_with_draft_cancels_preserving_draft() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
-    agent.prompt.textarea.set_text("draft while streaming");
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "mid-turn Esc with draft must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none(), "must not arm idle clear");
-    assert_eq!(
-        app.agents[&id].prompt.textarea.text(),
-        "draft while streaming",
-        "Esc cancel must preserve the draft (not clear it like Ctrl+C)"
-    );
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
-}
-#[test]
-fn esc_from_scrollback_pane_running_turn_cancels_in_non_vim_mode() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
-    agent.vim_mode = false;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "1× Esc from scrollback while running must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
-}
-#[test]
-fn esc_from_prompt_pane_running_turn_vim_mode_is_swallowed() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = true;
-    agent.prompt.textarea.set_text("draft while streaming");
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "1× Esc while running must swallow in vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert!(app.agents[&id].cancel_trigger_hint.is_none());
-    assert_eq!(
-        app.agents[&id].prompt.textarea.text(),
-        "draft while streaming",
-        "vim mid-turn Esc must not clear the draft or arm idle clear"
-    );
-    assert!(app.agents[&id].session.state.is_turn_running());
-}
-#[test]
-fn esc_from_scrollback_pane_running_turn_vim_mode_is_swallowed() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
-    agent.vim_mode = true;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "1× Esc from scrollback while running must swallow in vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert!(app.agents[&id].cancel_trigger_hint.is_none());
-    assert!(app.agents[&id].session.state.is_turn_running());
-}
-#[test]
-fn esc_cancels_turn_gate_truth_table() {
-    assert!(crate::app::esc_cancels_turn(true, true));
-    assert!(crate::app::esc_cancels_turn(true, false));
-    assert!(crate::app::esc_cancels_turn(false, false));
-    assert!(!crate::app::esc_cancels_turn(false, true));
-}
-#[test]
-fn esc_running_turn_minimal_screen_mode_cancels_even_with_vim_on() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = true;
-    agent
-        .prompt
-        .set_screen_mode(crate::app::ScreenMode::Minimal);
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "minimal mode must Esc-cancel even with vim scrollback nav on, got {outcome:?}"
-    );
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
 }
 #[test]
 fn esc_owned_before_agent_covers_app_level_owners() {
@@ -3288,23 +3187,22 @@ fn esc_owned_before_agent_covers_app_level_owners() {
     assert!(!app.esc_owned_before_agent());
 }
 #[test]
-fn esc_while_cancelling_retries_cancel() {
+/// While "Cancelling…" Esc is swallowed silently: it neither re-sends the cancel nor hints at Ctrl+C (which escalates toward quit in this state).
+/// Replaces `esc_while_cancelling_retries_cancel`, which pinned the removed Esc-cancels-turn behaviour.
+fn esc_while_cancelling_is_swallowed() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.state = AgentState::TurnCancelling;
     agent.active_pane = crate::views::agent::ActivePane::Scrollback;
-    agent.vim_mode = true;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "Esc while cancelling must retry CancelTurn, got {outcome:?}"
+        matches!(outcome, InputOutcome::Changed),
+        "Esc while cancelling must swallow, got {outcome:?}"
     );
     assert!(app.pending_action.is_none());
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
+    assert!(app.agents[&id].cancel_trigger_hint.is_none());
+    assert!(app.agents[&id].toast.is_none());
 }
 #[test]
 fn esc_cancel_grace_holds_rewind_arm_then_expires() {
