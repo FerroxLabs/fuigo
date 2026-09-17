@@ -490,6 +490,7 @@ pub struct SamplingClient {
     endpoint: EndpointTemplate,
     /// Whether every request body carries [`CacheBypass`]: only for FluxRouter's API host, and never on a subscription transport.
     fluxrouter_cache_bypass: bool,
+    first_use_noted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -841,6 +842,7 @@ impl SamplingClient {
             header_injector: config.header_injector,
             endpoint,
             fluxrouter_cache_bypass,
+            first_use_noted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -887,6 +889,15 @@ impl SamplingClient {
     /// A wired bearer_resolver is the sole auth source.
     /// A missing live bearer strips default Authorization / x-api-key so a hard-expired seed key cannot ride on the wire.
     fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
+        if !self
+            .first_use_noted
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !self
+                .first_use_noted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            crate::prewarm::note_first_sampling_use(&self.base_url);
+        }
         let mut headers = self.default_headers.clone();
         if let Some(resolver) = &self.bearer_resolver {
             headers.remove(AUTHORIZATION);

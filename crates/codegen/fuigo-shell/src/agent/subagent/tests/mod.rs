@@ -216,6 +216,7 @@ fn wedged_child_handle() -> (
         status_line_enabled: std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(false),
         ),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -234,6 +235,9 @@ fn wedged_child_handle() -> (
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new("test-model"),
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+        },
         scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: false,
@@ -2578,6 +2582,7 @@ fn test_sampling_config(model_slug: &str) -> fuigo_sampling_types::SamplingConfi
         max_completion_tokens: None,
         temperature: None,
         top_p: None,
+        max_retries: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
         query_params: Default::default(),

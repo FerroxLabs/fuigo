@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
 pub mod two_pass;
+pub mod user_echo;
 pub mod visibility;
 pub use self::acp_session::*;
 pub use self::acp_types::*;
@@ -23,6 +24,7 @@ pub use self::persistence::{
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
+pub use self::user_echo::{CLIENT_USER_MESSAGE_ECHO_META, USER_MESSAGE_ECHO_CAPABILITY};
 pub use fuigo_fsnotify::{
     FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind,
 };

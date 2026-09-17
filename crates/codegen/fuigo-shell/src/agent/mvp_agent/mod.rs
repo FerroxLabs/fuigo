@@ -1484,6 +1484,7 @@ mod session_lifecycle;
 mod agent_ops;
 mod acp_agent;
 pub(crate) mod reasoning_effort;
+mod sampler_prewarm;
 mod session_setup;
 mod settings_manager;
 mod subagent_spawn;
@@ -2139,7 +2140,7 @@ impl MvpAgent {
             let _ = tx.send(crate::session::SessionCommand::RefreshSkillBaseline);
         }
     }
-    pub(super) fn refresh_skill_baseline_for_all_sessions(&self) {
+    pub(crate) fn refresh_skill_baseline_for_all_sessions(&self) {
         let senders = self.resident_cmd_txs();
         Self::broadcast_refresh_skill_baseline(senders);
     }

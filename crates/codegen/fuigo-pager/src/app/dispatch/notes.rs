@@ -8,6 +8,7 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
 use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+use agent_client_protocol as acp;
 use fuigo_tools::implementations::fuigo_build::ask_user_question::Question;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -655,13 +656,19 @@ fn extract_session_context(agent: &AgentView) -> String {
 /// Send a /btw side question.
 /// Bypasses the prompt queue, so it works even while the agent is mid-turn.
 /// Fires an ACP ext method and shows a loading overlay.
-pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effect> {
+pub(super) fn dispatch_send_btw(
+    app: &mut AppView,
+    question: String,
+    mut images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
+        crate::prompt_images::drain_and_cleanup(&mut images);
         return vec![];
     };
     let minimal = app.screen_mode.is_minimal();
-    let (session_id, minimal_request_id) = {
+    let (session_id, minimal_request_id, blocks) = {
         let Some(agent) = app.agents.get_mut(&id) else {
+            crate::prompt_images::drain_and_cleanup(&mut images);
             return vec![];
         };
         let Some(session_id) = agent.session.session_id.clone() else {
@@ -674,7 +681,29 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
             } else {
                 agent.show_toast(NO_SESSION_NOTICE);
             }
+            crate::prompt_images::drain_and_cleanup(&mut images);
             return vec![];
+        };
+        // Image-bearing side question: the same helper as the interjection path builds text and image
+        // content blocks (orphan-placeholder recovery, allowlist, size cap). Text-only stays on the legacy wire.
+        let blocks = if images.is_empty() {
+            None
+        } else {
+            let (kept, omitted) = images_within_btw_cap(std::mem::take(&mut images));
+            let mut blocks = crate::prompt_images::build_content_blocks_with_workspace(
+                question.clone(),
+                kept,
+                Some(std::path::Path::new(&agent.session.cwd)),
+            );
+            if omitted > 0
+                && let Some(acp::ContentBlock::Text(text)) = blocks
+                    .iter_mut()
+                    .find(|block| matches!(block, acp::ContentBlock::Text(_)))
+            {
+                text.text.push_str("\n\n");
+                text.text.push_str(&btw_image_omit_notice(omitted));
+            }
+            Some(blocks)
         };
 
         // Composer clearing belongs to the submit funnel: `dispatch_send_prompt_inner` clears it when `consume_input` is set
@@ -692,15 +721,51 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
             agent.btw_focused = false;
             None
         };
-        (session_id, minimal_request_id)
+        (session_id, minimal_request_id, blocks)
     };
 
     vec![Effect::SendBtw {
         agent_id: id,
         session_id,
         question,
+        blocks,
         minimal_request_id,
     }]
+}
+
+/// Side-question payload cap. Matches the shell's per-request bound so one screenshot
+/// under 50MB is never dropped; extra images past this total are omitted.
+const BTW_IMAGE_AGGREGATE_CAP: usize = 50_000_000;
+
+/// Keep attachments in order until the aggregate cap is hit; the rest are cleaned up and counted.
+fn images_within_btw_cap(
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> (Vec<crate::prompt_images::PastedImage>, usize) {
+    let mut kept = Vec::new();
+    let mut omitted = Vec::new();
+    let mut total = 0usize;
+    for image in images {
+        let size = image.byte_len;
+        if total.saturating_add(size) > BTW_IMAGE_AGGREGATE_CAP {
+            tracing::warn!(
+                bytes = size,
+                total,
+                cap = BTW_IMAGE_AGGREGATE_CAP,
+                "skipping /btw image: aggregate payload cap"
+            );
+            omitted.push(image);
+            continue;
+        }
+        total += size;
+        kept.push(image);
+    }
+    let omitted_count = omitted.len();
+    crate::prompt_images::drain_and_cleanup(&mut omitted);
+    (kept, omitted_count)
+}
+
+fn btw_image_omit_notice(omitted: usize) -> String {
+    format!("{omitted} attached image(s) were not included (over the 50MB side-question limit).")
 }
 
 /// Toast when a manual `/recap` produces no summary.

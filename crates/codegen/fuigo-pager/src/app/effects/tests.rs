@@ -194,6 +194,26 @@ fn interject_params_omit_content_when_no_blocks() {
     assert_eq!(obj["interjectionId"], "i1");
     assert_eq!(obj.len(), 3, "no extra keys on the legacy shape");
 }
+/// Text-only side questions must omit the `content` key entirely; an image-bearing one carries it.
+#[test]
+fn btw_params_carry_content_only_when_blocks_are_present() {
+    let sid = acp::SessionId::new("s1");
+    let params = build_btw_params(&sid, "why", None);
+    let obj = params.as_object().unwrap();
+    assert!(!obj.contains_key("content"), "content key must be absent");
+    assert_eq!(obj["sessionId"], "s1");
+    assert_eq!(obj["question"], "why");
+    assert_eq!(obj.len(), 2, "no extra keys on the legacy shape");
+
+    let blocks = vec![
+        acp::ContentBlock::Text(acp::TextContent::new("why")),
+        acp::ContentBlock::Image(acp::ImageContent::new("aGVsbG8=", "image/png")),
+    ];
+    let params = build_btw_params(&sid, "why", Some(&blocks));
+    let content = params["content"].as_array().expect("content array");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[1]["type"], "image");
+}
 #[test]
 fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
     let payload = serde_json::json!({

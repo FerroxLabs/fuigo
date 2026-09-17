@@ -4552,6 +4552,69 @@ fn replay_malformed_skill_token_ranges_degrade_to_plain() {
         other => panic!("expected UserPrompt, got {:?}", other),
     }
 }
+/// A persisted interjection chunk as the shell writes it: the model-facing frame as text,
+/// the typed text in `displayText`, and the `interjection` chunk flag (wire literals pinned here).
+fn interjection_user_message(typed: &str) -> acp::SessionUpdate {
+    let mut chunk_meta = serde_json::Map::new();
+    chunk_meta.insert("modelId".into(), serde_json::json!("test-model"));
+    chunk_meta.insert("interjection".into(), serde_json::Value::Bool(true));
+    let mut text_meta = serde_json::Map::new();
+    text_meta.insert("displayText".into(), serde_json::json!(typed));
+    let framed = format!(
+        "The user sent a message while you were working:\n<user_query>\n{typed}\n</user_query>\nMake sure to complete any unfinished tasks from previous turns."
+    );
+    acp::SessionUpdate::UserMessageChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(framed).meta(Some(text_meta)),
+        ))
+        .meta(Some(chunk_meta)),
+    )
+}
+#[test]
+fn replay_interjection_chunk_renders_as_interjection_block() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(
+        interjection_user_message("ok run the stop for me"),
+        &replay,
+        &mut sb
+    ));
+    assert_eq!(sb.len(), 1);
+    match &sb.get(0).unwrap().block {
+        RenderBlock::UserPrompt(block) => {
+            assert_eq!(block.text, "ok run the stop for me");
+            assert!(
+                block.is_interjection,
+                "replayed interjection keeps interjection bookkeeping"
+            );
+            assert_eq!(
+                block.prompt_index, None,
+                "the shell never numbers interjections"
+            );
+            assert!(!block.is_cron && !block.is_bash);
+        }
+        other => panic!("expected UserPrompt, got {:?}", other),
+    }
+}
+/// A `/skill` sent mid-turn stays a plain interjection row, as live, not a skill prompt.
+#[test]
+fn replay_interjection_flag_outranks_slash_skill_fallback() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    assert!(tracker.handle_update(interjection_user_message("/commit now"), &meta(), &mut sb));
+    match &sb.get(0).unwrap().block {
+        RenderBlock::UserPrompt(block) => {
+            assert_eq!(block.text, "/commit now");
+            assert!(block.is_interjection);
+            assert!(block.skill_token_ranges.is_empty());
+        }
+        other => panic!("expected UserPrompt, got {:?}", other),
+    }
+}
 #[test]
 fn call_mcp_tool_coerced_to_use_tool_renders_block() {
     let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("mcp1")), "grafana__search")

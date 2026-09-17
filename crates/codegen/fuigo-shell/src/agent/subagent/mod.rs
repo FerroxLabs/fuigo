@@ -717,7 +717,7 @@ async fn read_parent_sampling_config(
                 client_version: creds.client_version,
                 reasoning_effort: cfg.reasoning_effort,
                 force_http1: false,
-                max_retries: None,
+                max_retries: cfg.max_retries.or(ctx.sampling_config.max_retries),
                 stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
                 idle_timeout_secs: None,
                 client_identifier: ctx.sampling_config.client_identifier.clone(),

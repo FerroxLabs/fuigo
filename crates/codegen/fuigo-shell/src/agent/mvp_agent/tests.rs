@@ -1155,6 +1155,7 @@ fn make_test_handle(
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -1171,6 +1172,9 @@ fn make_test_handle(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+        },
         scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: yolo,
@@ -2090,6 +2094,33 @@ async fn mcp_list_gateway_off_disables_cached_catalog() {
         })
         .await;
 }
+/// `/skills` scans disk for the modal and must also refresh every live session's baseline.
+#[tokio::test(flavor = "current_thread")]
+async fn skills_list_refreshes_session_skill_baseline() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-skills-list");
+    let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+    agent.insert_resident(&sid, handle);
+    let req = acp::ExtRequest::new(
+        "fuigo/skills/list",
+        serde_json::value::to_raw_value(&serde_json::json!({ "cwd": "/tmp" }))
+            .unwrap()
+            .into(),
+    );
+    crate::extensions::skills::handle(
+        &agent,
+        &req,
+        None,
+        fuigo_agent::prompt::skills::CompatConfig::default(),
+    )
+    .await
+    .expect("skills/list succeeds");
+    let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
+        .await
+        .expect("RefreshSkillBaseline should be sent")
+        .expect("channel should stay open");
+    assert!(matches!(cmd, SessionCommand::RefreshSkillBaseline));
+}
 /// Gateway tools live on the agent catalog, so sessions only rebuild `search_tool`.
 #[tokio::test(flavor = "current_thread")]
 async fn refresh_mcp_search_index_broadcasts_to_sessions() {
@@ -2514,6 +2545,80 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
         meta.get(crate::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY),
         Some(&serde_json::json!(false)),
         "session meta must carry the handle's pinned value"
+    );
+}
+/// U022's `SpawnSnapshot` half: "creating a new session returns faster; MCP tools and other startup
+/// work happen in the background."
+///
+/// The default-model `session/new` echo must come out of the spawn snapshot and must never touch the
+/// session actor, so a command channel that is OPEN but unserved — what a session whose actor is
+/// still running its MCP handshakes looks like — cannot hold the reply. A custom-model switch is the
+/// one path that may still round-trip, because the switch is what resolves an override after spawn.
+///
+/// Red on `b156799`, where the echo had only the actor round-trip. Red again on the mid-history shape
+/// where the guarded arm sat BELOW the catch-all `Some(handle)` arm: the default-model case fell
+/// through to the actor and the first half of this test hit its 500 ms bound instead of answering
+/// immediately.
+#[tokio::test(flavor = "current_thread")]
+async fn default_model_session_new_echo_reads_the_spawn_snapshot_without_waiting_for_the_actor() {
+    fn overrides(domain: &str) -> fuigo_sampling_types::ToolOverrides {
+        fuigo_sampling_types::ToolOverrides {
+            x_search: None,
+            web_search: Some(fuigo_sampling_types::WebSearchOptions {
+                allowed_domains: Some(vec![domain.to_owned()]),
+                excluded_domains: None,
+            }),
+        }
+    }
+    let sid = acp::SessionId::new("spawn-snapshot-echo");
+    let from_snapshot = overrides("from-the-spawn-snapshot.example");
+    let from_actor = overrides("from-the-actor.example");
+    let (cmd_tx, mut cmd_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info.id = sid.clone();
+    handle.cmd_tx = cmd_tx;
+    handle.spawn_snapshot.applied_tool_overrides = Some(from_snapshot.clone());
+
+    let echo = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        crate::agent::mvp_agent::session_setup::new_session_tool_overrides_echo(
+            Some(&handle),
+            &sid,
+            true,
+        ),
+    )
+    .await
+    .expect("the default-model echo must not wait on a session actor that is still starting up");
+    assert_eq!(
+        echo,
+        Some(from_snapshot),
+        "the default-model echo is the value the spawn pinned"
+    );
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "the default-model echo must not send the actor a single command"
+    );
+
+    let call = crate::agent::mvp_agent::session_setup::new_session_tool_overrides_echo(
+        Some(&handle),
+        &sid,
+        false,
+    );
+    let serve = async {
+        match cmd_rx.recv().await {
+            Some(crate::session::SessionCommand::GetToolOverrides { respond_to }) => {
+                let _ = respond_to.send(Some(from_actor.clone()));
+            }
+            Some(_) => panic!("the custom-model echo must ask for the tool overrides"),
+            None => panic!("the custom-model echo must ask the actor at all"),
+        }
+    };
+    let (custom_echo, ()) = tokio::join!(call, serve);
+    assert_eq!(
+        custom_echo,
+        Some(from_actor),
+        "a custom-model switch still round-trips to the actor, exactly as upstream does"
     );
 }
 fn build_agent_with_auth(auth: crate::auth::FuigoAuth) -> MvpAgent {
@@ -7518,6 +7623,90 @@ fn init_advertising_status_line(enabled: bool) -> acp::InitializeRequest {
             .terminal(false)
             .meta(meta),
     )
+}
+fn echo_session_meta(enabled: bool) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        crate::session::CLIENT_USER_MESSAGE_ECHO_META.to_string(),
+        serde_json::json!(enabled),
+    );
+    meta
+}
+fn init_advertising_user_message_echo(enabled: bool) -> acp::InitializeRequest {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        crate::session::USER_MESSAGE_ECHO_CAPABILITY.to_string(),
+        serde_json::json!(enabled),
+    );
+    acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+        acp::ClientCapabilities::new()
+            .fs(acp::FileSystemCapabilities::new())
+            .terminal(false)
+            .meta(meta),
+    )
+}
+#[test]
+fn user_message_echo_session_meta_outranks_the_client_that_started_the_process() {
+    let says_nothing = || {
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+            acp::ClientCapabilities::new()
+                .fs(acp::FileSystemCapabilities::new())
+                .terminal(false),
+        )
+    };
+    let wanted = |meta: Option<acp::Meta>, init: acp::InitializeRequest| {
+        MvpAgent::resolve_user_message_echo_capability(meta.as_ref(), &init)
+    };
+    assert!(wanted(
+        Some(echo_session_meta(true)),
+        init_advertising_user_message_echo(false)
+    ));
+    assert!(!wanted(
+        Some(echo_session_meta(false)),
+        init_advertising_user_message_echo(true)
+    ));
+    assert!(wanted(None, init_advertising_user_message_echo(true)));
+    assert!(!wanted(None, init_advertising_user_message_echo(false)));
+    assert!(!wanted(Some(acp::Meta::new()), says_nothing()));
+    assert!(!wanted(None, says_nothing()));
+}
+/// U086's one non-additive wire change, pinned against the client that actually drives Fuigo.
+///
+/// Murage's `initialize` sends `clientCapabilities.{fs, elicitation}` plus, when the engine gates
+/// folders, `_meta["fuigo/folderTrust"]` and nothing else (murage `server/drivers/acp/core.ts`,
+/// `request("initialize", …)`). It therefore never opts in, and it must not: its `session/update`
+/// handler switches on `agent_message_chunk`, `agent_thought_chunk`, `tool_call` and
+/// `tool_call_update` only, so `user_message_chunk` was already dropped on the floor. Losing the
+/// live echo costs its transcript nothing. If this ever flips to `true` by accident, a Murage room
+/// starts re-rendering every prompt the user already sees.
+#[test]
+fn murage_shaped_client_never_opts_into_the_live_user_message_echo() {
+    let folder_trust_only = || {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "fuigo/folderTrust".to_string(),
+            serde_json::json!({ "interactive": true }),
+        );
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+            acp::ClientCapabilities::new()
+                .fs(acp::FileSystemCapabilities::new())
+                .meta(meta),
+        )
+    };
+    let no_meta_at_all = || {
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
+            .client_capabilities(acp::ClientCapabilities::new().fs(acp::FileSystemCapabilities::new()))
+    };
+    for init in [folder_trust_only(), no_meta_at_all()] {
+        assert!(
+            !MvpAgent::resolve_user_message_echo_capability(None, &init),
+            "a client that never asks for the echo must not be sent one"
+        );
+        assert!(
+            !MvpAgent::resolve_user_message_echo_capability(Some(&acp::Meta::new()), &init),
+            "an empty session `_meta` must not opt a client in either"
+        );
+    }
 }
 
 // Synthetic ACP requests use catalog entries and an actor command channel, never a provider.

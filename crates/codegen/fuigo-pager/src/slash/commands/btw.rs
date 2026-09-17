@@ -19,6 +19,9 @@ impl SlashCommand for BtwCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        CommandResult::Action(Action::SendBtw(args.trim().to_string()))
+        CommandResult::Action(Action::SendBtw {
+            question: args.trim().to_string(),
+            images: Vec::new(),
+        })
     }
 }

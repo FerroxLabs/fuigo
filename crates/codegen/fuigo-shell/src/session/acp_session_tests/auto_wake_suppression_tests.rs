@@ -1955,3 +1955,165 @@ async fn completed_monitor_read_still_sweeps_its_buffered_monitor_events() {
         })
         .await;
 }
+/// Regression: `InjectNotification` must gate on THIS session's turn, not the agent-wide flag.
+/// In a multi-session process (dashboard, leader) another session's turn kept the shared flag `true`,
+/// so an idle session parked its monitor events in the mid-turn buffer, where they sat unseen until its
+/// next user prompt. The event must instead become a pending notification that wakes the idle session.
+#[tokio::test(flavor = "current_thread")]
+async fn monitor_event_for_idle_session_is_not_parked_while_another_session_runs_a_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                fuigo_acp_lib::AcpClientMessage,
+            >();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                PersistenceMsg,
+            >();
+            let (mut actor, event_rx) = create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+            let agent_wide_turn_active = std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(true),
+            );
+            let shared_buffer = fuigo_tools::implementations::fuigo_build::monitor::types::MonitorEventBuffer::new();
+            actor.tool_context.is_turn_active = Some(agent_wide_turn_active);
+            actor.tool_context.monitor_event_buffer = Some(shared_buffer.clone());
+            actor.state.lock().await.notifications_suppressed = true;
+            let actor = std::sync::Arc::new(actor);
+            let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<
+                SessionCommand,
+            >();
+            let (_chat_tx, chat_rx) = tokio::sync::mpsc::unbounded_channel::<
+                fuigo_chat_state::ChatStateEvent,
+            >();
+            let codebase_indexes = std::sync::Arc::new(
+                parking_lot::Mutex::new(
+                    fuigo_workspace::file_system::CodebaseIndexManager::new(),
+                ),
+            );
+            tokio::task::spawn_local(
+                super::run_session(
+                    actor.clone(),
+                    cmd_rx,
+                    chat_rx,
+                    event_rx,
+                    None,
+                    codebase_indexes,
+                    std::path::PathBuf::from("/tmp"),
+                    crate::session::fs_watch::FsWatchCapabilities::none(),
+                ),
+            );
+            cmd_tx
+                .send(SessionCommand::InjectNotification {
+                    prompt_id: "monitor-idle".to_string(),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "<monitor-event task_id=\"watch-1\">\nnew message\n</monitor-event>",
+                    ))],
+                    priority: NotificationPriority::Next,
+                    source: NotificationSource::MonitorEvent {
+                        task_id: "watch-1".to_string(),
+                    },
+                })
+                .expect("run_session must be receiving commands");
+            for _ in 0..100 {
+                if !actor.state.lock().await.pending_notifications.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                shared_buffer.is_empty(),
+                "an idle session must not park its monitor event in the mid-turn buffer because another session is mid-turn"
+            );
+            let state = actor.state.lock().await;
+            assert_eq!(
+                state
+                    .pending_notifications
+                    .iter()
+                    .map(|n| n.source.task_id())
+                    .collect::<Vec<_>>(),
+                vec!["watch-1"],
+                "the monitor event must queue as a wake for this idle session"
+            );
+        })
+        .await;
+}
+/// The mid-turn buffer is still the right place when THIS session is the one running a turn.
+#[tokio::test(flavor = "current_thread")]
+async fn monitor_event_during_own_turn_is_buffered_for_the_turn_loop() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                fuigo_acp_lib::AcpClientMessage,
+            >();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                PersistenceMsg,
+            >();
+            let (mut actor, event_rx) = create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+            let shared_buffer = fuigo_tools::implementations::fuigo_build::monitor::types::MonitorEventBuffer::new();
+            actor.tool_context.monitor_event_buffer = Some(shared_buffer.clone());
+            actor.session_turn_active.store(true, std::sync::atomic::Ordering::SeqCst);
+            let actor = std::sync::Arc::new(actor);
+            let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<
+                SessionCommand,
+            >();
+            let (_chat_tx, chat_rx) = tokio::sync::mpsc::unbounded_channel::<
+                fuigo_chat_state::ChatStateEvent,
+            >();
+            let codebase_indexes = std::sync::Arc::new(
+                parking_lot::Mutex::new(
+                    fuigo_workspace::file_system::CodebaseIndexManager::new(),
+                ),
+            );
+            tokio::task::spawn_local(
+                super::run_session(
+                    actor.clone(),
+                    cmd_rx,
+                    chat_rx,
+                    event_rx,
+                    None,
+                    codebase_indexes,
+                    std::path::PathBuf::from("/tmp"),
+                    crate::session::fs_watch::FsWatchCapabilities::none(),
+                ),
+            );
+            cmd_tx
+                .send(SessionCommand::InjectNotification {
+                    prompt_id: "monitor-busy".to_string(),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "<monitor-event task_id=\"watch-2\">\nnew message\n</monitor-event>",
+                    ))],
+                    priority: NotificationPriority::Next,
+                    source: NotificationSource::MonitorEvent {
+                        task_id: "watch-2".to_string(),
+                    },
+                })
+                .expect("run_session must be receiving commands");
+            for _ in 0..100 {
+                if !shared_buffer.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(shared_buffer.len(), 1, "own-turn monitor events go to the turn loop's buffer");
+            assert!(
+                actor.state.lock().await.pending_notifications.is_empty(),
+                "own-turn monitor events must not also queue a wake"
+            );
+        })
+        .await;
+}
