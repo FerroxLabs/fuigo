@@ -77,7 +77,8 @@ pub(super) async fn abort_unacknowledged_prompt(
         limit_ms,
         "headless: the agent never acknowledged the prompt; aborting"
     );
-    crate::unified_log::warn(
+    // Written directly: the buffered forwarder needs the very shell that stopped answering
+    crate::unified_log::write_direct_warn(
         "prompt.ack_timeout",
         Some(session_id.0.as_ref()),
         Some(serde_json::json!({
