@@ -133,8 +133,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::NextResponse,
-            label: "response",
-            description: "Next response",
+            label: "turn",
+            description: "Jump to next turn at viewport top",
             default_key: key!('J'),
             alt_keys: vec![],
             category: Category::ConversationNav,
@@ -146,8 +146,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::PrevResponse,
-            label: "response",
-            description: "Previous response",
+            label: "turn",
+            description: "Jump to previous turn at viewport top",
             default_key: key!('K'),
             alt_keys: vec![],
             category: Category::ConversationNav,

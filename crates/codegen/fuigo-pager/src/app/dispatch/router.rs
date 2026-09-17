@@ -521,13 +521,17 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::NextResponse => {
             with_scrollback(app, |s| {
-                s.next_response();
+                if let Some(t) = s.turn_below_viewport_top() {
+                    s.jump_to_turn(t);
+                }
             });
             vec![]
         }
         Action::PrevResponse => {
             with_scrollback(app, |s| {
-                s.prev_response();
+                if let Some(t) = s.turn_above_viewport_top() {
+                    s.jump_to_turn(t);
+                }
             });
             vec![]
         }
