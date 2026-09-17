@@ -528,11 +528,20 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 .scrollback
                 .push_block(RenderBlock::session_event(SessionEvent::CompactStarted));
 
+            let user_context = crate::slash::parse_invocation(&queued.text).and_then(|inv| {
+                let args = inv.args.trim();
+                if inv.token == "compact" && !args.is_empty() {
+                    Some(args.to_string())
+                } else {
+                    None
+                }
+            });
+
             QueueDrain {
                 effects: vec![Effect::Compact {
                     agent_id,
                     session_id,
-                    user_context: None,
+                    user_context,
                 }],
                 page_flip_entry: None,
             }
