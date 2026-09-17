@@ -389,6 +389,28 @@ impl SessionActor {
                     tool_call_id,
                     acp::ToolCallUpdateFields::new()
                         .status(Some(final_status))
+                        // The MODEL's copy of this tool result, and the reason it is the bounded `history` half and
+                        // not `full`. `chat_rebuild::extract_tool_result_text` (session/storage/mod.rs) prefers
+                        // `content` and, when it is absent, falls back to `raw_output.to_string()` — the whole
+                        // `BashOutput` JSON, with `output` rendered as a decimal byte array. Every rebuild of
+                        // `chat_history.jsonl` from `updates.jsonl` takes that path (`remote::pull`,
+                        // `ensure_chat_history` after a crash or cache loss, and every session import, which drops
+                        // the chat cache on purpose), so without this the model's copy of one `! cmd` was the FULL
+                        // output: 965 B -> 3.93 MB for a 1 MiB command, and `line 001` back in the conversation.
+                        // Setting it keeps the rebuilt copy byte-identical to the live one this turn pushed into
+                        // chat history. Pinned by `bash_mode_rebuilt_chat_history_keeps_the_model_copy_bounded`.
+                        //
+                        // Additive on the wire, verified rather than assumed: the streaming `BashOutputChunk`
+                        // updates for this same tool call already carry `content`
+                        // (`tools/notification_bridge.rs`), as does every model-issued bash tool result
+                        // (`acp_conversion.rs`, `ToolOutput::Bash`), so no client sees a new shape here. The pager
+                        // ignores it for a bash-mode block — `tool_call_to_block`'s Execute arm renders
+                        // `raw_output`'s `BashOutput::output` and reads `content` only when `raw_output` does not
+                        // parse (`fuigo-pager/src/acp/tracker.rs`) — and Murage's `tool_call_update` arm reads only
+                        // `status` and `toolCallId` (`server/drivers/acp/core.ts`).
+                        .content(Some(vec![acp::ToolCallContent::from(
+                            acp::ContentBlock::Text(acp::TextContent::new(history_output.clone())),
+                        )]))
                         .raw_output(serde_json::to_value(ToolsToolOutput::Bash(bash_output)).ok()),
                 )),
                 None,
@@ -424,20 +446,30 @@ impl SessionActor {
 /// The two copies of a bash-mode (`! cmd`) command's output.
 ///
 /// `full` is what the pager's execute block shows: the complete output (already bounded to the terminal runner's
-/// `output_byte_limit`, 1 MiB), trailing whitespace trimmed. `history` is the copy the model sees in the next turn's
-/// chat history and in `output_for_prompt`: the same text when it is at most [`BASH_MODE_FINAL_OUTPUT_LINES`] lines,
-/// otherwise `"... (N lines)\n"` followed by the last [`BASH_MODE_FINAL_OUTPUT_LINES`] lines.
+/// `output_byte_limit`, 1 MiB), trailing whitespace trimmed. `history` is the copy the model sees — in the next
+/// turn's chat history, in `output_for_prompt`, and in the final `ToolCallUpdate`'s `content`, which is what a
+/// rebuild of `chat_history.jsonl` from `updates.jsonl` reads: the same text when it is at most
+/// [`BASH_MODE_FINAL_OUTPUT_LINES`] lines, otherwise `"... (N lines)\n"` followed by the last
+/// [`BASH_MODE_FINAL_OUTPUT_LINES`] lines. Every model-facing path must take `history`; only the pager gets `full`.
 ///
 /// Upstream 1.0.25: "Bash command output shown in the pager is now the complete result instead of a truncated tail."
 /// Before that, `full` was also the tail, so anything above the bound was lost to the user with no way to expand it.
 ///
 /// # Which surface this actually fixes: the PERSISTED copy, not the live frame
 ///
-/// Measured, not assumed (`fuigo-pager/tests/pty_e2e/bash_full_output_double_click_fold_pty.rs` passes on `b156799`
-/// as well as here): while the command is running the shell streams `BashOutputChunk` updates that carry the whole
-/// accumulated buffer, and `tools/notification_bridge.rs` sends those **straight to the gateway without persisting
-/// them**. So the live execute block already held every line on the base tree, and the tail in the final update did
-/// not take it away on screen.
+/// While the command is running the shell streams `BashOutputChunk` updates that carry the whole accumulated
+/// buffer, and `tools/notification_bridge.rs` sends those **straight to the gateway without persisting them**, so
+/// the live execute block already showed every line on the base tree.
+///
+/// The final update does NOT leave that alone, though — `fuigo-pager`'s
+/// `bash_mode_final_update_output_replaces_the_streamed_block` measures it: the completion path merges, rebuilds
+/// the block from `raw_output`'s `BashOutput::output` in `tool_call_to_block`'s Execute arm, and
+/// `replace_tool_block` assigns `entry.block` wholesale, so on base the streamed lines above the bound really did
+/// vanish from the block the moment completion was applied. `bash_full_output_double_click_fold_pty` is green on
+/// `b156799` all the same because its one discriminating assertion, `contains_text("L01")`, samples the block
+/// before that: the `wait_for_text("L06")` ahead of it is already satisfied by the streamed buffer (L06 is inside
+/// base's ten-line tail too) so it returns without waiting for completion, and nothing re-samples afterwards. That
+/// PTY test is a regression guard for this port, not evidence of it.
 ///
 /// The final `ToolCallUpdate` is the one that IS persisted (`emit_notification_direct` -> `PersistenceMsg::Update`),
 /// and it is the only bash-mode output a reloaded session has: replay feeds the pager the initial `ToolCall` plus
@@ -473,8 +505,13 @@ impl BashModeOutput {
         let lines: Vec<&str> = full.lines().collect();
         let total_lines = lines.len();
         let history = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
+            // `start < total_lines` holds: this branch runs only when `total_lines > BASH_MODE_FINAL_OUTPUT_LINES`.
+            // Upstream `4827113` rewrites this as `lines.get(start..).unwrap_or(&[])`, but that is part of its
+            // repo-wide `indexing_slicing` sweep, not of the 1.0.25 item, and `indexing_slicing` is not enabled in
+            // this workspace. Kept as base had it, like the other two unrelated clippy rewrites in the same
+            // upstream file that this port deliberately left behind.
             let start = total_lines - BASH_MODE_FINAL_OUTPUT_LINES;
-            let last_lines = lines.get(start..).unwrap_or(&[]).join("\n");
+            let last_lines = lines[start..].join("\n");
             format!("... ({} lines)\n{}", total_lines, last_lines)
         } else {
             full.clone()
@@ -631,15 +668,40 @@ mod bash_mode_output_tests {
 
     /// As [`run_bash_mode`], with the runner's `output_byte_limit` truncation flag under test control.
     async fn run_bash_mode_with(output: String, truncated: bool) -> (BashOutput, String) {
+        let run = run_bash_mode_capturing(output, truncated).await;
+        (run.bash, run.user_message)
+    }
+
+    /// One bash-mode turn's observable output: the two copies plus every ACP notification the turn emitted, in
+    /// order. The notifications are what `emit_notification_direct` hands the persistence actor, so they are also
+    /// exactly what a session's `updates.jsonl` holds.
+    struct BashModeRun {
+        bash: BashOutput,
+        user_message: String,
+        notifications: Vec<acp::SessionNotification>,
+    }
+
+    async fn run_bash_mode_capturing(output: String, truncated: bool) -> BashModeRun {
         let (gateway_tx, _gateway_rx) =
             tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
         let (persistence_tx, mut persistence_rx) =
             tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-        // `flush_to_disk` waits for the persistence actor's ack; stand in for it.
+        // `flush_to_disk` waits for the persistence actor's ack; stand in for it. The bash-mode user chunk is sent
+        // straight down this channel rather than through `send_update`, so keep the Acp updates it carries: a real
+        // `updates.jsonl` holds them ahead of the tool call.
+        let persisted: std::rc::Rc<std::cell::RefCell<Vec<acp::SessionNotification>>> =
+            std::rc::Rc::default();
+        let persisted_sink = std::rc::Rc::clone(&persisted);
         tokio::task::spawn_local(async move {
             while let Some(msg) = persistence_rx.recv().await {
-                if let PersistenceMsg::FlushAndAck { respond_to } = msg {
-                    let _ = respond_to.send(Ok(()));
+                match msg {
+                    PersistenceMsg::FlushAndAck { respond_to } => {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                    PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(n)) => {
+                        persisted_sink.borrow_mut().push(*n);
+                    }
+                    _ => {}
                 }
             }
         });
@@ -669,8 +731,8 @@ mod bash_mode_output_tests {
         });
 
         // Drain the actor's event channel while the turn runs: ack replay flushes so `flush_to_disk` does not
-        // wait out its timeout, and keep the final Bash ToolCallUpdate.
-        let mut bash_output: Option<BashOutput> = None;
+        // wait out its timeout, and keep every ACP notification (the final Bash ToolCallUpdate among them).
+        let mut notifications: Vec<acp::SessionNotification> = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !turn.is_finished() {
             assert!(
@@ -679,17 +741,29 @@ mod bash_mode_output_tests {
             );
             match tokio::time::timeout(std::time::Duration::from_millis(20), event_rx.recv()).await
             {
-                Ok(Some(event)) => note_event(event, &mut bash_output),
+                Ok(Some(event)) => note_event(event, &mut notifications),
                 Ok(None) => break,
                 Err(_) => {}
             }
         }
         while let Ok(event) = event_rx.try_recv() {
-            note_event(event, &mut bash_output);
+            note_event(event, &mut notifications);
         }
         turn.await
             .expect("bash-mode turn task")
             .expect("bash-mode turn ok");
+        let bash_output = notifications.iter().rev().find_map(|n| match &n.update {
+            acp::SessionUpdate::ToolCallUpdate(upd) => upd
+                .fields
+                .raw_output
+                .clone()
+                .and_then(|raw| serde_json::from_value::<ToolOutput>(raw).ok())
+                .and_then(|out| match out {
+                    ToolOutput::Bash(bash) => Some(bash),
+                    _ => None,
+                }),
+            _ => None,
+        });
 
         let conversation = actor.chat_state_handle.get_conversation().await;
         let user_message = conversation
@@ -700,30 +774,66 @@ mod bash_mode_output_tests {
                 _ => None,
             })
             .expect("bash mode pushes one user message into chat history");
-        (
-            bash_output.expect("bash mode must send a final Bash ToolCallUpdate"),
+        // The session's `updates.jsonl` order: the user chunk this turn persisted directly, then the tool call and
+        // its final update, which `emit_notification_direct` forwards to the same persistence stream.
+        let mut all = persisted.borrow().clone();
+        all.extend(notifications);
+        BashModeRun {
+            bash: bash_output.expect("bash mode must send a final Bash ToolCallUpdate"),
             user_message,
-        )
+            notifications: all,
+        }
     }
 
-    fn note_event(event: SessionEvent, bash_output: &mut Option<BashOutput>) {
+    fn note_event(event: SessionEvent, notifications: &mut Vec<acp::SessionNotification>) {
         match event {
             SessionEvent::FlushReplay {
                 respond_to: Some(tx),
             } => {
                 let _ = tx.send(());
             }
-            SessionEvent::Notification(SessionNotification::Acp(n)) => {
-                let n = *n;
-                if let acp::SessionUpdate::ToolCallUpdate(upd) = n.update
-                    && let Some(raw) = upd.fields.raw_output
-                    && let Ok(ToolOutput::Bash(bash)) = serde_json::from_value::<ToolOutput>(raw)
-                {
-                    *bash_output = Some(bash);
-                }
-            }
+            SessionEvent::Notification(SessionNotification::Acp(n)) => notifications.push(*n),
             _ => {}
         }
+    }
+
+    /// Write `notifications` as a session's `updates.jsonl` and rebuild `chat_history.jsonl` from it, exactly as
+    /// `remote::pull`, `ensure_chat_history` and session import do. Returns the rebuilt conversation and the size
+    /// of the rebuilt file.
+    fn rebuild_chat_history_from(
+        notifications: &[acp::SessionNotification],
+    ) -> (Vec<fuigo_sampling_types::ConversationItem>, u64) {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let updates_path = dir.path().join(crate::session::storage::UPDATES_FILE);
+        {
+            let mut file = std::fs::File::create(&updates_path).expect("updates.jsonl");
+            for notification in notifications {
+                let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(
+                    &crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+                )
+                .expect("envelope");
+                let line = serde_json::to_string(&envelope).expect("jsonl line");
+                writeln!(file, "{line}").expect("write updates.jsonl");
+            }
+        }
+        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path())
+            .expect("rebuild chat_history.jsonl");
+        let chat_path = dir.path().join(crate::session::storage::CHAT_HISTORY_FILE);
+        let bytes = std::fs::metadata(&chat_path)
+            .expect("chat_history.jsonl")
+            .len();
+        let text = std::fs::read_to_string(&chat_path).expect("read chat_history.jsonl");
+        let items = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                serde_json::from_str::<fuigo_sampling_types::ConversationItem>(l)
+                    .expect("rebuilt conversation item")
+            })
+            .collect();
+        (items, bytes)
     }
 
     // ---- the pure split ----
@@ -1079,6 +1189,104 @@ mod bash_mode_output_tests {
             "one bash-mode command must stay under 8 MiB of persisted session file, got {}",
             line.len()
         );
+    }
+
+    // ---- the model's copy after a session rebuild ----
+
+    /// INVARIANT: what the MODEL receives for a `! cmd` turn must stay bounded on EVERY path that produces it,
+    /// including the one that does not read chat state at all.
+    ///
+    /// `chat_history.jsonl` is a cache. It is rebuilt from `updates.jsonl` on every remote/relay session pull
+    /// (`remote::pull`), whenever the cache is missing or zero-length (`ensure_chat_history`, i.e. a crash before
+    /// the chat flush), and on every session import — `extensions/session_state.rs::write_import` drops the file on
+    /// purpose so load rebuilds it. `chat_rebuild::extract_tool_result_text` prefers `ToolCallUpdateFields::content`
+    /// and falls back to `raw_output.to_string()`, so with no `content` the model's copy of this turn becomes the
+    /// whole `BashOutput` JSON — including the FULL output as a decimal byte array, which is what upstream 1.0.25
+    /// started putting there.
+    ///
+    /// RED on `bd4c152` (the port without `content`): the rebuilt item is that JSON, it contains `line 001`, and it
+    /// grows with the command instead of with the bound. GREEN here: the rebuilt item is the same bounded tail the
+    /// live turn pushed into chat history.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_rebuilt_chat_history_keeps_the_model_copy_bounded() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = numbered_lines(25);
+                let run = run_bash_mode_capturing(raw, false).await;
+                let expected_tail = format!(
+                    "... (25 lines)\n{}",
+                    (16..=25)
+                        .map(|i| format!("line {i:03}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+
+                let (items, bytes) = rebuild_chat_history_from(&run.notifications);
+                let tool_results: Vec<String> = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        fuigo_sampling_types::ConversationItem::ToolResult(t) => {
+                            Some(t.content.as_ref().to_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    tool_results.len(),
+                    1,
+                    "one bash-mode turn rebuilds to one tool result, got {tool_results:?}"
+                );
+                assert_eq!(
+                    tool_results[0], expected_tail,
+                    "the rebuilt model copy is the bounded tail, not the raw BashOutput JSON"
+                );
+
+                let rebuilt: String = items.iter().map(|i| i.text_content()).collect();
+                assert!(
+                    !rebuilt.contains("line 001"),
+                    "lines above the bound must not reach the model through a rebuild: {rebuilt:?}"
+                );
+                assert!(
+                    !rebuilt.contains("108,105,110"),
+                    "the rebuilt copy must not be `output` rendered as a decimal byte array: {rebuilt:?}"
+                );
+                assert!(
+                    bytes < 4096,
+                    "a 25-line `! cmd` must rebuild to a small chat item, got {bytes} bytes"
+                );
+            })
+            .await;
+    }
+
+    /// The same rebuild for a command that saturates [`BASH_MODE_OUTPUT_BYTE_LIMIT`]: the model-facing cost of one
+    /// `! cmd` must be set by the ten-line bound, not by what the command printed. Run with `--nocapture` to see
+    /// the measured size.
+    ///
+    /// RED on `bd4c152`: ~3.9 MB of `108,105,110,…` in the rebuilt conversation, i.e. context overflow or an
+    /// emergency compaction on the next turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_rebuilt_chat_history_cost_of_a_full_size_output_is_measured() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = "line of ordinary command output\n".repeat(
+                    BASH_MODE_OUTPUT_BYTE_LIMIT / "line of ordinary command output\n".len(),
+                );
+                let printed = raw.trim_end().len();
+                let run = run_bash_mode_capturing(raw, false).await;
+                let (_items, bytes) = rebuild_chat_history_from(&run.notifications);
+                println!(
+                    "bash-mode rebuilt model copy: command printed {printed} bytes -> \
+                     chat_history.jsonl {bytes} bytes"
+                );
+                assert!(
+                    bytes < 4096,
+                    "the rebuilt model copy must stay bounded by BASH_MODE_FINAL_OUTPUT_LINES, \
+                     got {bytes} bytes for {printed} bytes of output"
+                );
+            })
+            .await;
     }
 
     /// At or under the bound nothing is elided anywhere.
