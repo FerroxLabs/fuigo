@@ -4,6 +4,7 @@ mod billing;
 mod cta_e2e;
 mod dashboard;
 mod jump;
+mod mid_text_btw;
 mod modes;
 mod notes;
 mod permissions;

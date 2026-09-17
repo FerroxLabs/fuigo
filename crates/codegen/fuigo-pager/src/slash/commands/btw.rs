@@ -15,6 +15,7 @@ impl SlashCommand for BtwCommand {
         takes_args: true,
         args_required: true,
         session_scoped: true,
+        can_hoist_from_mid_text: true,
         arg_placeholder: "<question>",
     }
 
