@@ -377,7 +377,7 @@ impl AgentView {
     }
     /// Shared "normal pane" hints: the flag computation, `build_hints`, and the queue hint.
     /// Single source of truth for the two former duplicated blocks in `current_shortcut_hints` and `draw`.
-    fn normal_pane_hints(
+    pub(super) fn normal_pane_hints(
         &self,
         registry: &ActionRegistry,
         esc_owned_before_agent: bool,
@@ -460,6 +460,13 @@ impl AgentView {
                 .is_some();
         let selected_can_kill = if self.active_pane == ActivePane::Catalog {
             false
+        } else if self.active_pane == ActivePane::Dock {
+            // Only a row whose `x` would actually dispatch: not a header, a
+            // `show N more` row, or a row already being killed.
+            self.dock_items()
+                .get(self.dock_cursor)
+                .copied()
+                .is_some_and(|item| self.dock_stop_action(item).is_some())
         } else if self.active_pane == ActivePane::Tasks {
             self.tasks
                 .selected_task_id()
@@ -495,7 +502,11 @@ impl AgentView {
             registry,
             is_editing,
             fold_label,
-            self.scrollback.selected_group_header_fold_label(),
+            if self.active_pane == ActivePane::Dock {
+                self.dock_enter_label()
+            } else {
+                self.scrollback.selected_group_header_fold_label()
+            },
             thinking_label,
             if self.active_pane == ActivePane::Tasks {
                 self.tasks.show_done()

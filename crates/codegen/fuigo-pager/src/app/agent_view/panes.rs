@@ -653,6 +653,43 @@ impl AgentView {
         }
     }
 
+    /// What Enter does on the selected dock item, for the footer: fold a
+    /// header, reveal a `show N more` row, open an openable row, or nothing.
+    pub(crate) fn dock_enter_label(&self) -> Option<&'static str> {
+        use crate::views::dock::{DockItem, Section};
+        match self.dock_items().get(self.dock_cursor) {
+            Some(DockItem::Header(sec)) => Some(if self.is_dock_section_expanded(*sec) {
+                "collapse"
+            } else {
+                "expand"
+            }),
+            Some(DockItem::RevealRemaining(_)) => Some("show all"),
+            Some(DockItem::Row(section, i)) => {
+                let openable = match section {
+                    Section::Workflows => self
+                        .dock_workflow_rows()
+                        .get(*i)
+                        .is_some_and(|(_, row)| row.openable),
+                    Section::Subagents => self
+                        .dock_subagent_rows()
+                        .get(*i)
+                        .is_some_and(|(_, _, row)| row.openable),
+                    Section::Tasks => self
+                        .dock_task_rows()
+                        .get(*i)
+                        .is_some_and(|(_, row)| row.openable),
+                    Section::Watchers => self
+                        .dock_watcher_rows()
+                        .get(*i)
+                        .is_some_and(|(_, row)| row.openable),
+                    Section::Queued => true,
+                };
+                openable.then_some("open")
+            }
+            None => None,
+        }
+    }
+
     pub(crate) fn dock_snapshot(&self) -> crate::views::dock::DockData {
         crate::views::dock::DockData {
             workflows: self
