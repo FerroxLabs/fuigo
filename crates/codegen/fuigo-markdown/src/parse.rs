@@ -24,6 +24,7 @@ use crate::latex;
 use crate::open_code_highlighter::OpenCodeHighlighter;
 use crate::style::{MarkdownStyle, TableBorders};
 use crate::syntax::{Syntect, syntax_highlight_raw};
+use crate::url_scan;
 
 /// Trait for converting anstyle to ratatui style.
 trait StyleInto<T> {
@@ -605,9 +606,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             Event::End(tag_end) => self.on_end(tag_end, range),
             Event::Text(text) => {
                 // Capture text into table cell if we're inside a table
-                if let Some(ref mut state) = self.table_state {
-                    state.push_text(&text);
-                }
+                self.push_table_text_linking_urls(&text);
 
                 // Record the enclosing fenced block's raw byte range and its de-prefixed body content
                 // pulldown merges the body into one text event, but accumulate defensively in case it is split
@@ -1381,6 +1380,42 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
 
     /// Apply inline-code styling to a code/math span: dim the delimiters, style the content.
     /// Shared by `Event::Code` and the inline-math fallback path.
+    /// Push text into the current table cell (no-op outside a table), tagging
+    /// bare URLs/emails as link spans. The post-render URL scan runs after the
+    /// table has wrapped the cell, so it would only catch the first line of a
+    /// wrapped URL; tagging here uses the wrap-aware `TableHyperlink` path.
+    fn push_table_text_linking_urls(&mut self, text: &str) {
+        let Some(state) = self.table_state.as_mut() else {
+            return;
+        };
+        if state.cell_link.is_some() {
+            state.push_text(text);
+            return;
+        }
+
+        let mut cursor = 0;
+        url_scan::for_each_plain_link(text, |range, url| {
+            if range.start > cursor
+                && let Some(prefix) = text.get(cursor..range.start)
+            {
+                state.push_text(prefix);
+            }
+            let id = self.link_id_counter;
+            self.link_id_counter += 1;
+            state.cell_link = Some((url, id));
+            if let Some(slice) = text.get(range.clone()) {
+                state.push_text(slice);
+            }
+            state.cell_link = None;
+            cursor = range.end;
+        });
+        if cursor < text.len()
+            && let Some(rest) = text.get(cursor..)
+        {
+            state.push_text(rest);
+        }
+    }
+
     fn style_inline_code_span(&mut self, code: &CowStr<'_>, range: &Range<usize>) {
         // Find the actual content range (excluding the delimiters).
         let outer_text = &self.text[range.clone()];

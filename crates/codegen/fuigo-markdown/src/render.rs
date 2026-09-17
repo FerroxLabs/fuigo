@@ -1875,6 +1875,82 @@ mod tests {
         }
     }
 
+    /// A bare URL in a table cell that wraps across lines must produce one hyperlink fragment per line,
+    /// each with the full URL and a shared id.
+    #[test]
+    fn test_table_bare_url_wrapped_keeps_full_url_on_every_line() {
+        let url = "https://example.com/very/long/path/segment/that/wraps/around/the/cell";
+        let md = format!("| A | B |\n|---|---|\n| x | see {url} now |\n\n");
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            &md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(30),
+        );
+        let lines = lines_to_text(&output.lines);
+
+        let links = &output.hyperlinks;
+        assert!(
+            links.len() >= 2,
+            "URL must wrap into multiple fragments: {links:#?}\n{lines:#?}"
+        );
+        let Some(first) = links.first() else {
+            panic!("expected URL fragments: {links:?}");
+        };
+        let id = first.id;
+        let mut covered = String::new();
+        for link in links {
+            assert_eq!(link.url, url, "every fragment must carry the full URL");
+            assert_eq!(link.id, id, "fragments must share one link id");
+            let Some(line) = lines.get(link.line_index) else {
+                panic!("missing line {}", link.line_index);
+            };
+            covered.extend(
+                line.chars()
+                    .skip(link.column_range.start)
+                    .take(link.column_range.len()),
+            );
+        }
+        assert_eq!(
+            covered, url,
+            "fragments must cover exactly the URL text, not the surrounding words"
+        );
+    }
+
+    /// Same for a bare email: every wrapped fragment carries the `mailto:` target.
+    #[test]
+    fn test_table_bare_email_wrapped_keeps_mailto_on_every_line() {
+        let email = "someone.with.a.long.name@subdomain.example-organisation.com";
+        let md = format!("| A | B |\n|---|---|\n| x | {email} |\n\n");
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            &md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(30),
+        );
+
+        let links = &output.hyperlinks;
+        assert!(
+            links.len() >= 2,
+            "email must wrap into fragments: {links:#?}"
+        );
+        assert!(
+            links.iter().all(|l| {
+                l.url == format!("mailto:{email}")
+                    && links.first().is_some_and(|first| l.id == first.id)
+            }),
+            "every fragment must carry the full mailto target: {links:#?}"
+        );
+    }
+
     /// Table source map: rendered line numbers must not exceed the table's actual source line count, and must map to the correct source lines.
     #[test]
     fn test_table_source_map_stays_within_bounds() {
