@@ -2175,6 +2175,247 @@ fn dashboard_slash_usage_hidden_for_external_auth() {
         "must not upsell billing on external auth: {toast}"
     );
 }
+/// The dashboard modal's own fetch generation and its open state.
+fn dashboard_usage_modal(app: &AppView) -> &crate::views::usage_modal::UsageInfoModalState {
+    app.dashboard
+        .as_ref()
+        .unwrap()
+        .usage_modal
+        .as_ref()
+        .expect("usage modal open on the dashboard")
+}
+/// Regression: the dispatcher used to require an agent view and silently dropped `/usage` on the dashboard.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_opens_dashboard_modal() {
+    use crate::views::usage_modal::UsageInfoTab;
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let before = app.agents.len();
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let [Effect::FetchAppBilling { nonce }] = effects.as_slice() else {
+        panic!("session-less open refreshes only the account allowance, got: {effects:?}");
+    };
+    assert_ne!(
+        *nonce, 0,
+        "a modal-driven fetch must carry a real generation"
+    );
+    assert_eq!(app.agents.len(), before, "must not add an agent");
+    assert!(
+        matches!(app.active_view, ActiveView::AgentDashboard),
+        "must stay on dashboard"
+    );
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert_eq!(dashboard.dispatch.text(), "");
+    assert!(
+        dashboard.error_toast.is_none(),
+        "{:?}",
+        dashboard.error_toast
+    );
+    let modal = dashboard_usage_modal(&app);
+    assert_eq!(modal.active_tab, UsageInfoTab::UsageLimit);
+    assert_eq!(modal.fetch_nonce, *nonce);
+    assert!(modal.ctx.session_id.is_none());
+    assert!(modal.ctx.usage_visible);
+    assert!(!modal.ctx.chat_kind);
+    assert!(modal.billing_loading);
+    for agent in app.agents.values() {
+        assert!(
+            agent.active_modal.is_none(),
+            "modal must not land on a background agent"
+        );
+    }
+}
+/// A second open re-tabs the existing modal without a second fetch; the tab really changes when the action asks for another one.
+/// The session-scoped `/context` slash stays refused on the dashboard and leaves the modal alone.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_usage_modal_reopen_retabs_without_refetch_and_session_slashes_stay_refused() {
+    use crate::views::usage_modal::UsageInfoTab;
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let nonce = dashboard_usage_modal(&app).fetch_nonce;
+    let effects = dispatch(Action::ShowContextInfo, &mut app);
+    assert!(
+        effects.is_empty(),
+        "re-open must not refetch, got: {effects:?}"
+    );
+    let modal = dashboard_usage_modal(&app);
+    assert_eq!(modal.active_tab, UsageInfoTab::ContextUsage);
+    assert_eq!(
+        modal.fetch_nonce, nonce,
+        "re-tab keeps the in-flight generation"
+    );
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(
+        dashboard_usage_modal(&app).active_tab,
+        UsageInfoTab::UsageLimit
+    );
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/context".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(
+        dashboard_usage_modal(&app).active_tab,
+        UsageInfoTab::UsageLimit
+    );
+    let toast = app
+        .dashboard
+        .as_ref()
+        .unwrap()
+        .error_toast
+        .as_deref()
+        .expect("session-scoped /context toasts on the dashboard");
+    assert!(
+        toast.contains("/context only works in a session"),
+        "unexpected toast: {toast}"
+    );
+}
+/// The reply that carries the modal's generation settles it; a background reply (nonce 0) updates the cache but not the modal.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_usage_modal_settles_only_on_its_own_app_billing_generation() {
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let nonce = dashboard_usage_modal(&app).fetch_nonce;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: Some(test_bal(10.0)),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    assert!(
+        dashboard_usage_modal(&app).billing_loading,
+        "a startup/login refresh must not settle the modal's fetch"
+    );
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(10.0));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: Some(test_bal(42.0)),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            nonce,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.billing_loading);
+    assert!(modal.billing_error.is_none());
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(42.0));
+}
+/// A failed fetch surfaces its error in the modal and keeps the last-known-good balance (the welcome warning and new-agent seed read it).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_usage_modal_billing_error_keeps_cached_balance() {
+    let mut app = three_agent_app();
+    app.credit_balance = Some(test_bal(63.0));
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let nonce = dashboard_usage_modal(&app).fetch_nonce;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingError {
+            error: "proxy unreachable".to_string(),
+            nonce,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.billing_loading);
+    assert_eq!(modal.billing_error.as_deref(), Some("proxy unreachable"));
+    assert_eq!(
+        app.credit_balance.as_ref().map(|b| b.usage_pct),
+        Some(63.0),
+        "a transport failure must not wipe the cached balance"
+    );
+}
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_redirect_url_skips_billing_fetch() {
+    let mut app = three_agent_app();
+    app.usage_billing_redirect_url = Some("https://billing.example.com/me".to_string());
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.billing_loading);
+    assert_eq!(modal.fetch_nonce, 0);
+    assert_eq!(
+        modal.ctx.billing_redirect_url.as_deref(),
+        Some("https://billing.example.com/me")
+    );
+}
+/// Team / API-key accounts have no consumer billing surface: no fetch, and the modal explains who manages the limits.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_team_account_skips_billing_fetch() {
+    let mut app = three_agent_app();
+    app.usage_visible = false;
+    app.sync_billing_surface_to_agents();
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.ctx.usage_visible);
+    assert!(!modal.billing_loading);
+    assert_eq!(modal.fetch_nonce, 0);
+}
+/// `--chat` processes carry `chat_kind` on every session; the dashboard modal follows so it hides Build coding credits the same way.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_in_chat_mode_marks_modal_chat_kind() {
+    let mut app = three_agent_app();
+    app.chat_mode = true;
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(
+        effects.is_empty(),
+        "chat kind never fetches Build billing, got: {effects:?}"
+    );
+    let modal = dashboard_usage_modal(&app);
+    assert!(modal.ctx.chat_kind);
+    assert!(!modal.billing_loading);
+}
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_reopen_clears_usage_modal() {
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(app.dashboard.as_ref().unwrap().usage_modal.is_some());
+    let _ = dispatch(Action::ExitDashboard, &mut app);
+    open_dashboard(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().usage_modal.is_none());
+}
+/// Ctrl+\ passes through the open modal into the overlay; coming back through either overlay exit must not resurrect it.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_overlay_exits_clear_usage_modal() {
+    let mut app = three_agent_app();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    open_dashboard(&mut app);
+    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let _ = dispatch_dashboard_attach(&mut app, row.clone());
+    assert!(matches!(app.active_view, ActiveView::Agent(_)));
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    assert!(
+        app.dashboard.as_ref().unwrap().usage_modal.is_none(),
+        "overlay exit must drop the modal"
+    );
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let _ = dispatch_dashboard_attach(&mut app, row);
+    let _ = dispatch_dashboard_overlay_stop(&mut app);
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    assert!(
+        app.dashboard.as_ref().unwrap().usage_modal.is_none(),
+        "overlay stop must drop the modal"
+    );
+}
 /// Session-scoped Action builtins must not spawn an agent whose first
 /// prompt is the slash text (registered but not offered: error toast).
 #[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
@@ -4573,6 +4814,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: true,
             caption: Some(CAPTION),
         }),
+        None,
     );
     assert!(
         state.pinned_upgrade_cta_live,
@@ -4624,6 +4866,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: true,
             caption: None,
         }),
+        None,
     );
     assert!(state.pinned_upgrade_cta_live);
     let rect = state
@@ -4654,6 +4897,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: false,
             caption: Some(CAPTION),
         }),
+        None,
     );
     assert!(!state.pinned_upgrade_cta_live);
     let rect = state
@@ -4686,6 +4930,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         false,
         None,
         false,
+        None,
         None,
     );
     assert!(state.upgrade_cta_hit.rect.is_none());
@@ -6403,6 +6648,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         None,
         false,
         None,
+        None,
     );
     assert!(
         app.dashboard.as_ref().unwrap().peek.is_some(),
@@ -6421,6 +6667,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         false,
         None,
         false,
+        None,
         None,
     );
     assert!(
@@ -6459,6 +6706,7 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
                 false,
                 None,
                 false,
+                None,
                 None,
             );
         };

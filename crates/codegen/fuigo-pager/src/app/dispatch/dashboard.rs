@@ -94,6 +94,7 @@ fn configure_dashboard_state(app: &mut AppView) {
     if let Some(d) = app.dashboard.as_mut() {
         d.close_popup();
         d.location_picker = None;
+        d.usage_modal = None;
         d.cwd = cwd.clone();
         d.cwd_has_git_ancestor = cwd_has_git_ancestor;
         d.dispatch_worktree = false;
@@ -429,6 +430,8 @@ pub(super) fn dispatch_dashboard_overlay_exit(app: &mut AppView) -> Vec<Effect> 
     if let Some(d) = app.dashboard.as_mut() {
         d.restore_peek_viewport(&mut app.agents);
         d.close_popup();
+        // The modal returns `Unchanged` for control chords, so Ctrl+\ can reach the overlay with it still open; don't bring it back
+        d.usage_modal = None;
     }
     // Leaving the overlay by mouse (`[Dashboard]` click) doesn't pass through the key-press disarm in `handle_input`
     // An armed stop-confirm would survive the exit and let a later Ctrl+X on the dashboard close a session with a single press
@@ -484,6 +487,7 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
         dashboard_neighbor_row(app, &crate::views::dashboard::DashboardRowId::TopLevel(id));
     if let Some(d) = app.dashboard.as_mut() {
         d.close_popup();
+        d.usage_modal = None;
     }
     app.active_view = ActiveView::AgentDashboard;
     let effects = dispatch_sessions_confirm_close(app, id);

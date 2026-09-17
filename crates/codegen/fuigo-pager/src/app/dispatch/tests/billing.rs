@@ -1137,6 +1137,7 @@ fn app_billing_fetched_stores_autotopup() {
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
                 crate::views::credit_bar::AutoTopupInfo::disabled(),
             ),
+            nonce: 0,
         }),
         &mut app,
     );

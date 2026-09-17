@@ -101,6 +101,8 @@ pub fn render_dashboard(
     dashboard_sessions_loading: bool,
     // Promo upgrade CTA to paint in the header after the location label (`None` means no CTA); field meanings live on [`HeaderUpgradeCta`]
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    // App-level cached allowance the session-less `/usage` modal renders from
+    credit_balance: Option<&crate::views::credit_bar::CreditBalance>,
 ) -> Option<(u16, u16)> {
     // Cache whether a pinned (non-dismissible) promo CTA is live so the key handler can steal Ctrl+O for it; the dispatch re-resolves the gate
     state.pinned_upgrade_cta_live = upgrade_cta.is_some_and(|cta| cta.pinned);
@@ -420,6 +422,18 @@ pub fn render_dashboard(
             &modal.mode,
             &theme,
             /* compact */ false,
+        );
+        return None;
+    }
+
+    if let Some(modal) = state.usage_modal.as_mut() {
+        crate::views::usage_modal::render_usage_modal(
+            buf,
+            area,
+            modal,
+            credit_balance,
+            /* compact */ false,
+            &theme,
         );
         return None;
     }

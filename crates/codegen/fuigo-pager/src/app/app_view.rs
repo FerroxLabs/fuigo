@@ -5327,6 +5327,7 @@ impl AppView {
                                 self.workspace_snapshot.as_ref(),
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
+                                self.credit_balance.as_ref(),
                             );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
@@ -5543,7 +5544,7 @@ impl AppView {
             || self.welcome_doc_viewer.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard
-                if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some()))
+                if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some() || d.usage_modal.is_some()))
             || cloud_modal_open
     }
     /// Store the resolved per-tip gates and propagate the prompt-relevant tips (undo and plan nudge) to every agent's prompt.

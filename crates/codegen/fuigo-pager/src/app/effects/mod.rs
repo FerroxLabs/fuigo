@@ -4534,7 +4534,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchAppBilling => {
+        Effect::FetchAppBilling { nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -4545,47 +4545,44 @@ pub(crate) fn execute(
                             .expect("serialize billing params")
                             .into(),
                     );
-                    match acp_send(req, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let result = wrapper.get("result").unwrap_or(&wrapper);
-                            match serde_json::from_value::<
-                                BillingConfigResponse,
-                            >(result.clone()) {
-                                Ok(billing) => {
-                                    let balance = billing
-                                        .config
-                                        .map(|c| crate::views::credit_bar::CreditBalance {
-                                            period_end_display: None,
-                                            ..credit_balance_from_config(c)
-                                        });
-                                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
-                                        fetch_auto_topup_info(&tx).await
-                                    } else {
-                                        crate::views::credit_bar::AutoTopupFetch::Cleared
-                                    };
-                                    TaskResult::AppBillingFetched {
-                                        balance,
-                                        autotopup,
-                                    }
-                                }
-                                Err(_) => {
-                                    TaskResult::AppBillingFetched {
-                                        balance: None,
-                                        autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                                    }
-                                }
-                            }
+                    let resp = match acp_send(req, &tx).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            return TaskResult::AppBillingError {
+                                error: sanitize_user_error(&format!("{e}")),
+                                nonce,
+                            };
                         }
-                        Err(_) => {
-                            TaskResult::AppBillingFetched {
-                                balance: None,
-                                autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                            }
+                    };
+                    let wrapper: serde_json::Value = serde_json::from_str(resp.0.get())
+                        .unwrap_or_default();
+                    let result = wrapper.get("result").unwrap_or(&wrapper);
+                    let billing = match serde_json::from_value::<
+                        BillingConfigResponse,
+                    >(result.clone()) {
+                        Ok(billing) => billing,
+                        Err(e) => {
+                            return TaskResult::AppBillingError {
+                                error: format!("Parse error: {e}"),
+                                nonce,
+                            };
                         }
+                    };
+                    let balance = billing
+                        .config
+                        .map(|c| crate::views::credit_bar::CreditBalance {
+                            period_end_display: None,
+                            ..credit_balance_from_config(c)
+                        });
+                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
+                        fetch_auto_topup_info(&tx).await
+                    } else {
+                        crate::views::credit_bar::AutoTopupFetch::Cleared
+                    };
+                    TaskResult::AppBillingFetched {
+                        balance,
+                        autotopup,
+                        nonce,
                     }
                 });
         }
