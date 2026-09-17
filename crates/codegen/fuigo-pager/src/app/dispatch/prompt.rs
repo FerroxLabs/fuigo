@@ -491,12 +491,14 @@ pub(super) fn dispatch_send_prompt_inner(
     // Submitting the prompt retires any edit-contextual ephemeral tip (ambient tips live out their TTL across the submit)
     agent.ephemeral_tip.clear_on_submit();
 
-    // The raw text decides command-ness, like the slash branch below; a mid-text `/btw` hoists.
+    // Image chips are composer chrome: `[Image #1] explain /btw q` must ask `explain q`, not carry the marker to the model.
+    let slash_input = agent.prompt.submitted_text_without_image_chips(&text);
+    // The raw text decides command-ness, like the slash branch below; a stripped ` /btw q` hoists.
     let hoisted = if literal || text.trim().starts_with('/') {
         None
     } else {
         crate::slash::mid_text_hoist::hoist_mid_text_command(
-            &text,
+            &slash_input,
             agent.prompt.slash_controller.registry(),
         )
     };

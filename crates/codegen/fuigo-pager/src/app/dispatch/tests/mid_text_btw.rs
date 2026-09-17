@@ -105,3 +105,36 @@ fn mid_text_other_builtin_still_passes_through() {
         "{effects:?}"
     );
 }
+
+/// A leading image chip is composer chrome, not text the model should read.
+/// The hoist scans the chip-stripped submission, so `[Image #1] explain /btw q`
+/// asks `explain q` — the `[Image #1]` marker never reaches the side question.
+#[test]
+fn leading_image_chip_is_not_carried_into_the_side_question() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let typed = {
+        let prompt = &mut app.agents.get_mut(&id).unwrap().prompt;
+        prompt
+            .insert_image(crate::prompt_images::PastedImage {
+                element_id: fuigo_ratatui_textarea::ElementId::from_raw(0),
+                display_number: 0,
+                mime_type: "image/png".into(),
+                dimensions: Some((100, 80)),
+                byte_len: 2048,
+                encoded_bytes: Some(vec![0u8; 16].into()),
+                source_path: None,
+                staged_temp_path: None,
+                session_image_path: None,
+                preview: crate::prompt_images::PromptImagePreview::default(),
+            })
+            .unwrap();
+        prompt.append_text("explain the controller. /btw what is a WBC");
+        prompt.text().to_owned()
+    };
+    assert!(typed.starts_with("[Image #1] "), "{typed:?}");
+
+    let effects = dispatch(Action::SendPrompt(typed), &mut app);
+
+    assert_fullscreen_side_question(&effects, QUESTION);
+}

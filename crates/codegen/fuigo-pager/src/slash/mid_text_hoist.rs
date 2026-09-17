@@ -1,6 +1,7 @@
 //! Rewrites a plain submission carrying an opted-in `/command` token into a leading
 //! `/command <message-without-token>` line. The caller decides what counts as a plain submission
-//! (raw text not starting with `/`).
+//! (raw text not starting with `/`); `text` is chip-stripped, so a `/` at index 0 here is an
+//! ordinary token after a leading image chip (`[Image #1] /btw q` arrives as ` /btw q`).
 
 use crate::slash::registry::CommandRegistry;
 use crate::slash::scan_inline_slash_tokens;
