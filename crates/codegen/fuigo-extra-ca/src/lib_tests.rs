@@ -209,3 +209,25 @@ fn load_fails_open_on_read_errors() {
     .unwrap();
     assert!(load_extra_root_ders(ENV_FUIGO_EXTRA_CA_BUNDLE, &oversized).is_empty());
 }
+
+#[test]
+fn provider_for_picks_ring_on_the_ring_target_and_aws_lc_rs_elsewhere() {
+    // ring lacks ECDSA P-521; aws-lc-rs has it. That difference is what the
+    // supports_p521 warning keys on, so it is the discriminator here too.
+    fn has_p521(provider: &rustls::crypto::CryptoProvider) -> bool {
+        provider
+            .signature_verification_algorithms
+            .supported_schemes()
+            .contains(&rustls::SignatureScheme::ECDSA_NISTP521_SHA512)
+    }
+    assert!(
+        !has_p521(&provider_for(true)),
+        "the Windows ARM64 (ring) target must get ring, which has no P-521"
+    );
+    assert!(
+        has_p521(&provider_for(false)),
+        "every other target must get aws-lc-rs, which has P-521"
+    );
+    // The value the build actually uses is the one cfg! for the ring target.
+    assert_eq!(IS_RING_TARGET, cfg!(all(windows, target_arch = "aarch64")));
+}

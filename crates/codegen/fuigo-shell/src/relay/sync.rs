@@ -24,12 +24,25 @@ const MAX_PENDING: usize = 256;
 /// Number of messages to drop when buffer is full.
 const DROP_BATCH_SIZE: usize = 64;
 
-/// Build the share URL for a session.
-/// Format: https://grok.com/build/{sessionId}
-pub(crate) fn build_share_url(session_id: &str) -> String {
-    let base_url =
-        std::env::var("FUIGO_CODE_WEB_URL").unwrap_or_else(|_| "https://grok.com".to_string());
-    format!("{}/build/{}", base_url, session_id)
+/// The share URL for a relay-synced session: `<FUIGO_CODE_WEB_URL>/build/{sessionId}`.
+///
+/// `None` when `FUIGO_CODE_WEB_URL` is unset. Upstream fell back to the
+/// vendor's web origin here, so a Fuigo user whose relay connected was shown a
+/// link to a site that does not host their session. No origin, no URL.
+pub(crate) fn build_share_url(session_id: &str) -> Option<String> {
+    crate::remote::client::code_web_url().map(|base_url| format!("{}/build/{}", base_url, session_id))
+}
+
+/// The line printed once the relay handshake completes.
+///
+/// Carries the share URL only when one is configured; otherwise it says the
+/// session is syncing and nothing more, rather than inventing a destination.
+pub(crate) fn relay_connected_message(share_url: Option<&str>) -> String {
+    match share_url {
+        Some(url) => format!("📡 Session syncing to relay. View at: {url}"),
+        None => "📡 Session syncing to relay (no share URL: FUIGO_CODE_WEB_URL is not set)."
+            .to_string(),
+    }
 }
 
 /// Connection state for the relay sync.
@@ -564,9 +577,9 @@ fn handle_relay_message(
                     tracing::warn!(session_id = %session_id, "RelaySync: failed to send session/upsert");
                 }
 
-                // Display share URL after successful handshake
+                // Display the share URL after a successful handshake, if one is configured
                 let share_url = build_share_url(session_id);
-                tprintln!("📡 Session syncing to relay. View at: {}", share_url);
+                tprintln!("{}", relay_connected_message(share_url.as_deref()));
             }
         }
         Some("_fuigo/relay/initialized") => {
@@ -793,18 +806,60 @@ mod tests {
         assert_eq!(json["_meta"]["agentType"].as_str(), Some("tui"));
     }
 
+    // ===== Share URL Tests =====
+    //
+    // Env access is process-global, so these run `#[serial_test::serial]` and
+    // restore the prior value through `EnvGuard` (same pattern as
+    // `unified_list` and `client_tests`).
+
+    /// Unset origin: no URL is built, and the message the user sees names no host at all.
     #[test]
-    fn test_build_share_url_default() {
-        let url = build_share_url("test-session-123");
-        assert_eq!(url, "https://grok.com/build/test-session-123");
+    #[serial_test::serial]
+    fn build_share_url_without_web_origin_is_none() {
+        let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        assert_eq!(build_share_url("test-session-123"), None);
+        let shown = relay_connected_message(build_share_url("test-session-123").as_deref());
+        assert!(!shown.contains("grok.com"), "{shown}");
+        assert!(!shown.contains("http"), "no invented destination: {shown}");
+        assert!(shown.contains("FUIGO_CODE_WEB_URL"), "{shown}");
     }
 
+    /// Set origin: the URL is built from it exactly as before.
     #[test]
-    fn test_build_share_url_with_uuid() {
-        let url = build_share_url("01937d8a-1234-7abc-9def-0123456789ab");
+    #[serial_test::serial]
+    fn build_share_url_with_web_origin_uses_it() {
+        let _set =
+            fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://share.example.test");
         assert_eq!(
-            url,
-            "https://grok.com/build/01937d8a-1234-7abc-9def-0123456789ab"
+            build_share_url("01937d8a-1234-7abc-9def-0123456789ab").as_deref(),
+            Some("https://share.example.test/build/01937d8a-1234-7abc-9def-0123456789ab")
+        );
+        let shown = relay_connected_message(build_share_url("s1").as_deref());
+        assert_eq!(
+            shown,
+            "📡 Session syncing to relay. View at: https://share.example.test/build/s1"
+        );
+    }
+
+    /// An empty value counts as unset, matching the sibling REST clients.
+    #[test]
+    #[serial_test::serial]
+    fn build_share_url_with_empty_web_origin_is_none() {
+        let _set = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "");
+        assert_eq!(build_share_url("s1"), None);
+    }
+
+    /// The relay's connected line never names the upstream vendor, set or unset.
+    /// (Compiles against the pre-fix signature too: it only inspects `Debug` output.)
+    #[test]
+    #[serial_test::serial]
+    fn build_share_url_never_names_the_vendor_when_unset() {
+        let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let url = build_share_url("test-session-123");
+        let rendered = format!("{url:?}");
+        assert!(
+            !rendered.contains("grok.com"),
+            "relay share URL invented a vendor host: {rendered}"
         );
     }
 

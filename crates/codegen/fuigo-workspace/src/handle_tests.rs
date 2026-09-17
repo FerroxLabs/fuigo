@@ -1,4 +1,5 @@
 use super::*;
+use crate::LockedTestEnv;
 use crate::capability::CapabilityMode;
 use crate::config::{
     AgentSessionConfig, BindMcpConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig,
@@ -2159,8 +2160,14 @@ fn spawn_test_queue(home: &std::path::Path) -> Arc<fuigo_file_utils::queue::Uplo
 /// It must never use the real `$FUIGO_WORKSPACE_HOME` and must NOT configure an upload queue.
 /// The legacy inline-upload path stays inert (no storage config).
 /// This pins the flag-off defaults so uploads never start implicitly and `new` stays runtime-light (no queue worker spawned).
+///
+/// `resolve_workspace_home()` below READS `$FUIGO_WORKSPACE_HOME` / `$FUIGO_HOME`, which the
+/// `FUIGO_HOME` fixtures in `worktree`, `trust` and `identity_tests` set for the length of their
+/// own guard, so this takes `ENV_TEST_LOCK` too: without it the read can land inside one of those
+/// windows (a data race with their `set_var`, and a comparison against a home no test here chose).
 #[tokio::test]
 async fn new_defaults_to_ephemeral_home_and_inert_legacy_upload() {
+    let _env = LockedTestEnv::lock();
     let handle = make_handle();
     let shared = handle.shared();
     let home = shared.workspace_home();
@@ -8406,4 +8413,141 @@ async fn fork_inherits_path_virtualization() {
         .path_virtualization()
         .expect("fork must inherit mapping");
     assert_eq!(virt.real_root(), "/workspace/conv-abc");
+}
+// ===== Auxiliary-service base URL (FUIGO_CLI_CHAT_PROXY_BASE_URL) =====
+//
+// Pure-function tests: the resolver takes the already-read value, so no test here
+// touches the process environment.
+
+/// Unset: `None`. No compiled fallback, so nothing names a host the operator never chose.
+#[test]
+fn cli_chat_proxy_base_url_unset_is_none() {
+    assert_eq!(cli_chat_proxy_base_url_from(None), None);
+}
+
+/// Empty counts as unset, matching `fuigo-shell`'s empty `CLI_CHAT_PROXY_BASE_URL_DEFAULT`.
+#[test]
+fn cli_chat_proxy_base_url_empty_is_none() {
+    assert_eq!(cli_chat_proxy_base_url_from(Some(String::new())), None);
+}
+
+/// Set: the value passes through verbatim, exactly as the env override always did.
+#[test]
+fn cli_chat_proxy_base_url_set_passes_through() {
+    assert_eq!(
+        cli_chat_proxy_base_url_from(Some("https://proxy.example.test/v1".into())).as_deref(),
+        Some("https://proxy.example.test/v1")
+    );
+}
+
+/// The live resolver never names the upstream vendor whatever the environment holds.
+/// This one READS the process environment (the resolver calls `std::env::var`), so it takes
+/// `ENV_TEST_LOCK` like every writer in this file: the `auxiliary_service_wiring_*` tests below
+/// set `CLI_CHAT_PROXY_BASE_URL_ENV` for the length of their own guard, and `--test-threads > 1`
+/// would otherwise let this read land inside that window — a data race with their `set_var`, and
+/// an assertion about a value no caller of this test ever chose.
+#[test]
+fn cli_chat_proxy_base_url_never_names_the_vendor() {
+    let _env = LockedTestEnv::lock();
+    let rendered = format!("{:?}", cli_chat_proxy_base_url());
+    assert!(
+        !rendered.contains("grok.com"),
+        "workspace proxy base invented a vendor host: {rendered}"
+    );
+}
+
+// ===== The decision itself: `auxiliary_service_wiring` (handle.rs) =====
+//
+// The resolver tests above only cover the string. These cover what
+// `connect_local_workspace` actually DOES with it: which tool configs the session-context
+// factory hands out, and whether data collection is forced off. Env is mutated under the
+// crate-wide `ENV_TEST_LOCK` with `TestEnvGuard` restore, like every other env test here.
+
+fn wiring_test_auth() -> fuigo_computer_hub_sdk::SharedAuthProvider {
+    Arc::new(fuigo_computer_hub_sdk::AuthCredential::bearer("test-token"))
+}
+
+/// The tool configs the factory would give a real session, as `(image, video, web_search)`
+/// debug strings. `Disabled` / default variants are what an unconfigured workspace must show.
+fn wiring_tool_configs(wiring: &AuxiliaryServiceWiring) -> (String, String, String) {
+    use crate::config::SessionContextFactory as _;
+    let backend: Arc<dyn fuigo_tools::computer::types::TerminalBackend> =
+        Arc::new(fuigo_tools::computer::local::LocalTerminalBackend::new());
+    let ctx = wiring.factory.build_session_context(
+        "wiring-test-session",
+        std::path::PathBuf::from("/tmp"),
+        Arc::new(std::collections::HashMap::new()),
+        backend,
+    );
+    (
+        format!("{:?}", ctx.image_gen_config),
+        format!("{:?}", ctx.video_gen_config),
+        format!("{:?}", ctx.web_search_config),
+    )
+}
+
+/// UNSET: image/video/web-search come out disabled and data collection is forced off —
+/// even with `FUIGO_WORKSPACE_DATA_COLLECTION_DISABLED=false` explicitly opting in, because
+/// with no auxiliary service there is nowhere to upload to. Upstream instead dialled its
+/// vendor's `cli-chat-proxy` host and left all three enabled.
+// `LocalTerminalBackend::new()` registers with the tokio reactor, so this needs a runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn auxiliary_service_wiring_without_the_env_disables_gen_tools_and_collection() {
+    let _env = LockedTestEnv::lock()
+        .set_str(WORKSPACE_DATA_COLLECTION_DISABLED_ENV, "false")
+        .unset(CLI_CHAT_PROXY_BASE_URL_ENV);
+    let wiring = auxiliary_service_wiring(&wiring_test_auth());
+    assert_eq!(wiring.api_base_url, None);
+    assert!(
+        wiring.data_collection_disabled,
+        "no auxiliary service => collection forced off even though the env var opted in"
+    );
+    let (image, video, web) = wiring_tool_configs(&wiring);
+    assert!(image.starts_with("Disabled"), "image_gen: {image}");
+    assert!(video.starts_with("Disabled"), "video_gen: {video}");
+    assert!(web.starts_with("Disabled"), "web_search: {web}");
+    for rendered in [&image, &video, &web] {
+        assert!(
+            !rendered.contains("grok.com"),
+            "unconfigured workspace named a vendor host: {rendered}"
+        );
+    }
+}
+
+/// SET: the three tools are enabled against exactly the configured base, and the
+/// data-collection env var is honoured again (`false` => collection on).
+// `LocalTerminalBackend::new()` registers with the tokio reactor, so this needs a runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn auxiliary_service_wiring_with_the_env_enables_gen_tools_at_that_base() {
+    let _env = LockedTestEnv::lock()
+        .set_str(CLI_CHAT_PROXY_BASE_URL_ENV, "https://proxy.example.test/v1")
+        .set_str(WORKSPACE_DATA_COLLECTION_DISABLED_ENV, "false");
+    let wiring = auxiliary_service_wiring(&wiring_test_auth());
+    assert_eq!(
+        wiring.api_base_url.as_deref(),
+        Some("https://proxy.example.test/v1")
+    );
+    assert!(
+        !wiring.data_collection_disabled,
+        "with a proxy configured the env var decides, as before"
+    );
+    let (image, video, web) = wiring_tool_configs(&wiring);
+    for rendered in [&image, &video, &web] {
+        assert!(rendered.starts_with("Enabled"), "{rendered}");
+        assert!(
+            rendered.contains("https://proxy.example.test/v1"),
+            "must use exactly the configured base: {rendered}"
+        );
+    }
+}
+
+/// SET, with collection left at its default: still disabled, so the only thing the unset
+/// case changes is that the env var stops being able to turn it back on.
+#[test]
+fn auxiliary_service_wiring_default_collection_stays_disabled_with_a_proxy() {
+    let _env = LockedTestEnv::lock()
+        .set_str(CLI_CHAT_PROXY_BASE_URL_ENV, "https://proxy.example.test/v1")
+        .unset(WORKSPACE_DATA_COLLECTION_DISABLED_ENV);
+    let wiring = auxiliary_service_wiring(&wiring_test_auth());
+    assert!(wiring.data_collection_disabled);
 }

@@ -1129,3 +1129,121 @@ async fn auth_headers_do_not_collide_with_json() {
         assert_eq!(count, 1, "duplicate header {name}");
     }
 }
+// ===== No vendor host as a default (1.0.20, REM-1 / REM-3) =====
+//
+// Env access is process-global: these run `#[serial_test::serial]` and restore
+// the prior value through `EnvGuard`, like the other env-touching tests here.
+
+/// Row 1: with `FUIGO_CODE_BACKEND_URL` unset the backend client resolves NO host.
+/// Upstream fell back to its vendor's `code.` origin here.
+/// (Inspects `Debug` output only, so it compiles against the pre-fix `&str` too.)
+#[test]
+#[serial_test::serial]
+fn backend_client_without_backend_url_names_no_vendor_host() {
+    let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_BACKEND_URL");
+    let client = BackendClient::new();
+    let rendered = format!("{:?}", client.base_url());
+    assert!(
+        !rendered.contains("grok.com"),
+        "backend base fell back to a vendor host: {rendered}"
+    );
+}
+
+/// Row 2: with `FUIGO_CODE_WEB_URL` unset there is no share URL to build.
+/// Upstream invented `<vendor>/build/share/<id>` here.
+#[test]
+#[serial_test::serial]
+fn share_url_without_web_origin_names_no_vendor_host() {
+    let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+    let rendered = format!("{:?}", share_url("perm-123"));
+    assert!(
+        !rendered.contains("grok.com"),
+        "share URL invented a vendor host: {rendered}"
+    );
+}
+
+/// Row 1, typed: unset means `None`, and every request fails closed with a message that
+/// names the variable rather than a DNS/egress refusal for a host nobody asked for.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn backend_client_without_backend_url_fails_closed_with_a_true_message() {
+    let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_BACKEND_URL");
+    let client = BackendClient::new().with_auth_manager(test_auth_manager());
+    assert_eq!(client.base_url(), None);
+    let err = client.list_sessions().await.expect_err("no backend, no request");
+    let shown = err.to_string();
+    assert!(matches!(err, BackendError::NotConfigured(_)), "{shown}");
+    assert!(shown.contains("FUIGO_CODE_BACKEND_URL"), "{shown}");
+    assert!(!shown.contains("grok.com"), "{shown}");
+    let err = client
+        .delete_session_data("s1")
+        .await
+        .expect_err("no backend, no request");
+    assert!(matches!(err, BackendError::NotConfigured(_)));
+}
+
+/// Row 1, set: the override is honoured verbatim, as before.
+#[test]
+#[serial_test::serial]
+fn backend_client_with_backend_url_uses_it() {
+    let _set =
+        fuigo_test_support::EnvGuard::set("FUIGO_CODE_BACKEND_URL", "http://backend.example.test");
+    assert_eq!(
+        BackendClient::new().base_url(),
+        Some("http://backend.example.test")
+    );
+}
+
+/// Row 1, empty: an empty value counts as unset (the sibling clients' convention).
+#[test]
+#[serial_test::serial]
+fn backend_client_with_empty_backend_url_is_unconfigured() {
+    let _set = fuigo_test_support::EnvGuard::set("FUIGO_CODE_BACKEND_URL", "");
+    assert_eq!(BackendClient::new().base_url(), None);
+}
+
+/// Row 2, typed: unset means `None`; set builds `<origin>/build/share/<id>` exactly as before.
+#[test]
+#[serial_test::serial]
+fn share_url_follows_the_configured_web_origin_only() {
+    {
+        let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        assert_eq!(share_url("perm-123"), None);
+    }
+    {
+        let _set =
+            fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://share.example.test");
+        assert_eq!(
+            share_url("perm-123").as_deref(),
+            Some("https://share.example.test/build/share/perm-123")
+        );
+    }
+    {
+        let _set = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "");
+        assert_eq!(share_url("perm-123"), None);
+    }
+}
+
+/// A share is refused BEFORE any upload when either half is missing, and the refusal
+/// names the missing variable. With both set, the origin comes back for the link.
+#[test]
+#[serial_test::serial]
+fn share_link_origin_fails_closed_on_either_missing_half() {
+    let _backend = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_BACKEND_URL");
+    let _web = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+    let err = BackendClient::new()
+        .share_link_origin()
+        .expect_err("no backend");
+    assert!(err.to_string().contains("FUIGO_CODE_BACKEND_URL"), "{err}");
+    let _backend = fuigo_test_support::EnvGuard::set("FUIGO_CODE_BACKEND_URL", "http://b.example.test");
+    let err = BackendClient::new()
+        .share_link_origin()
+        .expect_err("backend but no web origin");
+    assert!(err.to_string().contains("FUIGO_CODE_WEB_URL"), "{err}");
+    assert!(!err.to_string().contains("grok.com"), "{err}");
+    let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://w.example.test");
+    assert_eq!(
+        BackendClient::new().share_link_origin().unwrap(),
+        "https://w.example.test"
+    );
+}

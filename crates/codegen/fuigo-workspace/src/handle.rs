@@ -4406,11 +4406,11 @@ pub async fn connect_local_workspace(
             workspace_home.display()
         ))
     })?;
-    let api_base_url = std::env::var("FUIGO_CLI_CHAT_PROXY_BASE_URL")
-        .unwrap_or_else(|_| "https://cli-chat-proxy.grok.com/v1".to_string());
-    let data_collection_disabled =
-        std::env::var("FUIGO_WORKSPACE_DATA_COLLECTION_DISABLED").as_deref() != Ok("false");
-    let mut factory = WorkspaceSessionContextFactory::with_auth(auth.clone(), api_base_url.clone());
+    let AuxiliaryServiceWiring {
+        api_base_url,
+        data_collection_disabled,
+        mut factory,
+    } = auxiliary_service_wiring(&auth);
     if crate::session::tool_config::tool_state_enabled() {
         factory = factory.with_tool_state_home(workspace_home.clone());
     }
@@ -4452,9 +4452,11 @@ pub async fn connect_local_workspace(
             .extend(bundled_allowlist_ignore_dirs(&dir, allowlist.as_deref()));
         ws_config.skills_config.bundled_skill_dirs = vec![dir];
     }
+    // With no proxy configured the base is empty; every enqueue path is gated on
+    // `data_collection_disabled` (forced above), so it is never dialled.
     let proxy_storage = Arc::new(crate::upload::ProxyStorageConfig::new(
         auth.clone(),
-        api_base_url.clone(),
+        api_base_url.clone().unwrap_or_default(),
         identity.clone(),
     ));
     let trace_source: Arc<dyn fuigo_file_utils::queue::TraceExportSource> = Arc::new(
@@ -4519,6 +4521,74 @@ pub async fn connect_local_workspace(
     );
     connect_result?;
     Ok(ws_handle)
+}
+/// Env var naming the auxiliary service (gen tools, web search, trace upload) the
+/// workspace routes through.
+pub const CLI_CHAT_PROXY_BASE_URL_ENV: &str = "FUIGO_CLI_CHAT_PROXY_BASE_URL";
+/// The configured auxiliary-service base URL, or `None` when
+/// [`CLI_CHAT_PROXY_BASE_URL_ENV`] is unset or empty.
+///
+/// There is **no compiled default**. Upstream fell back to its vendor's
+/// `cli-chat-proxy` host; Fuigo runs no such service, so an unset var means the
+/// features that need one are unavailable (see [`connect_local_workspace`]).
+/// `fuigo-shell` makes the same choice (`CLI_CHAT_PROXY_BASE_URL_DEFAULT = ""`).
+pub fn cli_chat_proxy_base_url() -> Option<String> {
+    cli_chat_proxy_base_url_from(std::env::var(CLI_CHAT_PROXY_BASE_URL_ENV).ok())
+}
+/// [`cli_chat_proxy_base_url`] over an already-read value; empty counts as unset.
+/// Set values pass through verbatim.
+pub fn cli_chat_proxy_base_url_from(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.is_empty())
+}
+/// Env var opting data collection back ON; anything but the exact string `false` leaves it off.
+pub const WORKSPACE_DATA_COLLECTION_DISABLED_ENV: &str = "FUIGO_WORKSPACE_DATA_COLLECTION_DISABLED";
+/// Everything [`connect_local_workspace`] derives from the auxiliary-service base URL.
+pub struct AuxiliaryServiceWiring {
+    /// The configured base, or `None`. `ProxyStorageConfig` gets `""` for `None`; nothing dials it
+    /// because every enqueue path is gated on `data_collection_disabled`.
+    pub api_base_url: Option<String>,
+    /// Forced ON (collection off) when there is no auxiliary service, whatever
+    /// [`WORKSPACE_DATA_COLLECTION_DISABLED_ENV`] says: there is nowhere to upload to.
+    pub data_collection_disabled: bool,
+    /// Carries auth + base only when a base exists; without one the factory builds session
+    /// contexts whose image_gen / video_gen / web_search configs are the `Disabled` defaults.
+    pub factory: crate::session::tool_config::WorkspaceSessionContextFactory,
+}
+/// Resolve the auxiliary-service wiring from the process environment.
+///
+/// This is the single place the "no `FUIGO_CLI_CHAT_PROXY_BASE_URL`" behaviour is decided.
+/// Upstream silently dialled its vendor's `cli-chat-proxy` host here; Fuigo has no such
+/// service, so an unset var turns the features that need one OFF and says so, rather than
+/// pointing at a host the operator never chose. Pinned by `auxiliary_service_wiring_*` in
+/// `handle_tests.rs`.
+pub fn auxiliary_service_wiring(
+    auth: &fuigo_computer_hub_sdk::SharedAuthProvider,
+) -> AuxiliaryServiceWiring {
+    let api_base_url = cli_chat_proxy_base_url();
+    let data_collection_disabled =
+        std::env::var(WORKSPACE_DATA_COLLECTION_DISABLED_ENV).as_deref() != Ok("false");
+    match api_base_url {
+        Some(url) => AuxiliaryServiceWiring {
+            factory: crate::session::tool_config::WorkspaceSessionContextFactory::with_auth(
+                auth.clone(),
+                url.clone(),
+            ),
+            api_base_url: Some(url),
+            data_collection_disabled,
+        },
+        None => {
+            tracing::info!(
+                "{CLI_CHAT_PROXY_BASE_URL_ENV} is not set: image/video generation, web search \
+                 and trace upload are unavailable in this workspace"
+            );
+            AuxiliaryServiceWiring {
+                api_base_url: None,
+                // Nowhere to upload to, so collection is off even if the env var opted in.
+                data_collection_disabled: true,
+                factory: crate::session::tool_config::WorkspaceSessionContextFactory::new(),
+            }
+        }
+    }
 }
 /// Resolve `$FUIGO_WORKSPACE_HOME`, the workspace-owned on-disk state root.
 ///
