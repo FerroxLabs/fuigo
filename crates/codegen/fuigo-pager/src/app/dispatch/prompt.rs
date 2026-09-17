@@ -656,10 +656,16 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     // Inline `/feedback` composed alongside pasted images: the chips belong to the report
                     // Drain them into the action before the composer wipe destroys them
-                    if let Action::SendFeedback { images, .. }
-                    | Action::OpenFeedbackPane { images, .. } = &mut action
-                    {
-                        *images = agent.prompt.drain_images().into();
+                    match &mut action {
+                        Action::SendFeedback { images, .. }
+                        | Action::OpenFeedbackPane { images, .. } => {
+                            *images = agent.prompt.drain_images().into();
+                        }
+                        // Same as feedback: these images are the question, not leftover chips.
+                        Action::SendBtw { images, .. } => {
+                            *images = agent.prompt.drain_images();
+                        }
+                        _ => {}
                     }
                     agent.prompt.set_text("");
                 }
