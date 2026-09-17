@@ -445,7 +445,7 @@ pub struct TextClickState {
     pub click_count: u8,
 }
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
-pub(super) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
+pub(crate) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
 /// Minimum interval (ms) between clipboard toasts for rapid word/line
 /// selections. Drag completions always show the toast regardless.
 const CLIPBOARD_TOAST_DEBOUNCE_MS: u128 = 500;
