@@ -28,6 +28,7 @@ pub mod edit_highlight_worker;
 pub mod mermaid_worker;
 pub use fuigo_prompt_queue as prompt_queue;
 mod acp_handler;
+pub(crate) mod prompt_ack;
 mod connect_timeout;
 mod csi_filter;
 mod dispatch;

@@ -595,6 +595,9 @@ async fn drive_silent_turn(total_timeout: Option<std::time::Duration>) -> super:
         super::RunDeadline::start(total_timeout),
         std::time::Instant::now(),
         &mut ttf_logged,
+        // This fixture is about the `--timeout` cap, not the ack watch.
+        None,
+        &crate::app::prompt_ack::PromptAckDeadlines::from_env(None),
     )
     .await
 }
@@ -1178,5 +1181,132 @@ fn retry_status_mirror_chunk_is_not_part_of_the_answer() {
     assert_eq!(
         emitter.thought_buffer, "thinking",
         "only the model's own reasoning is reported as thought"
+    );
+}
+
+// ── Prompt-acknowledgment fail-safe (U084) ─────────────────────────────────────────
+
+/// A prompt the agent never acknowledges must abort at the hard deadline instead of waiting
+/// forever: the run ends with a `prompt_ack_timeout`-prefixed error and a bounded rewind cancel.
+#[tokio::test]
+async fn an_unacknowledged_prompt_aborts_at_the_hard_deadline() {
+    use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
+
+    // A live sender keeps the ACP arm pending: the agent answers nothing at all.
+    let (_client_tx, mut acp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (acp_tx, mut agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let session_id = acp::SessionId::new("sess-1");
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let deadlines = PromptAckDeadlines {
+        soft: std::time::Duration::from_millis(50),
+        hard: std::time::Duration::from_millis(200),
+    };
+    let mut ttf_logged = false;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::drive_prompt_turn(
+            // The `session/prompt` RPC itself never resolves, exactly like a wedged shell.
+            std::future::pending::<Result<acp::PromptResponse, acp::Error>>(),
+            &mut acp_rx,
+            &acp_tx,
+            &session_id,
+            &mut emitter,
+            &timeout_test_options(None),
+            super::RunDeadline::start(None),
+            std::time::Instant::now(),
+            &mut ttf_logged,
+            Some(PromptAckWatch::new("p-unacked", std::time::Instant::now())),
+            &deadlines,
+        ),
+    )
+    .await
+    .expect("an unacknowledged prompt must not hang the headless run");
+
+    assert!(
+        outcome.prompt_unacknowledged,
+        "the watch must report the prompt as unacknowledged"
+    );
+    let err = match outcome.prompt_result {
+        Some(Err(err)) => err,
+        other => panic!("expected the ack timeout error, got {other:?}"),
+    };
+    assert!(
+        err.message.contains("prompt_ack_timeout"),
+        "the exit error must carry the machine-greppable prefix, got: {}",
+        err.message
+    );
+    // The late prompt is rewound shell-side rather than left running unobserved.
+    let cancelled = std::iter::from_fn(|| agent_rx.try_recv().ok()).any(|msg| {
+        matches!(
+            msg,
+            fuigo_acp_lib::AcpAgentMessage::Cancel(ref args)
+                if args.request.session_id == session_id
+        )
+    });
+    assert!(cancelled, "the abort must send a rewind cancel");
+}
+
+/// An acknowledged prompt disarms the watch: the same wedged RPC now waits (it is the run
+/// deadline's job, not the ack watch's, to end a turn the agent accepted but never finishes).
+#[tokio::test]
+async fn an_acknowledged_prompt_disarms_the_watch() {
+    use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
+
+    let (client_tx, mut acp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let session_id = acp::SessionId::new("sess-1");
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    client_tx
+        .send(fuigo_acp_lib::AcpClientMessage::SessionNotification(
+            fuigo_acp_lib::AcpArgs {
+                request: acp::SessionNotification::new(
+                    session_id.clone(),
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new("working on it")),
+                    )),
+                )
+                .meta(
+                    serde_json::json!({ "promptId": "p-acked" })
+                        .as_object()
+                        .cloned(),
+                ),
+                response_tx: tx,
+            },
+        ))
+        .expect("queue the acknowledgment");
+    let mut emitter = super::HeadlessEmitter::new(super::OutputFormat::Json, false);
+    let deadlines = PromptAckDeadlines {
+        soft: std::time::Duration::from_millis(50),
+        hard: std::time::Duration::from_millis(200),
+    };
+    let mut ttf_logged = false;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        super::drive_prompt_turn(
+            std::future::pending::<Result<acp::PromptResponse, acp::Error>>(),
+            &mut acp_rx,
+            &acp_tx,
+            &session_id,
+            &mut emitter,
+            &timeout_test_options(None),
+            super::RunDeadline::start(None),
+            std::time::Instant::now(),
+            &mut ttf_logged,
+            Some(PromptAckWatch::new("p-acked", std::time::Instant::now())),
+            &deadlines,
+        ),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "an acknowledged prompt must keep waiting, not abort: {:?}",
+        outcome.map(|o| o.prompt_unacknowledged)
     );
 }
