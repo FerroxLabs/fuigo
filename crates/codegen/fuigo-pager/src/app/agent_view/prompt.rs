@@ -668,7 +668,7 @@ impl AgentView {
         // The `When::AgentScreen` registry currently binds `?+SHIFT` as the alt key for CommandPalette
         // See the parallel guard at the top-of-file `?` handler in `handle_input` (`active_pane != Prompt`)
         let is_text_char = crate::input::key::is_text_input_key(key);
-        // Mouse toggle is scrollback-only (Ctrl+R); the prompt leaves Ctrl+R unbound.
+        // Ctrl+R is consumed here for the session picker, so the textarea never sees it.
         if !is_text_char && let Some(action_id) = registry.lookup(key, When::AgentScreen) {
             // Ctrl+C is a two-step "clear, then cancel" gesture when the prompt has a draft
             // The first press clears the textarea; the second (now on an empty prompt) cancels the running turn

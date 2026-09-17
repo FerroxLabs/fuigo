@@ -2129,6 +2129,17 @@ impl TextArea {
                 // Ctrl/Cmd-Shift-Z → redo (terminals that report uppercase Z + Shift)
                 self.redo();
             }
+            // Alt+Z is the redo chord on terminals where Ctrl+Shift+Z arrives as the same bytes as Ctrl+Z.
+            // Windows sends Ctrl+Alt for AltGr, so that combination has to stay text input.
+            KeyEvent {
+                code: KeyCode::Char('z' | 'Z'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::ALT)
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+            {
+                self.redo();
+            }
             k if is_undo_input(&k) => {
                 self.undo();
             }

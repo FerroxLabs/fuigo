@@ -112,7 +112,7 @@ Covers typing, deletes, line/word kills, and clearing a draft.";
 
 const REDO_LONG_HELP: &str = "\
 Redoes the last undone change in the prompt editor.\n\
-Ctrl+Shift+Z is primary; Ctrl+R is an alternate.";
+The second chord is the fallback for terminals that cannot send the first one.";
 
 // Prompt history is not an ActionRegistry entry: Up is an inline key handler and /history is a slash command
 // List both here so users can find them
@@ -308,11 +308,10 @@ pub fn build_entries(
             undo.description = Some("Undo the last prompt edit".into());
             push_pseudo(&mut entries, undo, Some(UNDO_LONG_HELP));
 
-            // Textarea: Ctrl+Shift+Z, with Ctrl+R as alt
-            // Ctrl+R is prompt-only; scrollback may bind it to mouse reporting when that toggle is on
+            // Alt+Z is the fallback on terminals that send Ctrl+Shift+Z as plain Ctrl+Z
             let mut redo = HintItem::new(crate::key!('z', CONTROL | SHIFT), "redo");
             redo.description = Some("Redo the last undone prompt edit".into());
-            redo.keys.push(crate::key!('r', CONTROL));
+            redo.keys.push(crate::key!('z', ALT));
             push_pseudo(&mut entries, redo, Some(REDO_LONG_HELP));
 
             // Prompt history (Up / /history)
