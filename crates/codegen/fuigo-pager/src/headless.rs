@@ -36,7 +36,10 @@ use crate::headless::reducer::{
 };
 
 mod ext_protocol;
+mod prompt_ack;
 mod reducer;
+use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
+use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
 use ext_protocol::{ExtEvent, handle_ext_notification, reply_headless_ext_method};
 
 mod cli;
@@ -1346,7 +1349,8 @@ pub async fn run_single_turn(
     let t_prompt = Instant::now();
     emitter.mark_prompt_started();
     let mut ttf_logged = false;
-    let prompt_fut = match prompt {
+    let ack_deadlines = PromptAckDeadlines::from_process_env();
+    let (prompt_fut, prompt_ack) = match prompt {
         Some(prompt) => {
             let prompt_blocks = prompt.into_content_blocks();
             let mut meta = serde_json::Map::new();
@@ -1360,16 +1364,26 @@ pub async fn run_single_turn(
                 "screenMode".to_string(),
                 serde_json::Value::String("headless".to_string()),
             );
+            // The shell echoes this id on every notification for the prompt; the acknowledgment watch keys on it
+            let prompt_id = uuid::Uuid::new_v4().to_string();
+            meta.insert(
+                "promptId".to_string(),
+                serde_json::Value::String(prompt_id.clone()),
+            );
             let request =
                 acp::PromptRequest::new(session_id.clone(), prompt_blocks).meta(Some(meta));
-            Some(Box::pin(acp_send(request, &acp_tx)))
+            (
+                Some(Box::pin(acp_send(request, &acp_tx))),
+                Some(PromptAckWatch::new(prompt_id, Instant::now())),
+            )
         }
-        None => None,
+        None => (None, None),
     };
     let TurnDriveOutcome {
         prompt_result,
         connection_closed,
         timed_out,
+        prompt_unacknowledged,
     } = match prompt_fut {
         Some(prompt_fut) => {
             drive_prompt_turn(
@@ -1382,13 +1396,28 @@ pub async fn run_single_turn(
                 deadline,
                 t_prompt,
                 &mut ttf_logged,
+                prompt_ack,
+                &ack_deadlines,
             )
             .await
         }
         None => TurnDriveOutcome::default(),
     };
 
-    crate::unified_log::flush_blocking().await;
+    if prompt_unacknowledged {
+        // A shell that never took the prompt may never answer the log notification either
+        if tokio::time::timeout(
+            prompt_ack::HEADLESS_ABORT_SEND_TIMEOUT,
+            crate::unified_log::flush_blocking(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("headless: unified log flush timed out behind the unacknowledged prompt");
+        }
+    } else {
+        crate::unified_log::flush_blocking().await;
+    }
 
     if track_active {
         // Non-blocking flock so a slow/network ~/.fuigo can't hang exit.
@@ -1571,6 +1600,8 @@ struct TurnDriveOutcome {
     connection_closed: bool,
     /// `options.total_timeout` elapsed before the turn ended.
     timed_out: bool,
+    /// The shell never acknowledged the prompt; exit-path awaits must stay bounded.
+    prompt_unacknowledged: bool,
 }
 
 /// Drive the prompt future and the ACP stream until the turn ends.
@@ -1589,11 +1620,16 @@ async fn drive_prompt_turn<F>(
     deadline: RunDeadline,
     t_prompt: Instant,
     ttf_logged: &mut bool,
+    prompt_ack: Option<PromptAckWatch>,
+    ack_deadlines: &PromptAckDeadlines,
 ) -> TurnDriveOutcome
 where
     F: Future<Output = Result<acp::PromptResponse, acp::Error>>,
 {
     tokio::pin!(prompt_fut);
+    let mut prompt_ack = prompt_ack;
+    // Set when the ack watch expires: the exit path must then stay bounded.
+    let mut prompt_unacknowledged = false;
     let mut prompt_result = None;
     // Tracked regardless of wait_for_background so the exit reaper always sees running work.
     let mut pending_bg: HashSet<BackgroundWork> = HashSet::new();
@@ -1654,6 +1690,11 @@ where
             } else {
                 Duration::from_secs(3600)
             };
+            // The branch is disabled once acknowledged; the far-future sleep is built but never polled
+            let ack_deadline = match prompt_ack.as_ref() {
+                Some(watch) => tokio::time::Instant::from_std(watch.hard_deadline(ack_deadlines)),
+                None => tokio::time::Instant::now() + Duration::from_secs(3600),
+            };
 
             tokio::select! {
                 biased;
@@ -1663,8 +1704,14 @@ where
                         connection_closed = true;
                         break;
                     };
+                    let msg = msg.boxed();
+                    if let Some(watch) = prompt_ack.as_ref()
+                        && headless_ack_signal(&msg, session_id, watch.prompt_id()).is_some()
+                    {
+                        prompt_ack = None;
+                    }
                     handle_headless_acp_message(
-                        msg.boxed(),
+                        msg,
                         &mut *emitter,
                         t_prompt,
                         &mut *ttf_logged,
@@ -1674,6 +1721,8 @@ where
                     );
                 }
                 res = &mut prompt_fut, if prompt_result.is_none() => {
+                    // The turn ended: nothing left to acknowledge
+                    prompt_ack = None;
                     prompt_result = Some(res);
                     prompt_done_at = Some(Instant::now());
                     if !options.wait_for_background {
@@ -1706,6 +1755,22 @@ where
                     && !pending_bg.is_empty() =>
                 {
                     // Wake to re-check the timeout at the top of the loop.
+                }
+                _ = tokio::time::sleep_until(ack_deadline), if prompt_ack.is_some() => {
+                    let Some(watch) = prompt_ack.take() else {
+                        unreachable!("branch precondition is `prompt_ack.is_some()`")
+                    };
+                    let err = abort_unacknowledged_prompt(
+                        acp_tx,
+                        session_id,
+                        watch.prompt_id(),
+                        watch.waited(Instant::now()),
+                        ack_deadlines,
+                    )
+                    .await;
+                    prompt_result = Some(Err(err));
+                    prompt_unacknowledged = true;
+                    break;
                 }
             }
         }
@@ -1747,6 +1812,7 @@ where
         prompt_result,
         connection_closed,
         timed_out,
+        prompt_unacknowledged,
     }
 }
 
