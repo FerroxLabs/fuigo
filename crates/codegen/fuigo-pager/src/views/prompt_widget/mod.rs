@@ -3580,18 +3580,17 @@ fn chip_line(label: String) -> Line<'static> {
     ])
 }
 
-/// Normalize bare `\r` to `\n`, leaving `\r\n` pairs intact.
-///
-/// Some terminals send bare `\r` for line breaks in bracketed-paste content.
-/// Rust's `str::lines()` only splits on `\n` and `\r\n`, so without this normalization multi-line pastes would be treated as a single line.
+/// Normalize bare `\r`, U+2028, and U+2029 to `\n`, leaving `\r\n` intact. Rust's `str::lines()`
+/// splits on none of these, so without this normalization such pastes count as a single line and
+/// the invisible separators break the textarea's width model.
 fn normalize_line_breaks(text: &str) -> String {
     let mut s = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\r' && chars.peek() != Some(&'\n') {
-            s.push('\n');
-        } else {
-            s.push(c);
+        match c {
+            '\r' if chars.peek() != Some(&'\n') => s.push('\n'),
+            '\u{2028}' | '\u{2029}' => s.push('\n'),
+            _ => s.push(c),
         }
     }
     s
