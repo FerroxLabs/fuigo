@@ -3749,7 +3749,7 @@ mod tests {
         // 14 rows minus logo gap(1), menu(4), flex gap(1) and the version rows: the column, not half the screen, caps it
         let column_only = 14u16 - (1 + 4 + 1 + WelcomeLayout::fixed_below_with_prompt(0, 0));
         assert!(
-            column_only < 7 && column_only >= PROMPT_HEIGHT,
+            (PROMPT_HEIGHT..7).contains(&column_only),
             "column_only={column_only}"
         );
         assert_eq!(prompt_max_height(&input(14)), column_only);
