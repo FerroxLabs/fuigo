@@ -4,7 +4,10 @@
 use super::*;
 use std::path::PathBuf;
 
-/// Number of output lines to show in final bash mode output summary
+/// Number of trailing output lines a bash-mode command keeps in the prompt/history copy.
+///
+/// The TUI gets the complete output (see [`BashModeOutput`]); only the copy the model sees is bounded, so a
+/// long dump in `! cmd` mode does not inflate the next turn.
 const BASH_MODE_FINAL_OUTPUT_LINES: usize = 10;
 const BASH_MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
@@ -301,31 +304,13 @@ impl SessionActor {
             Err(e) => (format!("Error running command: {}", e), -1, false, None),
         };
 
-        // Create final summary with last N lines
-        // Format: "... (X lines)\nlast\nfew\nlines"
-        let lines: Vec<&str> = output.lines().collect();
-        let total_lines = lines.len();
-        let displayed_output = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
-            let start = total_lines - BASH_MODE_FINAL_OUTPUT_LINES;
-            let last_lines = lines[start..].join("\n");
-            format!("... ({} lines)\n{}", total_lines, last_lines)
-        } else {
-            output.trim_end().to_string()
-        };
+        // Full output for the TUI; prompt/history keep a last-N tail so dumps do not inflate the next turn
+        let BashModeOutput {
+            full: full_output,
+            history: history_output,
+        } = BashModeOutput::split(&output);
 
         let is_backgrounded = signal.as_deref() == Some("backgrounded");
-
-        // Build the final response text with output summary and exit code
-        let mut response_text = displayed_output.clone();
-        if is_backgrounded {
-            response_text.push_str("\n\n[command running in background]");
-        } else if timed_out {
-            response_text.push_str("\n\n[command timed out]");
-        } else if let Some(ref sig) = signal {
-            response_text.push_str(&format!("\n\n[killed by signal {}]", sig));
-        } else {
-            response_text.push_str(&format!("\n\n[exit code: {}]", exit_code));
-        }
 
         // Send final tool call update
         // For backgrounded commands, don't mark as completed/failed; let the background task do that
@@ -336,17 +321,17 @@ impl SessionActor {
                 acp::ToolCallStatus::Failed
             };
             let bash_output = BashOutput {
-                output_for_prompt: BashOutput::make_output_for_prompt(&displayed_output),
-                output: displayed_output.as_bytes().to_vec(),
+                output_for_prompt: BashOutput::make_output_for_prompt(&history_output),
+                output: full_output.as_bytes().to_vec(),
                 exit_code,
                 command: command.clone(),
-                truncated: total_lines > BASH_MODE_FINAL_OUTPUT_LINES,
+                truncated: false,
                 signal: signal.clone(),
                 timed_out,
                 description: None,
                 current_dir: self.tool_context.cwd.to_string(),
                 output_file: String::new(),
-                total_bytes: displayed_output.len(),
+                total_bytes: full_output.len(),
                 output_delta: None,
                 was_bare_echo: false,
             };
@@ -368,7 +353,7 @@ impl SessionActor {
         // Build a single user message for chat history that includes command, output, and exit code
         let user_message = format!(
             "I executed a terminal command: `{}`\n\nOutput:\n```\n{}\n```\n\n[exit code: {}]",
-            command, displayed_output, exit_code
+            command, history_output, exit_code
         );
 
         // Add to chat history as a user message only
@@ -382,6 +367,39 @@ impl SessionActor {
 
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
         ok_end_turn(total_tokens, None)
+    }
+}
+
+// ── Bash-mode output shapes ─────────────────────────────────────────────
+
+/// The two copies of a bash-mode (`! cmd`) command's output.
+///
+/// `full` is what the pager's execute block shows: the complete output (already bounded to the terminal runner's
+/// `output_byte_limit`, 1 MiB), trailing whitespace trimmed. `history` is the copy the model sees in the next turn's
+/// chat history and in `output_for_prompt`: the same text when it is at most [`BASH_MODE_FINAL_OUTPUT_LINES`] lines,
+/// otherwise `"... (N lines)\n"` followed by the last [`BASH_MODE_FINAL_OUTPUT_LINES`] lines.
+///
+/// Upstream 1.0.25: "Bash command output shown in the pager is now the complete result instead of a truncated tail."
+/// Before that, `full` was also the tail, so anything above the bound was lost to the user with no way to expand it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BashModeOutput {
+    pub(super) full: String,
+    pub(super) history: String,
+}
+
+impl BashModeOutput {
+    pub(super) fn split(output: &str) -> Self {
+        let full = output.trim_end().to_string();
+        let lines: Vec<&str> = full.lines().collect();
+        let total_lines = lines.len();
+        let history = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
+            let start = total_lines - BASH_MODE_FINAL_OUTPUT_LINES;
+            let last_lines = lines.get(start..).unwrap_or(&[]).join("\n");
+            format!("... ({} lines)\n{}", total_lines, last_lines)
+        } else {
+            full.clone()
+        };
+        Self { full, history }
     }
 }
 
@@ -474,5 +492,276 @@ mod tests {
             backend_tool_call_status(None),
             acp::ToolCallStatus::Completed
         );
+    }
+}
+
+/// Bash mode (`! cmd`): the pager gets the complete output, the model gets a bounded tail.
+///
+/// Upstream 1.0.25 fixed the pager showing a 10-line tail: the shell was sending the tail as `BashOutput.output`, so
+/// the scrollback block had nothing more to show. These tests pin both halves of the contract: the ACP
+/// `ToolCallUpdate.raw_output.output` (what the pager renders) is the full output, and the chat-history user message
+/// plus `output_for_prompt` (what the model sees next turn) stay the `... (N lines)` + last-10 tail.
+#[cfg(test)]
+mod bash_mode_output_tests {
+    use super::super::support::*;
+    use super::*;
+    use fuigo_tools::types::output::ToolOutput;
+    use std::sync::Arc;
+
+    /// A terminal runner that returns a scripted result without spawning anything.
+    #[derive(Debug)]
+    struct ScriptedTerminal {
+        combined_output: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::terminal::AsyncTerminalRunner for ScriptedTerminal {
+        async fn run(
+            &self,
+            _request: crate::terminal::runner::TerminalRunRequest,
+        ) -> Result<
+            crate::terminal::runner::TerminalRunResult,
+            crate::terminal::runner::TerminalError,
+        > {
+            Ok(crate::terminal::runner::TerminalRunResult {
+                combined_output: self.combined_output.clone(),
+                exit_code: Some(0),
+                truncated: false,
+                signal: None,
+                timed_out: false,
+            })
+        }
+    }
+
+    fn numbered_lines(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    /// Runs `! <command>` against a terminal whose output is scripted and returns the final Bash `raw_output` the
+    /// pager receives plus the chat-history user message the model receives.
+    async fn run_bash_mode(output: String) -> (BashOutput, String) {
+        let (gateway_tx, _gateway_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        let (persistence_tx, mut persistence_rx) =
+            tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+        // `flush_to_disk` waits for the persistence actor's ack; stand in for it.
+        tokio::task::spawn_local(async move {
+            while let Some(msg) = persistence_rx.recv().await {
+                if let PersistenceMsg::FlushAndAck { respond_to } = msg {
+                    let _ = respond_to.send(Ok(()));
+                }
+            }
+        });
+        let (actor, mut event_rx) = create_test_actor_with_terminal(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx,
+            Arc::new(ScriptedTerminal {
+                combined_output: output,
+            }),
+        )
+        .await;
+        let actor = Arc::new(actor);
+
+        let bash_actor = Arc::clone(&actor);
+        let turn = tokio::task::spawn_local(async move {
+            bash_actor
+                .handle_direct_bash_command(
+                    "bash-1",
+                    "seq-dump".to_string(),
+                    &[acp::ContentBlock::Text(acp::TextContent::new("!seq-dump"))],
+                )
+                .await
+        });
+
+        // Drain the actor's event channel while the turn runs: ack replay flushes so `flush_to_disk` does not
+        // wait out its timeout, and keep the final Bash ToolCallUpdate.
+        let mut bash_output: Option<BashOutput> = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !turn.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "bash-mode turn must finish"
+            );
+            match tokio::time::timeout(std::time::Duration::from_millis(20), event_rx.recv()).await
+            {
+                Ok(Some(event)) => note_event(event, &mut bash_output),
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        while let Ok(event) = event_rx.try_recv() {
+            note_event(event, &mut bash_output);
+        }
+        turn.await
+            .expect("bash-mode turn task")
+            .expect("bash-mode turn ok");
+
+        let conversation = actor.chat_state_handle.get_conversation().await;
+        let user_message = conversation
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                fuigo_sampling_types::ConversationItem::User(_) => Some(item.text_content()),
+                _ => None,
+            })
+            .expect("bash mode pushes one user message into chat history");
+        (
+            bash_output.expect("bash mode must send a final Bash ToolCallUpdate"),
+            user_message,
+        )
+    }
+
+    fn note_event(event: SessionEvent, bash_output: &mut Option<BashOutput>) {
+        match event {
+            SessionEvent::FlushReplay {
+                respond_to: Some(tx),
+            } => {
+                let _ = tx.send(());
+            }
+            SessionEvent::Notification(SessionNotification::Acp(n)) => {
+                let n = *n;
+                if let acp::SessionUpdate::ToolCallUpdate(upd) = n.update
+                    && let Some(raw) = upd.fields.raw_output
+                    && let Ok(ToolOutput::Bash(bash)) = serde_json::from_value::<ToolOutput>(raw)
+                {
+                    *bash_output = Some(bash);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- the pure split ----
+
+    #[test]
+    fn split_keeps_the_complete_output_for_the_tui_and_a_tail_for_history() {
+        let raw = numbered_lines(25);
+        let out = BashModeOutput::split(&raw);
+        assert_eq!(out.full, raw.trim_end(), "TUI copy is the whole output");
+        let expected_tail = format!(
+            "... (25 lines)\n{}",
+            (16..=25)
+                .map(|i| format!("line {i:03}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(
+            out.history, expected_tail,
+            "model copy is the last 10 lines"
+        );
+    }
+
+    #[test]
+    fn split_at_or_under_the_bound_is_identical_on_both_sides() {
+        for n in [0usize, 1, 9, 10] {
+            let raw = numbered_lines(n);
+            let out = BashModeOutput::split(&raw);
+            assert_eq!(out.full, raw.trim_end(), "n={n}");
+            assert_eq!(
+                out.history, out.full,
+                "n={n}: no tail marker at or under the bound"
+            );
+            assert!(!out.history.contains("... ("), "n={n}");
+        }
+        let raw = numbered_lines(11);
+        let out = BashModeOutput::split(&raw);
+        assert!(
+            out.history.starts_with("... (11 lines)\nline 002\n"),
+            "{:?}",
+            out.history
+        );
+        assert_eq!(out.full, raw.trim_end());
+    }
+
+    // ---- the actor path the pager and the model actually see ----
+
+    /// INVARIANT (upstream 1.0.25): for a bash-mode command whose output exceeds the old 10-line display bound, the
+    /// `BashOutput.output` the pager renders is the complete output. RED on the base tree: base sends the
+    /// `... (25 lines)` tail as `output`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_pager_output_is_the_complete_result_not_a_tail() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = numbered_lines(25);
+                let (bash, _history) = run_bash_mode(raw.clone()).await;
+                let shown = String::from_utf8(bash.output).expect("utf-8 output");
+                assert_eq!(
+                    shown,
+                    raw.trim_end(),
+                    "the pager must receive all 25 lines, not a tail"
+                );
+                assert!(shown.contains("line 001"), "first line reaches the pager");
+                assert!(
+                    !shown.starts_with("... ("),
+                    "no elision marker in the pager copy"
+                );
+                assert!(!bash.truncated, "the shell did not truncate the pager copy");
+                assert_eq!(bash.total_bytes, raw.trim_end().len());
+            })
+            .await;
+    }
+
+    /// The model-facing contract must not grow: the chat-history user message and `output_for_prompt` carry the
+    /// `... (N lines)` + last-10 tail exactly as before. GREEN on the base tree and after the fix.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_model_copy_stays_the_bounded_tail() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = numbered_lines(25);
+                let (bash, history) = run_bash_mode(raw).await;
+                let expected_tail = format!(
+                    "... (25 lines)\n{}",
+                    (16..=25)
+                        .map(|i| format!("line {i:03}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                assert!(
+                    history.contains(&format!("Output:\n```\n{expected_tail}\n```")),
+                    "chat history carries the tail, got {history:?}"
+                );
+                assert!(
+                    !history.contains("line 001"),
+                    "lines above the bound never reach the model: {history:?}"
+                );
+                assert!(history.contains("[exit code: 0]"), "{history:?}");
+                assert!(
+                    bash.output_for_prompt.starts_with("... (25 lines)\n"),
+                    "output_for_prompt is derived from the tail: {:?}",
+                    bash.output_for_prompt
+                );
+                assert!(
+                    !bash.output_for_prompt.contains("line 001"),
+                    "{:?}",
+                    bash.output_for_prompt
+                );
+            })
+            .await;
+    }
+
+    /// At or under the bound nothing is elided anywhere.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_short_output_is_identical_for_pager_and_model() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = numbered_lines(10);
+                let (bash, history) = run_bash_mode(raw.clone()).await;
+                let shown = String::from_utf8(bash.output).expect("utf-8 output");
+                assert_eq!(shown, raw.trim_end());
+                assert!(history.contains(&format!("Output:\n```\n{}\n```", raw.trim_end())));
+                assert!(!history.contains("... ("));
+                assert!(!bash.truncated);
+            })
+            .await;
     }
 }

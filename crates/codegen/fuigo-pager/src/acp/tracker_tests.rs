@@ -4756,3 +4756,85 @@ fn retry_status_mirror_chunk_is_not_rendered_and_keeps_retry_activity() {
     assert!(tracker.handle_update(agent_chunk("Hello"), &meta(), &mut sb));
     assert_eq!(sb.len(), 1, "an untagged chunk still renders");
 }
+/// Bash mode (`! cmd`): whatever `BashOutput.output` the shell sends is the execute block's output, byte for byte.
+///
+/// Upstream 1.0.25 ("Bash command output shown in the pager is now the complete result instead of a truncated tail")
+/// was a shell-side fix: the shell used to send only a `... (N lines)` + last-10 tail as `output`. The pager never
+/// bounded it — this pins that the block keeps every line it is given, well past that old 10-line bound, so the
+/// full result reaches `DisplayMode::Expanded`.
+#[test]
+fn bash_mode_execute_block_keeps_every_output_line_it_is_given() {
+    use fuigo_tools::types::output::{BashOutput, ToolOutput};
+    let full: String = (1..=40)
+        .map(|i| format!("line {i:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bash = BashOutput {
+        output: full.as_bytes().to_vec(),
+        output_for_prompt: format!(
+            "... (40 lines)\n{}",
+            full.lines().skip(30).collect::<Vec<_>>().join("\n")
+        ),
+        exit_code: 0,
+        command: "seq-dump".to_string(),
+        truncated: false,
+        signal: None,
+        timed_out: false,
+        description: None,
+        current_dir: "/tmp".to_string(),
+        output_file: String::new(),
+        total_bytes: full.len(),
+        output_delta: None,
+        was_bare_echo: false,
+    };
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from("bash-mode-1")),
+                "Execute `seq-dump`".to_string(),
+            )
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::InProgress)
+            .content(vec![])
+            .locations(vec![])
+            .raw_input(Some(serde_json::json!({
+                "command": "seq-dump",
+                "description": "seq-dump",
+                "is_background": false
+            })))
+            .meta(
+                serde_json::json!({ "bash_mode": true })
+                    .as_object()
+                    .cloned(),
+            ),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("bash-mode-1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok()),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    let entry = sb.get(0).expect("execute entry");
+    match &entry.block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert!(exec.bash_mode, "bash-mode marker carried onto the block");
+            assert_eq!(
+                exec.output.as_deref(),
+                Some(full.as_str()),
+                "the block holds all 40 lines, not the output_for_prompt tail"
+            );
+            assert_eq!(exec.copy_text(), full, "copy text is the complete result");
+            assert!(exec.is_success());
+        }
+        other => panic!("expected Execute block, got {other:?}"),
+    }
+}
