@@ -257,9 +257,16 @@ pub(super) fn dispatch_exit_dashboard(app: &mut AppView) -> Vec<Effect> {
         .take()
         .filter(|t| app.agents.contains_key(&t.agent_id()));
     // Overlay chrome only when the preferred target is still alive, never on the insertion-order fallback after the return agent was closed
+    // The fallback never lands on the unused home husk: closing the dashboard opened from Welcome goes back to Welcome with the husk still hidden
     let (return_id, rearm_overlay) = match preferred {
         Some(t) => (Some(t.agent_id()), t.is_overlay()),
-        None => (app.agents.keys().next().copied(), false),
+        None => (
+            app.agents
+                .keys()
+                .copied()
+                .find(|id| app.home_session_agent != Some(*id)),
+            false,
+        ),
     };
     if let Some(id) = return_id {
         app.active_view = ActiveView::Agent(id);
@@ -680,7 +687,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
     let (pending_mode, policy_block) = resolve_pending_dispatch_mode(app);
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     log_dashboard_launched("new_agent_button");
-    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id, false);
     set_create_permission_mode(&mut effects, pending_mode);
     if let Some(agent) = app.agents.get_mut(&new_id) {
         apply_pending_dispatch_config(agent, pending_model.as_ref(), pending_mode, policy_block);
@@ -1145,7 +1152,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         });
     let (prompt_text, mut pasted_images, chip_elements) = prompt_state.into_submission();
     log_dashboard_launched("prompt");
-    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id, false);
     set_create_permission_mode(&mut effects, pending_mode);
     if let Some(agent) = app.agents.get_mut(&new_id) {
         agent.session.enqueue_prompt(prompt_text);

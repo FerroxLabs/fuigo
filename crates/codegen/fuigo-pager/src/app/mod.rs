@@ -45,7 +45,7 @@ pub mod subagent;
 pub mod subscription;
 mod x10_filter;
 pub(crate) use effects::sanitize_user_error;
-mod event_loop;
+pub(crate) mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;

@@ -1260,6 +1260,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 app.show_toast("Session deleted");
                 return vec![];
             }
+            if after == AfterSessionDelete::UnusedHusk {
+                app.dashboard_local_sessions
+                    .retain(|entry| entry.session_id != session_id);
+                app.leader_roster
+                    .retain(|entry| entry.session_id != session_id);
+                return vec![];
+            }
             let sid = acp::SessionId::new(session_id.clone());
             let to_remove: Vec<_> = app
                 .agents

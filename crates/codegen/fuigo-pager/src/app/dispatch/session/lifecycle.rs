@@ -147,10 +147,17 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
             return effects;
         }
     }
+    // An explicit new session from Welcome (Ctrl+N, Enter on an empty prompt after the reveal refused) drops the
+    // unused optimistic session; typing goes through `leave_welcome_for_session` and reveals it instead.
+    let mut effects = if matches!(app.active_view, ActiveView::Welcome) {
+        abandon_unused_home_session(app)
+    } else {
+        vec![]
+    };
     let in_git_repo = get_active_agent(app)
         .map(|a| a.current_branch.is_some())
         .unwrap_or(app.cwd_has_git_ancestor);
-    if in_git_repo {
+    let created = if in_git_repo {
         match app.new_session_worktree_mode {
             WorktreeMode::Always => {
                 dispatch_new_worktree_session(app, None, None, None, None, None, None)
@@ -166,7 +173,156 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
         }
     } else {
         dispatch_new_session_inner(app, None)
+    };
+    effects.extend(created);
+    effects
+}
+/// Welcome + Always + git: leaving home isolates; the in-cwd husk is never revealed.
+pub(in crate::app::dispatch) fn welcome_always_isolates(app: &AppView) -> bool {
+    matches!(app.active_view, ActiveView::Welcome)
+        && app.cwd_has_git_ancestor
+        && matches!(
+            app.new_session_worktree_mode,
+            crate::app::app_view::WorktreeMode::Always
+        )
+}
+/// Create a background session for the home screen without leaving Welcome.
+/// No-ops when the gate is closed, access is blocked, a session already exists, the user is not on home, or deferred startup will leave home.
+pub(crate) fn maybe_create_home_session(app: &mut AppView) -> Vec<Effect> {
+    if !app.session_startup_allowed() || app.is_access_blocked() {
+        return vec![];
     }
+    if !matches!(app.active_view, ActiveView::Welcome) {
+        return vec![];
+    }
+    if app.home_session_agent.is_some() || !app.agents.is_empty() {
+        return vec![];
+    }
+    if app.deferred_startup.leaves_home() {
+        return vec![];
+    }
+    if app.chat_mode || welcome_always_isolates(app) {
+        return vec![];
+    }
+    let (_id, effects) = dispatch_new_session_inner_with_id(app, None, true);
+    effects
+}
+/// Drop the unused optimistic home session when the user leaves home for a different agent (Ctrl+N, Ctrl+W, resume, fork).
+pub(crate) fn abandon_unused_home_session(app: &mut AppView) -> Vec<Effect> {
+    let Some(id) = app.home_session_agent.take() else {
+        return vec![];
+    };
+    abandon_agent_as_unused_husk(app, id)
+}
+/// Drop the revealed Welcome husk when LoadSession opens a different session.
+/// An empty `/new` is not this husk. A composer draft keeps it.
+pub(crate) fn abandon_unused_empty_for_load(
+    app: &mut AppView,
+    keep_session_id: &str,
+) -> Vec<Effect> {
+    let mut effects = abandon_unused_home_session(app);
+    let Some(id) = app.optimistic_home_husk else {
+        return effects;
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        app.optimistic_home_husk = None;
+        return effects;
+    };
+    if agent
+        .session
+        .session_id
+        .as_ref()
+        .is_some_and(|sid| sid.0.as_ref() == keep_session_id)
+    {
+        return effects;
+    }
+    if !crate::views::dashboard::row::is_empty_top_level(agent)
+        || !agent.prompt.text().trim().is_empty()
+        || !agent.prompt.images.is_empty()
+    {
+        return effects;
+    }
+    effects.extend(abandon_agent_as_unused_husk(app, id));
+    effects
+}
+fn abandon_agent_as_unused_husk(app: &mut AppView, id: AgentId) -> Vec<Effect> {
+    if app.optimistic_home_husk == Some(id) {
+        app.optimistic_home_husk = None;
+    }
+    if app.home_session_agent == Some(id) {
+        app.home_session_agent = None;
+    }
+    let (session_id, cwd) = app
+        .agents
+        .get(&id)
+        .map(|a| {
+            (
+                a.session.session_id.clone(),
+                a.session.cwd.display().to_string(),
+            )
+        })
+        .unwrap_or((None, app.cwd.display().to_string()));
+    remove_agent_and_cleanup(app, id);
+    let mut effects = unregister_session_effect(session_id.clone());
+    if let Some(session_id) = session_id {
+        effects.push(Effect::DeleteSession {
+            source: "unused-home".into(),
+            session_id: session_id.to_string(),
+            cwd,
+            after: crate::app::actions::AfterSessionDelete::UnusedHusk,
+        });
+    }
+    effects
+}
+/// Move a home draft (text) onto `id`'s already-configured composer. Usually a no-op: the first keystroke leaves home
+/// before anything is typed, so only a draft restored after a failed create gets carried.
+fn take_welcome_composer_onto_agent(app: &mut AppView, id: AgentId) {
+    let draft = app.welcome_prompt.text().to_string();
+    if draft.trim().is_empty() {
+        return;
+    }
+    app.welcome_prompt.set_text("");
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.prompt.set_text(&draft);
+    }
+}
+/// Leave the home screen for the pre-created session, carrying any home draft.
+pub(in crate::app::dispatch) fn reveal_home_session(app: &mut AppView) {
+    let Some(id) = app.home_session_agent.take() else {
+        return;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return;
+    };
+    if agent.acp_synced_generation != agent.session.available_commands_generation {
+        agent.prompt.sync_acp_commands(
+            &agent.session.available_commands,
+            agent.session.available_tools.as_ref(),
+            &agent.session.models,
+        );
+        agent.acp_synced_generation = agent.session.available_commands_generation;
+    }
+    take_welcome_composer_onto_agent(app, id);
+    if matches!(app.active_view, ActiveView::Welcome) {
+        switch_to_agent(app, id, SwitchCause::New);
+        if app.screen_mode.is_minimal() {
+            app.minimal_state.welcome_pending = true;
+        }
+    }
+}
+/// Callers must handle the view staying on Welcome (gate closed).
+/// `WorktreeMode::Always` never reveals the in-cwd optimistic session.
+pub(in crate::app::dispatch) fn leave_welcome_for_session(app: &mut AppView) -> Vec<Effect> {
+    if !matches!(app.active_view, ActiveView::Welcome) || !app.session_startup_allowed() {
+        return vec![];
+    }
+    if !welcome_always_isolates(app) {
+        reveal_home_session(app);
+        if matches!(app.active_view, ActiveView::Agent(_)) {
+            return vec![];
+        }
+    }
+    dispatch_new_session(app)
 }
 /// Open the local worktree question modal for `/new`.
 /// Mirrors [`open_fork_question`] but uses [`LocalQuestionKind::NewSession`].
@@ -325,14 +481,16 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    let (_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
+    let (_id, effects) = dispatch_new_session_inner_with_id(app, model_id, false);
     effects
 }
 /// Sibling that returns the new `AgentId` alongside the effects.
 /// Used by `dispatch_dashboard_dispatch` so it doesn't rely on the (correct-but-brittle) `app.agents.last()` lookup.
+/// `hidden` creates the optimistic home session: the agent is registered as `home_session_agent` and the view stays where it is.
 pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
+    hidden: bool,
 ) -> (AgentId, Vec<Effect>) {
     let (previous_session_id, effective_cwd, inherit_worktree) = match get_active_agent(app) {
         Some(a) => (
@@ -417,11 +575,17 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             .set_plugins_visible(!app.appearance.disable_plugins);
         agent.active_pane = ActivePane::Prompt;
     }
-    switch_to_agent(app, agent_id, SwitchCause::New);
-    if app.screen_mode.is_minimal() {
-        app.minimal_state.welcome_pending = true;
+    if hidden {
+        app.home_session_agent = Some(agent_id);
+        app.optimistic_home_husk = Some(agent_id);
+    } else {
+        switch_to_agent(app, agent_id, SwitchCause::New);
+        if app.screen_mode.is_minimal() {
+            app.minimal_state.welcome_pending = true;
+        }
     }
-    let chat_kind = consume_chat_kind(app);
+    // The hidden home must not steal a leftover `/chat` intent; the reveal path re-reads it.
+    let chat_kind = if hidden { false } else { consume_chat_kind(app) };
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.chat_kind = chat_kind;
         agent.conversation_entry = chat_kind;
@@ -676,6 +840,7 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
         app.session_startup_allowed(),
         "drain_startup_actions must run only with the startup gate open"
     );
+    let mut effects = maybe_create_home_session(app);
     let DeferredStartupActions {
         session: deferred,
         preferred_session_id: preferred_id,
@@ -689,7 +854,6 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
         #[cfg(feature = "local-workspace")]
         history_load_as_build,
     } = app.deferred_startup.take();
-    let mut effects = Vec::new();
     match deferred {
         Some(DeferredSessionStartup::Fork {
             parent_session_id,
@@ -890,6 +1054,8 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
     if load_session_id.is_none() {
         reseed_tip_for_new_session(app);
     }
+    // A worktree session isolates: the in-cwd optimistic home session is never the one being asked for.
+    let mut effects = abandon_unused_home_session(app);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
     let mut scrollback = ScrollbackState::new();
@@ -1002,7 +1168,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         agent.session.enqueue_prompt(prompt);
     }
     switch_to_agent(app, agent_id, SwitchCause::New);
-    let effects = vec![Effect::CreateWorktreeSession {
+    effects.push(Effect::CreateWorktreeSession {
         agent_id,
         load_session_id,
         label,
@@ -1011,7 +1177,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         permission_mode_override: None,
         preferred_session_id,
         chat_kind,
-    }];
+    });
     effects
 }
 pub(in crate::app::dispatch) fn dispatch_new_session_with_id(
@@ -1024,7 +1190,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_with_id(
             Some(crate::app::session_startup::DeferredSessionStartup::NewWithId { session_id });
         return vec![];
     }
-    let (_agent_id, effects) = dispatch_new_session_inner_with_id(app, None);
+    let (_agent_id, effects) = dispatch_new_session_inner_with_id(app, None, false);
     effects
 }
 /// Tear down a placeholder agent that must not proceed under sticky `--chat` (local Build refuse).
@@ -1308,6 +1474,12 @@ pub(in crate::app::dispatch) fn handle_session_failed(
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, error = %error, "Session creation failed");
     let msg = format!("Session creation failed: {error}");
+    if app.home_session_agent == Some(agent_id) {
+        app.home_session_agent = None;
+    }
+    if app.optimistic_home_husk == Some(agent_id) {
+        app.optimistic_home_husk = None;
+    }
     let is_orphan = app
         .agents
         .get(&agent_id)

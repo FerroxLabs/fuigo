@@ -2061,6 +2061,15 @@ pub(crate) async fn run(
             app.deferred_startup.new_session = true;
         }
     }
+    // Already authenticated, trusted, and still on Welcome with nothing queued: prepare the session in the background
+    // so the first keystroke lands in a live composer. Gated startups reach the same call from `drain_startup_actions`.
+    if should_create_home_on_authenticated_startup(&app) {
+        let effs = dispatch::maybe_create_home_session(&mut app);
+        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            return Ok(finish_run(&mut app));
+        }
+        presenter.request_presentation(&mut app, terminal, false);
+    }
 
     // Startup intents are now fully classified; only an untouched welcome can nudge.
     if let Some(effect) = app.begin_foreign_resume_detection()
@@ -4267,9 +4276,16 @@ pub(crate) fn session_flags_for_effects(
     }
 }
 
+/// Whether the interactive startup should prepare the optimistic home session right away.
+pub(crate) fn should_create_home_on_authenticated_startup(app: &AppView) -> bool {
+    matches!(app.active_view, ActiveView::Welcome)
+        && app.session_startup_allowed()
+        && !app.is_access_blocked()
+}
+
 /// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.
 /// Shared by the event-loop `ActionThenForward` arm and tests (batches; no effect barrier between).
-fn dispatch_then_forward(
+pub(crate) fn dispatch_then_forward(
     action: Action,
     event: &Event,
     arrived_at: std::time::Instant,
