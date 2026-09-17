@@ -129,11 +129,16 @@ pub fn build_rows_with_roster(
 }
 /// Build dashboard v2 rows from the persisted workspace membership.
 ///
-/// The snapshot is authoritative: a live agent absent from it gets no row until something writes it into the store.
-/// A matching live agent contributes its richer runtime row; otherwise stored metadata produces a read-only idle row.
+/// The snapshot is authoritative for membership and sessions this process has not loaded; a matching live agent
+/// contributes its richer runtime row, otherwise stored metadata produces a read-only idle row.
+/// `provisional` lists live top-level agents with no committed member yet (session id not bound, or the write still
+/// in flight); `crate::app::workspace_sync::provisional_agent_ids` decides which qualify. They render immediately
+/// through `top_level_row` instead of waiting for the store, and the member row takes over under the same id once
+/// the write lands. `None` for the snapshot (store still loading or failed) renders the provisional rows alone.
 pub fn build_rows_with_workspace(
     agents: &IndexMap<AgentId, AgentView>,
-    snapshot: &fuigo_dashboard_store::WorkspaceSnapshot,
+    snapshot: Option<&fuigo_dashboard_store::WorkspaceSnapshot>,
+    provisional: &[AgentId],
     home: Option<&str>,
 ) -> Vec<DashboardRow> {
     let live_by_session: std::collections::HashMap<&str, (AgentId, &AgentView)> = agents
@@ -146,9 +151,9 @@ pub fn build_rows_with_workspace(
                 .map(|session_id| (session_id.0.as_ref(), (*id, agent)))
         })
         .collect();
-    snapshot
-        .members
-        .iter()
+    let mut rows: Vec<DashboardRow> = snapshot
+        .into_iter()
+        .flat_map(|snapshot| snapshot.members.iter())
         .filter(|member| matches!(member.kind, fuigo_dashboard_store::MemberKind::Build))
         .map(|member| {
             if let Some((id, agent)) = live_by_session.get(member.session_id.as_ref()) {
@@ -156,7 +161,23 @@ pub fn build_rows_with_workspace(
             }
             workspace_member_row(member, home)
         })
-        .collect()
+        .collect();
+    for id in provisional {
+        let Some(agent) = agents.get(id) else {
+            continue;
+        };
+        if is_empty_top_level(agent) {
+            continue;
+        }
+        if rows
+            .iter()
+            .any(|row| row.id == DashboardRowId::TopLevel(*id))
+        {
+            continue;
+        }
+        rows.push(top_level_row(*id, agent, false, home));
+    }
+    rows
 }
 fn workspace_member_row(
     member: &fuigo_dashboard_store::Member,
@@ -480,7 +501,7 @@ fn sanitize(s: &str) -> String {
 /// A session created on pager launch carries only the system prompt and injected `<system-reminder>` context.
 /// Neither is a real user turn or renders as a `UserPrompt` block, so the session reads as empty here until the user sends something.
 /// [`build_local_rows`] uses this to keep such sessions off the dashboard.
-fn is_empty_top_level(agent: &AgentView) -> bool {
+pub(crate) fn is_empty_top_level(agent: &AgentView) -> bool {
     let has_text = |s: Option<&str>| s.map(str::trim).is_some_and(|t| !t.is_empty());
     if has_text(agent.display_name.as_deref()) {
         return false;
@@ -1081,10 +1102,64 @@ mod tests {
             "Stored title",
             Some("Stored summary"),
         )]);
-        let rows = build_rows_with_workspace(&agents, &snapshot, None);
+        let rows = build_rows_with_workspace(&agents, Some(&snapshot), &[], None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, DashboardRowId::TopLevel(AgentId(7)));
         assert_eq!(rows[0].label, "Live title");
+    }
+    #[test]
+    fn provisional_dispatch_row_shows_before_session_id_binds() {
+        let mut dispatched = crate::app::agent_view::test_fixtures::make_agent();
+        dispatched
+            .session
+            .enqueue_prompt("fix the login bug before lunch".into());
+        assert!(dispatched.session.session_id.is_none());
+        let agents = IndexMap::from([(AgentId(3), dispatched)]);
+        let snapshot = workspace_snapshot(vec![workspace_member("other", "Other", None)]);
+        let rows = build_rows_with_workspace(&agents, Some(&snapshot), &[AgentId(3)], None);
+        assert_eq!(rows.len(), 2);
+        let row = &rows[1];
+        assert_eq!(row.id, DashboardRowId::TopLevel(AgentId(3)));
+        assert_eq!(row.state, RowState::Working);
+        assert_eq!(row.label, "fix the login bug before lunch");
+        assert!(!row.pinned);
+    }
+    #[test]
+    fn provisional_worktree_row_reports_creation_activity() {
+        let mut creating = crate::app::agent_view::test_fixtures::make_agent();
+        creating
+            .session
+            .start_command(crate::app::agent::AgentCommand::CreateWorktree);
+        creating.session.enqueue_prompt("queued".into());
+        let agents = IndexMap::from([(AgentId(4), creating)]);
+        let rows = build_rows_with_workspace(&agents, None, &[AgentId(4)], None);
+        assert_eq!(rows.len(), 1, "live rows render before the snapshot loads");
+        assert_eq!(rows[0].state, RowState::Working);
+        assert_eq!(
+            rows[0].activity.as_deref(),
+            Some("Creating worktree\u{2026}")
+        );
+    }
+    #[test]
+    fn empty_idle_provisional_agent_stays_hidden() {
+        let agents = IndexMap::from([(
+            AgentId(6),
+            crate::app::agent_view::test_fixtures::make_agent(),
+        )]);
+        let rows = build_rows_with_workspace(&agents, None, &[AgentId(6)], None);
+        assert!(rows.is_empty());
+    }
+    /// Once the write lands the committed member row takes over under the same id; a stale provisional entry must not duplicate it.
+    #[test]
+    fn committed_member_row_takes_over_from_provisional() {
+        let mut bound = crate::app::agent_view::test_fixtures::make_agent();
+        bound.session.session_id = Some(acp::SessionId::new("saved"));
+        bound.session.enqueue_prompt("work".into());
+        let agents = IndexMap::from([(AgentId(7), bound)]);
+        let snapshot = workspace_snapshot(vec![workspace_member("saved", "Stored", None)]);
+        let rows = build_rows_with_workspace(&agents, Some(&snapshot), &[AgentId(7)], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, DashboardRowId::TopLevel(AgentId(7)));
     }
     #[test]
     fn workspace_rows_ignore_non_build_members() {
@@ -1094,7 +1169,7 @@ mod tests {
             workspace_member("shared", "Build", None),
             conversation,
         ]);
-        let rows = build_rows_with_workspace(&IndexMap::new(), &snapshot, None);
+        let rows = build_rows_with_workspace(&IndexMap::new(), Some(&snapshot), &[], None);
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].id,
@@ -1112,7 +1187,7 @@ mod tests {
             workspace_member("first", "First", Some("First summary")),
             second,
         ]);
-        let rows = build_rows_with_workspace(&IndexMap::new(), &snapshot, None);
+        let rows = build_rows_with_workspace(&IndexMap::new(), Some(&snapshot), &[], None);
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].id,
