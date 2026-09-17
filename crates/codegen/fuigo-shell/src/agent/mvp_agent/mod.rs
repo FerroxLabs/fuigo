@@ -2136,7 +2136,7 @@ impl MvpAgent {
             let _ = tx.send(crate::session::SessionCommand::RefreshSkillBaseline);
         }
     }
-    pub(super) fn refresh_skill_baseline_for_all_sessions(&self) {
+    pub(crate) fn refresh_skill_baseline_for_all_sessions(&self) {
         let senders = self.resident_cmd_txs();
         Self::broadcast_refresh_skill_baseline(senders);
     }
