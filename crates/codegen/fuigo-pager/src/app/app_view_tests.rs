@@ -774,12 +774,6 @@ fn scheduled_loop(task_id: &str) -> crate::app::agent::ScheduledTaskInfo {
         last_subagent_id: None,
     }
 }
-/// Paint the dashboard, then read the tick demand. Since dash c5c57d9 the dashboard's demand comes from what the
-/// last frame painted (`painted_animations`), so upstream 4827113 draws before every read here too.
-fn painted_tick_demand(app: &mut AppView) -> TickDemand {
-    let _ = paint_dashboard(app);
-    app.tick_demand()
-}
 /// The dashboard paints a `Working` spinner for background work on a turn-idle agent; the tick demand must
 /// keep up with it, or the spinner freezes on its first frame.
 #[test]
