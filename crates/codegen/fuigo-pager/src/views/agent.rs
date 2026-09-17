@@ -905,11 +905,23 @@ pub fn build_hints(
             hints
         }
         ActivePane::Dock => {
-            vec![
-                HintItem::paired(crate::key!('j'), crate::key!('k'), "navigate"),
-                HintItem::new(crate::key!(Enter), "open"),
-                HintItem::new(crate::key!('x'), "kill"),
-            ]
+            // For the dock, `group_header_label` carries `dock_enter_label()`:
+            // what Enter does on the selection, if anything. Upstream's `h`
+            // show-done hint is not offered: Fuigo's dock lists running
+            // subagents only and has no `h` binding.
+            let mut hints = vec![HintItem::paired(
+                crate::key!('j'),
+                crate::key!('k'),
+                "navigate",
+            )];
+            if let Some(label) = group_header_label {
+                hints.push(HintItem::new(crate::key!(Enter), label));
+            }
+            if selected_can_kill {
+                hints.push(HintItem::new(crate::key!('x'), "kill"));
+            }
+            hints.push(HintItem::new(crate::key!(Tab), "prompt"));
+            hints
         }
         ActivePane::Queue => {
             let mut hints = vec![

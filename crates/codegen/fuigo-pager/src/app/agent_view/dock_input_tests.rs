@@ -719,6 +719,7 @@ fn enter_on_header_still_toggles() {
     let outcome = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Changed));
     assert!(!agent.dock_tasks_expanded);
+    assert_eq!(agent.dock_enter_label(), Some("expand"));
 }
 
 #[test]
@@ -2096,4 +2097,86 @@ fn click_opens_a_linked_loop_and_ignores_an_unlinked_one() {
     let outcome = agent.handle_dock_key(&key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Unchanged));
     assert!(agent.active_subagent.is_none());
+}
+
+// -------------------------------------------------------- U037/U106: the dock
+// footer offers only what the selection can do.
+
+fn footer_labels(agent: &AgentView) -> Vec<String> {
+    agent
+        .normal_pane_hints(&ActionRegistry::defaults(), false)
+        .iter()
+        .map(|hint| hint.label.to_string())
+        .collect()
+}
+
+fn has(labels: &[String], label: &str) -> bool {
+    labels.iter().any(|l| l == label)
+}
+
+#[test]
+fn dock_enter_label_names_what_enter_does() {
+    let mut agent = agent_with_task_overflow();
+    agent.dock_cursor = 0;
+    assert_eq!(agent.dock_enter_label(), Some("collapse"));
+    agent.dock_cursor = task_row_index(&agent);
+    assert_eq!(agent.dock_enter_label(), Some("open"));
+    agent.dock_cursor = reveal_row_index(&agent, Section::Tasks);
+    assert_eq!(agent.dock_enter_label(), Some("show all"));
+
+    let mut agent = dock_with_workflow();
+    agent.dock_cursor = agent
+        .dock_items()
+        .iter()
+        .position(|item| matches!(item, DockItem::Row(Section::Watchers, 0)))
+        .expect("loop row");
+    assert_eq!(
+        agent.dock_enter_label(),
+        None,
+        "an unlinked loop row has nothing to open"
+    );
+}
+
+#[test]
+fn dock_footer_offers_kill_and_open_only_where_they_act() {
+    let mut agent = dock_with_task();
+    assert_eq!(
+        agent.dock_items().get(agent.dock_cursor).copied(),
+        Some(DockItem::Header(Section::Tasks))
+    );
+    let labels = footer_labels(&agent);
+    assert!(has(&labels, "collapse"), "a header folds: {labels:?}");
+    assert!(has(&labels, "prompt"), "Tab leaves the dock: {labels:?}");
+    assert!(
+        !has(&labels, "kill") && !has(&labels, "open"),
+        "a header can neither be killed nor opened: {labels:?}"
+    );
+
+    agent.dock_cursor = task_row_index(&agent);
+    let labels = footer_labels(&agent);
+    assert!(has(&labels, "open") && has(&labels, "kill"), "{labels:?}");
+
+    agent
+        .session
+        .bg_tasks
+        .get_mut("bg-1")
+        .expect("task")
+        .pending_kill = true;
+    let labels = footer_labels(&agent);
+    assert!(
+        has(&labels, "open") && !has(&labels, "kill"),
+        "a row already being killed offers no second kill: {labels:?}"
+    );
+
+    let mut agent = dock_with_workflow();
+    agent.dock_cursor = agent
+        .dock_items()
+        .iter()
+        .position(|item| matches!(item, DockItem::Row(Section::Watchers, 0)))
+        .expect("loop row");
+    let labels = footer_labels(&agent);
+    assert!(
+        has(&labels, "kill") && !has(&labels, "open"),
+        "an unlinked loop can be cancelled but not opened: {labels:?}"
+    );
 }
