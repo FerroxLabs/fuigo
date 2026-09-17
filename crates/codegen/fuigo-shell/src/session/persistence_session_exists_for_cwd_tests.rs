@@ -1,5 +1,6 @@
 use super::{
-    resolve_local_session_any_cwd_in_root, session_exists_for_cwd_in_root, session_exists_in_root,
+    resolve_local_session_any_cwd_in_root, resolve_local_session_ids_any_cwd_in_root,
+    session_exists_for_cwd_in_root, session_exists_in_root,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -110,6 +111,28 @@ fn resolve_local_session_any_cwd_skips_stub_and_finds_real() {
             .as_deref(),
         Some(cwd_a),
         "must anchor to the real session's cwd, not the stub's"
+    );
+}
+
+#[test]
+fn batch_resolver_loads_one_view_and_keeps_only_persisted_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("sessions");
+    let encoded = crate::util::fuigo_home::encode_cwd_dirname("/project/alpha");
+    let persisted = root.join(&encoded).join("persisted");
+    fs::create_dir_all(&persisted).unwrap();
+    fs::write(persisted.join("summary.json"), b"{}").unwrap();
+    let stub = root.join(&encoded).join("stub").join("images");
+    fs::create_dir_all(&stub).unwrap();
+    fs::write(stub.join("image.png"), b"png").unwrap();
+
+    let resolved =
+        resolve_local_session_ids_any_cwd_in_root(&["persisted", "stub", "missing"], &root)
+            .unwrap();
+
+    assert_eq!(
+        resolved,
+        std::collections::HashSet::from(["persisted".into()])
     );
 }
 
