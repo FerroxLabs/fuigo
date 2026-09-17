@@ -1657,17 +1657,22 @@ impl AgentView {
             }
             ButtonAction::ToggleSelectedSkill => {
                 if let Some(ref mut state) = self.extensions_modal {
-                    use crate::views::extensions_modal::TabDataState;
-                    if let TabDataState::Loaded(ref skills) = state.skills_data
-                        && let Some(idx) = state.selected_data_index()
-                        && let Some(skill) = skills.get(idx)
-                    {
-                        state.pending_action = Some("toggling...".into());
-                        state.pending_entry_index = Some(state.picker_state.selected);
-                        return InputOutcome::Action(Action::ToggleSkill {
-                            skill_name: skill.name.clone(),
-                            enabled: !skill.enabled,
-                        });
+                    use crate::views::extensions_modal::{ActionVerb, TabDataState};
+                    if let TabDataState::Loaded(ref skills) = state.skills_data {
+                        if let Some(skill) =
+                            state.selected_data_index().and_then(|idx| skills.get(idx))
+                        {
+                            let skill_name = skill.name.clone();
+                            let enabled = !skill.enabled;
+                            state.pending_action = Some("toggling...".into());
+                            state.pending_entry_index = Some(state.picker_state.selected);
+                            return InputOutcome::Action(Action::ToggleSkill {
+                                skill_name,
+                                enabled,
+                            });
+                        }
+                        // A header row has no skill to toggle: say which row to pick instead of doing nothing
+                        state.post_select_row_hint("skill", ActionVerb::EnableDisable);
                     }
                 }
                 InputOutcome::Changed

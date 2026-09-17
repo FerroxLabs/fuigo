@@ -2836,36 +2836,9 @@ pub fn handle_picker_input(
                 return PickerOutcome::Changed;
             }
 
-            // Printable characters while tabs focused: exit focus and start a search query (mirrors behavior from non-active search hint)
-            if config.show_search_hint && !state.search_active {
-                if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
-                    state.tabs_focused = false;
-                    state.search_active = true;
-                    return PickerOutcome::Changed;
-                }
-                if !config.search_only_on_slash
-                    && !config.vim_normal_first
-                    && is_legacy_alt_word_key(key)
-                {
-                    return PickerOutcome::Changed;
-                }
-                if !config.search_only_on_slash
-                    && !config.vim_normal_first
-                    && is_plain_query_character(key)
-                {
-                    let outcome = state.edit_query(key);
-                    if outcome == LineEditOutcome::TextChanged {
-                        state.tabs_focused = false;
-                        state.search_active = true;
-                    }
-                    if let Some(outcome) = finish_query_edit(state, outcome) {
-                        return outcome;
-                    }
-                }
-            }
-
-            // For other keys (action keys, Esc, etc.) while tabs focused we fall through so the normal paths can still apply
-            // L/R fall through too; the tabs block later returns for them
+            // Everything else falls through to the shared handlers: action keys (Space included), the `f`
+            // filter key, h/l tab cycling, `/` and printable chars (which clear `tabs_focused` where they
+            // start a query). Capturing printable chars here swallowed the action keys.
         }
 
         // Ctrl+F: toggle mode.
@@ -3101,6 +3074,7 @@ pub fn handle_picker_input(
         if config.show_search_hint && !state.search_active {
             if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
                 state.search_active = true;
+                state.tabs_focused = false;
                 return PickerOutcome::Changed;
             }
             if !config.search_only_on_slash
