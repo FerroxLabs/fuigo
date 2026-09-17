@@ -595,7 +595,8 @@ pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
         .flatten()
 }
 
-/// Resolve a batch of candidate IDs against the local session tree, returning the subset that is persisted.
+/// Resolve a batch of candidate IDs against one point-in-time storage view.
+/// Loading [`RelocationView`] walks the local session tree, so callers that need to classify a list must use this API rather than calling [`resolve_local_session_any_cwd`] once per entry.
 pub fn resolve_local_session_ids_any_cwd<S: AsRef<str>>(
     session_ids: &[S],
 ) -> io::Result<std::collections::HashSet<String>> {
@@ -607,13 +608,16 @@ fn resolve_local_session_ids_any_cwd_in_root<S: AsRef<str>>(
     session_ids: &[S],
     sessions_root: &Path,
 ) -> RelocationResult<std::collections::HashSet<String>> {
-    let mut resolved = std::collections::HashSet::new();
-    for session_id in session_ids.iter().map(AsRef::as_ref) {
-        if resolve_local_session_any_cwd_in_root(session_id, sessions_root)?.is_some() {
-            resolved.insert(session_id.to_owned());
-        }
-    }
-    Ok(resolved)
+    let view = storage_view(sessions_root)?;
+    Ok(session_ids
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|session_id| {
+            view.find_persisted_session_dir(session_id)
+                .is_ok_and(|path| path.is_some())
+        })
+        .map(str::to_owned)
+        .collect())
 }
 
 pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
