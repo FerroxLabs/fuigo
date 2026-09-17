@@ -3011,16 +3011,44 @@ fn restorable_transport(pending: &PendingTransport) -> Option<PendingTransport> 
     }
 }
 
+/// Which handshake phases a transport actually runs.
+///
+/// This is the SINGLE key for both the protocol-version fallback's gate
+/// ([`restorable_http_transport`]) and every budget that has to allow for that fallback
+/// ([`McpClient::version_fallback_secs`]). Keying the budget on anything else — `http_config`,
+/// say — lets the two drift: a client whose budget says "no fallback" while the retry fires
+/// under-sizes every waiter parked on it. Deriving both from [`transport_kind`] makes that
+/// unrepresentable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransportKind {
+    /// Legacy `initialize` only. [`McpClient::try_handshake`] sends stdio straight to
+    /// [`McpClient::serve_legacy`]: no probe phase, and the consumed child process leaves no
+    /// transport to rebuild, so no fallback either.
+    Stdio,
+    /// Probe + legacy. The bridge is in-process and rebuildable, but it holds no server-side
+    /// session that could be pinned to a protocol version, so there is nothing to fall back for.
+    Acp,
+    /// Probe + legacy + the protocol-version fallback on a rebuilt transport.
+    Http,
+}
+
+/// The one place that classifies a [`PendingTransport`]. See [`TransportKind`].
+fn transport_kind(pending: &PendingTransport) -> TransportKind {
+    match pending {
+        PendingTransport::Stdio(_) => TransportKind::Stdio,
+        PendingTransport::Acp { .. } => TransportKind::Acp,
+        PendingTransport::Http(_) | PendingTransport::HttpAuth { .. } => TransportKind::Http,
+    }
+}
+
 /// Like [`restorable_transport`], but only for the HTTP transports whose sessions live on the
 /// server: those are the ones that can bind a session to the protocol version the client REQUESTED
 /// rather than the one the server negotiated. Stdio has no server-side session; the ACP bridge is
 /// in-process.
 fn restorable_http_transport(pending: &PendingTransport) -> Option<PendingTransport> {
-    match pending {
-        PendingTransport::Http(_) | PendingTransport::HttpAuth { .. } => {
-            restorable_transport(pending)
-        }
-        PendingTransport::Stdio(_) | PendingTransport::Acp { .. } => None,
+    match transport_kind(pending) {
+        TransportKind::Http => restorable_transport(pending),
+        TransportKind::Stdio | TransportKind::Acp => None,
     }
 }
 
@@ -3060,7 +3088,17 @@ pub struct McpClient {
     /// The model's first tool dispatch can race the background `get_tool_registrations` handshake.
     /// Parking here (instead of failing fast) keeps that race from leaking an error into model-visible tool results.
     init_done: Notify,
+    /// Which handshake phases this client's transport runs; see [`TransportKind`].
+    /// Snapshotted from the [`PendingTransport`] this client was built with, so it stays true
+    /// after the transport moves into [`ClientState::Pending`].
+    transport_kind: TransportKind,
     startup_timeout_sec: u64,
+    /// The outer deadline a deadline-driven caller (today `drive_server_starts`) gave this
+    /// server, if any. It caps [`Self::startup_timeout_sec`] at construction and bounds each
+    /// handshake RETRY in [`Self::ensure_initialized`], so the whole `ensure_initialized`
+    /// surfaces its own per-server error instead of being cancelled by the caller's deadline.
+    /// `None` on the ordinary config path: retries are then bounded only per phase, as before.
+    handshake_deadline_sec: Option<u64>,
     tool_timeout_sec: u64,
     /// Per-tool timeout overrides in seconds.
     /// Looked up by tool name; falls back to `tool_timeout_sec` when a tool isn't listed.
@@ -3127,6 +3165,13 @@ pub type SharedEventTx =
 pub struct McpClientTimeoutOverrides {
     /// Server startup timeout in seconds.
     pub startup_timeout_sec: Option<u64>,
+    /// Outer deadline, in seconds, that the caller will cancel the whole handshake at.
+    ///
+    /// Deadline-driven callers set THIS rather than computing a startup budget themselves: only
+    /// the client knows which handshake phases its transport runs, and a transport-blind budget
+    /// either starves a phase or reserves time for one that never runs.
+    /// It caps the resolved [`Self::startup_timeout_sec`] and bounds each handshake retry.
+    pub handshake_deadline_sec: Option<u64>,
     /// Default per-tool timeout in seconds (used when a tool has no entry in `tool_timeouts`).
     pub tool_timeout_sec: Option<u64>,
     /// Per-tool timeout overrides in seconds, keyed by tool name.
@@ -3204,14 +3249,25 @@ impl McpClient {
         byo_oauth_config: Option<McpOAuthConfig>,
     ) -> Self {
         let reconnect = restorable_transport(&transport);
-        let (startup_timeout_sec, tool_timeout_sec, tool_timeouts) =
+        let kind = transport_kind(&transport);
+        let (mut startup_timeout_sec, tool_timeout_sec, tool_timeouts) =
             Self::load_timeouts(overrides, meta_config);
+        // A caller-supplied deadline caps the resolved budget, per transport. It never RAISES it:
+        // `_meta`/config values still win below the cap, which is why the bind path stopped
+        // computing the budget itself (its `overrides.startup_timeout_sec` beat everything).
+        let handshake_deadline_sec = overrides.and_then(|o| o.handshake_deadline_sec);
+        if let Some(deadline_secs) = handshake_deadline_sec {
+            startup_timeout_sec =
+                startup_timeout_sec.min(Self::startup_within_deadline(deadline_secs, kind));
+        }
         let expose_image_base64 = Self::load_expose_image_base64(overrides, meta_config);
         Self {
             client_id: next_client_id(),
             server_name,
             state: Mutex::new(ClientState::Pending(transport)),
             init_done: Notify::new(),
+            transport_kind: kind,
+            handshake_deadline_sec,
             startup_timeout_sec,
             tool_timeout_sec,
             tool_timeouts,
@@ -3753,21 +3809,39 @@ impl McpClient {
             && let Err(err) = &result
             && !matches!(err, McpError::Timeout { .. })
         {
-            tracing::info!(
-                server = %self.server_name,
-                requested = REQUESTED_PROTOCOL_VERSION.as_str(),
-                fallback = FALLBACK_PROTOCOL_VERSION.as_str(),
-                error = %err,
-                "MCP handshake failed at the requested protocol version; retrying at the fallback"
-            );
-            protocol_version = FALLBACK_PROTOCOL_VERSION;
-            result = self
-                .try_handshake(
-                    retry_transport,
-                    protocol_version.clone(),
-                    HandshakeProbe::Skip,
-                )
-                .await;
+            // A deadline-driven caller sized `startup_timeout_sec` so the FIRST attempt fits its
+            // deadline; the retry gets the remainder. Without that clamp the bind path's HTTP
+            // worst case is `2 * deadline - probe` against a `deadline`-long drive, and the
+            // drive's cancellation — not this client — reports the failure, as the generic
+            // "MCP discovery timed out after Ns" for a server that had a specific error to give.
+            let retry_window = self.remaining_handshake_window(handshake_start.elapsed());
+            if retry_window.is_some_and(|window| window.is_zero()) {
+                tracing::info!(
+                    server = %self.server_name,
+                    error = %err,
+                    "handshake deadline spent; keeping the first attempt's error instead of \
+                     starting a protocol-version fallback that cannot finish"
+                );
+            } else {
+                tracing::info!(
+                    server = %self.server_name,
+                    requested = REQUESTED_PROTOCOL_VERSION.as_str(),
+                    fallback = FALLBACK_PROTOCOL_VERSION.as_str(),
+                    error = %err,
+                    "MCP handshake failed at the requested protocol version; retrying at the fallback"
+                );
+                protocol_version = FALLBACK_PROTOCOL_VERSION;
+                result = self
+                    .handshake_within(
+                        retry_window,
+                        self.try_handshake(
+                            retry_transport,
+                            protocol_version.clone(),
+                            HandshakeProbe::Skip,
+                        ),
+                    )
+                    .await;
+            }
         }
 
         let handshake_elapsed = handshake_start.elapsed().as_micros() as u64;
@@ -3779,26 +3853,58 @@ impl McpClient {
         if result.is_err()
             && let (Some(auth_mgr), Some(config)) = (&self.auth_manager, &self.http_config)
         {
-            tracing::info!(
-                server = %self.server_name,
-                "Handshake failed, attempting token refresh and retry"
-            );
-            let refresh_ok = {
-                let mut mgr = auth_mgr.lock().await;
-                crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr)
-                    .await
-                    .hydrated
-                    && mgr.refresh_token().await.is_ok()
-            };
-            if refresh_ok {
-                let retry_transport = PendingTransport::HttpAuth {
-                    config: config.clone(),
-                    auth_manager: auth_mgr.clone(),
+            // Same deadline remainder as the fallback above, and it covers the REFRESH too: the
+            // refresh POST and `build_oauth_http_client`'s `AuthorizationManager` construction
+            // are the two awaits `OAUTH_REFRESH_RETRY_ALLOWANCE_SECS` only approximates, so a
+            // deadline-driven caller bounds them here or not at all.
+            let retry_window = self.remaining_handshake_window(handshake_start.elapsed());
+            if retry_window.is_some_and(|window| window.is_zero()) {
+                tracing::info!(
+                    server = %self.server_name,
+                    "handshake deadline spent; skipping the OAuth refresh-and-retry"
+                );
+            } else {
+                tracing::info!(
+                    server = %self.server_name,
+                    "Handshake failed, attempting token refresh and retry"
+                );
+                // `None` = the refresh did not succeed, so the first attempt's error stands.
+                let refresh_and_retry = async {
+                    let refresh_ok = {
+                        let mut mgr = auth_mgr.lock().await;
+                        crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr)
+                            .await
+                            .hydrated
+                            && mgr.refresh_token().await.is_ok()
+                    };
+                    if !refresh_ok {
+                        return None;
+                    }
+                    let retry_transport = PendingTransport::HttpAuth {
+                        config: config.clone(),
+                        auth_manager: auth_mgr.clone(),
+                    };
+                    // A fresh token can turn a probe rejection into a modern session, so probe again
+                    Some(
+                        self.try_handshake(
+                            retry_transport,
+                            protocol_version,
+                            HandshakeProbe::Discover,
+                        )
+                        .await,
+                    )
                 };
-                // A fresh token can turn a probe rejection into a modern session, so probe again
-                result = self
-                    .try_handshake(retry_transport, protocol_version, HandshakeProbe::Discover)
-                    .await;
+                let retried = match retry_window {
+                    Some(window) => tokio::time::timeout(window, refresh_and_retry)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Some(Err(McpError::timeout(&self.server_name, window)))
+                        }),
+                    None => refresh_and_retry.await,
+                };
+                if let Some(outcome) = retried {
+                    result = outcome;
+                }
             }
         }
 
@@ -3982,16 +4088,33 @@ impl McpClient {
             .max(1)
     }
 
-    /// Worst-case wall time of one [`Self::try_handshake`] attempt: the probe phase plus the legacy phase's full startup budget. Anything that waits on a handshake holder must use this bound, not `startup_timeout_sec` alone — a swallowed probe legitimately keeps the holder busy past the startup budget.
+    /// The probe phase's contribution to a budget: zero for stdio, which
+    /// [`Self::try_handshake`] sends straight to [`Self::serve_legacy`] with no probe.
+    /// Reserving a probe window for stdio would silently shorten its `initialize` window on
+    /// every deadline-driven caller.
+    fn probe_phase_secs(&self) -> u64 {
+        match self.transport_kind {
+            TransportKind::Stdio => 0,
+            TransportKind::Acp | TransportKind::Http => self.probe_timeout_secs(),
+        }
+    }
+
+    /// Worst-case wall time of one [`Self::try_handshake`] attempt: the probe phase (where the transport runs one) plus the legacy phase's full startup budget. Anything that waits on a handshake holder must use this bound, not `startup_timeout_sec` alone — a swallowed probe legitimately keeps the holder busy past the startup budget.
     fn handshake_budget_secs(&self) -> u64 {
         self.startup_timeout_sec
-            .saturating_add(self.probe_timeout_secs())
+            .saturating_add(self.probe_phase_secs())
     }
 
     /// Allowance for the protocol-version fallback retry inside [`Self::ensure_initialized`]: a
     /// second legacy `initialize` at [`FALLBACK_PROTOCOL_VERSION`], on a fresh transport, with the
     /// full `startup_timeout_sec`. Zero for stdio/ACP, whose transports are not rebuildable
     /// ([`restorable_http_transport`] returns `None`, so the retry cannot fire).
+    ///
+    /// This keys on [`Self::transport_kind`] — the SAME classification
+    /// [`restorable_http_transport`] gates the retry on — so the allowance cannot say "no
+    /// fallback" while the retry fires. (It used to key on `http_config.is_some()`, which is a
+    /// different fact about a client: [`McpClient::stub`] holds an HTTP pending transport with
+    /// no `http_config`, and any future constructor could do the same.)
     ///
     /// One `ensure_initialized` ATTEMPT is therefore bounded by probe + 2 × startup, not by
     /// [`Self::handshake_budget_secs`]: that retry's gate is `!matches!(err, McpError::Timeout
@@ -4000,10 +4123,9 @@ impl McpClient {
     /// fails at `startup_timeout_sec - ε` still fires it. At the 30 s default that is
     /// 10 + 30 + 30 = 70 s.
     fn version_fallback_secs(&self) -> u64 {
-        if self.http_config.is_some() {
-            self.startup_timeout_sec
-        } else {
-            0
+        match self.transport_kind {
+            TransportKind::Http => self.startup_timeout_sec,
+            TransportKind::Stdio | TransportKind::Acp => 0,
         }
     }
 
@@ -4018,45 +4140,142 @@ impl McpClient {
     /// Everything that puts a timeout around a handshake — the waiter park below, and
     /// [`Self::get_tool_registrations`] — must be sized on THIS, not on
     /// [`Self::handshake_budget_secs`].
+    ///
+    /// A [`Self::handshake_deadline_sec`] caps the result, because it caps the thing being
+    /// measured: [`Self::ensure_initialized`] runs its retries inside whatever the deadline has
+    /// left, so no run of it can exceed the deadline.
     fn handshake_worst_case_secs(&self) -> u64 {
+        // The OAuth refresh-and-retry keys on the same `(auth_manager, http_config)` pair the
+        // retry in `ensure_initialized` does, and that retry builds its own `HttpAuth` transport.
         let one_attempt = self
             .handshake_budget_secs()
             .saturating_add(self.version_fallback_secs());
-        if self.auth_manager.is_some() && self.http_config.is_some() {
+        let unbounded = if self.auth_manager.is_some() && self.http_config.is_some() {
             one_attempt
                 .saturating_add(Self::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS)
                 .saturating_add(self.handshake_budget_secs())
         } else {
             one_attempt
+        };
+        match self.handshake_deadline_sec {
+            Some(deadline_secs) => {
+                unbounded.min(deadline_secs.max(Self::MIN_HANDSHAKE_DEADLINE_SECS))
+            }
+            None => unbounded,
+        }
+    }
+
+    /// Head start a deadline-driven caller's retry window gives up so the CALLER can observe this
+    /// client's own error. The caller's deadline is absolute and started before we did — it
+    /// covers spawning the child / opening the connection as well as the handshake — so a retry
+    /// that ran to the deadline exactly would race the caller's cancellation and usually lose,
+    /// flattening a specific per-server error into the caller's generic timeout.
+    /// It is taken out of a RETRY only, never out of the first attempt's window.
+    const HANDSHAKE_DEADLINE_MARGIN_SECS: u64 = 1;
+
+    /// The window a handshake RETRY gets, given how much of one [`Self::ensure_initialized`] has
+    /// already elapsed. `None` means "no deadline configured, run unbounded" (the ordinary config
+    /// path, where each phase carries its own timeout and nothing outside is waiting to cancel).
+    /// `Some(ZERO)` means the deadline is spent and the retry must be skipped.
+    fn remaining_handshake_window(
+        &self,
+        elapsed: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        self.handshake_deadline_sec.map(|secs| {
+            std::time::Duration::from_secs(
+                secs.saturating_sub(Self::HANDSHAKE_DEADLINE_MARGIN_SECS),
+            )
+            .saturating_sub(elapsed)
+        })
+    }
+
+    /// Run a handshake retry inside [`Self::remaining_handshake_window`], mapping an elapsed
+    /// window onto this server's own [`McpError::Timeout`] — the point of the bound is that the
+    /// client, not the caller's deadline, is what reports the failure.
+    async fn handshake_within<F>(
+        &self,
+        window: Option<std::time::Duration>,
+        attempt: F,
+    ) -> F::Output
+    where
+        F: std::future::Future<
+                Output = Result<
+                    rmcp::service::RunningService<RoleClient, FuigoClientHandler>,
+                    McpError,
+                >,
+            >,
+    {
+        match window {
+            Some(window) => tokio::time::timeout(window, attempt)
+                .await
+                .unwrap_or_else(|_| Err(McpError::timeout(&self.server_name, window))),
+            None => attempt.await,
         }
     }
 
     /// Waiter allowance for the token-refresh interlude between an OAuth client's two handshake
     /// attempts: metadata/credential hydration is bounded by [`OAUTH_DISCOVERY_TIMEOUT`]-sized
-    /// steps, plus the refresh POST itself. The POST rides rmcp's own OAuth client without a total
-    /// request deadline, so this covers the nominal path; a pathological hung refresh can still
-    /// outlast waiters, which predates the probe split and needs a deadline inside rmcp's refresh
-    /// to close fully.
+    /// steps, plus the refresh POST itself.
+    ///
+    /// TWO awaits in that interlude are outside every phase timeout, and this allowance is a
+    /// nominal-path figure for both rather than a bound on either:
+    /// 1. The refresh POST. It is not deadline-free — `AuthorizationManager` rides
+    ///    [`crate::http_policy`]'s `CheckedOAuthClient`, whose reqwest clients are built with
+    ///    `.timeout(Duration::from_secs(30))` — but one REQUEST capped at 30 s is already twice
+    ///    this allowance, and a refresh is not necessarily one request.
+    /// 2. [`Self::build_oauth_http_client`]'s `crate::http_policy::auth_manager(..)` await,
+    ///    which constructs rmcp's `AuthorizationManager` (metadata discovery). It runs once per
+    ///    [`Self::try_handshake`] on an `HttpAuth` transport — up to THREE times per
+    ///    [`Self::ensure_initialized`]: the first attempt, the protocol-version fallback, and
+    ///    this OAuth retry — and none of it is counted here.
+    ///
+    /// A pathological OAuth interlude can therefore still outlast a waiter sized on
+    /// [`Self::handshake_worst_case_secs`]. That predates the probe split (at v1.0.19 the same
+    /// awaits sat outside a `startup + 1` park), and closing it fully needs a total deadline
+    /// inside rmcp's refresh. A [`Self::handshake_deadline_sec`] does close it for the callers
+    /// that set one, since the whole retry runs inside the deadline's remainder.
     const OAUTH_REFRESH_RETRY_ALLOWANCE_SECS: u64 = 15;
 
     /// Smallest whole-second deadline that holds both handshake phases (one second each).
     pub const MIN_HANDSHAKE_DEADLINE_SECS: u64 = 2;
 
-    /// Largest `startup_timeout_sec` whose worst-case handshake
-    /// ([`Self::handshake_budget_secs`]) still fits inside `deadline_secs`.
-    /// For deadline-driven callers: deriving the override from this keeps the invariant that a hung
-    /// handshake fails on its own before the outer deadline has to cancel it — a swallowed probe can
-    /// no longer burn the legacy phase's window. Short deadlines split evenly between the probe and
-    /// the legacy phase, since the probe timeout tracks the startup budget
-    /// ([`Self::probe_timeout_secs`]).
+    /// Largest `startup_timeout_sec` that leaves a PROBING transport's first handshake attempt
+    /// (probe + legacy, [`Self::handshake_budget_secs`]) inside `deadline_secs`.
+    /// Short deadlines split evenly between the probe and the legacy phase, since the probe
+    /// timeout tracks the startup budget ([`Self::probe_timeout_secs`]).
     /// Deadlines under [`Self::MIN_HANDSHAKE_DEADLINE_SECS`] cannot hold both phases; they get the
     /// minimum budget and the caller's outer deadline fires first.
+    ///
+    /// This is the probing half of `Self::startup_within_deadline`, which is what
+    /// deadline-driven callers actually want: stdio runs no probe and must not have a probe
+    /// window carved out of its `initialize`.
     pub fn max_startup_within_deadline(deadline_secs: u64) -> u64 {
         let deadline_secs = deadline_secs.max(Self::MIN_HANDSHAKE_DEADLINE_SECS);
         if deadline_secs >= Self::DISCOVER_PROBE_TIMEOUT_SECS.saturating_mul(2) {
             deadline_secs - Self::DISCOVER_PROBE_TIMEOUT_SECS
         } else {
             deadline_secs / 2
+        }
+    }
+
+    /// The startup budget a `deadline_secs` deadline leaves THIS transport's legacy phase.
+    ///
+    /// Stdio gets the whole deadline: [`Self::try_handshake`] runs no probe for it, so reserving
+    /// [`Self::DISCOVER_PROBE_TIMEOUT_SECS`] would just shorten its `initialize` window (the
+    /// cold-start `npx`/`uvx` case) for a phase it never runs. Probing transports get
+    /// [`Self::max_startup_within_deadline`].
+    ///
+    /// Note what this function does NOT try to do: squeeze the protocol-version fallback in too.
+    /// On HTTP that would mean `(deadline - probe) / 2` — 10 s of `initialize` at a 30 s
+    /// deadline, a third of what v1.0.19 gave, which trades this regression for a worse one. The
+    /// fallback is instead bounded by the deadline's REMAINDER in [`Self::ensure_initialized`],
+    /// so the first attempt keeps its full window and the total still fits.
+    fn startup_within_deadline(deadline_secs: u64, kind: TransportKind) -> u64 {
+        match kind {
+            TransportKind::Stdio => deadline_secs.max(1),
+            TransportKind::Acp | TransportKind::Http => {
+                Self::max_startup_within_deadline(deadline_secs)
+            }
         }
     }
 
@@ -4124,16 +4343,27 @@ impl McpClient {
     /// [`McpError::HandshakeFailed`] see the same errors they saw before the probe existed.
     ///
     /// The probe phase does not erode this window, but it does not follow that
-    /// `startup_timeout_sec` keeps its pre-probe MEANING for every caller: a caller that derives
-    /// the budget from an outer deadline ([`Self::max_startup_within_deadline`], today the bind
-    /// path) hands the legacy phase `deadline - DISCOVER_PROBE_TIMEOUT_SECS`, so a 30 s deadline
-    /// leaves 20 s here rather than 30. A legacy server that ACCEPTS `server/discover` and never
-    /// answers it — non-conformant; a legacy SDK answers method-not-found at once — and then needs
-    /// 20-30 s for `initialize` connects at 30 s of raw startup budget but not at a 30 s deadline.
-    /// Upstream has the identical formula and default, and the probe is not skippable (2026-07-28
-    /// session-less servers reject every `tools/call` on a legacy session), so the lever is the
-    /// operator's: `mcp_startup_timeout_secs` on the ordinary config path, the discovery deadline
-    /// on the bind path.
+    /// `startup_timeout_sec` keeps its pre-probe MEANING for every caller: a caller that hands
+    /// the client an outer deadline ([`Self::startup_within_deadline`], today the bind path)
+    /// leaves a PROBING transport's legacy phase `deadline - DISCOVER_PROBE_TIMEOUT_SECS`, so a
+    /// 30 s deadline leaves 20 s here rather than 30. (Stdio is unaffected: it runs no probe and
+    /// gets the whole deadline.) A legacy HTTP/ACP server that ACCEPTS `server/discover` and
+    /// never answers it — non-conformant; a legacy SDK answers method-not-found at once — and
+    /// then needs 20-30 s for `initialize` connects at 30 s of raw startup budget but not at a
+    /// 30 s deadline. Upstream has the identical formula and default, and the probe is not
+    /// skippable (2026-07-28 session-less servers reject every `tools/call` on a legacy session).
+    ///
+    /// The lever differs by path, and only one of the two is an OPERATOR's:
+    /// - ordinary config path: `mcp_startup_timeout_secs` and friends, resolved in fuigo-shell
+    ///   (`requirements.toml [mcp].startup_timeout_sec` > `MCP_TIMEOUT` >
+    ///   `FUIGO_MCP_STARTUP_TIMEOUT_SECS` > `config.toml [mcp]` > remote settings) and injected
+    ///   through `McpClientTimeoutOverrides::startup_timeout_sec`.
+    /// - bind path: the discovery deadline, and that is an EMBEDDER's lever, not an operator's.
+    ///   Nothing in this repo calls `BindMcpConfig::with_discovery_timeout` outside tests, and
+    ///   fuigo-shell's resolver never reaches fuigo-workspace. What the deadline does reach is
+    ///   `handshake_deadline_sec`, which only CAPS the resolved budget — so a `_meta`
+    ///   `startup_timeout_ms` below the cap still wins, where the old bind-path
+    ///   `startup_timeout_sec` override beat everything.
     /// The `initialize` names `protocol_version`: `REQUESTED_PROTOCOL_VERSION` on the first
     /// attempt, `FALLBACK_PROTOCOL_VERSION` on the retry [`Self::ensure_initialized`] makes for an
     /// HTTP server that rejects the requested version's session.
