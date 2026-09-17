@@ -27,8 +27,11 @@ pub enum SentMessagePresentation {
     Unconfirmed { reason: String },
 }
 
-/// The delivery mode the tool call asked for, as the row names it. `None` on the block when the
-/// wire carried no `delivery` or one this pager does not recognize; the row then keeps its plain verb.
+/// The delivery mode the tool call asked for, as the row names it. An OMITTED `delivery` is not
+/// `None` here: the tool resolves it to `queue` (`send_subagent_message::resolve_delivery`), so the
+/// wire mapping resolves it the same way and the row reads identically to an explicit `"queue"`.
+/// `None` is reserved for a value this pager does not recognize; the row then keeps its plain verb,
+/// which claims no class at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "lowercase")]
 pub enum SentMessageDelivery {
@@ -47,12 +50,21 @@ impl SentMessagePresentation {
     /// not of a delivery difference: the engine lands `queue`, `steer` and
     /// `interject` identically (see `send_subagent_message`'s
     /// `description_template` invariant in `fuigo-tools`), and the row exists
-    /// so the scrollback shows what was asked for.
+    /// so the scrollback shows what was asked for. No verb here promises an
+    /// ORDER.
+    ///
+    /// One verb per recognized class, and exactly one class per verb: the
+    /// plain "Sent message to subagent" is the `None` row — a delivery this
+    /// pager does not recognize — so it can never be confused with a class the
+    /// pager DOES know. An omitted `delivery` never reaches here as `None`; it
+    /// is resolved to `Queue` at the wire boundary, because that is what the
+    /// tool does with it.
     pub(crate) fn title_for(&self, delivery: Option<SentMessageDelivery>) -> &'static str {
         match self {
             Self::Sending => "Sending message to subagent",
             Self::Sent => match delivery {
-                None | Some(SentMessageDelivery::Steer) => "Sent message to subagent",
+                None => "Sent message to subagent",
+                Some(SentMessageDelivery::Steer) => "Steered message to subagent",
                 Some(SentMessageDelivery::Queue) => "Queued message for subagent",
                 Some(SentMessageDelivery::Interject) => "Interjected message to subagent",
             },
