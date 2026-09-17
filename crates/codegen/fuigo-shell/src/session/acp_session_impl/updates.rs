@@ -1,13 +1,14 @@
 //! Outbound updates for `SessionActor`: `send_update` and its buffered/transient/direct variants.
 //! Also Ferrox Labs-notification handling and the gateway-bridge dispatch shims.
 use super::*;
-/// Hook / image-intake diagnostics leave the no-output rewind window open; every other variant closes it.
+/// Hook / image-intake diagnostics and background_tasks snapshots leave the no-output rewind window open; every other variant closes it.
 pub(super) fn closes_cancel_rewind_window(update: &FuigoSessionUpdate) -> bool {
     !matches!(
         update,
         FuigoSessionUpdate::HookExecution { .. }
             | FuigoSessionUpdate::ImageCompressed { .. }
             | FuigoSessionUpdate::ImageDropped { .. }
+            | FuigoSessionUpdate::BackgroundTasks { .. }
     )
 }
 fn scrub_inbound_session_summary(

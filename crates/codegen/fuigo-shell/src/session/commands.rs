@@ -863,6 +863,18 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+    /// Persist + broadcast the current background-task list via
+    /// `fuigo/session_notification` (`SessionUpdate::BackgroundTasks`).
+    ///
+    /// `respond_to` means load enqueued the persist+broadcast before returning.
+    /// It is not a client-delivery ack. Live incremental follow-ups leave it `None`.
+    ///
+    /// `pending` is the bridge coalesce bit. Live incrementals pass `Some` so
+    /// a burst collapses to one emit; load leaves it `None` (forced flush).
+    EmitBackgroundTasksSnapshot {
+        respond_to: Option<oneshot::Sender<()>>,
+        pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    },
     /// Write `resume_status.json` (live loops/tasks/subagents/workflows/goal) before a close or unload
     /// that does not go through `Shutdown`; the ack means the write finished, not that anything was live.
     PersistResumeStatus {

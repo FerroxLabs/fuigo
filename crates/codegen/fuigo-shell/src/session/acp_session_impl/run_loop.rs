@@ -2113,6 +2113,15 @@ pub(super) async fn run_session(
                             });
                             let _ = respond_to.send(result);
                         }
+                        SessionCommand::EmitBackgroundTasksSnapshot {
+                            respond_to,
+                            pending,
+                        } => {
+                            session.emit_background_tasks_snapshot(pending).await;
+                            if let Some(respond_to) = respond_to {
+                                let _ = respond_to.send(());
+                            }
+                        }
                         SessionCommand::PersistResumeStatus { respond_to } => {
                             session.persist_resume_status().await;
                             let _ = respond_to.send(());
