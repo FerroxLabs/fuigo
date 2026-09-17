@@ -2717,6 +2717,7 @@ pub fn handle_picker_input(
             if key.code == KeyCode::Esc {
                 let query_changed = config.vim_normal_first && !state.query().is_empty();
                 state.search_active = false;
+                state.selection_hidden = false;
                 // vim_normal_first: Esc leaves search for nav mode and clears the query in one step (mirrors scrollback vim-mode)
                 if config.vim_normal_first {
                     state.clear_query();
@@ -3181,6 +3182,46 @@ mod tests {
 
     fn press_up() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+    }
+
+    fn left_click(column: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Clicking the search bar hides the list selection; leaving search with Esc must bring it back.
+    /// Ported from upstream `dashboard_picker_esc_after_search_click_restores_the_selection`,
+    /// asserted on the shared handler every picker host routes through.
+    #[test]
+    fn esc_after_search_click_restores_the_selection() {
+        let config = cfg(true, false);
+        let mut state = PickerState::default();
+        state.selected = 1;
+        state.hit_areas = Some(PickerHitAreas {
+            close_button: Rect::default(),
+            search_bar: Rect::new(4, 6, 40, 1),
+            item_rects: vec![Rect::new(4, 8, 40, 1)],
+            entry_indices: vec![1],
+            tab_rects: vec![],
+            filter_rect: None,
+        });
+
+        let clicked = handle_picker_input(&left_click(5, 6), &mut state, 2, &config);
+        assert!(matches!(clicked, PickerOutcome::Changed));
+        assert!(state.search_active, "clicking search must focus it");
+        assert!(state.selection_hidden, "clicking search hides the selection");
+
+        let escaped = handle_picker_input(&press_esc(), &mut state, 2, &config);
+        assert!(matches!(escaped, PickerOutcome::Changed));
+        assert!(!state.search_active);
+        assert!(
+            !state.selection_hidden,
+            "Esc leaving search must restore the list selection"
+        );
     }
 
     #[test]
