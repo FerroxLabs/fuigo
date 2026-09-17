@@ -161,7 +161,8 @@ pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
 /// The UI shows the raw `prompt` text via `RenderBlock::cron_prompt`; this wrapped version is only sent to the model via `Effect::SendPrompt`.
 /// The framing tells the model the message is a scheduled task execution, not a human.
 fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
-    fuigo_tools::reminders::format_scheduled_task_prompt(prompt, task_id, human_schedule)
+    // An in-conversation fire has no child subagent to poll.
+    fuigo_tools::reminders::format_scheduled_task_prompt(prompt, task_id, None, human_schedule)
 }
 
 /// Try to send the next queued entry (prompt, command, bash, or cron) if the agent is idle.
@@ -1321,6 +1322,13 @@ mod tests {
         assert!(
             !out.contains("<user_query>"),
             "must not add <user_query> — shell does that"
+        );
+        assert!(out.contains(
+            "If this schedule is no longer relevant, run scheduler_delete(\"task-1\"). If it is outdated, you can update it with scheduler_create(new_prompt, interval, \"task-1\")."
+        ));
+        assert!(
+            !out.contains("Check the subagent output"),
+            "in-conversation fires have no child subagent to poll"
         );
         assert!(out.ends_with("do stuff"));
     }

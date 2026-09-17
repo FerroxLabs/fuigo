@@ -146,6 +146,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         task_output_tool_name: fuigo_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
             .to_string(),
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         auto_wake_enabled: true,
         goal_loop_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         parent_terminal_backend: None,

@@ -32,7 +32,7 @@ fn single_successful_completion_with_poll_tool() {
         12300,
         5,
     )];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
     assert!(result.starts_with("While you were idle, 1 background subagent completed:\n"));
     assert!(result.contains("[explore]"));
     assert!(result.contains("completed successfully"));
@@ -51,9 +51,12 @@ fn scheduled_completion_includes_resolved_cleanup_tool() {
         &[completion],
         Some("get_task_output"),
         Some("renamed_scheduler_delete"),
+        Some("renamed_scheduler_create"),
     );
 
     assert!(result.contains("renamed_scheduler_delete(\"loop-123\")"));
+    assert!(result.contains("renamed_scheduler_create(new_prompt, interval, \"loop-123\")"));
+    assert!(result.contains("Check the subagent output using get_task_output(\"abc-123\")"));
 }
 
 #[test]
@@ -66,7 +69,7 @@ fn failed_completion_with_poll_tool() {
         45200,
         12,
     )];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
     assert!(result.contains("failed"));
     assert!(result.contains("45.2s"));
     assert!(result.contains("12 tool calls"));
@@ -79,7 +82,7 @@ fn multiple_completions_batched_with_poll_tool() {
         summary("b", "general-purpose", "task 2", false, 5000, 8),
         summary("c", "explore", "task 3", true, 3000, 4),
     ];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
     assert!(result.starts_with("While you were idle, 3 background subagents completed:\n"));
     // All three entries appear
     assert!(result.contains("subagent_id: a."));
@@ -99,7 +102,7 @@ fn no_poll_tool_inlines_output() {
         12300,
         5,
     )];
-    let result = format_between_turn_completions(&completions, None, None);
+    let result = format_between_turn_completions(&completions, None, None, None);
     assert!(result.contains("[explore]"));
     assert!(result.contains("abc-123"));
     assert!(
