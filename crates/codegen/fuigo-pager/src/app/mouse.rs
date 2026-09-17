@@ -1181,6 +1181,17 @@ impl AgentView {
             _ => InputOutcome::Unchanged,
         }
     }
+    /// Forget every pointer-derived highlight by replaying the hover pass at an off-screen position.
+    /// Used on screen-mode switches: minimal mode turns mouse capture off, so no motion event arrives to refresh hover state and the pre-switch highlight (hovered entry row, buttons, dropdown rows) would stick on the next fullscreen frame until the pointer moves.
+    /// Routing through [`Self::handle_mouse`] keeps this in lockstep with the real hover pass.
+    pub(crate) fn clear_pointer_hover(&mut self) {
+        let _ = self.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: u16::MAX,
+            row: u16::MAX,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+    }
     /// Apply a scrollbar click or drag at the given screen row.
     ///
     /// Uses [`scrollbar_click_to_offset`], the same math as the thumb renderer.

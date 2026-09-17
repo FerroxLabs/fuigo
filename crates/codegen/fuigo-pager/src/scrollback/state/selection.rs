@@ -530,7 +530,39 @@ impl ScrollbackState {
     /// Minimal mode's print-once commit pass stamps thinking entries `Expanded` directly into the shared state
     /// (`minimal_commit_display_mode` in `fuigo-pager-minimal`), so a fullscreen → minimal → fullscreen round trip
     /// would otherwise come back with every previously-folded thought sprung open.
-    pub fn reapply_thinking_fold_policy(&mut self) {}
+    pub fn reapply_thinking_fold_policy(&mut self) {
+        let target_mode = self.thinking_display_mode;
+        let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
+        let mut changed_ids = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if !matches!(entry.block, RenderBlock::Thinking(_))
+                || !entry.block.is_foldable()
+                || entry.is_running
+                || (respect_manual_folds && entry.display_mode_pinned)
+                || entry.display_mode == target_mode
+            {
+                continue;
+            }
+            entry.display_mode = target_mode;
+            entry.invalidate_cache();
+            changed_ids.push(*id);
+        }
+        if changed_ids.is_empty() {
+            return;
+        }
+        for &id in &changed_ids {
+            self.dirty_heights.insert(id);
+        }
+        // Do not clear `expanded_groups`: those keys are user-expanded tool-call
+        // groups and were never stamped by minimal.
+        for id in &changed_ids {
+            if let Some(idx) = self.entries.get_index_of(id) {
+                self.rekey_verb_group_expansion(idx);
+            }
+        }
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
 
     /// Expand all truncated groups (add every group-start ID to expanded_groups).
     /// Runs are walked with the shared `joins_dense_run` predicate, so the inserted ids agree with the truncation pass's breaks on claimed entries.
