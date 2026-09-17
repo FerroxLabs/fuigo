@@ -3199,16 +3199,18 @@ mod tests {
     #[test]
     fn esc_after_search_click_restores_the_selection() {
         let config = cfg(true, false);
-        let mut state = PickerState::default();
-        state.selected = 1;
-        state.hit_areas = Some(PickerHitAreas {
-            close_button: Rect::default(),
-            search_bar: Rect::new(4, 6, 40, 1),
-            item_rects: vec![Rect::new(4, 8, 40, 1)],
-            entry_indices: vec![1],
-            tab_rects: vec![],
-            filter_rect: None,
-        });
+        let mut state = PickerState {
+            selected: 1,
+            hit_areas: Some(PickerHitAreas {
+                close_button: Rect::default(),
+                search_bar: Rect::new(4, 6, 40, 1),
+                item_rects: vec![Rect::new(4, 8, 40, 1)],
+                entry_indices: vec![1],
+                tab_rects: vec![],
+                filter_rect: None,
+            }),
+            ..Default::default()
+        };
 
         let clicked = handle_picker_input(&left_click(5, 6), &mut state, 2, &config);
         assert!(matches!(clicked, PickerOutcome::Changed));
