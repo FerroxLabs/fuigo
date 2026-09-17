@@ -4717,6 +4717,10 @@ fn spawn_fake_actor(
                 TestSessionCommand::IsBusy { respond_to } => {
                     let _ = respond_to.send(busy);
                 }
+                // Close/unload snapshots the live work before teardown; ack it and keep it out of the observed order.
+                TestSessionCommand::PersistResumeStatus { respond_to } => {
+                    let _ = respond_to.send(());
+                }
                 other => {
                     let _ = observed_tx.send(other);
                 }
@@ -5363,8 +5367,10 @@ fn explicit_close_finalizes_the_replica() {
     run_local_for_bridge_test(|| async {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-close");
-        let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, Some("turn-1"));
+        let (handle, _tx, cmd_rx) = make_live_session_handle(&sid, Some("turn-1"));
         agent.insert_resident(&sid, handle);
+        // The fake actor acks the pre-teardown resume-status snapshot; `Cancel` is still the first observed command.
+        let mut cmd_rx = spawn_fake_actor(cmd_rx, true);
         drive_close(&agent, "no-such-session")
             .await
             .expect("close of a missing session must succeed as a no-op");
@@ -5375,7 +5381,11 @@ fn explicit_close_finalizes_the_replica() {
         drive_close(&agent, sid.0.as_ref())
             .await
             .expect("session close must be handled");
-        let Ok(TestSessionCommand::Cancel(options)) = cmd_rx.try_recv() else {
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
+            .await
+            .expect("close must send Cancel")
+            .expect("fake actor channel must stay open");
+        let TestSessionCommand::Cancel(options) = cmd else {
             panic!("close must send Cancel before anything else");
         };
         assert_eq!(

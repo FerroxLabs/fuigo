@@ -1445,6 +1445,45 @@ pub(crate) async fn spawn_session_actor(
     >();
     crate::session::workflow::registry::warm_builtin_cache();
     let workflow_session_dir = crate::session::persistence::session_dir(&session_info);
+    // Crash path: teardown never wrote `resume_status.json`, so rebuild it from what is left on disk
+    // (scheduler state, running subagent metas, restored workflow runs, the goal) before the first prompt consumes it
+    let resume_workflows: Vec<crate::session::resume_status::ResumeWorkflow> =
+        persisted_workflow_runs
+            .iter()
+            .filter(|run| {
+                use crate::session::workflow::tracker::WorkflowRunStatus;
+                let status = run.manifest.state.status;
+                status == WorkflowRunStatus::Active
+                    || status == WorkflowRunStatus::Interrupted
+                    || status.is_paused()
+            })
+            .map(|run| {
+                let state = &run.manifest.state;
+                crate::session::resume_status::ResumeWorkflow {
+                    run_id: state.run_id.clone(),
+                    objective: state.objective.clone(),
+                }
+            })
+            .collect();
+    let resume_goal = goal_tracker.lock().snapshot().and_then(|g| {
+        use crate::session::goal_tracker::GoalStatus;
+        if matches!(g.status, GoalStatus::Complete | GoalStatus::BudgetLimited) {
+            None
+        } else {
+            Some(crate::session::resume_status::ResumeGoal {
+                objective: g.objective.clone(),
+            })
+        }
+    });
+    if !startup_hints.is_subagent && !crate::session::resume_status::exists(&workflow_session_dir) {
+        let snapshot = crate::session::resume_status::reconstruct_from_disk(
+            &workflow_session_dir,
+            session_info.id.0.as_ref(),
+            resume_workflows,
+            resume_goal,
+        );
+        crate::session::resume_status::persist(&workflow_session_dir, &snapshot);
+    }
     let (workflow_store, workflow_snapshots) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
             Some(workflow_session_dir.clone()),
