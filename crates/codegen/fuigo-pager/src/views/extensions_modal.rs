@@ -1148,18 +1148,18 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
         ],
         ExtensionsTab::Plugins => vec![
             ('r', "reload"),
-            ('u', "update"),
-            ('a', "install"),
+            ('u', ActionVerb::Update.label()),
+            ('a', ActionVerb::Install.label()),
             (' ', "toggle"),
-            ('x', "uninstall"),
+            ('x', ActionVerb::Uninstall.label()),
         ],
         ExtensionsTab::Marketplace => vec![
-            ('i', "install"),
+            ('i', ActionVerb::Install.label()),
             ('r', "refresh"),
-            ('u', "update"),
+            ('u', ActionVerb::Update.label()),
             ('a', "add source"),
-            ('d', "uninstall"),
-            ('x', "remove source"),
+            ('d', ActionVerb::Uninstall.label()),
+            ('x', ActionVerb::RemoveSource.label()),
         ],
         ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
         ExtensionsTab::Workflows => vec![('r', "reload")],
@@ -1198,7 +1198,7 @@ fn action_key_footer_desc_for_mapping(
         match selected_item_enabled_at(state, entry_data_indices, entry_group_keys, selected) {
             Some(true) => "disable",
             Some(false) => "enable",
-            None => "enable/disable",
+            None => ActionVerb::EnableDisable.label(),
         }
     } else {
         desc
@@ -1263,7 +1263,7 @@ fn selected_hook_policy_enforced_at(
 
 pub fn action_key_cheatsheet_desc(ch: char, desc: &'static str) -> &'static str {
     if ch == ' ' && desc == "toggle" {
-        "enable/disable"
+        ActionVerb::EnableDisable.label()
     } else {
         desc
     }

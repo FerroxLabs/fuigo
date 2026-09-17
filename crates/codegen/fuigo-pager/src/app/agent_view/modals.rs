@@ -5,6 +5,7 @@ use super::AgentView;
 use super::test_fixtures;
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
+use crate::views::extensions_modal::ActionVerb;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -1591,106 +1592,94 @@ impl AgentView {
                 }
             }
             ButtonAction::ToggleSelectedHook => {
-                if let Some(ref state) = self.extensions_modal
-                    && let crate::views::extensions_modal::TabDataState::Loaded(ref data) =
-                        state.hooks_data
-                    && let Some(idx) = state.selected_data_index()
-                    && let Some(hook) = data.hooks.get(idx)
-                {
-                    let source = &hook.source_dir;
-                    let is_collapsed = state.hooks_collapsed_groups.contains(source);
-
-                    if is_collapsed {
-                        // Group toggle: collect all hooks in this source group.
-                        let group_hooks: Vec<&fuigo_hooks_plugins_types::HookInfo> = data
-                            .hooks
-                            .iter()
-                            .filter(|h| h.source_dir == *source)
-                            .collect();
-                        // Direction comes from the unpinned hooks only (all-pinned groups read enabled)
-                        // Shared with the button-label mirror so the two can't drift
-                        let any_enabled = crate::views::extensions_modal::hook_group_any_enabled(
-                            group_hooks.iter().copied(),
-                        );
-                        let hook_names: Vec<String> =
-                            group_hooks.iter().map(|h| h.name.clone()).collect();
-                        let action = fuigo_hooks_plugins_types::HooksAction::ToggleSource {
-                            hook_names,
-                            disable: any_enabled,
-                        };
-                        return self.execute_modal_button_action(ButtonAction::HooksAction(action));
-                    } else {
-                        // Single hook toggle.
-                        let action = if hook.disabled {
-                            fuigo_hooks_plugins_types::HooksAction::Enable {
-                                hook_name: hook.name.clone(),
-                            }
-                        } else {
-                            fuigo_hooks_plugins_types::HooksAction::Disable {
-                                hook_name: hook.name.clone(),
-                            }
-                        };
-                        return self.execute_modal_button_action(ButtonAction::HooksAction(action));
+                let Some(state) = self.extensions_modal.as_mut() else {
+                    return InputOutcome::Changed;
+                };
+                let crate::views::extensions_modal::TabDataState::Loaded(ref data) =
+                    state.hooks_data
+                else {
+                    return InputOutcome::Changed;
+                };
+                let Some(hook) = state
+                    .selected_data_index()
+                    .and_then(|idx| data.hooks.get(idx))
+                else {
+                    // A group header has no hook to toggle: say which row to pick instead of doing nothing
+                    state.post_select_row_hint("hook", ActionVerb::EnableDisable);
+                    return InputOutcome::Changed;
+                };
+                let source = &hook.source_dir;
+                let action = if state.hooks_collapsed_groups.contains(source) {
+                    // Group toggle: collect all hooks in this source group.
+                    let group_hooks: Vec<&fuigo_hooks_plugins_types::HookInfo> = data
+                        .hooks
+                        .iter()
+                        .filter(|h| h.source_dir == *source)
+                        .collect();
+                    // Direction comes from the unpinned hooks only (all-pinned groups read enabled)
+                    // Shared with the button-label mirror so the two can't drift
+                    let any_enabled = crate::views::extensions_modal::hook_group_any_enabled(
+                        group_hooks.iter().copied(),
+                    );
+                    fuigo_hooks_plugins_types::HooksAction::ToggleSource {
+                        hook_names: group_hooks.iter().map(|h| h.name.clone()).collect(),
+                        disable: any_enabled,
                     }
-                }
-                InputOutcome::Changed
+                } else if hook.disabled {
+                    // Single hook toggle.
+                    fuigo_hooks_plugins_types::HooksAction::Enable {
+                        hook_name: hook.name.clone(),
+                    }
+                } else {
+                    fuigo_hooks_plugins_types::HooksAction::Disable {
+                        hook_name: hook.name.clone(),
+                    }
+                };
+                self.execute_modal_button_action(ButtonAction::HooksAction(action))
             }
             ButtonAction::ToggleSelectedPlugin => {
-                if let Some(ref state) = self.extensions_modal
-                    && let crate::views::extensions_modal::TabDataState::Loaded(ref data) =
-                        state.plugins_data
-                    && let Some(idx) = state.selected_data_index()
-                    && let Some(plugin) = data.plugins.get(idx)
-                {
+                if let Some(plugin) = self.selected_plugin_for_action(ActionVerb::EnableDisable) {
+                    let plugin_id = plugin.id;
                     let action = if plugin.enabled {
-                        fuigo_hooks_plugins_types::PluginsAction::Disable {
-                            plugin_id: plugin.id.clone(),
-                        }
+                        fuigo_hooks_plugins_types::PluginsAction::Disable { plugin_id }
                     } else {
-                        fuigo_hooks_plugins_types::PluginsAction::Enable {
-                            plugin_id: plugin.id.clone(),
-                        }
+                        fuigo_hooks_plugins_types::PluginsAction::Enable { plugin_id }
                     };
                     return self.execute_modal_button_action(ButtonAction::PluginsAction(action));
                 }
                 InputOutcome::Changed
             }
             ButtonAction::ToggleSelectedSkill => {
-                if let Some(ref mut state) = self.extensions_modal {
-                    use crate::views::extensions_modal::{ActionVerb, TabDataState};
-                    if let TabDataState::Loaded(ref skills) = state.skills_data {
-                        if let Some(skill) =
-                            state.selected_data_index().and_then(|idx| skills.get(idx))
-                        {
-                            let skill_name = skill.name.clone();
-                            let enabled = !skill.enabled;
-                            state.pending_action = Some("toggling...".into());
-                            state.pending_entry_index = Some(state.picker_state.selected);
-                            return InputOutcome::Action(Action::ToggleSkill {
-                                skill_name,
-                                enabled,
-                            });
-                        }
-                        // A header row has no skill to toggle: say which row to pick instead of doing nothing
-                        state.post_select_row_hint("skill", ActionVerb::EnableDisable);
-                    }
-                }
-                InputOutcome::Changed
+                let Some(state) = self.extensions_modal.as_mut() else {
+                    return InputOutcome::Changed;
+                };
+                let crate::views::extensions_modal::TabDataState::Loaded(ref skills) =
+                    state.skills_data
+                else {
+                    return InputOutcome::Changed;
+                };
+                let Some(skill) = state.selected_data_index().and_then(|idx| skills.get(idx))
+                else {
+                    // A header row has no skill to toggle: say which row to pick instead of doing nothing
+                    state.post_select_row_hint("skill", ActionVerb::EnableDisable);
+                    return InputOutcome::Changed;
+                };
+                let skill_name = skill.name.clone();
+                let enabled = !skill.enabled;
+                state.pending_action = Some("toggling...".into());
+                state.pending_entry_index = Some(state.picker_state.selected);
+                InputOutcome::Action(Action::ToggleSkill {
+                    skill_name,
+                    enabled,
+                })
             }
             ButtonAction::UninstallSelectedPlugin => {
-                if let Some(ref state) = self.extensions_modal
-                    && let crate::views::extensions_modal::TabDataState::Loaded(ref data) =
-                        state.plugins_data
-                    && let Some(idx) = state.selected_data_index()
-                    && let Some(plugin) = data.plugins.get(idx)
-                {
-                    let plugin_id = plugin.id.clone();
-                    let name = plugin.name.clone();
+                if let Some(plugin) = self.selected_plugin_for_action(ActionVerb::Uninstall) {
                     return self.prompt_extensions_confirm(
-                        format!("Uninstall plugin \"{name}\"?"),
+                        format!("Uninstall plugin \"{}\"?", plugin.name),
                         crate::views::extensions_modal::ConfirmationAction::Plugins(
                             fuigo_hooks_plugins_types::PluginsAction::Uninstall {
-                                plugin_id,
+                                plugin_id: plugin.id,
                                 // Server owns multi-plugin cascade text when count > 1.
                                 confirmed: false,
                             },
@@ -1702,14 +1691,9 @@ impl AgentView {
             ButtonAction::UpdateSelectedPlugin => {
                 // Fetch latest from the plugin's source for the selected plugin only (`plugin_id: Some(..)`)
                 // Distinct from `r` reload, which re-copies installed plugins at their current version
-                if let Some(ref state) = self.extensions_modal
-                    && let crate::views::extensions_modal::TabDataState::Loaded(ref data) =
-                        state.plugins_data
-                    && let Some(idx) = state.selected_data_index()
-                    && let Some(plugin) = data.plugins.get(idx)
-                {
+                if let Some(plugin) = self.selected_plugin_for_action(ActionVerb::Update) {
                     let action = fuigo_hooks_plugins_types::PluginsAction::Update {
-                        plugin_id: Some(plugin.id.clone()),
+                        plugin_id: Some(plugin.id),
                     };
                     return self.execute_modal_button_action(ButtonAction::PluginsAction(action));
                 }
@@ -1870,21 +1854,19 @@ impl AgentView {
             ButtonAction::InstallSelectedMarketplacePlugin => self
                 .execute_selected_marketplace_plugin_action(
                     "Installing...",
-                    |source_url_or_path, plugin_relative_path| {
-                        fuigo_hooks_plugins_types::MarketplaceAction::Install {
-                            source_url_or_path,
-                            plugin_relative_path,
-                        }
+                    ActionVerb::Install,
+                    |plugin| fuigo_hooks_plugins_types::MarketplaceAction::Install {
+                        source_url_or_path: plugin.source_url_or_path,
+                        plugin_relative_path: plugin.relative_path,
                     },
                 ),
             ButtonAction::UpdateSelectedMarketplacePlugin => self
                 .execute_selected_marketplace_plugin_action(
                     "Updating...",
-                    |source_url_or_path, plugin_relative_path| {
-                        fuigo_hooks_plugins_types::MarketplaceAction::Update {
-                            source_url_or_path,
-                            plugin_relative_path,
-                        }
+                    ActionVerb::Update,
+                    |plugin| fuigo_hooks_plugins_types::MarketplaceAction::Update {
+                        source_url_or_path: plugin.source_url_or_path,
+                        plugin_relative_path: plugin.relative_path,
                     },
                 ),
             ButtonAction::StartInput {
@@ -1898,50 +1880,38 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ButtonAction::UninstallSelectedMarketplacePlugin => {
-                if let Some(ref state) = self.extensions_modal {
-                    use crate::views::extensions_modal::TabDataState;
-                    if let TabDataState::Loaded(ref response) = state.marketplace_data
-                        && let Some((si, Some(pi))) =
-                            state.resolve_marketplace_selection(&response.sources)
-                    {
-                        let source = &response.sources[si];
-                        let plugin = &source.plugins[pi];
-                        return self.prompt_extensions_confirm(
-                            format!("Uninstall marketplace plugin \"{}\"?", plugin.name),
-                            crate::views::extensions_modal::ConfirmationAction::Marketplace(
-                                fuigo_hooks_plugins_types::MarketplaceAction::Uninstall {
-                                    source_url_or_path: source.source_url_or_path.clone(),
-                                    plugin_relative_path: plugin.relative_path.clone(),
-                                },
-                            ),
-                        );
-                    }
+                if let Some(plugin) =
+                    self.selected_marketplace_plugin_for_action(ActionVerb::Uninstall)
+                {
+                    return self.prompt_extensions_confirm(
+                        format!("Uninstall marketplace plugin \"{}\"?", plugin.name),
+                        crate::views::extensions_modal::ConfirmationAction::Marketplace(
+                            fuigo_hooks_plugins_types::MarketplaceAction::Uninstall {
+                                source_url_or_path: plugin.source_url_or_path,
+                                plugin_relative_path: plugin.relative_path,
+                            },
+                        ),
+                    );
                 }
                 InputOutcome::Changed
             }
             ButtonAction::RemoveSelectedMarketplaceSource => {
-                if let Some(ref state) = self.extensions_modal {
-                    use crate::views::extensions_modal::TabDataState;
-                    if let TabDataState::Loaded(ref response) = state.marketplace_data {
-                        let source = state
-                            .resolve_marketplace_selection(&response.sources)
-                            .and_then(|(si, _)| response.sources.get(si));
-                        if let Some(source) = source {
-                            return self.prompt_extensions_confirm(
-                                format!(
-                                    "Remove source \"{}\" and uninstall all its plugins?",
-                                    source.source_name
-                                ),
-                                crate::views::extensions_modal::ConfirmationAction::Marketplace(
-                                    fuigo_hooks_plugins_types::MarketplaceAction::RemoveSource {
-                                        source_url_or_path: source.source_url_or_path.clone(),
-                                    },
-                                ),
-                            );
-                        }
-                    }
-                }
-                InputOutcome::Changed
+                let Some(source) =
+                    self.selected_marketplace_source_for_action(ActionVerb::RemoveSource)
+                else {
+                    return InputOutcome::Changed;
+                };
+                self.prompt_extensions_confirm(
+                    format!(
+                        "Remove source \"{}\" and uninstall all its plugins?",
+                        source.name
+                    ),
+                    crate::views::extensions_modal::ConfirmationAction::Marketplace(
+                        fuigo_hooks_plugins_types::MarketplaceAction::RemoveSource {
+                            source_url_or_path: source.source_url_or_path,
+                        },
+                    ),
+                )
             }
         }
     }
@@ -1999,26 +1969,116 @@ impl AgentView {
     fn execute_selected_marketplace_plugin_action(
         &mut self,
         pending_label: &'static str,
-        make_action: impl FnOnce(String, String) -> fuigo_hooks_plugins_types::MarketplaceAction,
+        verb: ActionVerb,
+        make_action: impl FnOnce(
+            SelectedMarketplacePlugin,
+        ) -> fuigo_hooks_plugins_types::MarketplaceAction,
     ) -> InputOutcome {
+        let Some(plugin) = self.selected_marketplace_plugin_for_action(verb) else {
+            return InputOutcome::Changed;
+        };
         if let Some(ref mut state) = self.extensions_modal {
-            use crate::views::extensions_modal::TabDataState;
-            if let TabDataState::Loaded(ref response) = state.marketplace_data
-                && let Some((si, Some(pi))) = state.resolve_marketplace_selection(&response.sources)
-            {
-                let source = &response.sources[si];
-                let plugin = &source.plugins[pi];
-                state.pending_action = Some(pending_label.into());
-                state.pending_entry_index = Some(state.picker_state.selected);
-                let action = make_action(
-                    source.source_url_or_path.clone(),
-                    plugin.relative_path.clone(),
-                );
-                return InputOutcome::Action(Action::ExecuteMarketplaceAction(action));
+            state.pending_action = Some(pending_label.into());
+            state.pending_entry_index = Some(state.picker_state.selected);
+        }
+        InputOutcome::Action(Action::ExecuteMarketplaceAction(make_action(plugin)))
+    }
+
+    /// The selected Marketplace-tab plugin row. Marketplace plugin actions are per-plugin, so a
+    /// source header has no target and posts the row hint instead.
+    fn selected_marketplace_plugin_for_action(
+        &mut self,
+        verb: ActionVerb,
+    ) -> Option<SelectedMarketplacePlugin> {
+        use crate::views::extensions_modal::TabDataState;
+        let state = self.extensions_modal.as_mut()?;
+        let TabDataState::Loaded(ref response) = state.marketplace_data else {
+            return None;
+        };
+        let (source, plugin_index) = state
+            .resolve_marketplace_selection(&response.sources)
+            .and_then(|(si, pi)| Some((response.sources.get(si)?, pi)))?;
+        match plugin_index.and_then(|pi| source.plugins.get(pi)) {
+            Some(plugin) => Some(SelectedMarketplacePlugin {
+                source_url_or_path: source.source_url_or_path.clone(),
+                relative_path: plugin.relative_path.clone(),
+                name: plugin.name.clone(),
+            }),
+            None => {
+                // A source whose scan failed or found nothing has no plugin row to point at
+                if !source.plugins.is_empty() {
+                    state.post_select_row_hint("plugin", verb);
+                }
+                None
             }
         }
-        InputOutcome::Changed
     }
+
+    /// The selected Marketplace-tab source header. Source actions are per-source, so a plugin row
+    /// has no target and posts the row hint instead.
+    fn selected_marketplace_source_for_action(
+        &mut self,
+        verb: ActionVerb,
+    ) -> Option<SelectedMarketplaceSource> {
+        use crate::views::extensions_modal::TabDataState;
+        let state = self.extensions_modal.as_mut()?;
+        let TabDataState::Loaded(ref response) = state.marketplace_data else {
+            return None;
+        };
+        let (source_index, plugin_index) =
+            state.resolve_marketplace_selection(&response.sources)?;
+        if plugin_index.is_some() {
+            state.post_select_row_hint("source", verb);
+            return None;
+        }
+        let source = response.sources.get(source_index)?;
+        Some(SelectedMarketplaceSource {
+            name: source.source_name.clone(),
+            source_url_or_path: source.source_url_or_path.clone(),
+        })
+    }
+
+    /// The selected Plugins-tab row. A group header spans repos, so it has no target and posts the
+    /// row hint instead.
+    fn selected_plugin_for_action(&mut self, verb: ActionVerb) -> Option<SelectedPlugin> {
+        use crate::views::extensions_modal::TabDataState;
+        let state = self.extensions_modal.as_mut()?;
+        let TabDataState::Loaded(ref data) = state.plugins_data else {
+            return None;
+        };
+        let plugin = state
+            .selected_data_index()
+            .and_then(|idx| data.plugins.get(idx))
+            .map(|plugin| SelectedPlugin {
+                id: plugin.id.clone(),
+                name: plugin.name.clone(),
+                enabled: plugin.enabled,
+            });
+        if plugin.is_none() {
+            state.post_select_row_hint("plugin", verb);
+        }
+        plugin
+    }
+}
+
+/// Plugins-tab row resolved for a per-plugin action.
+struct SelectedPlugin {
+    id: String,
+    name: String,
+    enabled: bool,
+}
+
+/// Marketplace plugin row resolved for a per-plugin action.
+struct SelectedMarketplacePlugin {
+    source_url_or_path: String,
+    relative_path: String,
+    name: String,
+}
+
+/// Marketplace source header resolved for a per-source action.
+struct SelectedMarketplaceSource {
+    name: String,
+    source_url_or_path: String,
 }
 
 #[cfg(test)]
