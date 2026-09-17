@@ -1024,11 +1024,15 @@ async fn session_end_cancels_in_flight_start_hook() {
         let gate = tempfile::TempDir::new().unwrap();
         let release = gate.path().join("release");
         let started = gate.path().join("started");
+        // The hook backgrounds a grandchild: cancelling it must killpg the whole group, not just
+        // SIGKILL the direct child, or the grandchild outlives the session and writes `leaked`.
+        let leaked = gate.path().join("leaked");
         *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
             super::client_hooks_tests::file_registry_with_spec(
                 HookEventName::SessionStart,
                 &format!(
-                    "echo $$ > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done",
+                    "sh -c 'sleep 3 && echo alive > {}' & echo $$ > '{}'; while [ ! -f '{}' ]; do sleep 0.05; done",
+                    leaked.display(),
                     started.display(),
                     release.display()
                 ),
@@ -1082,6 +1086,12 @@ async fn session_end_cancels_in_flight_start_hook() {
                 .skip(end.unwrap())
                 .any(|n| n == "session_start"),
             "cancelled start must not fire after session-end, got {names:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(
+            !leaked.exists(),
+            "the cancelled start hook's backgrounded grandchild outlived the session, \
+             so its process group was not killpg'd"
         );
     })
     .await;
