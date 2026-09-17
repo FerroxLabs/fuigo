@@ -27,11 +27,30 @@ pub enum SentMessagePresentation {
     Unconfirmed { reason: String },
 }
 
+/// The delivery mode the tool call asked for, as the row names it. `None` on the block when the
+/// wire carried no `delivery` or one this pager does not recognize; the row then keeps its plain verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
+pub enum SentMessageDelivery {
+    Steer,
+    Queue,
+    Interject,
+}
+
 impl SentMessagePresentation {
     pub(crate) fn title(&self) -> &'static str {
+        self.title_for(None)
+    }
+
+    /// The header verb names the mode an accepted send used; a failed or unconfirmed send names no mode.
+    pub(crate) fn title_for(&self, delivery: Option<SentMessageDelivery>) -> &'static str {
         match self {
             Self::Sending => "Sending message to subagent",
-            Self::Sent => "Sent message to subagent",
+            Self::Sent => match delivery {
+                None | Some(SentMessageDelivery::Steer) => "Sent message to subagent",
+                Some(SentMessageDelivery::Queue) => "Queued message for subagent",
+                Some(SentMessageDelivery::Interject) => "Interjected message to subagent",
+            },
             Self::Rejected { .. } => "Failed to send message to subagent",
             Self::Unconfirmed { .. } => "Message delivery unconfirmed",
         }
@@ -74,6 +93,8 @@ pub struct SentMessageToolCallBlock {
     pub presentation: SentMessagePresentation,
     pub subagent_id: Option<String>,
     pub text: Option<String>,
+    /// The requested delivery mode, when the wire named one this pager knows.
+    pub delivery: Option<SentMessageDelivery>,
     pub started_at: Option<std::time::Instant>,
     pub elapsed_ms: Option<i64>,
 }
@@ -88,9 +109,20 @@ impl SentMessageToolCallBlock {
             presentation,
             subagent_id,
             text,
+            delivery: None,
             started_at: None,
             elapsed_ms: None,
         }
+    }
+
+    pub fn with_delivery(mut self, delivery: Option<SentMessageDelivery>) -> Self {
+        self.delivery = delivery;
+        self
+    }
+
+    /// The header line: the presentation's verb, naming the delivery mode of an accepted send.
+    pub(crate) fn title(&self) -> &'static str {
+        self.presentation.title_for(self.delivery)
     }
 
     pub fn is_success(&self) -> bool {
@@ -122,7 +154,7 @@ impl SentMessageToolCallBlock {
 
     pub(crate) fn searchable_text(&self) -> Option<String> {
         crate::scrollback::block::join_searchable([
-            Some(self.presentation.title().to_owned()),
+            Some(self.title().to_owned()),
             self.subagent_id.clone(),
             self.text.clone(),
             self.presentation
@@ -138,7 +170,20 @@ impl SentMessageToolCallBlock {
             theme.primary()
         }
         .add_modifier(ratatui::style::Modifier::BOLD);
-        Line::from(Span::styled(self.presentation.title(), style))
+        Line::from(Span::styled(self.title(), style))
+    }
+
+    /// Expanded rows also spell the requested mode as a muted suffix, so a steer is visible too.
+    fn expanded_header(&self, theme: &Theme) -> Line<'static> {
+        let mut line = self.header(theme, false);
+        if let Some(delivery) = self.delivery {
+            let delivery: &'static str = delivery.into();
+            line.spans.push(Span::styled(
+                format!(" \u{00b7} {delivery}"),
+                theme.muted(),
+            ));
+        }
+        line
     }
 
     pub(crate) fn rendered_output(&self, ctx: &BlockContext) -> RenderedBlockOutput {
@@ -198,7 +243,7 @@ impl BlockContent for SentMessageToolCallBlock {
         }
 
         let width = (ctx.width as usize).saturating_sub(2).max(20);
-        let mut lines: Vec<BlockLine> = vec![self.header(&theme, false).into()];
+        let mut lines: Vec<BlockLine> = vec![self.expanded_header(&theme).into()];
         if let Some((detail, style)) = self.presentation.detail() {
             let color = match style {
                 MessageDetailStyle::Error => theme.accent_error,

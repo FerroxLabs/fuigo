@@ -260,12 +260,47 @@ async fn rejected_delivery(
             .await
             .expect("probe child started");
 
-        let outcome = await_with_timeout(backend.send_active_message(
-            ActiveAgentMessageRequest::try_new_with_operation("child", "follow up", operation)
-            .expect("valid message"),
-        ))
-        .await;
-        let dispatched = child_cmd_rx.try_recv().is_ok();
+        // Poll send on the LocalSet while this task waits for the child command.
+        // A pinned-but-unpolled future deadlocks Steer dispatch on current_thread.
+        let send_task = tokio::task::spawn_local({
+            let backend = backend.clone();
+            async move {
+                backend
+                    .send_active_message(
+                        ActiveAgentMessageRequest::try_new_with_operation(
+                            "child",
+                            "follow up",
+                            operation,
+                        )
+                        .expect("valid message"),
+                    )
+                    .await
+            }
+        });
+        let (outcome, dispatched) = if target == "child"
+            && matches!(
+                operation,
+                ActiveAgentMessageOperation::Steer | ActiveAgentMessageOperation::Interject
+            )
+            && !force_queue_envelope
+        {
+            let command = await_with_timeout(child_cmd_rx.recv())
+                .await
+                .expect("Steer command dispatched");
+            let SessionCommand::ParentAgentMessage { respond_to, .. } = command else {
+                panic!("expected parent-message command");
+            };
+            respond_to
+                .send(ActiveMessageAdmission::Rejected)
+                .expect("admission future remains open");
+            (
+                await_with_timeout(send_task).await.expect("send task"),
+                true,
+            )
+        } else {
+            let outcome = await_with_timeout(send_task).await.expect("send task");
+            (outcome, child_cmd_rx.try_recv().is_ok())
+        };
         coordinator_task.abort();
         spawn_task.abort();
         (outcome, dispatched)
@@ -284,9 +319,21 @@ async fn target_mismatch_rejects_without_dispatch() {
 }
 
 #[tokio::test]
-async fn matched_steer_is_unsupported_and_uncommitted() {
+async fn matched_steer_dispatches_to_the_child_host() {
     let actual = rejected_delivery("child", ActiveAgentMessageOperation::Steer, false).await;
-    assert_eq!(actual, (ActiveAgentMessageOutcome::Unsupported, false));
+    assert_eq!(
+        actual,
+        (ActiveAgentMessageOutcome::NotActiveOrFinalizing, true)
+    );
+}
+
+#[tokio::test]
+async fn matched_interject_dispatches_to_the_child_host() {
+    let actual = rejected_delivery("child", ActiveAgentMessageOperation::Interject, false).await;
+    assert_eq!(
+        actual,
+        (ActiveAgentMessageOutcome::NotActiveOrFinalizing, true)
+    );
 }
 
 #[tokio::test]

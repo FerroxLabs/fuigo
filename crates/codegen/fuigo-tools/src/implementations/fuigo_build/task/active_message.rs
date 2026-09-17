@@ -14,6 +14,7 @@ pub const MAX_ACTIVE_AGENT_MESSAGE_BYTES: usize = 32 * 1024;
 pub enum ActiveAgentMessageOperation {
     Queue,
     Steer,
+    Interject,
 }
 
 /// Bounded caller request for the internal active-descendant route.

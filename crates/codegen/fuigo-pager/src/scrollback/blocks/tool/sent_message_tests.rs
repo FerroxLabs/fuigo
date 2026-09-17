@@ -136,6 +136,83 @@ fn sent_block_uses_exact_success_title_and_renders_arguments_as_inert_text() {
 }
 
 #[test]
+fn header_grammar_covers_every_presentation_and_delivery() {
+    use SentMessageDelivery::{Interject, Queue, Steer};
+    let sent = |delivery| {
+        SentMessageToolCallBlock::new(
+            SentMessagePresentation::Sent,
+            Some("sub-123".into()),
+            Some("follow up".into()),
+        )
+        .with_delivery(delivery)
+    };
+    for (block, collapsed, expanded_header) in [
+        (
+            sent(None),
+            "Sent message to subagent",
+            "Sent message to subagent".to_owned(),
+        ),
+        (
+            sent(Some(Steer)),
+            "Sent message to subagent",
+            "Sent message to subagent \u{00b7} steer".to_owned(),
+        ),
+        (
+            sent(Some(Queue)),
+            "Queued message for subagent",
+            "Queued message for subagent \u{00b7} queue".to_owned(),
+        ),
+        (
+            sent(Some(Interject)),
+            "Interjected message to subagent",
+            "Interjected message to subagent \u{00b7} interject".to_owned(),
+        ),
+        (
+            SentMessageToolCallBlock::new(SentMessagePresentation::Sending, None, None)
+                .with_delivery(Some(Queue)),
+            "Sending message to subagent",
+            "Sending message to subagent \u{00b7} queue".to_owned(),
+        ),
+        (
+            SentMessageToolCallBlock::new(
+                SentMessagePresentation::Rejected {
+                    reason: "nope".into(),
+                },
+                None,
+                None,
+            )
+            .with_delivery(Some(Interject)),
+            "Failed to send message to subagent",
+            "Failed to send message to subagent \u{00b7} interject".to_owned(),
+        ),
+        (
+            SentMessageToolCallBlock::new(
+                SentMessagePresentation::Unconfirmed {
+                    reason: "maybe".into(),
+                },
+                None,
+                None,
+            )
+            .with_delivery(Some(Steer)),
+            "Message delivery unconfirmed",
+            "Message delivery unconfirmed \u{00b7} steer".to_owned(),
+        ),
+    ] {
+        assert_eq!(block.title(), collapsed);
+        assert_eq!(rendered(&block, 120, DisplayMode::Collapsed), collapsed);
+        let expanded = rendered(&block, 120, DisplayMode::Expanded);
+        let first = expanded.lines().next().expect("expanded header line");
+        assert_eq!(first, expanded_header, "{expanded}");
+        assert!(
+            block
+                .searchable_text()
+                .is_some_and(|text| text.contains(collapsed)),
+            "{collapsed}"
+        );
+    }
+}
+
+#[test]
 fn wrapped_message_joiners_reconstruct_word_midword_and_trailing_newline_exactly() {
     let text = "alpha beta supercalifragilisticexpialidocious\n";
     let block = SentMessageToolCallBlock::new(
