@@ -43,6 +43,16 @@ fn read_summary_from(session_dir: &std::path::Path) -> Summary {
     serde_json::from_slice(&std::fs::read(session_dir.join("summary.json")).unwrap()).unwrap()
 }
 
+fn mark_summary_used(session_dir: &std::path::Path) {
+    let mut summary = read_summary_from(session_dir);
+    summary.num_messages = 1;
+    std::fs::write(
+        session_dir.join("summary.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 #[serial]
 async fn list_sessions_repairs_untagged_worktree_summary_in_rows_and_on_disk() {
@@ -375,6 +385,8 @@ async fn list_sessions_recent_repairs_untagged_worktree_summary_in_rows_and_on_d
     let adapter = JsonlStorageAdapter::with_root(home.path().to_path_buf());
     let session_dir = adapter.session_dir(&info);
     write_untagged_summary(&session_dir, &info);
+    // Recent list omits empty untitled rows, so this must be a used row to observe the heal.
+    mark_summary_used(&session_dir);
 
     let listed = adapter.list_sessions_recent(10).await.unwrap();
 
@@ -412,6 +424,7 @@ async fn list_sessions_heal_does_not_evict_recent_sessions_from_mtime_window() {
     };
     let recent_dir = adapter.session_dir(&recent);
     write_untagged_summary(&recent_dir, &recent);
+    mark_summary_used(&recent_dir);
     set_summary_mtime(&recent_dir, now);
 
     let listed = adapter.list_sessions(None).await.unwrap();
