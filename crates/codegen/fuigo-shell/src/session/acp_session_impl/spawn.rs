@@ -1514,6 +1514,26 @@ pub(crate) async fn spawn_session_actor(
                             }
                         }
                     }
+                    WorkflowSource::Pause { run_id } => {
+                        use fuigo_tools::implementations::fuigo_build::workflow::WorkflowControl;
+                        let _ = ack.send(
+                            manager
+                                .lock()
+                                .await
+                                .control_ack(run_id, WorkflowControl::Pause),
+                        );
+                        continue;
+                    }
+                    WorkflowSource::Stop { run_id } => {
+                        use fuigo_tools::implementations::fuigo_build::workflow::WorkflowControl;
+                        let _ = ack.send(
+                            manager
+                                .lock()
+                                .await
+                                .control_ack(run_id, WorkflowControl::Stop),
+                        );
+                        continue;
+                    }
                 };
                 let resolved = match resolved {
                     Ok(r) => r,
