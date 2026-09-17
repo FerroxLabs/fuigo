@@ -309,16 +309,33 @@ pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
     }
 }
 
+/// How a hook is named to the user: a real name, or tier copy for config-tier sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookDisplayName<'a> {
+    /// A real name (`global/lint`), an agent identity (`agent:<name>`), or a `client:<id>`.
+    Named(&'a str),
+    /// Config-tier copy ("a managed policy hook") for sources whose stamped spec path means nothing to the user.
+    Tier(&'static str),
+}
+
 /// User-facing hook name for blocked-prompt copy: drops the stamped `:{event}[i].hooks[j]` tail, then renders config-tier sources as tier copy.
 /// The tier copy is split by [`HookProvenance::is_managed_policy`] (who controls the hook), not [`HookOrigin`]'s grouping.
 /// Real names (`global/lint`), agent identities (`agent:<name>`), and `client:<id>` pass through.
-pub fn hook_display_name(qualified: &str) -> &str {
+pub fn hook_display_label(qualified: &str) -> HookDisplayName<'_> {
     let source = strip_spec_path(qualified);
     match source {
-        "user" | "requirements/user" => "a user hook",
-        "managed" => "a managed hook",
-        "system_managed" | "requirements/system" => "a managed policy hook",
-        _ => source,
+        "user" | "requirements/user" => HookDisplayName::Tier("a user hook"),
+        "managed" => HookDisplayName::Tier("a managed hook"),
+        "system_managed" | "requirements/system" => HookDisplayName::Tier("a managed policy hook"),
+        _ => HookDisplayName::Named(source),
+    }
+}
+
+/// [`hook_display_label`] flattened for callers that read both forms the same way.
+pub fn hook_display_name(qualified: &str) -> &str {
+    match hook_display_label(qualified) {
+        HookDisplayName::Named(name) => name,
+        HookDisplayName::Tier(copy) => copy,
     }
 }
 

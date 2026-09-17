@@ -1,45 +1,31 @@
 use super::*;
 use fuigo_shell::sampling::error::format_rate_limited_user_message;
-/// Stash a live stop-family batch under `stash_pid` for the turn marker to fold.
-/// `merge_same_name` merges a same-name repeat instead of pushing it standalone.
-pub(super) fn stash_live_stop_batch(
-    agent: &mut AgentView,
-    stash_pid: Option<String>,
-    event_name: String,
-    hook_entries: Vec<crate::scrollback::blocks::tool::HookRunEntry>,
-    merge_same_name: bool,
-) {
-    if let Some(stale) = agent
-        .pending_stop_hooks
-        .take_if(|p| p.prompt_id != stash_pid)
-    {
-        for (name, runs) in stale.groups {
-            agent.scrollback.push_lifecycle_hooks(name, runs);
-        }
-    }
-    let pending = agent.pending_stop_hooks.get_or_insert_with(|| {
-        super::super::agent_view::PendingStopHooks {
-            prompt_id: stash_pid,
-            groups: Vec::new(),
-        }
-    });
-    match pending
-        .groups
-        .iter()
-        .position(|(name, _)| *name == event_name)
-    {
-        Some(idx) if merge_same_name => {
-            pending.groups[idx].1.extend(hook_entries);
-        }
-        Some(_) => {
-            agent
-                .scrollback
-                .push_lifecycle_hooks(event_name, hook_entries);
-        }
-        None => {
-            pending.groups.push((event_name, hook_entries));
-        }
-    }
+/// The one scrollback line a failed run gets; success gets none and a deny is already annotated by the shell.
+/// "ignored" is literal (fail-open); a config-tier source has no name worth showing, so its line names only the event.
+pub(super) fn failed_hook_line(
+    event_name: &str,
+    run: &fuigo_shell::extensions::notification::HookRunEntryDto,
+) -> Option<String> {
+    use fuigo_hooks::config::HookDisplayName;
+    use fuigo_shell::extensions::notification::HookRunStatusDto;
+    let HookRunStatusDto::Failed {
+        error,
+        blocked: false,
+        ..
+    } = &run.status
+    else {
+        return None;
+    };
+    let subject = match fuigo_hooks::config::hook_display_label(&run.name) {
+        HookDisplayName::Named(name) => format!("{event_name} hook ({name})"),
+        HookDisplayName::Tier(_) => format!("{event_name} hook"),
+    };
+    let error = error.lines().next().unwrap_or("").trim();
+    Some(if error.is_empty() {
+        format!("{subject} failed, ignored")
+    } else {
+        format!("{subject} failed, ignored: {error}")
+    })
 }
 pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
     let total = view.session.models.get_context_window().unwrap_or(0);
@@ -905,102 +891,21 @@ pub(super) fn handle_session_notification_with_origin(
         FuigoSessionUpdate::HookExecution {
             event_name,
             tool_name: _tool_name,
-            prompt_id: batch_prompt_id,
+            prompt_id: _prompt_id,
             runs,
         } => {
-            use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-            let hook_entries: Vec<HookRunEntry> = runs
-                .into_iter()
-                .map(|r| {
-                    let status = match r.status {
-                        fuigo_shell::extensions::notification::HookRunStatusDto::Success {
-                            elapsed_ms,
-                        } => HookRunStatus::Success {
-                            elapsed: std::time::Duration::from_millis(elapsed_ms),
-                        },
-                        fuigo_shell::extensions::notification::HookRunStatusDto::Skipped => {
-                            HookRunStatus::Skipped
-                        }
-                        fuigo_shell::extensions::notification::HookRunStatusDto::Failed {
-                            error,
-                            elapsed_ms,
-                            blocked: true,
-                        } => HookRunStatus::Blocked {
-                            detail: error,
-                            elapsed: std::time::Duration::from_millis(elapsed_ms),
-                        },
-                        fuigo_shell::extensions::notification::HookRunStatusDto::Failed {
-                            error,
-                            elapsed_ms,
-                            blocked: false,
-                        } => HookRunStatus::Failed {
-                            error,
-                            elapsed: std::time::Duration::from_millis(elapsed_ms),
-                        },
-                    };
-                    HookRunEntry {
-                        name: r.name,
-                        status,
-                        output: r.output,
-                    }
-                })
-                .collect();
-            let is_tool_hook = event_name == "pre_tool_use" || event_name == "post_tool_use";
-            let is_stop_hook =
-                fuigo_hooks_plugins_types::HookEvent::from_wire(&event_name).is_turn_end();
-            if is_tool_hook {
-                let phase = if event_name == "pre_tool_use" {
-                    HookPhase::Pre
-                } else {
-                    HookPhase::Post
-                };
-                if let Some(entry_id) = agent.scrollback.last_tool_call_entry_id() {
-                    agent.scrollback.attach_hooks(entry_id, phase, hook_entries);
-                }
-            } else if is_stop_hook && !meta.is_replay && !agent.session.loading_replay {
-                let local_turn_active =
-                    agent.session.state.is_turn_running() || agent.session.state.is_cancelling();
-                let batch_is_wake = batch_prompt_id.as_deref().is_some_and(is_wake_prompt);
-                let foreign_batch = batch_prompt_id.is_some()
-                    && agent.session.current_prompt_id.is_some()
-                    && batch_prompt_id != agent.session.current_prompt_id
-                    && !batch_is_wake;
-                if foreign_batch {
-                    agent
-                        .scrollback
-                        .push_lifecycle_hooks(event_name, hook_entries);
-                } else if !batch_is_wake && local_turn_active {
-                    let stash_pid = batch_prompt_id
-                        .clone()
-                        .or_else(|| agent.session.current_prompt_id.clone());
-                    stash_live_stop_batch(
-                        agent,
-                        stash_pid,
-                        event_name,
-                        hook_entries,
-                        batch_prompt_id.is_some(),
-                    );
-                } else if let Some(entry_id) = agent
-                    .scrollback
-                    .latest_turn_marker_accepting(&event_name, batch_prompt_id.as_deref())
-                {
-                    agent.scrollback.attach_stop_hooks_to_marker(
-                        entry_id,
-                        event_name,
-                        hook_entries,
-                        batch_prompt_id.as_deref(),
-                    );
-                } else {
-                    agent
-                        .scrollback
-                        .push_lifecycle_hooks(event_name, hook_entries);
-                }
-            } else {
-                agent
-                    .scrollback
-                    .push_lifecycle_hooks(event_name, hook_entries);
+            // Successful and skipped runs leave no trace; a deny is already annotated by the shell.
+            if app.appearance.disable_plugins {
+                return false;
             }
-            true
+            let mut redraw = false;
+            for line in runs.iter().filter_map(|r| failed_hook_line(&event_name, r)) {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::HookOutcome { message: line },
+                ));
+                redraw = true;
+            }
+            redraw
         }
         FuigoSessionUpdate::HooksChanged {
             hooks,
