@@ -96,8 +96,7 @@ pub(super) async fn abort_unacknowledged_prompt(
         "rewindIfPristine": true,
         "promptId": prompt_id,
     });
-    let cancel =
-        acp::CancelNotification::new(session_id.clone()).meta(meta.as_object().cloned());
+    let cancel = acp::CancelNotification::new(session_id.clone()).meta(meta.as_object().cloned());
     match tokio::time::timeout(HEADLESS_ABORT_SEND_TIMEOUT, acp_send(cancel, acp_tx)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {

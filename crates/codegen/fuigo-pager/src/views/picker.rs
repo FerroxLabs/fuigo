@@ -3215,7 +3215,10 @@ mod tests {
         let clicked = handle_picker_input(&left_click(5, 6), &mut state, 2, &config);
         assert!(matches!(clicked, PickerOutcome::Changed));
         assert!(state.search_active, "clicking search must focus it");
-        assert!(state.selection_hidden, "clicking search hides the selection");
+        assert!(
+            state.selection_hidden,
+            "clicking search hides the selection"
+        );
 
         let escaped = handle_picker_input(&press_esc(), &mut state, 2, &config);
         assert!(matches!(escaped, PickerOutcome::Changed));

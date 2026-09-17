@@ -166,8 +166,10 @@ mod tests {
         }
         assert!(saw_query, "query glyphs missing from {text:?}");
 
-        let caret = (0..buf.area.width)
-            .any(|x| buf.cell((x, 0)).is_some_and(|cell| cell.bg == theme.text_primary));
+        let caret = (0..buf.area.width).any(|x| {
+            buf.cell((x, 0))
+                .is_some_and(|cell| cell.bg == theme.text_primary)
+        });
         assert!(!caret, "idle query must not paint a caret, got {text:?}");
     }
 

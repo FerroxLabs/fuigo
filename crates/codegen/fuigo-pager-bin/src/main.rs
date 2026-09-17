@@ -25,7 +25,6 @@ mod jemalloc_malloc_conf {
     static MALLOC_CONF: MallocConfPtr = MallocConfPtr(CONF.as_ptr());
 }
 use anyhow::Result;
-use std::io::Write as _;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +47,7 @@ use fuigo_shell::leader::{
 use fuigo_telemetry::process_info::{
     Entrypoint, Interactivity, ProcessIdentity, ReleaseChannel, set_identity, set_release_channel,
 };
+use std::io::Write as _;
 fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<ProcessIdentity> {
     use fuigo_telemetry::process_info::LeaderMode::Standalone;
     let (entrypoint, interactivity) = match command {

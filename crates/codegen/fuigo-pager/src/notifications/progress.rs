@@ -1,4 +1,3 @@
-
 use crate::notifications::tmux;
 use crate::terminal::{TerminalContext, TerminalName};
 
