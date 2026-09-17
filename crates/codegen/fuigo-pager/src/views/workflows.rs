@@ -1185,6 +1185,14 @@ mod tests {
     }
 
     #[test]
+    fn activity_label_uses_phase_while_active_and_status_otherwise() {
+        let running = make_run("wf-1", "learn-traces-2", "active");
+        assert_eq!(running.activity_label(), "Research \u{b7} 1 agent");
+        let paused = make_run("wf-1", "learn-traces-2", "user_paused");
+        assert_eq!(paused.activity_label(), "user paused");
+    }
+
+    #[test]
     fn single_run_auto_enters_detail_with_phase_rail_and_roster() {
         let run = make_run("wf_1", "deep-research", "active");
         let runs = vec![&run];

@@ -117,8 +117,10 @@ fn all_sections_render_with_counts_and_collapse_state() {
     assert!(row_text(&buf, 0).starts_with(&header_prefix(true, "Subagents", 3)));
     let first = row_text(&buf, 1);
     let diamond = crate::glyphs::diamond_filled();
+    // Literal, not `ROW_INDENT`: expecting the constant under test cannot fail.
+    assert_eq!(ROW_INDENT, " ", "the row inset is one space");
     assert!(
-        first.starts_with(&format!("{ROW_INDENT}{diamond} Explore")),
+        first.starts_with(&format!(" {diamond} Explore")),
         "row must start with indent + diamond, got {first:?}"
     );
     assert!(
@@ -1266,7 +1268,7 @@ fn long_loop_prompt_truncates_so_actions_stay_visible() {
     let data = DockData {
         watchers: vec![row(
             "Loop",
-            "Run one pass of the Grok Build feedback-ingest pipeline. STEP 1 — stale-process guard. Run: ps -eo pid,etime,command",
+            "Run one pass of the Fuigo Build feedback-ingest pipeline. STEP 1 — stale-process guard. Run: ps -eo pid,etime,command",
             "every 5m",
             true,
         )],
@@ -1302,11 +1304,12 @@ fn header_has_a_small_inset_from_the_dock_left_edge() {
     let mut buf = Buffer::empty(area);
     render(&mut buf, area, &theme, &data);
     let header = row_text(&buf, 0);
+    // Pinned against a literal, not `HEADER_INDENT`: building the expected
+    // value from the constant under test would make the assertion a tautology
+    // that stays green when the inset is deleted.
+    assert_eq!(HEADER_INDENT, " ", "the header inset is one space");
     assert!(
-        header.starts_with(&format!(
-            "{HEADER_INDENT}{}",
-            crate::glyphs::disclosure_closed()
-        )),
+        header.starts_with(&format!(" {}", crate::glyphs::disclosure_closed())),
         "header must be inset one column, got {header:?}"
     );
 }

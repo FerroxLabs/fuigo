@@ -585,14 +585,13 @@ impl AgentView {
         InputOutcome::Changed
     }
 
-    /// Extra rows belong to one section. Revealing Watchers must drop Tasks'
-    /// raise so the two do not share the lift and shrink each other.
+    /// Raise one section. A section already showing all its rows keeps them:
+    /// the lift is bounded by [`Self::dock_max_rows`] and the layout shares it,
+    /// and `clamp_dock_overflow` drops any raise a shrunk section no longer
+    /// needs. (Upstream `4827113` sets the one flag here too; clearing the
+    /// others would close a section the user had just opened.)
     fn set_dock_section_show_all(&mut self, section: crate::views::dock::Section) {
         use crate::views::dock::Section;
-        self.dock_workflows_show_all = false;
-        self.dock_subagents_show_all = false;
-        self.dock_tasks_show_all = false;
-        self.dock_watchers_show_all = false;
         match section {
             Section::Workflows => self.dock_workflows_show_all = true,
             Section::Subagents => self.dock_subagents_show_all = true,
