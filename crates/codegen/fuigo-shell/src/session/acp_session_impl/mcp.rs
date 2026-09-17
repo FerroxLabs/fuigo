@@ -393,24 +393,12 @@ impl SessionActor {
                     }
                 }
             };
-            let init_budget = std::time::Duration::from_secs(
-                client
-                    .startup_timeout_sec()
-                    .saturating_mul(2)
-                    .saturating_add(5),
-            );
             let mcp_state_arc = self.mcp_state.clone();
-            let registrations = match tokio::time::timeout(
-                init_budget,
-                client.get_tool_registrations(mcp_state_arc),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(crate::session::mcp_servers::McpError::Timeout {
-                    server: server_name.clone(),
-                    timeout_secs: init_budget.as_secs(),
-                })
-            }) {
+            // `get_tool_registrations` bounds itself (handshake worst case + the first
+            // `tools/list`). Only the client knows whether a probe phase, a protocol-version
+            // fallback or an OAuth refresh retry are in play, so a `startup_timeout_sec`-derived
+            // wrapper here would cut a legitimate handshake short.
+            let registrations = match client.get_tool_registrations(mcp_state_arc).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::debug!(
@@ -534,22 +522,9 @@ impl SessionActor {
                         attach_elicitation_tx(&state, &client);
                     }
                     let arc = std::sync::Arc::new(client);
-                    let init_budget = std::time::Duration::from_secs(
-                        arc.startup_timeout_sec()
-                            .saturating_mul(2)
-                            .saturating_add(5),
-                    );
-                    let registrations = match tokio::time::timeout(
-                        init_budget,
-                        arc.get_tool_registrations(self.mcp_state.clone()),
-                    )
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(crate::session::mcp_servers::McpError::Timeout {
-                            server: server_name.clone(),
-                            timeout_secs: init_budget.as_secs(),
-                        })
-                    }) {
+                    // Bounded inside `get_tool_registrations`; see the note on the retry_auth_required path.
+                    let registrations =
+                        match arc.get_tool_registrations(self.mcp_state.clone()).await {
                         Ok(r) => r,
                         Err(e) => {
                             tracing::debug!(
@@ -1485,27 +1460,15 @@ impl SessionActor {
                             client.set_event_tx(Some(tx));
                         }
                         attach_elicitation_tx(&*mcp_state.lock().await, client);
-                        // `try_handshake` already bounds the connect with `startup_timeout_sec`
-                        // The post-handshake `tools/list` round-trip inside `get_tool_registrations` is otherwise unbounded
-                        // The progress loop below only finishes once every future resolves
-                        // A server that connects then stalls on `tools/list` would block `mcp_initialized` forever
-                        // That hangs the pager's "Connecting MCPs (N/M)…" spinner
-                        // Budget the per-server init (handshake and initial list) so one hung server can't hold up the others' completion signal
-                        let init_budget = std::time::Duration::from_secs(
-                            timeout_sec.saturating_mul(2).saturating_add(5),
-                        );
-                        let registrations = match tokio::time::timeout(
-                            init_budget,
-                            client.get_tool_registrations(mcp_state),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(crate::session::mcp_servers::McpError::Timeout {
-                                server: server_name.clone(),
-                                timeout_secs: init_budget.as_secs(),
-                            }),
-                        };
+                        // The progress loop below only finishes once every future resolves, so one
+                        // hung server must not hold up the others' completion signal — a server
+                        // that connects then stalls on `tools/list` would block `mcp_initialized`
+                        // forever and hang the pager's "Connecting MCPs (N/M)…" spinner.
+                        // `get_tool_registrations` owns that bound: it covers the handshake's worst
+                        // case (probe phase, protocol-version fallback, OAuth refresh retry) plus
+                        // the first `tools/list`. A `timeout_sec`-derived wrapper here cannot see
+                        // any of those and would cut a legitimate handshake short.
+                        let registrations = client.get_tool_registrations(mcp_state).await;
                         match registrations {
                             Ok(handles) => {
                                 Ok((server_name, handles, server_start.elapsed(), timeout_sec))

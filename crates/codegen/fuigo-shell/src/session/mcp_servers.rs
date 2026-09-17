@@ -35,6 +35,10 @@ fn resolve_overrides(
         tool_timeout_sec: config.as_ref().and_then(|c| c.tool_timeout_sec),
         tool_timeouts: config.as_ref().and_then(|c| c.tool_timeouts.clone()),
         expose_image_base64: config.as_ref().and_then(|c| c.expose_image_base64),
+        // The ordinary config path has no outer deadline to fit: each handshake phase carries
+        // its own timeout and nothing is waiting to cancel the whole thing. Only the bind path
+        // (`fuigo_workspace::mcp::drive_server_starts`) sets this.
+        handshake_deadline_sec: None,
     })
 }
 

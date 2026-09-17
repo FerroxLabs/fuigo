@@ -50,4 +50,14 @@ pub mod oauth;
 pub mod oauth_config;
 pub mod owned_clients;
 pub mod servers;
+/// Ported from upstream VERBATIM (module and its tests), so `tool_name.rs` and
+/// `tool_name_tests.rs` diff byte-for-byte against upstream's copies bar the crate rename.
+///
+/// That deliberately carries upstream's `clippy::indexing_slicing` rewrite in
+/// `parse_mcp_qualified_name` (`&tool_with_delimiter[..]` → `.get(..)?`, behaviour-identical:
+/// the index is a byte boundary the `windows` scan just found). Unrelated same-sync churn
+/// belongs to no item in this branch, but keeping the port whole is the better trade than
+/// hand-reverting one line and losing the byte-for-byte diff. Conscious acceptance, not an
+/// oversight — do not re-raise it.
+mod tool_name;
 pub mod wire;
