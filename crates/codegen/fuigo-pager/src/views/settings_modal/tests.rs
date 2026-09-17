@@ -78,6 +78,8 @@ fn contextual_hints_group_sub_sheet_flow() {
 /// Other choices are unaffected.
 #[test]
 fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
+    // effective_enum_choices reads the terminal-theme rollout gate global; pin it on.
+    let _guard = crate::theme::cache::pin_theme();
     let reg = SettingsRegistry::defaults();
     let meta = reg
         .find("permission_mode")
@@ -120,49 +122,60 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
         assert_eq!(
             effective_enum_choices("theme", theme_choices, &gated_off).len(),
             theme_choices.len(),
-            "non-permission_mode keys are never filtered"
+            "the auto gate must not filter theme keys"
         );
     }
 }
 
-/// `voice_capture_mode`'s "hold" choice is gated off without key releases and available with them; "toggle" is never gated.
-/// Permission_mode's "auto" gating is preserved.
-/// Pure; no process-global mutation.
+/// `voice_capture_mode`'s "hold" choice is gated off without key releases and available with them;
+/// "toggle" is never gated. Permission_mode's "auto" gating is preserved. The theme keys'
+/// "terminal" choice is gated on the rollout flag. Pure; no process-global mutation.
 #[test]
-fn enum_choice_gated_off_covers_voice_and_permission() {
+fn enum_choice_gated_off_covers_voice_permission_and_terminal_theme() {
+    let on = EnumChoiceGates {
+        auto_mode: true,
+        kitty_releases: true,
+        terminal_theme: true,
+    };
     // voice "hold": gated iff no key releases.
     assert!(enum_choice_gated_off(
         "voice_capture_mode",
         "hold",
-        true,
-        false
+        EnumChoiceGates {
+            kitty_releases: false,
+            ..on
+        }
     ));
-    assert!(!enum_choice_gated_off(
-        "voice_capture_mode",
-        "hold",
-        true,
-        true
-    ));
+    assert!(!enum_choice_gated_off("voice_capture_mode", "hold", on));
     // voice "toggle": never gated.
     assert!(!enum_choice_gated_off(
         "voice_capture_mode",
         "toggle",
-        true,
-        false
+        EnumChoiceGates {
+            kitty_releases: false,
+            ..on
+        }
     ));
     // permission_mode "auto": gated iff the auto gate is off.
     assert!(enum_choice_gated_off(
         "permission_mode",
         "auto",
-        false,
-        true
+        EnumChoiceGates {
+            auto_mode: false,
+            ..on
+        }
     ));
-    assert!(!enum_choice_gated_off(
-        "permission_mode",
-        "auto",
-        true,
-        true
-    ));
+    assert!(!enum_choice_gated_off("permission_mode", "auto", on));
+    // Each theme key's "terminal": gated iff the rollout flag is off; other themes unaffected.
+    let theme_off = EnumChoiceGates {
+        terminal_theme: false,
+        ..on
+    };
+    for key in ["theme", "auto_dark_theme", "auto_light_theme"] {
+        assert!(enum_choice_gated_off(key, "terminal", theme_off));
+        assert!(!enum_choice_gated_off(key, "terminal", on));
+        assert!(!enum_choice_gated_off(key, "fuigonight", theme_off));
+    }
 }
 
 fn meta_for(reg: &SettingsRegistry, key: SettingKey) -> &SettingMeta {

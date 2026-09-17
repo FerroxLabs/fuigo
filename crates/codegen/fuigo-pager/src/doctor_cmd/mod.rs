@@ -60,6 +60,8 @@ fn run_report(json_output: bool, writer: &mut impl Write) -> Result<()> {
 }
 
 pub fn collect_report() -> DiagnosticReport {
+    // Standalone path: pager startup never ran, so seed the terminal-theme rollout gate from the local tiers before the theme listing.
+    crate::theme::cache::set_terminal_theme_enabled(crate::app::resolve_terminal_theme_enabled());
     let terminal = crate::terminal::standalone_terminal_context();
     let report = collect_report_with(crate::diagnostics::probes::collect_standalone(&terminal));
     configured_report_for_terminal(report, &terminal)

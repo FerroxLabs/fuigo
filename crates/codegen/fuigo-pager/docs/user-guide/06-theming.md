@@ -6,7 +6,7 @@ Fuigo draws all TUI colors from a central theme. You can switch themes while Fui
 
 ## Available Themes
 
-Fuigo includes five built-in themes, plus an `auto` option that follows your system appearance:
+Fuigo includes five built-in themes, plus an `auto` option that follows your system appearance and an opt-in transparent `terminal` theme:
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|
@@ -15,6 +15,9 @@ Fuigo includes five built-in themes, plus an `auto` option that follows your sys
 | **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Dark, blue-tinted backgrounds from the Tokyo Night palette. Loses its character when quantized. | Yes |
 | **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | Muted dark palette with mauve accents, from the Rosé Pine family. | Yes |
 | **OscuraMidnight** | `oscura`, `oscura-midnight` | Deep dark base with purple accents. | Yes |
+| **Terminal** | `terminal`, `terminal-default`, `transparent`, `native` | Paints no backgrounds at all: your terminal's own canvas and 16-color ANSI palette show through, so it is legible on both light and dark profiles. Selection and hover read as reverse video rather than a colored band. Off by default — see below. | No |
+
+**The `terminal` theme is behind a rollout flag.** Until you turn it on it does not appear in `/theme`, the `/settings` theme choosers, or `/doctor`'s theme list, and `theme = "terminal"` in `config.toml` falls back to the default like any unknown name. Turn it on with `FUIGO_TERMINAL_THEME=1`, or `[features] terminal_theme = true` in `config.toml` (a `requirements.toml` pin wins over both).
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
 

@@ -23,6 +23,8 @@ pub mod tokyonight;
 pub use color_support::quantize;
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
+use std::sync::LazyLock;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeKind {
     FuigoNight = 0,
@@ -31,6 +33,7 @@ pub enum ThemeKind {
     RosePineMoon = 3,
     OscuraMidnight = 5,
     /// Every bg is `Reset` so the terminal canvas shows through; legible on both polarities without appearance detection.
+    /// Hidden and unparseable while `cache::terminal_theme_enabled()` is off.
     Terminal = 6,
     /// Meta-variant: follow system dark/light appearance.
     ///
@@ -51,19 +54,48 @@ impl ThemeKind {
         ThemeKind::Terminal,
     ];
 
+    /// [`ALL`] minus the gated `terminal`. Ignores color capability ([`available()`] filters that).
+    /// Derived from [`ALL`] so a new theme cannot be omitted.
+    pub fn selectable() -> &'static [ThemeKind] {
+        if cache::terminal_theme_enabled() {
+            Self::ALL
+        } else {
+            static GATED: LazyLock<Vec<ThemeKind>> = LazyLock::new(|| {
+                ThemeKind::ALL
+                    .iter()
+                    .copied()
+                    .filter(|kind| !kind.is_terminal_native())
+                    .collect()
+            });
+            &GATED
+        }
+    }
+
     /// Theme kinds available on the current terminal.
     ///
-    /// Filters out themes that require truecolor when the terminal does not support it (e.g., macOS Terminal.app is 256-color).
+    /// [`selectable()`] minus themes that require truecolor when the terminal does not support it (e.g., macOS Terminal.app is 256-color).
     pub fn available() -> &'static [ThemeKind] {
-        // Pick the right const slice for the detected color level; no heap allocation needed
-        const ALL: &[ThemeKind] = ThemeKind::ALL;
-        const NO_TRUECOLOR: &[ThemeKind] =
-            &[ThemeKind::FuigoNight, ThemeKind::FuigoDay, ThemeKind::Terminal];
-
         if color_support::detect().has_truecolor() {
-            ALL
+            return Self::selectable();
+        }
+        if cache::terminal_theme_enabled() {
+            static NO_TRUECOLOR: LazyLock<Vec<ThemeKind>> = LazyLock::new(|| {
+                ThemeKind::ALL
+                    .iter()
+                    .copied()
+                    .filter(|kind| !kind.requires_truecolor())
+                    .collect()
+            });
+            &NO_TRUECOLOR
         } else {
-            NO_TRUECOLOR
+            static NO_TRUECOLOR_GATED: LazyLock<Vec<ThemeKind>> = LazyLock::new(|| {
+                ThemeKind::ALL
+                    .iter()
+                    .copied()
+                    .filter(|kind| !kind.requires_truecolor() && !kind.is_terminal_native())
+                    .collect()
+            });
+            &NO_TRUECOLOR_GATED
         }
     }
 
@@ -118,15 +150,20 @@ impl ThemeKind {
 
     /// Parse a theme name (case-insensitive) against [`display_name`](Self::display_name) and [`aliases`](Self::aliases).
     /// Every conversion from string to `ThemeKind` must go through this function.
+    /// While the `terminal` rollout gate is off its names do not parse, so a configured or typed value falls back like any unknown name.
     pub fn from_name(name: &str) -> Option<Self> {
         let lower = name.to_lowercase();
-        Self::ALL
+        let kind = Self::ALL
             .iter()
             .chain(std::iter::once(&Self::Auto))
             .copied()
             .find(|kind| {
                 kind.display_name() == lower || kind.aliases().contains(&lower.as_str())
-            })
+            })?;
+        if kind.is_terminal_native() && !cache::terminal_theme_enabled() {
+            return None;
+        }
+        Some(kind)
     }
 
     /// Whether this is the meta "auto" variant (resolved at runtime).
@@ -639,6 +676,9 @@ mod tests {
     /// Every alias parses back to its own kind, so no alias is shadowed by another kind's name.
     #[test]
     fn from_name_accepts_every_alias() {
+        // `from_name` consults the terminal-theme rollout gate, a process global: serialize and seed it on.
+        let _guard = cache::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        cache::reset_for_test();
         for kind in ThemeKind::ALL.iter().chain([&ThemeKind::Auto]).copied() {
             for alias in kind.aliases() {
                 assert_eq!(ThemeKind::from_name(alias), Some(kind), "alias {alias}");
@@ -650,6 +690,9 @@ mod tests {
     /// The transparent theme parses under its canonical name and aliases and is listed in every catalog.
     #[test]
     fn terminal_theme_parses_and_is_selectable() {
+        // `from_name`/`available` consult the rollout gate, a process global: serialize and seed it on.
+        let _guard = cache::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        cache::reset_for_test();
         for name in ["terminal", "terminal-default", "transparent", "native", "TERMINAL"] {
             assert_eq!(
                 ThemeKind::from_name(name),
@@ -660,9 +703,33 @@ mod tests {
         assert_eq!(canonical_name("transparent"), Some("terminal"));
         assert_eq!(display_name_for_canonical("terminal"), "Terminal");
         assert!(ThemeKind::ALL.contains(&ThemeKind::Terminal));
+        assert!(ThemeKind::selectable().contains(&ThemeKind::Terminal));
         assert!(ThemeKind::available().contains(&ThemeKind::Terminal));
         assert!(ThemeKind::Terminal.is_terminal_native());
         assert!(!ThemeKind::Terminal.requires_truecolor());
+    }
+
+    /// With the rollout gate off, the `terminal` theme neither parses nor appears in any catalog; on, both come back.
+    /// This is the release decision: a 1.0.20 upgrade must not silently repaint anyone's colours.
+    #[test]
+    fn terminal_rollout_gate_hides_and_rejects_the_terminal_theme() {
+        // The gate is a process global (test default: on) — serialize with the other theme-global tests and restore via reset.
+        let _guard = cache::test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        cache::reset_for_test();
+
+        cache::set_terminal_theme_enabled(false);
+        for name in ["terminal", "terminal-default", "transparent", "native"] {
+            assert_eq!(ThemeKind::from_name(name), None, "{name} must not parse");
+        }
+        assert!(!ThemeKind::selectable().contains(&ThemeKind::Terminal));
+        assert!(!ThemeKind::available().contains(&ThemeKind::Terminal));
+
+        cache::set_terminal_theme_enabled(true);
+        assert_eq!(ThemeKind::from_name("terminal"), Some(ThemeKind::Terminal));
+        assert!(ThemeKind::selectable().contains(&ThemeKind::Terminal));
+        assert!(ThemeKind::available().contains(&ThemeKind::Terminal));
+
+        cache::reset_for_test();
     }
 
     #[test]

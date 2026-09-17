@@ -67,6 +67,11 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
+    EnumChoice {
+        canonical: "terminal",
+        display: "Terminal",
+        description: "Terminal's own background and text colors.",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -495,6 +500,11 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "oscura-midnight",
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "terminal",
+        display: "Terminal",
+        description: "Terminal's own background and text colors.",
     },
 ];
 
