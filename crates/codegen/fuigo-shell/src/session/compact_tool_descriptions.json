@@ -272,7 +272,7 @@
   },
   {
     "name": "get_command_or_subagent_output",
-    "original": "Get output and status from a background task or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents; for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n- Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at 600000 (~10 min) (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
+    "original": "Get output and status from a background task or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents; for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n- Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at 3600000 (~1 h) (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -285,7 +285,7 @@
           "default": []
         },
         "timeout_ms": {
-          "description": "Max wait time in milliseconds, up to 600000 (~10 min). Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot.",
+          "description": "Max wait time in milliseconds, up to 3600000 (~1 h). Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot.",
           "type": [
             "integer",
             "null"
@@ -293,13 +293,13 @@
           "format": "uint64",
           "minimum": 0,
           "default": null,
-          "maximum": 600000
+          "maximum": 3600000
         }
       },
       "type": "object",
       "required": []
     },
-    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted timeout_ms waits up to 120000 ms for completion; a positive value waits up to that long, capped at 600000 (values below 5000 are raised to 5000: short polls waste a model call each); 0 is a nonblocking snapshot. Read output_file for large output."
+    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted timeout_ms waits up to 120000 ms for completion; a positive value waits up to that long, capped at 3600000 (values below 5000 are raised to 5000: short polls waste a model call each); 0 is a nonblocking snapshot. Read output_file for large output."
   },
   {
     "name": "read_file",
@@ -436,7 +436,7 @@
   },
   {
     "name": "get_command_or_subagent_output",
-    "original": "Get output and status from a background task, monitor, or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n- Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at 600000 (~10 min) (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
+    "original": "Get output and status from a background task, monitor, or subagent.\n\nUsage notes:\n- Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with timeout_ms omitted or positive wait until all complete\n- Omit timeout_ms to wait up to 120000 ms for completion; a positive timeout_ms waits up to that many milliseconds, capped at 3600000 (~1 h) (values below 5000 ms are raised to 5000 ms: short polls waste a model call each); pass 0 for a non-blocking status snapshot\n- Returns current output, status, and exit code if completed\n- If output is large, use read_file on the output_file path",
     "parameters": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -449,7 +449,7 @@
           "default": []
         },
         "timeout_ms": {
-          "description": "Max wait time in milliseconds, up to 600000 (~10 min). Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot.",
+          "description": "Max wait time in milliseconds, up to 3600000 (~1 h). Omit it to wait up to 120000 ms for completion; positive values below 5000 are raised to 5000 (short polls waste a model call each); pass 0 for a non-blocking status snapshot.",
           "type": [
             "integer",
             "null"
@@ -457,13 +457,13 @@
           "format": "uint64",
           "minimum": 0,
           "default": null,
-          "maximum": 600000
+          "maximum": 3600000
         }
       },
       "type": "object",
       "required": []
     },
-    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted timeout_ms waits up to 120000 ms for completion; a positive value waits up to that long, capped at 600000 (values below 5000 are raised to 5000: short polls waste a model call each); 0 is a nonblocking snapshot. Read output_file for large output."
+    "compact": "Get output, status and completed exit codes for task_ids from background commands, monitors or subagents. Use an array even for one ID. Omitted timeout_ms waits up to 120000 ms for completion; a positive value waits up to that long, capped at 3600000 (values below 5000 are raised to 5000: short polls waste a model call each); 0 is a nonblocking snapshot. Read output_file for large output."
   },
   {
     "name": "search_replace",

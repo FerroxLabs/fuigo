@@ -600,7 +600,7 @@ async fn run_read_one(
             )));
         }
     }
-    let file_bytes = match fs.read_file(&path).await {
+    let mut file_bytes = match fs.read_file(&path).await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::debug!(?e, "Failed to read file");
@@ -656,11 +656,25 @@ async fn run_read_one(
     if let Ok(metadata) = bytes_to_metadata(&file_bytes)
         && metadata.is_image()
     {
-        return Ok(crate::implementations::read_file::image::image_read_output(
-            file_bytes,
-            metadata.mime_type,
-        )
-        .await);
+        if crate::implementations::read_file::should_embed_as_conversation_image(
+            &path,
+            &file_bytes,
+            &metadata.mime_type,
+        ) {
+            return Ok(crate::implementations::read_file::image::image_read_output(
+                file_bytes,
+                metadata.mime_type,
+            )
+            .await);
+        }
+        if let Some(svg_text) = crate::implementations::read_file::extract_svg_text(&file_bytes) {
+            file_bytes = svg_text.into_bytes();
+        } else {
+            return Ok(ReadFileOutput::ImageSizeError(
+                "Could not embed image in conversation: SVG or incomplete PNG preview cannot be sent as an image"
+                    .to_owned(),
+            ));
+        }
     }
     let extension = path
         .extension()
@@ -1865,6 +1879,70 @@ mod tests {
             mime_type: "".to_string(),
         };
         assert!(!metadata.is_image());
+    }
+    #[tokio::test]
+    async fn read_file_adobe_svg_with_truncated_png_prefix_reads_as_text() {
+        let tmp = TempDir::new().unwrap();
+        let bytes = crate::implementations::read_file::metadata::truncated_png_then_svg();
+        std::fs::write(tmp.path().join("baidu.svg"), &bytes).unwrap();
+        let tool = ReadFileTool;
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: "baidu.svg".to_string(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: None,
+        };
+        let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(content) => {
+                assert!(
+                    content.raw_output.contains("<svg"),
+                    "must read SVG markup, not embed the thumbnail: {content:?}"
+                );
+                assert!(content.raw_output.contains("baidu"));
+                assert!(
+                    !content.raw_output.contains('\u{FFFD}'),
+                    "PNG prefix must not leak into the text read"
+                );
+            }
+            ReadFileOutput::ImageContent(_) => {
+                panic!("Adobe SVG must not take the PNG image-embed path")
+            }
+            other => panic!("expected FileContent, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    async fn read_file_truncated_png_prefix_svg_without_markup_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let png = crate::implementations::read_file::metadata::truncated_png_prefix();
+        std::fs::write(tmp.path().join("preview.svg"), &png).unwrap();
+        let tool = ReadFileTool;
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: "preview.svg".to_string(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: None,
+        };
+        let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::ImageSizeError(msg) => {
+                assert!(msg.contains("incomplete PNG") || msg.contains("SVG"));
+            }
+            ReadFileOutput::ImageContent(_) => {
+                panic!("incomplete PNG preview on .svg must not embed")
+            }
+            other => panic!("expected ImageSizeError, got {other:?}"),
+        }
     }
     fn build_gitignore(root: &std::path::Path, patterns: &[&str]) -> ignore::gitignore::Gitignore {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
