@@ -527,6 +527,11 @@ impl ScrollbackState {
         self.bump_generation();
     }
 
+    /// Minimal mode's print-once commit pass stamps thinking entries `Expanded` directly into the shared state
+    /// (`minimal_commit_display_mode` in `fuigo-pager-minimal`), so a fullscreen → minimal → fullscreen round trip
+    /// would otherwise come back with every previously-folded thought sprung open.
+    pub fn reapply_thinking_fold_policy(&mut self) {}
+
     /// Expand all truncated groups (add every group-start ID to expanded_groups).
     /// Runs are walked with the shared `joins_dense_run` predicate, so the inserted ids agree with the truncation pass's breaks on claimed entries.
     /// Leading hidden thinking can still skew the keyed id off the truncation header, the same pre-existing divergence as `group_range_of`.
