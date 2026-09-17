@@ -529,7 +529,13 @@ where
                             }
                             debug!(bytes = trimmed_end.len(), "received WS text -> agent");
 
-                            if to_agent_tx.send(trimmed_end.to_string()).is_err() {
+                            let mut json = json;
+                            let outbound = if declare_relay_client_capabilities(&mut json) {
+                                json.to_string()
+                            } else {
+                                trimmed_end.to_string()
+                            };
+                            if to_agent_tx.send(outbound).is_err() {
                                 warn!("Failed to forward message to agent - channel closed");
                                 break;
                             }
@@ -654,6 +660,42 @@ where
         return Ok(SessionEndReason::AuthError);
     }
     Ok(SessionEndReason::Normal)
+}
+/// Capabilities the relay holds as a client regardless of what its `initialize` says.
+///
+/// The relay is the durable server-side store for every session on this
+/// connection and persists `user_message_chunk` solely from the agent's
+/// notifications — it never re-derives the prompt from `session/prompt`. Since
+/// the live echo became opt-in (`fuigo/userMessageEcho`), a relay whose
+/// `initialize` omits the flag silently loses every user prompt from stored
+/// history. Declaring it here, where the relay's frames enter the agent, makes
+/// persistence independent of the relay build; an explicit value from the relay
+/// is left alone. Returns whether the frame was modified.
+fn declare_relay_client_capabilities(frame: &mut serde_json::Value) -> bool {
+    if frame.get("method").and_then(|m| m.as_str()) != Some("initialize") {
+        return false;
+    }
+    let Some(params) = frame.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let caps = params
+        .entry("clientCapabilities")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(caps) = caps.as_object_mut() else {
+        return false;
+    };
+    let meta = caps.entry("_meta").or_insert_with(|| serde_json::json!({}));
+    let Some(meta) = meta.as_object_mut() else {
+        return false;
+    };
+    if meta.contains_key(crate::session::USER_MESSAGE_ECHO_CAPABILITY) {
+        return false;
+    }
+    meta.insert(
+        crate::session::USER_MESSAGE_ECHO_CAPABILITY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    true
 }
 #[cfg(test)]
 mod tests {
@@ -867,6 +909,53 @@ mod tests {
             .expect("should have forwarded message to agent");
         let received_json: serde_json::Value = serde_json::from_str(&received).unwrap();
         assert_eq!(received_json["method"], "initialize");
+    }
+    /// End to end over the real forwarding path: the frame the AGENT receives carries the echo
+    /// capability even though the relay's own `initialize` never mentioned it. Without this, the
+    /// agent's opt-in gate suppresses every live `user_message_chunk` and the relay's store — which
+    /// is built only from the agent's notifications — keeps sessions with no user prompts in them.
+    #[tokio::test]
+    async fn test_ws_session_declares_user_message_echo_on_the_forwarded_initialize() {
+        let (client_ws, server_ws) = ws_pair().await;
+        let (mut server_tx, _server_rx) = server_ws.split();
+        let (to_agent_tx, mut to_agent_rx) = mpsc::unbounded_channel::<String>();
+        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
+        let cancel = CancellationToken::new();
+        let msg_str = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": 1, "clientCapabilities": { "fs": {} } }
+        })
+        .to_string();
+        tokio::spawn(async move {
+            let _ = server_tx
+                .send(Message::Text(Utf8Bytes::from(msg_str)))
+                .await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = server_tx.close().await;
+        });
+        let _result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+        )
+        .await
+        .expect("test timed out");
+        let received = to_agent_rx
+            .try_recv()
+            .expect("should have forwarded message to agent");
+        let received_json: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(
+            received_json.pointer("/params/clientCapabilities/_meta/fuigo~1userMessageEcho"),
+            Some(&json!(true)),
+            "the relay must declare the live user-message echo on the frame it forwards"
+        );
+        assert_eq!(received_json["method"], "initialize");
+        assert_eq!(received_json["id"], json!(1));
+        assert_eq!(
+            received_json.pointer("/params/protocolVersion"),
+            Some(&json!(1))
+        );
     }
     #[tokio::test]
     async fn test_ws_session_cancel_stops_session() {
@@ -1170,5 +1259,65 @@ mod tests {
             "should have retried after failed refresh, got {}",
             connection_count.load(Ordering::SeqCst)
         );
+    }
+    /// U086's relay half. The relay persists `user_message_chunk` only from the agent's
+    /// notifications, so once the live echo became opt-in a relay whose `initialize` omits
+    /// `fuigo/userMessageEcho` would silently store sessions with no user prompts at all.
+    #[test]
+    fn relay_initialize_gains_user_message_echo_capability() {
+        let mut frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": { "_meta": { "fuigo/fs_notify": true } }
+            }
+        });
+        assert!(declare_relay_client_capabilities(&mut frame));
+        let meta = frame
+            .pointer("/params/clientCapabilities/_meta")
+            .expect("_meta present");
+        assert_eq!(
+            meta.get("fuigo/userMessageEcho"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(meta.get("fuigo/fs_notify"), Some(&serde_json::json!(true)));
+        assert_eq!(frame.get("id"), Some(&serde_json::json!(7)));
+    }
+    #[test]
+    fn relay_initialize_without_capabilities_block_gets_one() {
+        let mut frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": 1 }
+        });
+        assert!(declare_relay_client_capabilities(&mut frame));
+        assert_eq!(
+            frame.pointer("/params/clientCapabilities/_meta/fuigo~1userMessageEcho"),
+            Some(&serde_json::json!(true))
+        );
+    }
+    #[test]
+    fn relay_explicit_user_message_echo_is_respected() {
+        let mut frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "clientCapabilities": { "_meta": { "fuigo/userMessageEcho": false } } }
+        });
+        assert!(!declare_relay_client_capabilities(&mut frame));
+        assert_eq!(
+            frame.pointer("/params/clientCapabilities/_meta/fuigo~1userMessageEcho"),
+            Some(&serde_json::json!(false))
+        );
+    }
+    #[test]
+    fn non_initialize_frames_are_left_alone() {
+        for frame in [
+            serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new", "params": { "cwd": "/w", "_meta": {} } }),
+            serde_json::json!({ "jsonrpc": "2.0", "id": 3, "result": { "ok": true } }),
+            serde_json::json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "s" } }),
+        ] {
+            let original = frame.clone();
+            let mut frame = frame;
+            assert!(!declare_relay_client_capabilities(&mut frame));
+            assert_eq!(frame, original);
+        }
     }
 }
