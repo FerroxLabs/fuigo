@@ -903,7 +903,7 @@ impl QueuePane {
         focused: bool,
         layout_cfg: &LayoutConfig,
         overlay_area: Option<Rect>,
-        is_turn_running: bool,
+        can_send_now: bool,
     ) {
         // Detect a theme switch and refresh the list style
         // Its `selection_bg` (the focused-row highlight) is captured from the theme's `bg_highlight`
@@ -1029,11 +1029,18 @@ impl QueuePane {
                         .bind(Rect::new(cancel_x, screen_y, cancel_w, 1), entry.id);
                 }
 
+                let interject_label = "[Send now]";
+                let interject_w = interject_label.len() as u16;
+                let show_send_now = can_send_now && entry.capabilities.can_send_now();
+
                 // [edit] sits flush against [cancel] (no gap): a gap would let the queued message behind the row leak through the seam
                 // Unlike [Send now] it renders regardless of turn state; the keyboard `e` edit works either way
+                // Drop [edit] if [Send now] fits alone but not with [edit]: the time-sensitive button wins the slot.
                 let edit_label = "[edit]";
                 let edit_w = edit_label.len() as u16;
+                let send_now_fits_alone = show_send_now && fits(right, interject_w).is_some();
                 if entry.capabilities.can_edit()
+                    && (!send_now_fits_alone || fits(right, interject_w + edit_w).is_some())
                     && let Some(edit_x) = fits(right, edit_w)
                 {
                     right = edit_x;
@@ -1047,11 +1054,9 @@ impl QueuePane {
                         .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
                 }
 
-                if is_turn_running && entry.capabilities.can_send_now() {
+                if show_send_now {
                     // The compact [Send now] label still hit-tests as force-interject
                     // Leftmost in the chain, flush against [edit] for the same no-seam reason
-                    let interject_label = "[Send now]";
-                    let interject_w = interject_label.len() as u16;
                     if let Some(interject_x) = fits(right, interject_w) {
                         // Brighten the fg on hover (same hover color as the [Dashboard] button) so it reads as clickable
                         let interject_style = if self.send_now.is_hovered_for(entry.id) {
@@ -1790,6 +1795,53 @@ mod tests {
             cancel.x,
             "[edit] must sit flush against [cancel] when [Send now] is hidden"
         );
+    }
+
+    /// A row too narrow for the full chain drops `[edit]` before the
+    /// time-sensitive `[Send now]`; a row too narrow for `[Send now]` at all
+    /// still shows `[edit][cancel]`.
+    #[test]
+    fn narrow_pane_drops_edit_before_send_now() {
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "msg"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        pane.list_state.select_by_id(
+            *pane
+                .entry_ids()
+                .first()
+                .unwrap_or_else(|| panic!("queued id")),
+        );
+        let render = |pane: &mut QueuePane, inner_w: u16| {
+            let area = Rect::new(0, 0, 80, 1);
+            pane.render(
+                area,
+                &mut Buffer::empty(area),
+                true,
+                &layout_cfg,
+                None,
+                true,
+            );
+            let padding = area.width - pane.last_inner.expect("inner recorded").width;
+            let area = Rect::new(0, 0, padding + inner_w, 1);
+            pane.render(
+                area,
+                &mut Buffer::empty(area),
+                true,
+                &layout_cfg,
+                None,
+                true,
+            );
+        };
+
+        render(&mut pane, "[Send now][edit][cancel]".len() as u16 - 1);
+        assert!(pane.send_now.rect.is_some(), "[Send now] survives");
+        assert!(pane.edit_button.rect.is_none(), "[edit] is dropped first");
+
+        render(&mut pane, "[Send now][cancel]".len() as u16 - 1);
+        assert!(pane.send_now.rect.is_none(), "[Send now] can't fit");
+        assert!(pane.edit_button.rect.is_some(), "[edit] takes the space");
     }
 
     /// On panes too narrow for the full `[Send now][edit][cancel]` chain, a button that can't fit right of the content area's left edge is dropped.

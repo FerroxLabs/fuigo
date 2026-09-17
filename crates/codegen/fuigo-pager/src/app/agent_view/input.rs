@@ -1144,23 +1144,7 @@ impl AgentView {
             && key.kind != KeyEventKind::Release
             && registry.matches_id(ActionId::OpenSessions, key)
         {
-            self.active_modal = Some(ActiveModal::SessionPicker {
-                state: crate::views::picker::PickerState::default(),
-                entries: None,
-                loading: true,
-                lanes: Default::default(),
-                previous_palette: None,
-                window: crate::views::modal_window::ModalWindowState::new(),
-                content_results: None,
-                content_loading: false,
-                deep_search_seq: 0,
-                generation: 0,
-                detail_seq: 0,
-                entries_query: None,
-                source_filter: crate::views::session_picker::SourceFilter::default(),
-                pending_delete: None,
-            });
-            return InputOutcome::Action(Action::FetchSessionList);
+            return self.open_session_picker();
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
@@ -1405,6 +1389,8 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ActionId::OpenSettings => InputOutcome::Action(Action::OpenSettings),
+            // Ctrl+R reaches here from the prompt's agent-screen promotion, so the textarea never sees it (no redo).
+            ActionId::OpenSessions => self.open_session_picker(),
             ActionId::ToggleMouseCapture => {
                 crate::unified_log::info(
                     "mouse_reporting_toggle.handle_agent_action",
@@ -1418,6 +1404,26 @@ impl AgentView {
             other => resolve_action(Some(other)).unwrap_or(InputOutcome::Unchanged),
         }
     }
+    fn open_session_picker(&mut self) -> InputOutcome {
+        self.active_modal = Some(ActiveModal::SessionPicker {
+            state: crate::views::picker::PickerState::default(),
+            entries: None,
+            loading: true,
+            lanes: Default::default(),
+            previous_palette: None,
+            window: crate::views::modal_window::ModalWindowState::new(),
+            content_results: None,
+            content_loading: false,
+            deep_search_seq: 0,
+            generation: 0,
+            detail_seq: 0,
+            entries_query: None,
+            source_filter: crate::views::session_picker::SourceFilter::default(),
+            pending_delete: None,
+        });
+        InputOutcome::Action(Action::FetchSessionList)
+    }
+
     /// Returns `true` if the switch happened immediately, `false` if blocked.
     pub(crate) fn set_active_pane(&mut self, target: AgentPane, force: bool) -> bool {
         if target != AgentPane::Scrollback {

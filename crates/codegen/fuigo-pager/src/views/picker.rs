@@ -2836,36 +2836,9 @@ pub fn handle_picker_input(
                 return PickerOutcome::Changed;
             }
 
-            // Printable characters while tabs focused: exit focus and start a search query (mirrors behavior from non-active search hint)
-            if config.show_search_hint && !state.search_active {
-                if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
-                    state.tabs_focused = false;
-                    state.search_active = true;
-                    return PickerOutcome::Changed;
-                }
-                if !config.search_only_on_slash
-                    && !config.vim_normal_first
-                    && is_legacy_alt_word_key(key)
-                {
-                    return PickerOutcome::Changed;
-                }
-                if !config.search_only_on_slash
-                    && !config.vim_normal_first
-                    && is_plain_query_character(key)
-                {
-                    let outcome = state.edit_query(key);
-                    if outcome == LineEditOutcome::TextChanged {
-                        state.tabs_focused = false;
-                        state.search_active = true;
-                    }
-                    if let Some(outcome) = finish_query_edit(state, outcome) {
-                        return outcome;
-                    }
-                }
-            }
-
-            // For other keys (action keys, Esc, etc.) while tabs focused we fall through so the normal paths can still apply
-            // L/R fall through too; the tabs block later returns for them
+            // Everything else falls through to the shared handlers: action keys (Space included), the `f`
+            // filter key, h/l tab cycling, `/` and printable chars (which clear `tabs_focused` where they
+            // start a query). Capturing printable chars here swallowed the action keys.
         }
 
         // Ctrl+F: toggle mode.
@@ -3101,6 +3074,7 @@ pub fn handle_picker_input(
         if config.show_search_hint && !state.search_active {
             if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
                 state.search_active = true;
+                state.tabs_focused = false;
                 return PickerOutcome::Changed;
             }
             if !config.search_only_on_slash
@@ -3614,6 +3588,60 @@ mod tests {
         let outcome = handle_picker_input(&press('i'), &mut state, 3, &config);
         assert!(matches!(outcome, PickerOutcome::Action('i')));
         assert!(!state.search_active);
+    }
+
+    #[test]
+    fn tabs_focused_keys_reach_the_shared_handlers() {
+        // The tab bar holding focus only claims Up/Down/Enter: action keys (Space included) and the advertised `f`
+        // filter key act on the still-selected row, h/l cycle tabs, `/` and any other printable char start a query.
+        let focused = || PickerState {
+            tabs_focused: true,
+            ..PickerState::default()
+        };
+        for vim in [false, true] {
+            let mut config = cfg(true, vim);
+            config.tabs = Some(&["a", "b", "c"]);
+            config.action_keys = &[('u', "update"), (' ', "toggle")];
+            config.filter_label = Some("All");
+
+            for c in ['u', ' '] {
+                let mut state = focused();
+                let outcome = handle_picker_input(&press(c), &mut state, 3, &config);
+                assert!(
+                    matches!(outcome, PickerOutcome::Action(ch) if ch == c),
+                    "vim={vim} c={c:?}"
+                );
+                assert!(state.query().is_empty(), "vim={vim} c={c:?}");
+                assert!(!state.search_active, "vim={vim} c={c:?}");
+            }
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('f'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::FilterCycled), "vim={vim}");
+            assert!(!state.search_active, "vim={vim}");
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('l'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::TabChanged(1)), "vim={vim}");
+            let outcome = handle_picker_input(&press('h'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::TabChanged(2)), "vim={vim}");
+            assert!(state.query().is_empty(), "vim={vim}");
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('/'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::Changed), "vim={vim}");
+            assert!(state.search_active, "vim={vim}");
+            assert!(!state.tabs_focused, "vim={vim}");
+        }
+
+        let mut config = cfg(true, false);
+        config.tabs = Some(&["a", "b"]);
+        let mut state = focused();
+        let outcome = handle_picker_input(&press('a'), &mut state, 3, &config);
+        assert!(matches!(outcome, PickerOutcome::QueryChanged));
+        assert_eq!(state.query(), "a");
+        assert!(state.search_active);
+        assert!(!state.tabs_focused);
     }
 
     #[test]

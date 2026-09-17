@@ -423,36 +423,22 @@ fn paint_peek_config_badge(
     reply: &crate::views::prompt_widget::PromptWidget,
     multiline: bool,
 ) {
-    use crate::views::prompt_widget::{PromptFlag, PromptInfo};
+    use crate::app::actions::PermissionLabel;
+    use crate::views::prompt_widget::{PromptFlag, PromptInfo, mode_flags};
 
     if area.height < 3 || area.width < 6 {
         return;
     }
     let model_label = panel.model_name.clone().unwrap_or_default();
-    let mut flags: Vec<PromptFlag> = Vec::new();
-    // Mirror the chat prompt's flag precedence: plan wins over always-approve, which wins over auto
-    // Plan mode blocks edits regardless of the underlying permission mode (the gate in fuigo-shell)
-    // `plan` alone is therefore the honest badge even when yolo stays on underneath
-    if panel.plan_mode {
-        flags.push(PromptFlag {
-            text: "plan",
-            color: Some(theme.accent_plan),
-            bold: false,
-        });
-    } else if panel.auto_approve {
-        flags.push(PromptFlag {
-            text: "always-approve",
-            color: None,
-            bold: false,
-        });
+    // Mirror the chat prompt's info line: plan and permission are independent axes (`plan · always-approve`)
+    let permission = if panel.auto_approve {
+        PermissionLabel::AlwaysApprove
     } else if panel.auto {
-        // Auto (LLM classifier) mode. Blue `accent_system`.
-        flags.push(PromptFlag {
-            text: "auto",
-            color: Some(theme.accent_system),
-            bold: false,
-        });
-    }
+        PermissionLabel::Auto
+    } else {
+        PermissionLabel::Ask
+    };
+    let flags: Vec<PromptFlag> = mode_flags(panel.plan_mode.then_some("plan"), permission, theme);
     if model_label.is_empty() && flags.is_empty() && !multiline {
         return;
     }
@@ -1236,6 +1222,12 @@ mod tests {
                 .map(|x| buf[(x, h - 1)].symbol().to_string())
                 .collect()
         };
+        // The badge paints over the bottom border, right-aligned inside the corners:
+        // `╰──…─ <badge text> ╯`. Strip the border fill so the badge itself can be pinned exactly.
+        let badge_text = |row: &str| -> String {
+            row.trim_matches(|c: char| matches!(c, '─' | '╰' | '╯' | ' '))
+                .to_string()
+        };
 
         // Summary mode: model and always-approve on the bottom border
         let mut panel =
@@ -1290,19 +1282,19 @@ mod tests {
             "plan flag must show in plan mode: {plan_bottom:?}",
         );
 
-        // Plan plus always-approve shows `plan` only
-        // Plan mode blocks edits in every permission mode (shell-side gate), so the plan badge is the honest one
-        // Yolo stays on underneath and reappears once plan exits
+        // Plan and the permission mode are independent axes: plan mode never hides the permission
+        // flag, so the badge reads `plan · always-approve` (yolo still wins over auto within the
+        // permission axis).
+        // Pinned as the WHOLE badge text rather than a pair of `contains` probes: an exact match
+        // also catches a dropped model name, a missing ` · ` separator, a duplicated or reordered
+        // flag, and an `auto` flag appearing anywhere on the row — none of which `contains` can see.
         planp.auto_approve = true;
         planp.auto = true;
         let plan_yolo_bottom = badge_row(&planp, 6);
-        assert!(
-            plan_yolo_bottom.contains("plan"),
-            "plan flag must show in plan+yolo: {plan_yolo_bottom:?}",
-        );
-        assert!(
-            !plan_yolo_bottom.contains("always-approve") && !plan_yolo_bottom.contains("auto"),
-            "plan suppresses always-approve and auto: {plan_yolo_bottom:?}",
+        assert_eq!(
+            badge_text(&plan_yolo_bottom),
+            "Grok 4 Fast · plan · always-approve",
+            "plan keeps always-approve visible and yolo still wins over auto: {plan_yolo_bottom:?}",
         );
 
         // Yolo without plan shows `always-approve` (and it wins over auto)

@@ -706,6 +706,19 @@ pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope
 pub(super) fn parse_session_picker_entries(
     payload: &serde_json::Value,
 ) -> Vec<crate::app::app_view::SessionPickerEntry> {
+    parse_session_picker_entries_with(payload, |ids| {
+        fuigo_shell::session::resolve_local_session_ids_any_cwd(ids)
+    })
+}
+
+/// [`parse_session_picker_entries`] with an injectable local-session resolver.
+///
+/// `resolve_local` receives candidate ids and returns the subset persisted on disk; each call is a full
+/// `~/.fuigo/sessions` walk, so the relabel pass must hand it the whole list at once.
+pub(super) fn parse_session_picker_entries_with(
+    payload: &serde_json::Value,
+    resolve_local: impl Fn(&[&str]) -> std::io::Result<std::collections::HashSet<String>>,
+) -> Vec<crate::app::app_view::SessionPickerEntry> {
     use crate::app::app_view::SessionPickerEntry;
     let entries: Vec<serde_json::Value> = payload
         .get("sessions")
@@ -714,7 +727,7 @@ pub(super) fn parse_session_picker_entries(
         .unwrap_or_default();
     let now = chrono::Utc::now();
     let cutoff = now - chrono::Duration::days(30);
-    entries
+    let mut parsed: Vec<SessionPickerEntry> = entries
         .into_iter()
         .filter_map(|v| {
             let id = v
@@ -862,15 +875,35 @@ pub(super) fn parse_session_picker_entries(
                     return None;
                 }
             }
-            if e.source == "remote"
-                && fuigo_shell::session::resolve_local_session_any_cwd(&e.id)
-                    .is_some()
-            {
-                e.source = "local".to_string();
-            }
             Some(e)
         })
-        .collect()
+        .collect();
+    // The shell labels a row `remote` when it is absent from the cwd buckets it scanned, so a session stored
+    // under another cwd is still local. One storage walk classifies the whole list; the shell's labels are
+    // still usable without the disk check, so a failed walk degrades instead of failing
+    let remote_ids: Vec<&str> = parsed
+        .iter()
+        .filter(|e| e.source == "remote")
+        .map(|e| e.id.as_str())
+        .collect();
+    if remote_ids.is_empty() {
+        return parsed;
+    }
+    let local_ids = match resolve_local(&remote_ids) {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "session list local-session resolution failed");
+            return parsed;
+        }
+    };
+    // A conversation row can share an id with a Build row; only the rows that supplied the ids may flip
+    for e in parsed
+        .iter_mut()
+        .filter(|e| e.source == "remote" && local_ids.contains(&e.id))
+    {
+        e.source = "local".to_string();
+    }
+    parsed
 }
 /// Convert a resume-picker session into a dormant dashboard roster row.
 ///

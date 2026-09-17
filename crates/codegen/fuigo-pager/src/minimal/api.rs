@@ -297,10 +297,7 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
             .iter()
             .any(|e| Some(e.id.as_str()) != running);
     let has_payload = !agent.prompt.text().trim().is_empty() || has_queued_follow_up;
-    if crate::actions::ActionRegistry::interjection_possible(
-        agent.session.state.is_turn_running(),
-        has_payload,
-    ) {
+    if crate::actions::ActionRegistry::interjection_possible(agent.can_send_now(), has_payload) {
         return false;
     }
     !agent.pinned_upgrade_cta_live

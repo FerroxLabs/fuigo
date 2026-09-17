@@ -901,10 +901,10 @@ pub(crate) fn map_hyperlinks_to_overlay(
     cwd: Option<&std::path::Path>,
     overlay: &mut LinkOverlay,
 ) {
-    // Build mapping: pre-wrap line index to a vec of (wrapped_idx, col_start_in_prewrap, col_end_in_prewrap)
+    // Build mapping: pre-wrap line index to a vec of (wrapped_idx, col_start_in_prewrap, col_end_in_prewrap, indent_width)
     // A joiner of None means a new pre-wrap line starts.
-    let mut pre_wrap_segments: Vec<Vec<(usize, usize, usize)>> = Vec::new();
-    let mut current_segments: Vec<(usize, usize, usize)> = Vec::new();
+    let mut pre_wrap_segments: Vec<Vec<(usize, usize, usize, usize)>> = Vec::new();
+    let mut current_segments: Vec<(usize, usize, usize, usize)> = Vec::new();
     let mut cumulative_col: usize = 0;
 
     for (wrapped_idx, line) in block_output.lines.iter().enumerate() {
@@ -918,9 +918,22 @@ pub(crate) fn map_hyperlinks_to_overlay(
         if let Some(ref joiner) = line.joiner {
             cumulative_col += unicode_width::UnicodeWidthStr::width(joiner.as_str());
         }
+        // For continuation lines (those with a joiner), the content includes a subsequent_indent prefix. This indent is
+        // NOT part of the logical pre-wrap line content, so we must subtract it when mapping hyperlink column ranges.
+        // First wrap rows (no joiner) have the prefix already in pre-wrap hyperlink columns, so don't subtract it there.
+        let indent_width = line.indent_width;
+        let is_continuation = line.joiner.is_some();
+        let logical_indent = if is_continuation { indent_width } else { 0 };
+
         let line_width = line.content.width();
-        current_segments.push((wrapped_idx, cumulative_col, cumulative_col + line_width));
-        cumulative_col += line_width;
+        let logical_width = line_width.saturating_sub(logical_indent);
+        current_segments.push((
+            wrapped_idx,
+            cumulative_col,
+            cumulative_col + logical_width,
+            indent_width,
+        ));
+        cumulative_col += logical_width;
     }
     if !current_segments.is_empty() {
         pre_wrap_segments.push(current_segments);
@@ -948,7 +961,7 @@ pub(crate) fn map_hyperlinks_to_overlay(
             continue;
         }
         let segments = &pre_wrap_segments[adjusted_line];
-        for &(wrapped_idx, seg_col_start, seg_col_end) in segments {
+        for &(wrapped_idx, seg_col_start, seg_col_end, indent_width) in segments {
             // Check if hyperlink's column range overlaps this wrapped segment.
             let overlap_start = h.column_range.start.max(seg_col_start);
             let overlap_end = h.column_range.end.min(seg_col_end);
@@ -966,24 +979,40 @@ pub(crate) fn map_hyperlinks_to_overlay(
                 continue;
             }
 
+            // Compute the position within the logical (indent-excluded) content of this segment
             let local_col_start = overlap_start - seg_col_start;
             let local_col_end = overlap_end - seg_col_start;
+
+            // For the first wrap row of a pre-wrap line, the prefix is already included in the pre-wrap hyperlink
+            // columns, so don't add indent_width as a visual offset. Only continuation rows (with joiners) need the
+            // offset to skip the prepended subsequent_indent.
+            let Some(wrapped_line) = block_output.lines.get(wrapped_idx) else {
+                continue;
+            };
+            let is_continuation = wrapped_line.joiner.is_some();
+            let visual_indent = if is_continuation { indent_width } else { 0 };
 
             // Link columns are logical; map to visual only when paint reorders.
             let visual_ranges = if crate::render::bidi::is_enabled() {
                 row_plain_buf.clear();
-                line_plain_text_into(&block_output.lines[wrapped_idx].content, &mut row_plain_buf);
+                line_plain_text_into(&wrapped_line.content, &mut row_plain_buf);
                 if crate::render::bidi::needs_bidi(&row_plain_buf) {
                     crate::render::bidi::logical_cols_to_visual(
                         &row_plain_buf,
-                        local_col_start,
-                        local_col_end,
+                        local_col_start + visual_indent,
+                        local_col_end + visual_indent,
                     )
                 } else {
-                    vec![(local_col_start, local_col_end)]
+                    vec![(
+                        local_col_start + visual_indent,
+                        local_col_end + visual_indent,
+                    )]
                 }
             } else {
-                vec![(local_col_start, local_col_end)]
+                vec![(
+                    local_col_start + visual_indent,
+                    local_col_end + visual_indent,
+                )]
             };
             for (vs, ve) in visual_ranges {
                 if vs >= ve {

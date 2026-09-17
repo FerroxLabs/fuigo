@@ -35,6 +35,8 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
         super::mouse_reporting_toggle_enabled(),
     );
     app.welcome_prompt.set_screen_mode(mode);
+    // Minimal turns mouse capture off; without a motion event the last hover would stick.
+    app.last_mouse_pos = None;
     for agent in app.agents.values_mut() {
         reseed_agent_screen_mode(agent, mode);
     }
@@ -42,6 +44,10 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
 
 fn reseed_agent_screen_mode(agent: &mut AgentView, mode: ScreenMode) {
     agent.prompt.set_screen_mode(mode);
+    agent.clear_pointer_hover();
+    if !mode.is_minimal() {
+        agent.scrollback.reapply_thinking_fold_policy();
+    }
     for child in agent.subagent_views.values_mut() {
         reseed_agent_screen_mode(child, mode);
     }
@@ -291,6 +297,53 @@ mod tests {
 
         // Leave the fullscreen baseline other tests expect.
         reseed_screen_mode(&mut app, ScreenMode::Fullscreen);
+    }
+
+    /// After fullscreen → minimal → fullscreen, thinking folds must fold
+    /// back shut and the pre-switch pointer highlight must not stick.
+    #[test]
+    fn reseed_to_fullscreen_refolds_thinking_and_clears_hover() {
+        use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::types::DisplayMode;
+
+        // Serializes process-global mutation with other theme-touching tests.
+        let _guard = crate::theme::cache::pin_theme();
+        mark_theme_resolved();
+
+        let mut app = crate::app::app_view::tests::test_app_with_agent();
+        let agent_id = *app.agents.keys().next().expect("agent present");
+        let agent = app.agents.get_mut(&agent_id).expect("agent present");
+
+        let thought = agent
+            .scrollback
+            .push_block(RenderBlock::thinking("reasoning body"));
+        agent
+            .scrollback
+            .get_by_id_mut(thought)
+            .expect("thinking entry")
+            .set_display_mode(DisplayMode::Expanded);
+        agent.hovered_entry = Some(0);
+        agent.hovered_prompt = true;
+        agent.hit_context.hovered = true;
+
+        reseed_screen_mode(&mut app, ScreenMode::Minimal);
+        reseed_screen_mode(&mut app, ScreenMode::Fullscreen);
+
+        let Some(agent) = app.agents.get(&agent_id) else {
+            panic!("missing agent {agent_id:?}");
+        };
+        assert_eq!(
+            agent
+                .scrollback
+                .get_by_id(thought)
+                .expect("thinking entry")
+                .display_mode(),
+            DisplayMode::Collapsed,
+            "minimal's Expanded stamp must not survive the return to fullscreen"
+        );
+        assert_eq!(agent.hovered_entry, None, "entry hover cleared");
+        assert!(!agent.hovered_prompt, "prompt hover cleared");
+        assert!(!agent.hit_context.hovered, "hit-area hover cleared");
     }
 
     #[test]

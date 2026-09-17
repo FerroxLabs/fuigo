@@ -1044,6 +1044,33 @@ pub enum PermissionModeKind {
     /// Auto-approve all tool actions. `yolo_mode = true`.
     AlwaysApprove,
 }
+/// No `Default` arm, unlike [`PermissionModeKind`]: the runtime flags cannot tell `default` from `ask`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionLabel {
+    Ask,
+    Auto,
+    AlwaysApprove,
+}
+impl From<PermissionLabel> for PermissionModeKind {
+    fn from(label: PermissionLabel) -> Self {
+        match label {
+            PermissionLabel::Ask => Self::Ask,
+            PermissionLabel::Auto => Self::Auto,
+            PermissionLabel::AlwaysApprove => Self::AlwaysApprove,
+        }
+    }
+}
+impl PermissionLabel {
+    /// Shares [`PermissionModeKind::as_canonical`] so the info-line flags and the scrollback rows use one string table.
+    pub fn as_canonical(self) -> &'static str {
+        PermissionModeKind::from(self).as_canonical()
+    }
+}
+impl std::fmt::Display for PermissionLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_canonical())
+    }
+}
 impl PermissionModeKind {
     /// Canonical persisted/wire string for the kind.
     /// Matches the `EnumChoice.canonical` values in `settings/defs.rs::PERMISSION_MODE_CHOICES`.
@@ -1569,6 +1596,8 @@ pub enum Effect {
     Compact {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        /// `/compact <instructions>`: forwarded as `userContext`; bare `/compact` sends none.
+        user_context: Option<String>,
     },
     /// Kill a background task.
     KillBgTask {
