@@ -1071,7 +1071,12 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 }
                 Some(self.ms.strong_outer)
             }
-            Tag::Strikethrough => Some(self.ms.strikethrough_outer),
+            Tag::Strikethrough => {
+                if let Some(ref mut state) = self.table_state {
+                    state.cell_strike = true;
+                }
+                Some(self.ms.strikethrough_outer)
+            }
             Tag::Link {
                 dest_url, title, ..
             }
@@ -1212,7 +1217,12 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 }
                 None
             }
-            TagEnd::Strikethrough => None, // No highlight pushed
+            TagEnd::Strikethrough => {
+                if let Some(ref mut state) = self.table_state {
+                    state.cell_strike = false;
+                }
+                None
+            }
             TagEnd::CodeBlock => {
                 // pulldown synthesizes a block end at end-of-input even for an unterminated fence, so the end event alone does not prove closure
                 // A closing fence always sits after the body, so the block range extends past the body exactly when the fence closed
@@ -1245,6 +1255,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                     state.cell_bold = false;
                     state.cell_italic = false;
                     state.cell_code = false;
+                    state.cell_strike = false;
                     state.cell_link = None;
                 }
                 None
@@ -1990,7 +2001,11 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                                 style = style.italic();
                             }
                             if cell_span.code {
+                                // Full replace; apply strike after this so ~~`code`~~ stays crossed out.
                                 style = self.ms.inline_code_inner.style_into();
+                            }
+                            if cell_span.strike {
+                                style = style.crossed_out();
                             }
                             if let Some((url, id)) = &cell_span.link {
                                 // Apply link styling additively (preserves bold/italic if combined)
