@@ -12,7 +12,8 @@ pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, compact_error, is_disk_full_error,
+    EffectMeta, RestoreProgressMsg, SessionFlags, acp_error_user_text, acp_send_bounded,
+    compact_error, is_disk_full_error, parse_worktree_restore_payload,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
 #[cfg(feature = "local-workspace")]
@@ -286,220 +287,55 @@ pub(crate) fn execute(
                 ?git_ref,
                 "CreateWorktreeSession: restore_code, load_session_id, git_ref"
             );
+            let spec = crate::app::worktree_session::WorktreeSpec { label, git_ref };
             tasks
                 .spawn(async move {
+                    use crate::app::worktree_session::{
+                        create_worktree, new_worktree_id, resume_session_into_worktree,
+                    };
                     if let Some(sid) = load_session_id {
                         let local_miss = resume_local_miss
                             .as_deref()
                             .filter(|t| *t == sid);
-                        let resume_started = std::time::Instant::now();
-                        let wt_type = fuigo_shell::util::config::worktree_type();
-                        let copy_mode = if git_ref.is_some() {
-                            "clean"
-                        } else {
-                            "dirty"
-                        };
-                        let mut payload = serde_json::json!({
-                        "sessionId": sid,
-                        "sourceCwd": cwd.to_string_lossy(),
-                        "copyMode": copy_mode,
-                        "worktreeType": wt_type,
-                    });
-                        if let Some(rc) = restore_code {
-                            payload["restoreCode"] = serde_json::Value::Bool(rc);
-                        }
-                        if let Some(ref r) = git_ref {
-                            payload["gitRef"] = serde_json::Value::String(r.clone());
-                        }
-                        let ext_req = acp::ExtRequest::new(
-                            "fuigo/git/worktree/resume_session",
-                            serde_json::value::to_raw_value(&payload)
-                                .expect("serialize resume params")
-                                .into(),
-                        );
                         let _phase = startup::phase_scope(StartupPhase::SessionCreate);
-                        let ext_resp = match helpers::acp_send_bounded(
-                                ext_req,
-                                &tx,
-                                "Worktree session resume",
-                            )
-                            .await
+                        return match resume_session_into_worktree(
+                            &tx,
+                            &cwd,
+                            &spec,
+                            &sid,
+                            restore_code,
+                            local_miss,
+                        )
+                        .await
                         {
-                            Ok(resp) => {
-                                tracing::info!(
-                                session_id = %sid,
-                                elapsed_ms = resume_started.elapsed().as_millis() as u64,
-                                "worktree resume_session: ACP call completed"
-                            );
-                                resp
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                session_id = %sid,
-                                elapsed_ms = resume_started.elapsed().as_millis() as u64,
-                                error = %acp_error_text(&e),
-                                "worktree resume_session: ACP call failed"
-                            );
-                                return TaskResult::WorktreeSessionFailed {
-                                    agent_id,
-                                    error: worktree_resume_failure_message(
-                                        local_miss,
-                                        &acp_error_user_text(&e),
-                                    ),
-                                };
-                            }
-                        };
-                        let resp_value: serde_json::Value = match serde_json::from_str(
-                            ext_resp.0.get(),
-                        ) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                return TaskResult::WorktreeSessionFailed {
-                                    agent_id,
-                                    error: worktree_resume_failure_message(
-                                        local_miss,
-                                        &sanitize_user_error(&e.to_string()),
-                                    ),
-                                };
-                            }
-                        };
-                        if let Some(err) = resp_value
-                            .get("error")
-                            .filter(|v| !v.is_null())
-                        {
-                            let msg = err
-                                .as_str()
-                                .map(String::from)
-                                .unwrap_or_else(|| err.to_string());
-                            return TaskResult::WorktreeSessionFailed {
+                            Ok(resumed) => TaskResult::WorktreeForked {
                                 agent_id,
-                                error: worktree_resume_failure_message(
-                                    local_miss,
-                                    &sanitize_user_error(&msg),
-                                ),
-                            };
-                        }
-                        let result_obj = resp_value.get("result").unwrap_or(&resp_value);
-                        let new_session_id = result_obj
-                            .get("sessionId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&sid);
-                        let wt_path = result_obj
-                            .get("worktreePath")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| cwd.clone());
-                        let eff_cwd = result_obj
-                            .get("effectiveCwd")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| wt_path.clone());
-                        let (code_restored, restore_summary, restore_degree) = parse_worktree_restore_payload(
-                            result_obj,
-                        );
-                        return TaskResult::WorktreeForked {
-                            agent_id,
-                            session_id: acp::SessionId::new(new_session_id),
-                            worktree_path: wt_path,
-                            session_cwd: eff_cwd,
-                            code_restored,
-                            restore_summary,
-                            restore_degree,
-                            resume_session_id: Some(sid),
+                                session_id: acp::SessionId::new(resumed.session_id),
+                                worktree_path: resumed.worktree_root,
+                                session_cwd: resumed.session_cwd,
+                                code_restored: resumed.code_restored,
+                                restore_summary: resumed.restore_summary,
+                                restore_degree: resumed.restore_degree,
+                                resume_session_id: Some(sid),
+                            },
+                            Err(e) => TaskResult::WorktreeSessionFailed {
+                                agent_id,
+                                error: e.0,
+                            },
                         };
                     }
-                    let worktree_id = preferred_session_id
-                        .clone()
-                        .unwrap_or_else(|| {
-                            format!("pager-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
-                        });
-                    let copy_mode = if git_ref.is_some() { "clean" } else { "dirty" };
-                    let mut params = serde_json::json!({
-                    "sourceWorktreePath": cwd.to_string_lossy(),
-                    "newSessionId": worktree_id,
-                    "copyMode": copy_mode,
-                });
-                    if let Some(ref lbl) = label {
-                        params["label"] = serde_json::Value::String(lbl.clone());
-                    }
-                    if let Some(ref r) = git_ref {
-                        params["gitRef"] = serde_json::Value::String(r.clone());
-                    }
-                    let ext_req = acp::ExtRequest::new(
-                        "fuigo/git/worktree/create_from_worktree_sync",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize worktree params")
-                            .into(),
-                    );
-                    let ext_resp = match acp_send(ext_req, &tx).await {
-                        Ok(resp) => resp,
+                    let worktree_id = new_worktree_id(preferred_session_id.as_deref());
+                    let created = match create_worktree(&tx, &cwd, &spec, &worktree_id).await {
+                        Ok(created) => created,
                         Err(e) => {
                             return TaskResult::WorktreeSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't create worktree: {}", acp_error_text(&e)),
-                                ),
+                                error: e.0,
                             };
                         }
                     };
-                    let resp_value: serde_json::Value = match serde_json::from_str(
-                        ext_resp.0.get(),
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return TaskResult::WorktreeSessionFailed {
-                                agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't create worktree: {e}"),
-                                ),
-                            };
-                        }
-                    };
-                    if let Some(err) = resp_value.get("error") {
-                        let msg = err
-                            .as_str()
-                            .map(String::from)
-                            .unwrap_or_else(|| err.to_string());
-                        return TaskResult::WorktreeSessionFailed {
-                            agent_id,
-                            error: sanitize_user_error(
-                                &format!("couldn't create worktree: {msg}"),
-                            ),
-                        };
-                    }
-                    let result_obj = resp_value.get("result").unwrap_or(&resp_value);
-                    let worktree_root = match result_obj
-                        .get("worktreePath")
-                        .and_then(|v| v.as_str())
-                    {
-                        Some(p) => PathBuf::from(p),
-                        None => {
-                            return TaskResult::WorktreeSessionFailed {
-                                agent_id,
-                                error: sanitize_user_error(
-                                    "couldn't create worktree: response missing worktreePath",
-                                ),
-                            };
-                        }
-                    };
-                    let session_cwd = if let Some(git_root) = result_obj
-                        .get("sourceGitRoot")
-                        .and_then(|v| v.as_str())
-                    {
-                        let cwd_str = cwd.to_string_lossy();
-                        if let Some(relative) = cwd_str.strip_prefix(git_root) {
-                            let relative = relative.trim_start_matches('/');
-                            if relative.is_empty() {
-                                worktree_root.clone()
-                            } else {
-                                worktree_root.join(relative)
-                            }
-                        } else {
-                            worktree_root.clone()
-                        }
-                    } else {
-                        worktree_root.clone()
-                    };
+                    let worktree_root = created.worktree_root;
+                    let session_cwd = created.session_cwd;
                     if let Some(ref sid) = preferred_session_id {
                         let session_cwd_str = session_cwd.to_string_lossy();
                         if let Err(e) = crate::app::session_startup::ensure_session_id_available(

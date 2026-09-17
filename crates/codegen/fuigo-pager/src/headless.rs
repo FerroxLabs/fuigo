@@ -28,6 +28,10 @@ use fuigo_shell::util::config as cli_config;
 use fuigo_telemetry::startup::PendingStartup;
 
 use crate::acp::model_state::{EffortTokenError, ModelState};
+use crate::app::worktree_session::{
+    CREATE_METHOD, RESUME_METHOD, WorktreeRpcError, WorktreeSpec, create_worktree,
+    new_worktree_id, note_orphaned_worktree, resume_session_into_worktree,
+};
 use crate::acp::spawn::{AgentShutdownGuard, spawn_fuigo_shell};
 use crate::client_identity::{HEADLESS_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 use crate::headless::reducer::{
@@ -64,6 +68,8 @@ pub struct HeadlessOptions {
     /// Fork on resume/continue (`--fork-session`).
     pub fork_session: bool,
     pub worktree: Option<String>,
+    /// `--worktree-ref`: branch, tag, or commit the new worktree is based on.
+    pub worktree_ref: Option<String>,
     pub restore_code: bool,
     pub agent: Option<String>,
     pub agents_json: Option<String>,
@@ -560,6 +566,7 @@ fn build_headless_init_request(
         .meta(meta.as_object().cloned())
 }
 
+#[derive(Debug)]
 struct OpenedSession {
     session_id: acp::SessionId,
     models: ModelState,
@@ -719,6 +726,88 @@ async fn fork_then_open(
             "fork succeeded as {child} but load failed: {e}"
         )),
     }
+}
+
+/// Mirrors `Effect::CreateWorktreeSession`. A `-s` UUID also names the worktree, and
+/// `open_session_with_id` checks its availability under the worktree cwd, which is why
+/// `materialize_startup_for_cwd` skipped that check when `has_worktree` is set.
+async fn open_session_in_new_worktree(
+    acp_tx: &AcpAgentTx,
+    cwd: &Path,
+    spec: &WorktreeSpec,
+    session_id: Option<&str>,
+    deadline: RunDeadline,
+) -> anyhow::Result<OpenedSession> {
+    let created = with_send_deadline(
+        CREATE_METHOD,
+        deadline.budget(None),
+        create_worktree(acp_tx, cwd, spec, &new_worktree_id(session_id)),
+    )
+    .await?;
+    tracing::info!(
+        worktree = %created.worktree_root.display(),
+        session_cwd = %created.session_cwd.display(),
+        copy_mode = ?spec.copy_mode(),
+        "headless: worktree created"
+    );
+    let opened = match session_id {
+        Some(sid) => open_session_with_id(acp_tx, &created.session_cwd, sid, deadline).await,
+        None => open_session(acp_tx, &created.session_cwd, None, None, deadline).await,
+    };
+    opened.map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            note_orphaned_worktree(&e.to_string(), &created.worktree_root)
+        )
+    })
+}
+
+/// Mirrors the `load_session_id` branch of `Effect::CreateWorktreeSession`: the agent creates the
+/// worktree and restores into it, then the session is loaded at the cwd it reports.
+async fn resume_session_in_new_worktree(
+    acp_tx: &AcpAgentTx,
+    cwd: &Path,
+    spec: &WorktreeSpec,
+    session_id: &str,
+    restore_code: Option<bool>,
+    local_miss: bool,
+    deadline: RunDeadline,
+) -> anyhow::Result<OpenedSession> {
+    let resumed = with_send_deadline(
+        RESUME_METHOD,
+        deadline.budget(None),
+        resume_session_into_worktree(
+            acp_tx,
+            cwd,
+            spec,
+            session_id,
+            restore_code,
+            local_miss.then_some(session_id),
+        ),
+    )
+    .await?;
+    tracing::info!(
+        session_id = %resumed.session_id,
+        worktree = %resumed.worktree_root.display(),
+        session_cwd = %resumed.session_cwd.display(),
+        code_restored = resumed.code_restored,
+        "headless: session resumed into worktree"
+    );
+    // resume_session already restored code; asking again on load would redo it.
+    open_session(
+        acp_tx,
+        &resumed.session_cwd,
+        Some(&resumed.session_id),
+        None,
+        deadline,
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            note_orphaned_worktree(&e.to_string(), &resumed.worktree_root)
+        )
+    })
 }
 
 /// Apply `-m` / effort after session open.
@@ -924,6 +1013,12 @@ impl SendErrorText for anyhow::Error {
     }
 }
 
+impl SendErrorText for WorktreeRpcError {
+    fn send_error_text(&self) -> String {
+        self.0.clone()
+    }
+}
+
 impl SendErrorText for String {
     fn send_error_text(&self) -> String {
         self.clone()
@@ -948,13 +1043,14 @@ where
     }
 }
 
-/// `--worktree` is ignored here: headless never creates a worktree, so a remote miss must not take `DeferToWorktree`.
+/// With `-w`, a remote miss defers to the worktree resume path like the TUI; without it headless restores in place.
 fn headless_materialize_ctx(
     resume_title_pinned: bool,
     restore_code: bool,
+    has_worktree: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
-        has_worktree: false,
+        has_worktree,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,
@@ -1156,14 +1252,15 @@ pub async fn run_single_turn(
     use crate::app::session_startup::{self, MaterializedStartup, SessionStartupFlags};
     let has_resume_id = options.resume.as_deref().filter(|s| !s.is_empty());
     let resume_most_recent = options.resume.as_deref() == Some("");
+    let worktree =
+        WorktreeSpec::from_cli(options.worktree.as_deref(), options.worktree_ref.as_deref());
     let intent = session_startup::session_startup_intent_from_flags(SessionStartupFlags {
         session_id: options.session_id.as_deref(),
         resume_session_id: has_resume_id,
         resume_most_recent,
         continue_last_session: options.continue_last_session,
         fork_session: options.fork_session,
-        // Headless never creates a worktree from `-w`.
-        has_worktree: false,
+        has_worktree: worktree.is_some(),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))
     .inspect_err(|_| {
@@ -1172,7 +1269,11 @@ pub async fn run_single_turn(
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let materialized = session_startup::materialize_startup_for_cwd(
-        headless_materialize_ctx(options.resume_title_pinned, options.restore_code),
+        headless_materialize_ctx(
+            options.resume_title_pinned,
+            options.restore_code,
+            worktree.is_some(),
+        ),
         intent,
         &cwd_str,
     )
@@ -1194,16 +1295,46 @@ pub async fn run_single_turn(
     };
     let t_session = Instant::now();
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::SessionCreate);
-    let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None, deadline).await,
-        MaterializedStartup::NewWithId { session_id } => {
+    let opened = match (materialized, worktree.as_ref()) {
+        (MaterializedStartup::NewAuto, Some(spec)) => {
+            open_session_in_new_worktree(&acp_tx, &cwd, spec, None, deadline).await
+        }
+        (MaterializedStartup::NewWithId { session_id }, Some(spec)) => {
+            open_session_in_new_worktree(&acp_tx, &cwd, spec, Some(&session_id), deadline).await
+        }
+        (
+            MaterializedStartup::Resume {
+                session_id,
+                deferred_local_miss,
+                ..
+            },
+            Some(spec),
+        ) => {
+            resume_session_in_new_worktree(
+                &acp_tx,
+                &cwd,
+                spec,
+                &session_id,
+                restore_code,
+                deferred_local_miss,
+                deadline,
+            )
+            .await
+        }
+        (MaterializedStartup::NewAuto, None) => {
+            open_session(&acp_tx, &cwd, None, None, deadline).await
+        }
+        (MaterializedStartup::NewWithId { session_id }, None) => {
             open_session_with_id(&acp_tx, &cwd, &session_id, deadline).await
         }
-        MaterializedStartup::Resume {
-            session_id,
-            original_cwd,
-            ..
-        } => {
+        (
+            MaterializedStartup::Resume {
+                session_id,
+                original_cwd,
+                ..
+            },
+            None,
+        ) => {
             let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
             open_session(
                 &acp_tx,
@@ -1214,12 +1345,16 @@ pub async fn run_single_turn(
             )
             .await
         }
-        MaterializedStartup::Fork {
-            parent_session_id,
-            parent_cwd,
-            new_session_id,
-            ..
-        } => {
+        // Fork with `-w` never reaches here; the intent check above refuses it.
+        (
+            MaterializedStartup::Fork {
+                parent_session_id,
+                parent_cwd,
+                new_session_id,
+                ..
+            },
+            _,
+        ) => {
             fork_then_open(
                 &acp_tx,
                 &cwd,

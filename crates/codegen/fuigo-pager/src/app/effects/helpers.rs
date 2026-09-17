@@ -26,7 +26,7 @@ pub(super) fn session_rpc_timeout() -> std::time::Duration {
     SESSION_RPC_FLOOR.max(fuigo_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
 }
 /// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming `action` instead of an eternal spinner.
-pub(super) async fn acp_send_bounded<R, T>(
+pub(crate) async fn acp_send_bounded<R, T>(
     request: T,
     tx: &tokio::sync::mpsc::UnboundedSender<R>,
     action: &str,
@@ -201,7 +201,7 @@ pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
 }
 /// CANONICAL wire parser for the worktree resume response.
 /// Any other code consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape MUST go through this function; do not re-implement.
-pub(super) fn parse_worktree_restore_payload(
+pub(crate) fn parse_worktree_restore_payload(
     result_obj: &serde_json::Value,
 ) -> (bool, Option<String>, Option<fuigo_workspace::session::git::RestoreDegree>) {
     let code_restored = result_obj
