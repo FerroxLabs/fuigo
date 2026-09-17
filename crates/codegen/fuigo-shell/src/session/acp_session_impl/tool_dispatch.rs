@@ -11,6 +11,41 @@ use std::path::PathBuf;
 const BASH_MODE_FINAL_OUTPUT_LINES: usize = 10;
 const BASH_MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
+/// Hard bound on the bytes a single bash-mode (`! cmd`) command can produce.
+///
+/// The terminal runner stops accumulating here and reports `TerminalRunResult::truncated = true`, which this module
+/// forwards to `BashOutput::truncated`. It is also the bound on the persisted cost of one `! cmd`: since upstream
+/// 1.0.25 the FULL output goes out as the final `ToolCallUpdate.raw_output`, and every ACP notification is persisted
+/// to `updates.jsonl` (`emit_notification_direct` -> `PersistenceMsg::Update`). `BashOutput::output` is a `Vec<u8>`,
+/// so it lands as a JSON array of decimal numbers rather than a string.
+///
+/// # Measured worst case per `! cmd`
+///
+/// Measured on hetzner, not estimated, by building the real notification and serialising the real
+/// `SessionUpdateEnvelope` (`bash_mode_persisted_cost_of_a_full_size_output_is_measured`, and its base-tree twin in
+/// the round-2 red driver):
+///
+/// | tree | command printed | `updates.jsonl` line |
+/// |---|---|---|
+/// | `b156799` (10-line tail) | 1,048,576 B | **2,010 B** |
+/// | here (full output) | 1,048,575 B | **3,932,916 B** (3.75x the raw bytes) |
+///
+/// So the worst case is **~3.75 MiB of session file per `! cmd` that saturates this limit**, against ~2 KB before.
+/// There is NO per-session cap: N such commands cost N times that, and a session that runs twenty of them adds
+/// ~75 MiB to `updates.jsonl`. Ordinary `! cmd` output is a few hundred bytes and costs a few KB — the worst case
+/// needs a command that deliberately dumps a megabyte.
+///
+/// # Why it is not capped here, and what to do if it bites
+///
+/// Capping the persisted copy below the displayed copy would put the truncated tail straight back into a reloaded
+/// session, which is the bug this port fixes: a reopened session would show `... (N lines)` where the command's
+/// output had been. Recommendation, in order: (1) leave this as is — the growth only lands on outputs that really
+/// are a megabyte; (2) if session files do become a problem, the fix is to stop paying 3.75x for the encoding by
+/// giving `BashOutput::output` a base64/string serde representation (~1.37x, a 2.7x saving) rather than by
+/// shortening what is stored; (3) only then consider a per-session byte budget for bash-mode `raw_output`, which
+/// must degrade by dropping the OLDEST commands' stored output, never by truncating the newest.
+const BASH_MODE_OUTPUT_BYTE_LIMIT: usize = 1_048_576; // 1 MiB
+
 /// Phase 2: dispatch a tool call through [`WorkspaceOps::call_tool`].
 ///
 /// Agent sessions always use local workspace ops (in-process toolset).
@@ -286,22 +321,31 @@ impl SessionActor {
             cwd: self.tool_context.cwd.clone(),
             env: self.tool_context.session_env.as_ref().clone(),
             timeout: BASH_MODE_TIMEOUT,
-            output_byte_limit: 1_048_576, // 1 MiB
-            stream: true,                 // Enable streaming for bash mode
-            output_file: None,            // No file logging for interactive bash mode
+            output_byte_limit: BASH_MODE_OUTPUT_BYTE_LIMIT,
+            stream: true,      // Enable streaming for bash mode
+            output_file: None, // No file logging for interactive bash mode
         };
 
         let result = self.tool_context.terminal.run(request).await;
 
-        // Format the output
-        let (output, exit_code, timed_out, signal) = match result {
+        // Format the output.
+        // `byte_limit_hit` is the runner's own flag: the command produced more than `BASH_MODE_OUTPUT_BYTE_LIMIT`
+        // and the tail was dropped before we ever saw it. It is the only truncation left in this path.
+        let (output, exit_code, timed_out, signal, byte_limit_hit) = match result {
             Ok(res) => (
                 res.combined_output,
                 res.exit_code.unwrap_or(-1),
                 res.timed_out,
                 res.signal,
+                res.truncated,
             ),
-            Err(e) => (format!("Error running command: {}", e), -1, false, None),
+            Err(e) => (
+                format!("Error running command: {}", e),
+                -1,
+                false,
+                None,
+                false,
+            ),
         };
 
         // Full output for the TUI; prompt/history keep a last-N tail so dumps do not inflate the next turn
@@ -325,7 +369,12 @@ impl SessionActor {
                 output: full_output.as_bytes().to_vec(),
                 exit_code,
                 command: command.clone(),
-                truncated: false,
+                // The runner's 1 MiB cap, not a display bound: before 1.0.25 this field carried
+                // "a display tail was applied", which was never what `BashOutput::truncated` means
+                // (see its doc: "Use read_file tool to retrieve full output when truncated"), and the
+                // runner's own `truncated` was dropped on the floor. The display tail is gone; the byte
+                // cap is real, so it is what this field now reports.
+                truncated: byte_limit_hit,
                 signal: signal.clone(),
                 timed_out,
                 description: None,
@@ -381,6 +430,37 @@ impl SessionActor {
 ///
 /// Upstream 1.0.25: "Bash command output shown in the pager is now the complete result instead of a truncated tail."
 /// Before that, `full` was also the tail, so anything above the bound was lost to the user with no way to expand it.
+///
+/// # Which surface this actually fixes: the PERSISTED copy, not the live frame
+///
+/// Measured, not assumed (`fuigo-pager/tests/pty_e2e/bash_full_output_double_click_fold_pty.rs` passes on `b156799`
+/// as well as here): while the command is running the shell streams `BashOutputChunk` updates that carry the whole
+/// accumulated buffer, and `tools/notification_bridge.rs` sends those **straight to the gateway without persisting
+/// them**. So the live execute block already held every line on the base tree, and the tail in the final update did
+/// not take it away on screen.
+///
+/// The final `ToolCallUpdate` is the one that IS persisted (`emit_notification_direct` -> `PersistenceMsg::Update`),
+/// and it is the only bash-mode output a reloaded session has: replay feeds the pager the initial `ToolCall` plus
+/// that final update, and `tool_call_to_block` builds the execute block from its `BashOutput::output`. On the base
+/// tree that was the ten-line tail, so reopening a session showed `... (N lines)` where the command's own output had
+/// been. That is what this fixes, and it is why the persisted cost changes so much (a 1 MiB command went from ~2 KB
+/// to ~3.9 MB of `updates.jsonl`; see `bash_mode_persisted_cost_of_a_full_size_output_is_measured`).
+///
+/// # The model-facing copy DID change, for one input class
+///
+/// Trailing blank lines. Before 1.0.25 the line count and the tail were taken from the RAW output and the trim was
+/// applied only on the short branch; here (and upstream) the trim happens first and everything is counted on the
+/// trimmed text. So for output that ends in blank lines the two disagree, and `history` — the copy the model reads —
+/// is not byte-identical to the old one. `"a\nb\n" + "\n" * 10` is the clearest case: the old code counted 12 lines,
+/// declared `"... (12 lines)"` and then handed the model ten EMPTY lines, hiding `a` and `b` entirely; this code
+/// counts 2 and hands over `"a\nb"`. For output with more than [`BASH_MODE_FINAL_OUTPUT_LINES`] real lines plus a
+/// trailing blank run, the old tail spent part of its budget on blanks and the count included them.
+///
+/// This is kept, not reverted, for three reasons: the old shape lied (the count and the content disagreed with what
+/// the command actually printed), it could hide ALL of the real output behind blank padding, and it is what upstream
+/// 1.0.25 ships — reverting would fork the wire shape from the client this is being kept in sync with. The change is
+/// strictly a superset of information for the model: it never removes a real output line the old shape carried.
+/// Pinned by `bash_mode_trailing_blank_lines_change_the_model_copy_and_show_everything_in_the_pager`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BashModeOutput {
     pub(super) full: String,
@@ -512,6 +592,8 @@ mod bash_mode_output_tests {
     #[derive(Debug)]
     struct ScriptedTerminal {
         combined_output: String,
+        /// What the real runner reports when the command blew past `output_byte_limit`.
+        truncated: bool,
     }
 
     #[async_trait::async_trait]
@@ -526,7 +608,7 @@ mod bash_mode_output_tests {
             Ok(crate::terminal::runner::TerminalRunResult {
                 combined_output: self.combined_output.clone(),
                 exit_code: Some(0),
-                truncated: false,
+                truncated: self.truncated,
                 signal: None,
                 timed_out: false,
             })
@@ -544,6 +626,11 @@ mod bash_mode_output_tests {
     /// Runs `! <command>` against a terminal whose output is scripted and returns the final Bash `raw_output` the
     /// pager receives plus the chat-history user message the model receives.
     async fn run_bash_mode(output: String) -> (BashOutput, String) {
+        run_bash_mode_with(output, false).await
+    }
+
+    /// As [`run_bash_mode`], with the runner's `output_byte_limit` truncation flag under test control.
+    async fn run_bash_mode_with(output: String, truncated: bool) -> (BashOutput, String) {
         let (gateway_tx, _gateway_rx) =
             tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
         let (persistence_tx, mut persistence_rx) =
@@ -564,6 +651,7 @@ mod bash_mode_output_tests {
             persistence_tx,
             Arc::new(ScriptedTerminal {
                 combined_output: output,
+                truncated,
             }),
         )
         .await;
@@ -746,6 +834,251 @@ mod bash_mode_output_tests {
                 );
             })
             .await;
+    }
+
+    // ---- trailing blank lines: the one input class whose MODEL copy changed ----
+
+    /// Base counted lines on the RAW output and trimmed only on the short branch; this counts everything on the
+    /// trimmed text. For output that ends in blank lines the two disagree, so the model copy is NOT byte-identical
+    /// to the base. This pins the new shape and spells out the old one it replaced.
+    #[test]
+    fn split_trims_before_counting_so_a_blank_run_cannot_eat_the_tail() {
+        // Two real lines under twelve raw ones: base declared "... (12 lines)" and then showed the model ten EMPTY
+        // lines, hiding `a` and `b` completely. The trimmed split reports the two lines that were actually printed.
+        let padded = "a\nb\n\n\n\n\n\n\n\n\n\n\n";
+        assert_eq!(padded.lines().count(), 12, "the raw shape base counted");
+        let out = BashModeOutput::split(padded);
+        assert_eq!(out.full, "a\nb");
+        assert_eq!(out.history, "a\nb", "no elision marker: two real lines");
+        assert!(!out.history.contains("... ("));
+
+        // Above the bound, base spent part of the ten-line budget on the blanks; the trimmed split does not.
+        let raw = numbered_lines(25) + "\n\n\n";
+        assert_eq!(raw.lines().count(), 28, "the raw shape base counted");
+        let out = BashModeOutput::split(&raw);
+        assert_eq!(out.full, numbered_lines(25).trim_end());
+        let expected_tail = format!(
+            "... (25 lines)\n{}",
+            (16..=25)
+                .map(|i| format!("line {i:03}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(out.history, expected_tail);
+        // Superset check: every real line the base tail carried (the last 10 of 28 = lines 019..025) is still here.
+        for i in 19..=25 {
+            assert!(
+                out.history.contains(&format!("line {i:03}")),
+                "line {i:03} was in the base tail and must survive"
+            );
+        }
+        assert!(
+            !out.history.ends_with('\n'),
+            "no blank padding at the end of the model copy: {:?}",
+            out.history
+        );
+    }
+
+    /// The MODEL copy alone, for an output that ends in blank lines.
+    ///
+    /// Split out from the pager assertions so each half's red is its own, unambiguous failure: a single test that
+    /// checks the pager first would stop there and never show what base sent the model. RED on `b156799`, which put
+    /// `"... (28 lines)\nline 019..line 025\n\n\n"` in the chat-history message — a line count taken from the raw
+    /// output and a tail that spent three of its ten slots on blank padding. This is the deliberate model-facing
+    /// change recorded on [`BashModeOutput`]; see that doc for why it is kept rather than reverted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_trailing_blank_lines_model_copy_counts_only_the_lines_the_command_printed() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = numbered_lines(25) + "\n\n\n";
+                let (bash, history) = run_bash_mode(raw).await;
+
+                let expected_tail = format!(
+                    "... (25 lines)\n{}",
+                    (16..=25)
+                        .map(|i| format!("line {i:03}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                assert!(
+                    history.contains(&format!("Output:\n```\n{expected_tail}\n```")),
+                    "chat history carries the trimmed tail, got {history:?}"
+                );
+                assert_eq!(
+                    bash.output_for_prompt,
+                    BashOutput::make_output_for_prompt(&expected_tail),
+                    "output_for_prompt is the same trimmed tail"
+                );
+                assert!(
+                    !history.contains("... (28 lines)"),
+                    "the raw line count including blank padding is not what the model is told: {history:?}"
+                );
+                assert!(
+                    !history.contains("line 001"),
+                    "lines above the bound still never reach the model: {history:?}"
+                );
+            })
+            .await;
+    }
+
+    /// Both copies, end to end, for an output that ends in blank lines.
+    ///
+    /// RED on `b156799` for BOTH halves: base sent `"... (28 lines)\nline 019..line 025\n\n\n"` as the pager copy AND
+    /// as the model copy. The pager half is the cluster's fix. The model half is the deliberate, documented change
+    /// recorded on [`BashModeOutput`]: base's count and tail disagreed with what the command printed. The model half
+    /// also has its own test above, so its red is visible even though this one asserts the pager first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_trailing_blank_lines_change_the_model_copy_and_show_everything_in_the_pager()
+    {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let raw = numbered_lines(25) + "\n\n\n";
+                let (bash, history) = run_bash_mode(raw).await;
+
+                // Pager copy: every real line, no elision marker, no trailing blank run.
+                let shown = String::from_utf8(bash.output).expect("utf-8 output");
+                assert_eq!(
+                    shown,
+                    numbered_lines(25).trim_end(),
+                    "the pager must receive all 25 printed lines with the blank padding trimmed"
+                );
+                assert!(shown.contains("line 001"), "first line reaches the pager");
+                assert!(
+                    !shown.starts_with("... ("),
+                    "no elision marker in the pager copy"
+                );
+
+                // Model copy: the last ten REAL lines, counted after the trim.
+                let expected_tail = format!(
+                    "... (25 lines)\n{}",
+                    (16..=25)
+                        .map(|i| format!("line {i:03}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                assert!(
+                    history.contains(&format!("Output:\n```\n{expected_tail}\n```")),
+                    "chat history carries the trimmed tail, got {history:?}"
+                );
+                assert!(
+                    !history.contains("... (28 lines)"),
+                    "the raw line count is not what the model is told: {history:?}"
+                );
+                assert!(
+                    !history.contains("line 001"),
+                    "lines above the bound still never reach the model: {history:?}"
+                );
+                assert!(
+                    bash.output_for_prompt.starts_with("... (25 lines)\n"),
+                    "{:?}",
+                    bash.output_for_prompt
+                );
+            })
+            .await;
+    }
+
+    // ---- the truncation flag ----
+
+    /// `BashOutput::truncated` reports the runner's `output_byte_limit` cut, the only truncation left in this path.
+    ///
+    /// RED on `b156799`: base computed `truncated = total_lines > 10` from its display tail and threw
+    /// `TerminalRunResult::truncated` away, so a three-line output that the runner had capped was reported as
+    /// `truncated: false`. (Base did not propagate a truthful flag that this branch dropped — it never propagated
+    /// one at all.)
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_reports_the_runners_byte_limit_truncation() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (capped, _) = run_bash_mode_with(numbered_lines(3), true).await;
+                assert!(
+                    capped.truncated,
+                    "the runner hit BASH_MODE_OUTPUT_BYTE_LIMIT; the pager copy is not the whole result"
+                );
+
+                let (whole, _) = run_bash_mode_with(numbered_lines(25), false).await;
+                assert!(
+                    !whole.truncated,
+                    "25 lines under the byte limit are complete: a display tail is no longer truncation"
+                );
+            })
+            .await;
+    }
+
+    // ---- what one `! cmd` costs on disk ----
+
+    /// Measure the persisted cost of a worst-case bash-mode command.
+    ///
+    /// Every ACP notification except `AvailableCommandsUpdate` is persisted (`emit_notification_direct` ->
+    /// `PersistenceMsg::Update` -> one `SessionUpdateEnvelope` line in `updates.jsonl`). Since upstream 1.0.25 the
+    /// final bash-mode update carries the FULL output, and `BashOutput::output` is a `Vec<u8>`, which serde renders
+    /// as a JSON array of decimal numbers. This builds exactly that notification for an output at
+    /// [`BASH_MODE_OUTPUT_BYTE_LIMIT`] and prints the line length, so the worst case per `! cmd` is a measured
+    /// number rather than a guess. Run with `--nocapture` to see it.
+    #[test]
+    fn bash_mode_persisted_cost_of_a_full_size_output_is_measured() {
+        let raw = "line of ordinary command output\n"
+            .repeat(BASH_MODE_OUTPUT_BYTE_LIMIT / "line of ordinary command output\n".len());
+        let split = BashModeOutput::split(&raw);
+        assert!(
+            split.full.len() > BASH_MODE_OUTPUT_BYTE_LIMIT - 64,
+            "fixture is a full-size output"
+        );
+
+        let bash_output = BashOutput {
+            output_for_prompt: BashOutput::make_output_for_prompt(&split.history),
+            output: split.full.as_bytes().to_vec(),
+            exit_code: 0,
+            command: "seq-dump".to_string(),
+            truncated: false,
+            signal: None,
+            timed_out: false,
+            description: None,
+            current_dir: "/work".to_string(),
+            output_file: String::new(),
+            total_bytes: split.full.len(),
+            output_delta: None,
+            was_bare_echo: false,
+        };
+        let notification = acp::SessionNotification::new(
+            acp::SessionId::new("cost-measure"),
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::from("bash-mode-cost".to_string()),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::Completed))
+                    .raw_output(serde_json::to_value(ToolsToolOutput::Bash(bash_output)).ok()),
+            )),
+        );
+        let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(
+            &crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
+        )
+        .expect("envelope");
+        let line = serde_json::to_string(&envelope).expect("jsonl line");
+
+        let ratio = line.len() as f64 / split.full.len() as f64;
+        println!(
+            "bash-mode persisted cost: output {} bytes -> updates.jsonl line {} bytes ({:.2}x)",
+            split.full.len(),
+            line.len(),
+            ratio
+        );
+        // The shape, not a golden number: a JSON array of decimal byte values costs a few bytes per source byte.
+        assert!(
+            (2.0..8.0).contains(&ratio),
+            "persisted-cost ratio moved out of the documented band: {ratio:.2}x \
+             ({} bytes of output -> {} bytes of jsonl)",
+            split.full.len(),
+            line.len()
+        );
+        // Worst case per command, stated: one `! cmd` at the byte limit costs this much session file. There is no
+        // per-session cap — N such commands cost N times it. See BASH_MODE_OUTPUT_BYTE_LIMIT's doc comment.
+        assert!(
+            line.len() < 8 * 1024 * 1024,
+            "one bash-mode command must stay under 8 MiB of persisted session file, got {}",
+            line.len()
+        );
     }
 
     /// At or under the bound nothing is elided anywhere.
