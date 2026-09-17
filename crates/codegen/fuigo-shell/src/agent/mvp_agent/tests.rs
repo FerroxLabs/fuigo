@@ -5681,6 +5681,45 @@ async fn settings_fetch_returns_none_after_repeated_leader_drops() {
     );
 }
 
+/// Wiring pin for the coalescer: the post-auth path (`fetch_settings_resolving_gate`, which both
+/// `spawn_post_auth_settings` and the reconnect path funnel through) must fetch *through*
+/// [`SettingsManager`]. The three tests above drive `SettingsManager::fetch` directly, so removing
+/// the manager from `fetch_settings_resolving_gate` would leave every one of them green while the
+/// shipped product coalesced nothing.
+///
+/// A leader is parked on the manager first, so a wired call joins it and performs no fetch of its
+/// own; an unwired one would lead a second, uncoalesced fetch and never enter the manager.
+#[tokio::test(flavor = "current_thread")]
+async fn resolving_gate_fetches_through_the_settings_coalescer() {
+    let agent = build_minimal_agent_for_tests();
+    let auth = crate::auth::FuigoAuth::test_default();
+    assert_eq!(agent.settings_manager.entries_for_test(), 0);
+
+    let mut leader = Box::pin(
+        agent
+            .settings_manager
+            .fetch(&auth, std::future::pending::<crate::remote::SettingsFetch>),
+    );
+    tokio::select! {
+        biased;
+        _ = &mut leader => unreachable!("a pending leader cannot complete"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(agent.settings_manager.entries_for_test(), 1);
+
+    let mut gate = Box::pin(agent.fetch_settings_resolving_gate(&auth));
+    tokio::select! {
+        biased;
+        _ = &mut gate => unreachable!("a wired gate call parks on the in-flight leader"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        agent.settings_manager.entries_for_test(),
+        2,
+        "fetch_settings_resolving_gate must fetch through the settings coalescer, not around it"
+    );
+}
+
 /// The tier re-check work is single-flight across every caller: back-to-back gated initializes run at most one live check.
 /// An awaited authenticate-path check skips (rather than doubles or waits out) a check already wedged on a stalled subscription endpoint.
 /// Drives the exact block `initialize` runs when `tier_allowed` is false.
