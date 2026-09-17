@@ -57,17 +57,25 @@ impl AgentView {
     /// Minimal mode bypasses that draw path, so its commit pass ([`crate::minimal::commit::commit_active`]) calls this itself.
     /// That keeps a tool blocked on a permission/question out of the committed frontier.
     pub(crate) fn sync_pending_user_input_marks(&mut self) {
+        let already_pending = self.scrollback.pending_user_input_ids();
         self.scrollback.clear_all_pending_user_input();
         for perm in &self.permission_queue {
             let tc_id = perm.request.request.tool_call.tool_call_id.0.as_ref();
             if let Some(entry_id) = self.session.tracker.pending_tool_entry_id(tc_id) {
                 self.scrollback.set_pending_user_input(entry_id, true);
+                if !already_pending.contains(&entry_id) {
+                    self.scrollback.open_permission_edit(entry_id);
+                }
             }
         }
         if let Some(qv) = self.question_view.as_ref()
             && let Some(entry_id) = self.session.tracker.pending_tool_entry_id(&qv.tool_call_id)
         {
             self.scrollback.set_pending_user_input(entry_id, true);
+        }
+        let still_pending = self.scrollback.pending_user_input_ids();
+        for id in already_pending.difference(&still_pending) {
+            self.scrollback.close_permission_edit(*id);
         }
     }
     pub(super) fn handle_rewind_key(&mut self, key: &KeyEvent) -> InputOutcome {

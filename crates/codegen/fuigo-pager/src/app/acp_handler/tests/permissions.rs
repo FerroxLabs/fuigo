@@ -576,3 +576,81 @@
         assert!(agent.permission_stashed_pane.is_none());
     }
 
+
+    /// A queued permission on an Edit tool call opens its diff row so the change is visible before approving;
+    /// once the prompt is gone the row returns to its default fold.
+    #[test]
+    fn queued_permission_expands_edit_diff_until_resolved() {
+        use crate::scrollback::types::DisplayMode;
+        let mut agent = make_agent(Some("sess-1"));
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.scrollback.blocks.edit.expanded_by_default = Some(false);
+        agent.scrollback.set_appearance(appearance);
+        seed_pending_tool(&mut agent, "call-1", "pending");
+        let in_progress = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(std::sync::Arc::from("call-1")),
+            acp::ToolCallUpdateFields::new()
+                .kind(Some(acp::ToolKind::Edit))
+                .title(Some("foo.rs".to_string()))
+                .raw_input(Some(serde_json::json!({ "file_path": "foo.rs" })))
+                .content(Some(vec![acp::ToolCallContent::Diff(
+                    acp::Diff::new("foo.rs", "let x = 2;\n".to_string())
+                        .old_text(Some("let x = 1;\n".to_string())),
+                )])),
+        ));
+        agent.session.tracker.handle_update(
+            in_progress,
+            &NotificationMeta::default(),
+            &mut agent.scrollback,
+        );
+        let entry_id = agent
+            .session
+            .tracker
+            .pending_tool_entry_id("call-1")
+            .expect("edit entry exists");
+        assert_eq!(
+            agent.scrollback.get_by_id(entry_id).unwrap().display_mode,
+            DisplayMode::Collapsed,
+            "edits fold by default"
+        );
+
+        agent
+            .permission_queue
+            .push_back(crate::app::agent_view::test_fixtures::make_followup_permission_state());
+        agent.sync_pending_user_input_marks();
+        let entry = agent.scrollback.get_by_id(entry_id).unwrap();
+        assert!(entry.is_pending_user_input);
+        assert_eq!(
+            entry.display_mode,
+            DisplayMode::Expanded,
+            "a pending permission opens the diff row"
+        );
+
+        // A second per-frame sync while the prompt is still up must not re-open a fold the user closed.
+        agent
+            .scrollback
+            .get_by_id_mut(entry_id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Collapsed);
+        agent.sync_pending_user_input_marks();
+        assert_eq!(
+            agent.scrollback.get_by_id(entry_id).unwrap().display_mode,
+            DisplayMode::Collapsed,
+            "open fires once per prompt"
+        );
+
+        agent
+            .scrollback
+            .get_by_id_mut(entry_id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        agent.permission_queue.clear();
+        agent.sync_pending_user_input_marks();
+        let entry = agent.scrollback.get_by_id(entry_id).unwrap();
+        assert!(!entry.is_pending_user_input);
+        assert_eq!(
+            entry.display_mode,
+            DisplayMode::Collapsed,
+            "the row refolds to its default once the prompt resolves"
+        );
+    }
