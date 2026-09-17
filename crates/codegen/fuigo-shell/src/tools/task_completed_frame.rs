@@ -15,10 +15,15 @@ pub(crate) const FRAME_MAX_BYTES: usize = 32 * 1024;
 pub(crate) const METHOD: &str = "fuigo/task_completed";
 
 /// The JSON-RPC wrapper, the `_` an extension method carries, and the newline.
-const WRAPPER_BYTES: usize = r#"{"jsonrpc":"2.0","method":"_","params":}"#.len() + 1;
+pub(crate) const WRAPPER_BYTES: usize = r#"{"jsonrpc":"2.0","method":"_","params":}"#.len() + 1;
+
+/// Bytes one JSON-RPC notification line costs on the wire for `method` with a `params_len`-byte body.
+pub(crate) fn jsonrpc_line_len(method: &str, params_len: usize) -> usize {
+    WRAPPER_BYTES + method.len() + params_len
+}
 
 /// The cap is measured after JSON encoding.
-const FIELD_MAX_BYTES: usize = 1024;
+pub(crate) const FIELD_MAX_BYTES: usize = 1024;
 
 /// The replay copy of [`compact`]'s field list.
 /// The path to the log is missing on purpose: a truncated pointer is worse than less output, so it is cut only as a last resort.
@@ -163,7 +168,7 @@ fn encoded_len(text: &str) -> usize {
     text.chars().map(encoded_char_len).sum()
 }
 
-fn prefix_within_encoded_len(text: &str, max: usize) -> &str {
+pub(crate) fn prefix_within_encoded_len(text: &str, max: usize) -> &str {
     let mut used = 0;
     for (index, character) in text.char_indices() {
         used += encoded_char_len(character);

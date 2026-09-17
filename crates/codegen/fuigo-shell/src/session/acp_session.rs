@@ -186,6 +186,8 @@ use turn_task::*;
 mod cancel;
 #[path = "acp_session_impl/reminders.rs"]
 mod reminders;
+#[path = "acp_session_impl/background_tasks.rs"]
+mod background_tasks;
 use reminders::*;
 pub use reminders::{CollectedTodoGateInput, TodoGateInput, evaluate_todo_gate};
 #[path = "acp_session_impl/laziness_classifier.rs"]
