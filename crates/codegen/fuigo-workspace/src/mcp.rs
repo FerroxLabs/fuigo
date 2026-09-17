@@ -493,12 +493,17 @@ pub(crate) async fn drive_server_starts(
             state.mark_servers_initializing(remaining_names.iter().cloned());
         }
     }
-    // Per-server startup watchdog sized to the shared deadline, so a hung
-    // handshake fails on its own before the deadline has to cancel it.
-    let startup_timeout_sec = discovery_timeout
+    // Per-server startup watchdog sized so the WHOLE handshake (the
+    // `server/discover` probe phase plus the legacy phase running on this
+    // startup budget) fits the shared deadline, so a hung handshake fails on
+    // its own before the deadline has to cancel it. Sizing it to the raw
+    // deadline would let a swallowed probe burn the legacy phase's window and
+    // convert per-server errors into the generic discovery-timeout failure.
+    let deadline_secs = discovery_timeout
         .as_secs()
-        .saturating_add(u64::from(discovery_timeout.subsec_nanos() != 0))
-        .max(1);
+        .saturating_add(u64::from(discovery_timeout.subsec_nanos() != 0));
+    let startup_timeout_sec =
+        fuigo_mcp::servers::McpClient::max_startup_within_deadline(deadline_secs);
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(startup_timeout_sec),
         ..Default::default()

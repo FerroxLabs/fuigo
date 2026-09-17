@@ -3951,6 +3951,10 @@ struct BindMcpTestState {
     /// When set, `tools/list` returns this many tools (`tool_000`, ...)
     /// instead of the single default.
     tool_count: Option<usize>,
+    /// When set, `server/discover` never answers, so the probe phase can only
+    /// end at its own timeout — the shape of a server that swallows methods it
+    /// does not know.
+    swallow_discover: bool,
 }
 async fn bind_mcp_post(
     axum::extract::State(state): axum::extract::State<BindMcpTestState>,
@@ -3965,6 +3969,10 @@ async fn bind_mcp_post(
     }
     let id = request["id"].clone();
     match request["method"].as_str() {
+        Some("server/discover") if state.swallow_discover => {
+            std::future::pending::<()>().await;
+            unreachable!("a swallowed probe never answers")
+        }
         Some("initialize") => (
             [("mcp-session-id", "local-test-session")],
             axum::Json(serde_json::json!({
@@ -6264,6 +6272,70 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
         rx.recv().await.is_none(),
         "an aborted drive must not deliver outcomes into the revived life"
     );
+    server_task.abort();
+}
+/// The per-server startup watchdog must hold the WHOLE handshake, not just the
+/// legacy phase: `probe_timeout_secs` tracks the startup budget, so sizing the
+/// override to the raw discovery deadline lets a server that swallows
+/// `server/discover` burn the entire deadline in phase 1 — the legacy
+/// `initialize` never runs and a perfectly healthy legacy server is reported as
+/// a generic discovery timeout. Deriving it from
+/// [`fuigo_mcp::servers::McpClient::max_startup_within_deadline`] leaves both
+/// phases a window inside the deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        swallow_discover: true,
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    // Six seconds: the probe phase can only end at its timeout, which tracks the
+    // startup budget, so an un-split budget spends every second of the deadline
+    // probing.
+    let discovery_timeout = std::time::Duration::from_secs(6);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("swallows-discover", url);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                discovery_timeout,
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    let outcome = rx.recv().await.expect("the drive must report the server");
+    match outcome {
+        Ok(started) => assert_eq!(started.name, "swallows-discover"),
+        Err(failure) => panic!(
+            "a legacy server that swallows the probe must still finish its handshake inside the \
+             discovery deadline, but it failed: {}",
+            failure.error
+        ),
+    }
+    drive.await.unwrap().expect("the drive must finish");
     server_task.abort();
 }
 /// The other half of the `mcp_epoch` life fence: a hub `session.unbind`

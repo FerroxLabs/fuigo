@@ -3972,6 +3972,27 @@ impl McpClient {
             .saturating_add(self.probe_timeout_secs())
     }
 
+    /// Smallest whole-second deadline that holds both handshake phases (one second each).
+    pub const MIN_HANDSHAKE_DEADLINE_SECS: u64 = 2;
+
+    /// Largest `startup_timeout_sec` whose worst-case handshake
+    /// ([`Self::handshake_budget_secs`]) still fits inside `deadline_secs`.
+    /// For deadline-driven callers: deriving the override from this keeps the invariant that a hung
+    /// handshake fails on its own before the outer deadline has to cancel it — a swallowed probe can
+    /// no longer burn the legacy phase's window. Short deadlines split evenly between the probe and
+    /// the legacy phase, since the probe timeout tracks the startup budget
+    /// ([`Self::probe_timeout_secs`]).
+    /// Deadlines under [`Self::MIN_HANDSHAKE_DEADLINE_SECS`] cannot hold both phases; they get the
+    /// minimum budget and the caller's outer deadline fires first.
+    pub fn max_startup_within_deadline(deadline_secs: u64) -> u64 {
+        let deadline_secs = deadline_secs.max(Self::MIN_HANDSHAKE_DEADLINE_SECS);
+        if deadline_secs >= Self::DISCOVER_PROBE_TIMEOUT_SECS.saturating_mul(2) {
+            deadline_secs - Self::DISCOVER_PROBE_TIMEOUT_SECS
+        } else {
+            deadline_secs / 2
+        }
+    }
+
     /// Phase 1: probe `server/discover` so 2026-07-28 (SEP-2575 session-less) servers are
     /// negotiated the only way they can be: they never answer `initialize`.
     /// [`ProbeVerdict::Legacy`] means "run the legacy handshake on a fresh transport". Every probe outcome showing the SERVER was reached maps there: immediate rejections (correlated JSON-RPC errors like method-not-found, the middleware 4xx shapes rmcp classifies itself, and non-JSON 5xx / SSE error events surfaced as transport errors) fall back at once, while servers that ACCEPT the probe but never answer it
