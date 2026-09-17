@@ -148,14 +148,16 @@ fn header_grammar_covers_every_presentation_and_delivery() {
     };
     for (block, collapsed, expanded_header) in [
         (
+            // `None` reaches the block only for a delivery the pager does not
+            // recognize; the plain verb names no class.
             sent(None),
             "Sent message to subagent",
             "Sent message to subagent".to_owned(),
         ),
         (
             sent(Some(Steer)),
-            "Sent message to subagent",
-            "Sent message to subagent \u{00b7} steer".to_owned(),
+            "Steered message to subagent",
+            "Steered message to subagent \u{00b7} steer".to_owned(),
         ),
         (
             sent(Some(Queue)),

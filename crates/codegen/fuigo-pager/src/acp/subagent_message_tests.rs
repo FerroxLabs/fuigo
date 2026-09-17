@@ -142,12 +142,14 @@ fn wire_delivery_selects_the_verb() {
                 "delivery": "steer",
             }),
             Some(SentMessageDelivery::Steer),
-            "Sent message to subagent",
+            "Steered message to subagent",
         ),
         (
+            // Omitted IS `queue` (`resolve_delivery`), so it must resolve to
+            // the same class, and therefore the same verb, as an explicit one.
             input("sub-123", "follow up"),
-            None,
-            "Sent message to subagent",
+            Some(SentMessageDelivery::Queue),
+            "Queued message for subagent",
         ),
     ] {
         let block = block(&call(
@@ -162,6 +164,51 @@ fn wire_delivery_selects_the_verb() {
         assert_eq!(block.subagent_id.as_deref(), Some("sub-123"));
         assert_eq!(block.text.as_deref(), Some("follow up"));
     }
+}
+
+/// An omitted `delivery` and an explicit `"queue"` are the SAME operation
+/// (`send_subagent_message::resolve_delivery`), so the row may not label them
+/// differently. Only a value this pager cannot recognize falls back to the
+/// plain verb, which names no class at all.
+#[test]
+fn omitted_and_explicit_queue_deliveries_render_identically() {
+    let rendered = |raw: serde_json::Value| {
+        let block = block(&call(
+            acp::ToolCallStatus::Completed,
+            Some(raw),
+            Some(SendSubagentMessageOutput::Accepted {
+                message_id: "message-1".into(),
+            }),
+        ));
+        (block.delivery, block.title())
+    };
+    let omitted = rendered(serde_json::json!({
+        "subagent_id": "sub-123",
+        "text": "follow up",
+    }));
+    let explicit = rendered(serde_json::json!({
+        "subagent_id": "sub-123",
+        "text": "follow up",
+        "delivery": "queue",
+    }));
+    assert_eq!(
+        omitted, explicit,
+        "an omitted delivery is `queue`: the row must read the same as an explicit one"
+    );
+    assert_eq!(
+        omitted,
+        (
+            Some(SentMessageDelivery::Queue),
+            "Queued message for subagent"
+        )
+    );
+    // And the unrecognized row is NOT that verb: the plain verb claims no class.
+    let unknown = rendered(serde_json::json!({
+        "subagent_id": "sub-123",
+        "text": "follow up",
+        "delivery": "interrupt_and_send",
+    }));
+    assert_eq!(unknown, (None, "Sent message to subagent"));
 }
 
 #[test]
