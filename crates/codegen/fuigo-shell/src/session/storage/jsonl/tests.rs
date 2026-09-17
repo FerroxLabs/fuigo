@@ -2303,6 +2303,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            max_retries: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
             query_params: Default::default(),
