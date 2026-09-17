@@ -24,6 +24,51 @@ fn gate_snapshot_denies_when_lock_held_or_unopenable() {
     );
 }
 
+#[test]
+fn gate_waits_out_a_contended_lock_inside_a_local_set_on_a_multi_thread_runtime() {
+    let short_wait = std::time::Duration::from_millis(150);
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+
+    let held = try_lock_managed_config(dir.path()).expect("test takes the lock first");
+    let home = dir.path().to_path_buf();
+    let started = std::time::Instant::now();
+    let busy = local.block_on(&runtime, async move {
+        locked_gate_snapshot(&home, short_wait).map(|_| ())
+    });
+    let waited = started.elapsed();
+    assert_eq!(
+        busy,
+        Err(ManagedPolicyRefusal::Busy),
+        "a lock held for the whole wait must fail closed as busy, not panic"
+    );
+    // Pins the bounded-poll contract: a regression to unbounded blocking must fail here, not hang as a CI timeout.
+    assert!(
+        waited < std::time::Duration::from_secs(1),
+        "the contended wait must stay near lock_wait ({short_wait:?}), took {waited:?}"
+    );
+
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+    });
+    let home = dir.path().to_path_buf();
+    let acquired = local.block_on(&runtime, async move {
+        locked_gate_snapshot(&home, std::time::Duration::from_secs(5)).map(|_| ())
+    });
+    release.join().unwrap();
+    assert_eq!(
+        acquired,
+        Ok(()),
+        "the gate must take the lock once the holder releases it"
+    );
+}
+
 #[tokio::test]
 async fn refresher_drop_stops_work_without_cancelling_parent() {
     let parent = tokio_util::sync::CancellationToken::new();

@@ -53,19 +53,10 @@ fn locked_gate_snapshot(
 ) -> Result<policy::GateSnapshot, ManagedPolicyRefusal> {
     let lock_file = match store::try_gate_lock(home) {
         store::GateLockAttempt::Acquired(lock_file) => lock_file,
-        // block_in_place lets a multi-thread runtime backfill the worker; plain parking is
-        // safe on a current-thread one (no task ever holds the flock across an await).
+        // No `block_in_place`: bootstrap runs inside a `LocalSet`, where tokio panics on it even on a multi-thread runtime.
+        // Plain blocking is safe here: no task ever holds this flock across an await, and the wait is bounded by `lock_wait`.
         store::GateLockAttempt::Contended(lock_file) => {
-            match tokio::runtime::Handle::try_current() {
-                Ok(handle)
-                    if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-                {
-                    tokio::task::block_in_place(|| {
-                        store::wait_for_gate_lock(&lock_file, home, lock_wait)
-                    })?
-                }
-                _ => store::wait_for_gate_lock(&lock_file, home, lock_wait)?,
-            }
+            store::wait_for_gate_lock(&lock_file, home, lock_wait)?;
             lock_file
         }
         store::GateLockAttempt::Unavailable => {
