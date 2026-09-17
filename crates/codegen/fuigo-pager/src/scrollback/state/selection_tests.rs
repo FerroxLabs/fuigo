@@ -2059,3 +2059,129 @@ fn expanded_group_shows_all_entries_including_first() {
         assert!(h > 0, "entry {i} should be visible, got height={h}");
     }
 }
+
+// -----------------------------------------------------------------------
+// reapply_thinking_fold_policy (minimal → fullscreen return)
+// -----------------------------------------------------------------------
+
+#[test]
+fn reapply_thinking_fold_policy_refolds_minimal_expanded_thought() {
+    let mut state = ScrollbackState::new();
+    let thought = push_thought(&mut state, "reasoning body");
+    let answer = state.push_block(RenderBlock::stub_non_groupable("answer", Color::Blue));
+    state
+        .get_by_id_mut(answer)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "minimal's Expanded stamp must fold back to the thinking policy"
+    );
+    assert_eq!(
+        state.get_by_id(answer).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "non-thinking entries keep their mode"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_honors_sticky_expand_all() {
+    let mut state = ScrollbackState::new();
+    let thought = push_thought(&mut state, "reasoning body");
+    // Ctrl+E: sticky session-wide expand; a minimal round trip must not undo it.
+    state.expand_all_thinking();
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "the sticky thinking_display_mode wins over the collapse default"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_skips_pinned_and_running_thoughts() {
+    let mut state = ScrollbackState::new();
+    state.appearance.scrollback.scroll.respect_manual_folds = true;
+    let pinned = push_thought(&mut state, "user expanded this one");
+    {
+        let entry = state.get_by_id_mut(pinned).unwrap();
+        entry.set_display_mode(DisplayMode::Expanded);
+        entry.display_mode_pinned = true;
+    }
+    let streaming = state.push(ScrollbackEntry::running(RenderBlock::thinking("live")));
+    state
+        .get_by_id_mut(streaming)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(pinned).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "pins win under respect_manual_folds"
+    );
+    assert_eq!(
+        state.get_by_id(streaming).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "a still-streaming thought keeps its mode"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_preserves_expanded_tool_groups() {
+    let mut state = ScrollbackState::new();
+    let mut appearance = AppearanceConfig::default();
+    appearance.scrollback.display.group_max_visible = 3;
+    state.set_appearance(appearance);
+
+    let thought = push_thought(&mut state, "reasoning body");
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    // Non-groupable answer so the tool run is independent of the thought.
+    state.push_block(RenderBlock::stub_non_groupable("answer", Color::Blue));
+
+    let ids = push_tool_calls(&mut state, 6);
+    state.prepare_layout(80, 40);
+    // thought=0, answer=1, first tool=2
+    state.selected = Some(2);
+    assert!(
+        state.toggle_group_expansion(),
+        "tool group should toggle on its header"
+    );
+    assert!(
+        state.expanded_groups.contains(&ids[0]),
+        "precondition: group is expanded"
+    );
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "minimal's Expanded stamp still refolds"
+    );
+    assert!(
+        state.expanded_groups.contains(&ids[0]),
+        "user-expanded tool groups must survive the thinking refold"
+    );
+
+    state.prepare_layout(80, 40);
+    let visible_tools = (2..8).filter(|&i| cached_height_at(&state, i) > 0).count();
+    assert!(
+        visible_tools >= 6,
+        "expanded tool-call members must stay visible after thinking refold, visible_tools={visible_tools}"
+    );
+}
