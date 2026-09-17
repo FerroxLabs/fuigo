@@ -490,10 +490,20 @@ impl SessionActor {
                     crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
                 ));
         }
+        let suppress_live_user_echo =
+            matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
+                && !self.notifications.live_user_message_echo()
+                && !notification
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("isReplay"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
         if self
             .notifications
             .gateway_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
+            && !suppress_live_user_echo
         {
             self.notifications
                 .gateway
@@ -1218,6 +1228,113 @@ mod fuigo_event_id_stamping_tests {
                     }
                     _ => panic!("expected Acp update"),
                 }
+            })
+            .await;
+    }
+    fn user_chunk_notification(replay: bool) -> acp::SessionNotification {
+        let update = acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new("hi")),
+        ));
+        let n = acp::SessionNotification::new(acp::SessionId::new("test-actor"), update);
+        if replay {
+            n.meta(serde_json::json!({ "isReplay": true }).as_object().cloned())
+        } else {
+            n
+        }
+    }
+    #[tokio::test]
+    async fn live_user_message_chunk_persists_without_forward_when_echo_cap_is_off() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+                let (persistence_tx, mut prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor
+                    .notifications
+                    .gateway_enabled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .notifications
+                    .client_caps
+                    .user_message_echo
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .emit_notification_direct(user_chunk_notification(false))
+                    .await;
+                assert!(
+                    matches!(
+                        prx.try_recv(),
+                        Ok(PersistenceMsg::Update(
+                            crate::session::storage::SessionUpdate::Acp(_)
+                        ))
+                    ),
+                    "persist-only echo still writes updates.jsonl"
+                );
+                assert!(
+                    gateway_rx.try_recv().is_err(),
+                    "vanilla ACP clients must not receive a live user-message echo"
+                );
+            })
+            .await;
+    }
+    #[tokio::test]
+    async fn live_user_message_chunk_forwards_when_echo_cap_is_on() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor
+                    .notifications
+                    .gateway_enabled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .notifications
+                    .client_caps
+                    .user_message_echo
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .emit_notification_direct(user_chunk_notification(false))
+                    .await;
+                assert!(matches!(
+                    gateway_rx.try_recv(),
+                    Ok(fuigo_acp_lib::AcpClientMessage::SessionNotification(_))
+                ));
+            })
+            .await;
+    }
+    #[tokio::test]
+    async fn replay_user_message_chunk_forwards_when_echo_cap_is_off() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+                let (persistence_tx, _prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor
+                    .notifications
+                    .gateway_enabled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .notifications
+                    .client_caps
+                    .user_message_echo
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .emit_notification_direct(user_chunk_notification(true))
+                    .await;
+                assert!(matches!(
+                    gateway_rx.try_recv(),
+                    Ok(fuigo_acp_lib::AcpClientMessage::SessionNotification(_))
+                ));
             })
             .await;
     }

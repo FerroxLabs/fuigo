@@ -1155,6 +1155,7 @@ fn make_test_handle(
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -7393,6 +7394,52 @@ fn init_advertising_status_line(enabled: bool) -> acp::InitializeRequest {
             .terminal(false)
             .meta(meta),
     )
+}
+fn echo_session_meta(enabled: bool) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        crate::session::CLIENT_USER_MESSAGE_ECHO_META.to_string(),
+        serde_json::json!(enabled),
+    );
+    meta
+}
+fn init_advertising_user_message_echo(enabled: bool) -> acp::InitializeRequest {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        crate::session::USER_MESSAGE_ECHO_CAPABILITY.to_string(),
+        serde_json::json!(enabled),
+    );
+    acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+        acp::ClientCapabilities::new()
+            .fs(acp::FileSystemCapabilities::new())
+            .terminal(false)
+            .meta(meta),
+    )
+}
+#[test]
+fn user_message_echo_session_meta_outranks_the_client_that_started_the_process() {
+    let says_nothing = || {
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+            acp::ClientCapabilities::new()
+                .fs(acp::FileSystemCapabilities::new())
+                .terminal(false),
+        )
+    };
+    let wanted = |meta: Option<acp::Meta>, init: acp::InitializeRequest| {
+        MvpAgent::resolve_user_message_echo_capability(meta.as_ref(), &init)
+    };
+    assert!(wanted(
+        Some(echo_session_meta(true)),
+        init_advertising_user_message_echo(false)
+    ));
+    assert!(!wanted(
+        Some(echo_session_meta(false)),
+        init_advertising_user_message_echo(true)
+    ));
+    assert!(wanted(None, init_advertising_user_message_echo(true)));
+    assert!(!wanted(None, init_advertising_user_message_echo(false)));
+    assert!(!wanted(Some(acp::Meta::new()), says_nothing()));
+    assert!(!wanted(None, says_nothing()));
 }
 
 // Synthetic ACP requests use catalog entries and an actor command channel, never a provider.

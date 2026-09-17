@@ -231,6 +231,7 @@ async fn create_test_actor(
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             persistence_tx,
             disk_full: crate::session::notifications::idle_disk_full_rx(),
+            client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         },
         permissions: PermissionHandle::allow_all(),
         tool_context,

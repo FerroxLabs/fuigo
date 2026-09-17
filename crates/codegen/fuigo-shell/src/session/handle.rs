@@ -78,6 +78,8 @@ pub struct SessionHandle {
     /// See [`SessionActor::status_line_enabled`].
     /// Assigned by [`Self::set_status_line_wanted`] at every attach, and when a client disconnects from a session that stays resident.
     pub status_line_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Session-scoped client gates; `status_line` is the same flag as [`Self::status_line_enabled`].
+    pub(crate) client_caps: super::notifications::SessionClientCaps,
     /// MCP server configs for this session (merged local and client-provided).
     /// Stored on the handle so forked sessions can inherit the parent's MCP servers without a round-trip through the session actor.
     ///
@@ -403,6 +405,13 @@ impl SessionHandle {
     /// An attach that only raised the flag would leave the previous client's row enabled, and the session would keep building payloads nobody draws.
     pub(crate) fn set_status_line_wanted(&self, wanted: bool) {
         self.status_line_enabled
+            .store(wanted, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Record whether the client now on this session wants live `user_message_chunk` during a prompt.
+    /// Assigned, like [`Self::set_status_line_wanted`], so a later attach can switch it off again.
+    pub(crate) fn set_user_message_echo_wanted(&self, wanted: bool) {
+        self.client_caps
+            .user_message_echo
             .store(wanted, std::sync::atomic::Ordering::Relaxed);
     }
     /// Ask for a fresh status-line snapshot.

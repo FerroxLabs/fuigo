@@ -3933,16 +3933,56 @@ impl MvpAgent {
         meta: Option<&acp::Meta>,
         init: &acp::InitializeRequest,
     ) -> bool {
-        meta.and_then(|m| m.get(fuigo_status_line::CLIENT_STATUS_LINE_META))
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            fuigo_status_line::CLIENT_STATUS_LINE_META,
+            fuigo_status_line::STATUS_LINE_CAPABILITY,
+            false,
+        )
+    }
+    fn resolve_bool_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+        session_key: &str,
+        init_key: &str,
+        default: bool,
+    ) -> bool {
+        meta.and_then(|m| m.get(session_key))
             .or_else(|| {
-                init
-                    .client_capabilities
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get(fuigo_status_line::STATUS_LINE_CAPABILITY))
+                init.client_capabilities.meta.as_ref().and_then(|m| m.get(init_key))
             })
             .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+            .unwrap_or(default)
+    }
+    /// Whether the requesting client wants live `user_message_chunk` during a prompt.
+    /// Session `_meta` first: a leader multiplexes many clients behind one `initialize`.
+    pub(super) fn resolve_user_message_echo_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) -> bool {
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            crate::session::CLIENT_USER_MESSAGE_ECHO_META,
+            crate::session::USER_MESSAGE_ECHO_CAPABILITY,
+            false,
+        )
+    }
+    /// Assign live prompt echo for the reused resident actor. Can turn it off.
+    pub(super) fn attach_user_message_echo(
+        &self,
+        session_id: &acp::SessionId,
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        handle
+            .set_user_message_echo_wanted(
+                Self::resolve_user_message_echo_capability(meta, init),
+            );
     }
     /// Switch the row on for the resident actor an attach reuses and ask it to fill it.
     /// The store precedes the request because the emitter re-reads the capability when the wake lands.
@@ -4678,10 +4718,9 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("fuigo/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
-            let status_line_enabled = std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(
-                    Self::resolve_status_line_capability(session_meta, init),
-                ),
+            let client_caps = crate::session::notifications::SessionClientCaps::new(
+                Self::resolve_status_line_capability(session_meta, init),
+                Self::resolve_user_message_echo_capability(session_meta, init),
             );
             let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
@@ -4729,7 +4768,7 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
-                    status_line_enabled,
+                    client_caps,
                     feedback_proxy_url,
                     feedback_user_token,
                     feedback_alpha_test_key,
