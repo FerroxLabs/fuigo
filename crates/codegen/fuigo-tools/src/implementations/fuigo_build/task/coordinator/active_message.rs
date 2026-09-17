@@ -499,9 +499,27 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             return;
         };
         // A workflow child belongs to its run; a cancelled or killed child
-        // stays down ("do not restart it").
+        // stays down ("do not restart it"); and a child whose completion does
+        // not surface is not wakeable at all.
+        //
+        // `surface_completion == false` marks a child the model must never see
+        // (`task/types.rs`): a nested grandchild reparented to the root parent
+        // session (`coordinator/spawn.rs`) and every harness-internal spawn
+        // (goal planner / classifier / strategist / summarizer, workflow host
+        // service). Those children still pass the ownership check above, so
+        // without this arm a wake would answer `Accepted { message_id }`,
+        // re-run the child on the sender's text, and then surface nothing:
+        // `coordinator.rs` gates BOTH the buffered completion and
+        // `should_surface` on the same flag. "Accepted, then silence" is the
+        // one outcome this tool's description may not produce, so the wake is
+        // refused instead, with the same `NotActiveOrFinalizing` the sibling
+        // ineligibilities answer. The ordinary `task` spawn sets
+        // `surface_completion: true` (`task/mod.rs`), so no model-visible
+        // subagent loses its wake. Pinned by
+        // `wake_of_a_non_surfacing_child_is_refused_not_accepted_then_silent`.
         if completed.request.owner.is_workflow()
             || completed.result.cancelled
+            || !completed.request.surface_completion
             || !self.runner.supports_wake()
             || self
                 .spawn_blocked_sessions
@@ -518,6 +536,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     /// `resume_from` is its own id and the message text is its next prompt.
     /// The sender hears `Accepted` once the child starts, or
     /// `NotActiveOrFinalizing` if the incarnation ends before that.
+    ///
+    /// DEVIATION from upstream (`coordinator/wake.rs`), deliberate: upstream
+    /// PARKS a wake whose target has completed but whose terminal record is
+    /// not yet published (`self.pending_wakes`) and replays it when the record
+    /// lands. Fuigo has no `pending_wakes`; a message arriving in that window
+    /// reaches the still-`active` child, hits `BeginAdmission::Finalizing` in
+    /// `admit_active_message` and is answered `NotActiveOrFinalizing`. That is
+    /// a narrow race answered with an honest refusal rather than a silent
+    /// drop, and the description hedges with "an ELIGIBLE completed subagent",
+    /// so the park is not ported. Recorded here so it is not re-raised as a
+    /// finding.
     fn wake_completed_child(
         &mut self,
         subagent_id: String,
@@ -529,6 +558,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             let _ = respond_to.send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
             return;
         };
+        // Where the record sat in the eviction order, so the `Reject` arm
+        // below can put it back exactly there instead of at the newest end.
+        // Upstream's `restore_displaced_completion` re-inserts in
+        // `completion_age` order; nothing is appended to `completed_order`
+        // between here and that restore, so this index IS that position.
+        let displaced_position = self
+            .completed_order
+            .iter()
+            .position(|id| id == &subagent_id);
         self.completed_order.retain(|id| id != &subagent_id);
         let mut wake_request = completed.request.clone();
         wake_request.prompt = request.text().to_string();
@@ -544,7 +582,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         // the inherited flag is the ONLY thing that lets the parent see the
         // woken child's answer (`coordinator.rs` gates both the buffered
         // completion and `should_surface` on it). Clearing it here would leave
-        // the sender with `Accepted` and then silence.
+        // the sender with `Accepted` and then silence. Pinned by
+        // `woken_child_completion_surfaces_to_the_parent`, which drives a wake
+        // to completion and asserts BOTH gates fire; and a child that cannot
+        // surface at all never reaches this function (see the eligibility
+        // check in `handle_send_active_message`).
         wake_request.await_to_completion = false;
         wake_request.cancel_token = tokio_util::sync::CancellationToken::new();
         self.woken.insert(subagent_id.clone(), completed);
@@ -592,10 +634,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         }
                     },
                 );
-                // Nothing started: the terminal record goes back where it was.
+                // Nothing started: the terminal record goes back where it
+                // was — at its ORIGINAL position in the eviction order, not at
+                // the newest end. `coordinator.rs` evicts with `pop_front`
+                // once `MAX_COMPLETED_ENTRIES` is exceeded, so appending would
+                // make a genuinely newer completion the first one dropped.
+                // Pinned by
+                // `wake_rejected_at_the_spawn_limit_restores_the_displaced_completion`.
                 if let Some(completed) = self.woken.remove(&subagent_id) {
                     self.completed.insert(subagent_id.clone(), completed);
-                    self.completed_order.push_back(subagent_id.clone());
+                    let at = displaced_position
+                        .unwrap_or(self.completed_order.len())
+                        .min(self.completed_order.len());
+                    self.completed_order.insert(at, subagent_id.clone());
                 }
                 self.spawn_ready
                     .reject(&subagent_id, ActiveAgentMessageOutcome::NotActiveOrFinalizing);

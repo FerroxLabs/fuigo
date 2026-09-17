@@ -29,9 +29,18 @@ struct SentMessageWireInput {
 }
 
 impl SentMessageWireInput {
-    /// `None` when the wire named no delivery or one this pager does not know.
+    /// `None` ONLY when the wire named a delivery this pager does not know.
+    ///
+    /// An absent `delivery` is `queue`, not "no class": that is what the tool
+    /// does with it (`send_subagent_message::resolve_delivery`, and the shipped
+    /// description says "`queue` by default"). Resolving it here is what keeps
+    /// an omitted `delivery` and an explicit `"queue"` — the same operation —
+    /// from rendering two different verbs.
     fn recognized_delivery(&self) -> Option<SentMessageDelivery> {
-        match self.delivery.as_ref()?.as_str()? {
+        let Some(delivery) = self.delivery.as_ref() else {
+            return Some(SentMessageDelivery::Queue);
+        };
+        match delivery.as_str()? {
             "steer" => Some(SentMessageDelivery::Steer),
             "queue" => Some(SentMessageDelivery::Queue),
             "interject" => Some(SentMessageDelivery::Interject),
