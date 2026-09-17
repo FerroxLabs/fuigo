@@ -6201,6 +6201,9 @@ impl AppView {
                             .values()
                             .any(|info| !info.finished && info.workflow_run_id.is_none())
                         || agent.workflow_runs.iter().any(|run| run.is_active())
+                        // A turn-idle agent still paints a `Working` spinner for a running bg task/monitor
+                        // or an active /loop; without this the painted spinner never advances
+                        || crate::views::dashboard::row::has_background_work(agent)
                 });
                 let dash_search = self.dashboard.as_ref().is_some_and(|d| {
                     d.dispatch.file_search.context().is_some()
