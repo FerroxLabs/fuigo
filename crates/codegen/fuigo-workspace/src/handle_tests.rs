@@ -1,4 +1,5 @@
 use super::*;
+use crate::LockedTestEnv;
 use crate::capability::CapabilityMode;
 use crate::config::{
     AgentSessionConfig, BindMcpConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig,
@@ -11,7 +12,6 @@ use fuigo_tool_runtime::ToolCallContext;
 use fuigo_tools::registry::types::ToolServerConfig;
 use fuigo_tools::types::tool::ToolKind;
 use fuigo_workspace_types::WorkspaceEvent;
-use crate::LockedTestEnv;
 use std::sync::Arc;
 /// Create a test workspace handle with a "main" session pre-created.
 pub(crate) fn make_handle() -> WorkspaceHandle {
@@ -2160,8 +2160,14 @@ fn spawn_test_queue(home: &std::path::Path) -> Arc<fuigo_file_utils::queue::Uplo
 /// It must never use the real `$FUIGO_WORKSPACE_HOME` and must NOT configure an upload queue.
 /// The legacy inline-upload path stays inert (no storage config).
 /// This pins the flag-off defaults so uploads never start implicitly and `new` stays runtime-light (no queue worker spawned).
+///
+/// `resolve_workspace_home()` below READS `$FUIGO_WORKSPACE_HOME` / `$FUIGO_HOME`, which the
+/// `FUIGO_HOME` fixtures in `worktree`, `trust` and `identity_tests` set for the length of their
+/// own guard, so this takes `ENV_TEST_LOCK` too: without it the read can land inside one of those
+/// windows (a data race with their `set_var`, and a comparison against a home no test here chose).
 #[tokio::test]
 async fn new_defaults_to_ephemeral_home_and_inert_legacy_upload() {
+    let _env = LockedTestEnv::lock();
     let handle = make_handle();
     let shared = handle.shared();
     let home = shared.workspace_home();
@@ -8434,10 +8440,15 @@ fn cli_chat_proxy_base_url_set_passes_through() {
     );
 }
 
-/// The live resolver never names the upstream vendor whatever the environment holds
-/// (a test that sets the var to the vendor host would be the only way, and none does).
+/// The live resolver never names the upstream vendor whatever the environment holds.
+/// This one READS the process environment (the resolver calls `std::env::var`), so it takes
+/// `ENV_TEST_LOCK` like every writer in this file: the `auxiliary_service_wiring_*` tests below
+/// set `CLI_CHAT_PROXY_BASE_URL_ENV` for the length of their own guard, and `--test-threads > 1`
+/// would otherwise let this read land inside that window — a data race with their `set_var`, and
+/// an assertion about a value no caller of this test ever chose.
 #[test]
 fn cli_chat_proxy_base_url_never_names_the_vendor() {
+    let _env = LockedTestEnv::lock();
     let rendered = format!("{:?}", cli_chat_proxy_base_url());
     assert!(
         !rendered.contains("grok.com"),
