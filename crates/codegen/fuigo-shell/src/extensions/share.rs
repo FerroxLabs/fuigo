@@ -79,27 +79,26 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         return Err(crate::acp_error::invalid_params("No messages to share yet"));
     }
 
-    // Fail closed before any upload: with no share backend or web origin configured there is
-    // nothing to share to and nowhere to view it, and the error names the variable to set.
     let client = BackendClient::new().with_auth_manager(agent.auth_manager.clone());
-    client.share_link_origin().map_err(|e| {
-        tracing::warn!(error = %e, "share unavailable: not configured");
-        crate::acp_error::invalid_request(e.to_string())
-    })?;
 
     // Obtain trace context once; used for the signed URL upload and then moved into the spawned metadata task
     let trace_context = agent.get_trace_context(&info, current_turn).await;
 
-    // Upload session data to cloud storage via signed URL so large sessions don't hit the 413 body-size limit on the backend API
-    if let Some(ref ctx) = trace_context {
-        upload_share_data_to_gcs(
-            &request.session_id,
-            &exported.messages,
-            &ctx.gcs_config,
-            Some(agent.auth_manager.clone()),
-        )
-        .await;
-    }
+    // Upload session data to cloud storage via signed URL so large sessions don't hit the 413
+    // body-size limit on the backend API -- but only once the share destination is known.
+    // The ordering is the combinator's, not this block's, so it cannot be reordered away.
+    upload_only_after_destination_resolves(client.share_link_origin(), || async {
+        if let Some(ref ctx) = trace_context {
+            upload_share_data_to_gcs(
+                &request.session_id,
+                &exported.messages,
+                &ctx.gcs_config,
+                Some(agent.auth_manager.clone()),
+            )
+            .await;
+        }
+    })
+    .await?;
 
     // Upload to backend and get share URL.
     // The `save_session_data` call may fail with 413 for very large sessions; that is acceptable because the data is already in cloud storage
@@ -122,6 +121,28 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 
     let response = ShareSessionResponse { share_url };
     to_raw_response(&response)
+}
+
+/// Fail closed BEFORE any upload: with no share backend or web origin configured there is
+/// nothing to share to and nowhere to view it, so nothing may leave the machine, and the error
+/// names the variable to set.
+///
+/// The ordering lives here rather than in statement order at the call site: `upload` is this
+/// function's argument, so it is not expressible to run it before `destination` is resolved.
+/// `share_upload_gate_tests` pins both directions.
+async fn upload_only_after_destination_resolves<Fut>(
+    destination: Result<String, crate::remote::client::BackendError>,
+    upload: impl FnOnce() -> Fut,
+) -> Result<String, acp::Error>
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    let destination = destination.map_err(|e| {
+        tracing::warn!(error = %e, "share unavailable: not configured");
+        crate::acp_error::invalid_request(e.to_string())
+    })?;
+    upload().await;
+    Ok(destination)
 }
 
 /// Upload session messages to cloud storage via signed URL (best-effort).
@@ -287,5 +308,58 @@ mod tests {
             data,
             "Share session is disabled. Run `fuigo login` to authenticate."
         );
+    }
+}
+
+/// The share handler's pre-upload ordering, pinned in both directions.
+///
+/// Statement order alone would not catch a reordering, so the ordering lives in
+/// [`upload_only_after_destination_resolves`] and these tests watch the effect run (or not).
+#[cfg(test)]
+mod share_upload_gate_tests {
+    use super::*;
+    use crate::remote::client::BackendError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Not configured: the handler fails with a message naming the variable, and NOTHING is
+    /// uploaded. This is the one that a reordering (guard after the upload) would break.
+    #[tokio::test(flavor = "current_thread")]
+    async fn share_uploads_nothing_when_the_destination_is_not_configured() {
+        let uploads = AtomicUsize::new(0);
+        let err = upload_only_after_destination_resolves(
+            Err(BackendError::NotConfigured(
+                "session share links need FUIGO_CODE_WEB_URL to be configured".to_string(),
+            )),
+            || async {
+                uploads.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("an unconfigured share must fail");
+        assert_eq!(
+            uploads.load(Ordering::SeqCst),
+            0,
+            "session data must not leave the machine before the share destination is known"
+        );
+        let shown = format!("{err:?}");
+        assert!(shown.contains("FUIGO_CODE_WEB_URL"), "{shown}");
+        assert!(!shown.contains("grok.com"), "{shown}");
+    }
+
+    /// Configured: the upload runs exactly once, after the destination resolved, and the
+    /// destination is handed back for the share URL.
+    #[tokio::test(flavor = "current_thread")]
+    async fn share_uploads_once_after_the_destination_resolves() {
+        let uploads = AtomicUsize::new(0);
+        let origin = upload_only_after_destination_resolves(
+            Ok("https://share.example.test".to_string()),
+            || async {
+                uploads.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("a configured share must proceed");
+        assert_eq!(uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(origin, "https://share.example.test");
     }
 }

@@ -141,6 +141,17 @@ impl LockedTestEnv {
         self._env.push(TestEnvGuard::set(key, val));
         self
     }
+    /// [`set`](Self::set) for values that are not paths (URLs, flags): the guard stores an
+    /// `OsString` either way, so this only saves every call site a `Path::new`.
+    pub(crate) fn set_str(self, key: &'static str, val: &str) -> Self {
+        self.set(key, std::path::Path::new(val))
+    }
+    /// Unset `key` under the held lock, restoring the prior value on drop.
+    /// Same DISTINCT-keys caveat as [`set`](Self::set).
+    pub(crate) fn unset(mut self, key: &'static str) -> Self {
+        self._env.push(TestEnvGuard::unset(key));
+        self
+    }
 }
 #[cfg(test)]
 mod init_metrics_tests {

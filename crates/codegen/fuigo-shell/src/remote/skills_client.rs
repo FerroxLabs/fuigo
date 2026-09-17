@@ -460,9 +460,24 @@ impl SkillsClient {
     ///
     /// Primary first.
     /// When primary is OIDC and a catalog host is configured, also try non-OIDC keys for the same user from this AuthManager's `auth.json`.
-    /// (Upstream keyed this on its own vendor host; there is no compiled default host any more, so the
-    /// recovery follows the configured one. The alt keys go to the same host the primary bearer already went to.)
-    /// Team OIDC is often rejected with `oauth2-auth-forbidden`.
+    /// Team OIDC is often rejected with `oauth2-auth-forbidden`; those alts are the 403 recovery.
+    ///
+    /// **Why the gate is `base_url.is_some()` and not upstream's host comparison.**
+    /// The fan-out's job is credential SCOPING: a user's other stored keys may be replayed only
+    /// against a host the primary bearer has already been sent to, never to some further host.
+    /// Upstream spelled that as `base_url == <its vendor's web origin>`, because its base could be
+    /// either the compiled vendor default (the host `auth.json` credentials are minted for) or an
+    /// operator override pointing somewhere else, and only the former was in scope.
+    /// Fuigo has no compiled default: EVERY catalog host comes from [`SKILLS_BASE_URL_ENV_CHAIN`],
+    /// i.e. every host is one the operator named, so "the vendor's own host" has no representation
+    /// left and the comparison cannot be preserved. What is preserved is the property it protected —
+    /// the alts go to exactly the host the primary bearer already went to, and to no other. With no
+    /// host configured there is no such host, so there is no fan-out and `auth.json` is not read.
+    ///
+    /// This is deliberately WIDER than the base for a self-hosted operator: a configured non-vendor
+    /// catalog now gets the 403 recovery it never had, which is the only deployment Fuigo has. It is
+    /// narrower for nobody — the former vendor host is simply no longer privileged over any other
+    /// configured host. Pinned by `skills_auth_candidates_*` in this file's tests.
     ///
     /// Order / isolation (see [`skills_auth_alt_candidates`]):
     /// 1. same-tenant-tagged alts first when primary is tagged
@@ -479,6 +494,7 @@ impl SkillsClient {
         if primary.auth_mode != AuthMode::Oidc || primary.user_id.is_empty() {
             return out;
         }
+        // No configured host => no host the primary bearer went to => nothing to replay alts against.
         if self.base_url.is_none() {
             return out;
         }
@@ -1317,6 +1333,121 @@ pub(crate) mod tests {
             "empty is skipped, as before"
         );
     }
+
+    // ===== Same-user alt-key fan-out gate (`skills_auth_candidates`) =====
+    //
+    // The gate decides when the user's OTHER stored non-OIDC keys may be replayed against the
+    // catalog host after a 403. See `skills_auth_candidates`' doc for why it is now
+    // `base_url.is_some()` rather than upstream's comparison against its compiled vendor host.
+
+    /// The OIDC primary the fan-out keys on: same `user_id` as the alt written to `auth.json`.
+    fn alt_fanout_primary() -> crate::auth::FuigoAuth {
+        use crate::auth::{AuthMode, FuigoAuth, GROK_OAUTH2_ISSUER};
+        FuigoAuth {
+            key: "oidc-primary".into(),
+            user_id: "user-1".into(),
+            auth_mode: AuthMode::Oidc,
+            create_time: chrono::Utc::now(),
+            oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// An `AuthManager` whose `auth.json` holds ONE non-OIDC key for the SAME user, so the
+    /// fan-out has an alt to find when (and only when) the gate lets it look.
+    fn auth_manager_with_same_user_alt_key() -> Arc<AuthManager> {
+        use crate::auth::{AuthMode, FuigoAuth, FuigoComConfig, GROK_OAUTH2_ISSUER};
+        crate::auth::set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
+        let dir = tempfile::tempdir().unwrap();
+        let alt = FuigoAuth {
+            key: "web-personal".into(),
+            user_id: "user-1".into(),
+            auth_mode: AuthMode::WebLogin,
+            create_time: chrono::Utc::now(),
+            ..Default::default()
+        };
+        let mut store = std::collections::BTreeMap::new();
+        store.insert("web-personal-scope".to_string(), alt);
+        std::fs::write(
+            dir.path().join("auth.json"),
+            serde_json::to_string(&store).unwrap(),
+        )
+        .unwrap();
+        let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());
+        mgr.hot_swap(alt_fanout_primary());
+        std::mem::forget(dir);
+        Arc::new(mgr)
+    }
+
+    /// A client at an explicit base, including the "no host at all" case the env chain produces.
+    fn client_at(auth: Arc<AuthManager>, base: Option<&str>) -> SkillsClient {
+        SkillsClient {
+            http: crate::http::shared_client(),
+            base_url: base.map(str::to_owned),
+            auth,
+        }
+    }
+
+    fn candidate_keys(client: &SkillsClient) -> Vec<String> {
+        client
+            .skills_auth_candidates(&alt_fanout_primary())
+            .into_iter()
+            .map(|c| c.key)
+            .collect()
+    }
+
+    /// Unset: no host means no host the primary bearer was sent to, so there is nothing to
+    /// replay the user's other keys against. Primary only; `auth.json` is never read.
+    #[test]
+    #[serial_test::serial]
+    fn skills_auth_candidates_without_a_host_are_primary_only() {
+        let _p = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
+        let _i = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH");
+        let client = client_at(auth_manager_with_same_user_alt_key(), None);
+        assert_eq!(
+            candidate_keys(&client),
+            vec!["oidc-primary".to_string()],
+            "no configured catalog host must not fan out to stored alt keys"
+        );
+    }
+
+    /// Set to an operator's own host: the 403 recovery runs, and the alt goes to exactly the
+    /// host the primary bearer already went to. The base tried alts on its vendor host ONLY,
+    /// so a self-hosted catalog never got this.
+    #[test]
+    #[serial_test::serial]
+    fn skills_auth_candidates_with_a_configured_host_include_same_user_alts() {
+        let _p = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
+        let _i = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH");
+        let client = client_at(
+            auth_manager_with_same_user_alt_key(),
+            Some("https://skills.example.test"),
+        );
+        assert_eq!(
+            candidate_keys(&client),
+            vec!["oidc-primary".to_string(), "web-personal".to_string()],
+            "a configured catalog host must get the same-user 403 recovery"
+        );
+    }
+
+    /// The former compiled default is not privileged: pointed at the vendor's old host the
+    /// client behaves EXACTLY as at any other configured host. That equality is the invariant —
+    /// no host name is special-cased anywhere in this crate any more.
+    #[test]
+    #[serial_test::serial]
+    fn skills_auth_candidates_do_not_privilege_the_former_vendor_host() {
+        let _p = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
+        let _i = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH");
+        let auth = auth_manager_with_same_user_alt_key();
+        let former_default = client_at(Arc::clone(&auth), Some("https://grok.com"));
+        let operator_host = client_at(auth, Some("https://skills.example.test"));
+        assert_eq!(
+            candidate_keys(&former_default),
+            candidate_keys(&operator_host),
+            "the former vendor default must not be treated differently from any other host"
+        );
+    }
+
 }
 
 #[cfg(test)]

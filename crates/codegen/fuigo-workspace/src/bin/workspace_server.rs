@@ -242,6 +242,14 @@ fn require_hub_url(hub_url: Option<&str>) -> anyhow::Result<String> {
         ),
     }
 }
+
+/// Everything about the arguments that must be rejected while stderr is still the user's
+/// terminal, i.e. BEFORE `--daemonize` forks and takes the pidfile. Run inside `run()` this
+/// would land in the log file of a daemon the user did not want started.
+fn validate_before_daemonize(args: &Args) -> anyhow::Result<Url> {
+    Url::parse(&require_hub_url(args.hub_url.as_deref())?)
+        .map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))
+}
 fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
     if args.capabilities {
@@ -256,6 +264,9 @@ fn main() -> anyhow::Result<()> {
         Some(ref p) => dunce::canonicalize(p)?,
         None => std::env::current_dir()?,
     };
+    // Before daemonize(): a bad or missing --hub-url must reach the user's terminal, not the
+    // daemon's log file, and must not leave a forked process holding the pidfile.
+    let hub_url = validate_before_daemonize(&args)?;
     let oom_protection = fuigo_tty_utils::protect_from_oom_kill();
     let _pidfile_guard = if args.daemonize {
         let anchor = |p: PathBuf| if p.is_absolute() { p } else { cwd.join(p) };
@@ -288,7 +299,7 @@ fn main() -> anyhow::Result<()> {
         .worker_threads(fuigo_tty_utils::runtime::capped_worker_threads().get())
         .enable_all();
     let rt = fuigo_tty_utils::runtime::build_with_blocking_pool(&mut builder)?;
-    rt.block_on(run(args, cwd, oom_protection, oom_protect_applied))
+    rt.block_on(run(args, cwd, hub_url, oom_protection, oom_protect_applied))
 }
 /// Whether to set `FUIGO_TOOLS_RESET_CHILD_OOM` after the always-on protect attempt.
 /// Always-on success must set it so children do not inherit -900.
@@ -302,9 +313,12 @@ fn should_set_reset_child_oom(early_protect_ok: bool, oom_protect_flag: bool) ->
 fn oom_protect_log_active(applied: Option<bool>, early_ok: bool) -> bool {
     applied.unwrap_or(early_ok)
 }
+/// `url` is the hub URL, already parsed by [`validate_before_daemonize`] in `main` so a bad
+/// value never reaches a forked daemon's log file.
 async fn run(
     args: Args,
     cwd: PathBuf,
+    url: Url,
     oom_protection: std::io::Result<()>,
     oom_protect_applied: Option<bool>,
 ) -> anyhow::Result<()> {
@@ -341,8 +355,6 @@ async fn run(
         }
         _ => false,
     };
-    let url = Url::parse(&require_hub_url(args.hub_url.as_deref())?)
-        .map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))?;
     {
         use fuigo_sandbox::{ProfileName, SandboxManager};
         let profile = match std::env::var("FUIGO_SANDBOX_PROFILE").ok() {
@@ -836,6 +848,29 @@ mod tests {
                 .unwrap();
         assert_eq!(
             require_hub_url(args.hub_url.as_deref()).unwrap(),
+            "wss://hub.example.test/v1"
+        );
+    }
+    /// The pre-daemonize check covers BOTH failures the user can make on this flag, so
+    /// neither can end up in a forked daemon's log file. Where it is called from is pinned by
+    /// `tests/workspace_server_cli.rs`, which runs the real binary.
+    #[test]
+    fn validate_before_daemonize_rejects_missing_and_malformed_hub_urls() {
+        let missing = Args::try_parse_from(["fuigo-workspace-server"]).unwrap();
+        let err = validate_before_daemonize(&missing).expect_err("no hub, no run");
+        assert!(err.to_string().contains("--hub-url is required"), "{err}");
+        let malformed =
+            Args::try_parse_from(["fuigo-workspace-server", "--hub-url", "not a url"]).unwrap();
+        let err = validate_before_daemonize(&malformed).expect_err("unparseable hub");
+        assert!(err.to_string().contains("invalid --hub-url"), "{err}");
+        let good = Args::try_parse_from([
+            "fuigo-workspace-server",
+            "--hub-url",
+            "wss://hub.example.test/v1",
+        ])
+        .unwrap();
+        assert_eq!(
+            validate_before_daemonize(&good).unwrap().as_str(),
             "wss://hub.example.test/v1"
         );
     }
