@@ -1886,6 +1886,54 @@ mod tests {
     }
 
     #[test]
+    fn arm_send_now_during_idle_looking_wake_paints_and_arms_cancel() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::Idle;
+        agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        agent.front_message_committed = true;
+        agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            id: "p-next".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "flush me".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+
+        arm_send_now_and_paint(agent, "p-next", None);
+
+        assert_eq!(agent.expect_send_now_cancel.as_deref(), Some("p-next"));
+        assert!(agent.send_now_painted_blocks.contains_key("p-next"));
+    }
+
+    #[test]
+    fn send_now_during_cancellation_does_not_arm_cancel_expectation() {
+        for state in [AgentState::Idle, AgentState::TurnCancelling] {
+            let mut app = test_app_with_agent();
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = state;
+            if agent.session.state.is_idle() {
+                agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                    prompt_id: "task-completed-bg1".into(),
+                    cancel_sent: true,
+                });
+            }
+            agent.front_message_committed = true;
+
+            arm_send_now_and_paint_dispatched(agent, "p-next", "flush me");
+
+            assert!(agent.expect_send_now_cancel.is_none());
+            assert!(!agent.send_now_painted_blocks.contains_key("p-next"));
+        }
+    }
+
+    #[test]
     fn arm_send_now_skips_paint_while_front_uncommitted() {
         let mut app = test_app_with_agent();
         let agent = app.agents.get_mut(&AgentId(0)).unwrap();

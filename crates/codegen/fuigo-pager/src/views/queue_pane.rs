@@ -1792,6 +1792,53 @@ mod tests {
         );
     }
 
+    /// A row too narrow for the full chain drops `[edit]` before the
+    /// time-sensitive `[Send now]`; a row too narrow for `[Send now]` at all
+    /// still shows `[edit][cancel]`.
+    #[test]
+    fn narrow_pane_drops_edit_before_send_now() {
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "msg"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        pane.list_state.select_by_id(
+            *pane
+                .entry_ids()
+                .first()
+                .unwrap_or_else(|| panic!("queued id")),
+        );
+        let render = |pane: &mut QueuePane, inner_w: u16| {
+            let area = Rect::new(0, 0, 80, 1);
+            pane.render(
+                area,
+                &mut Buffer::empty(area),
+                true,
+                &layout_cfg,
+                None,
+                true,
+            );
+            let padding = area.width - pane.last_inner.expect("inner recorded").width;
+            let area = Rect::new(0, 0, padding + inner_w, 1);
+            pane.render(
+                area,
+                &mut Buffer::empty(area),
+                true,
+                &layout_cfg,
+                None,
+                true,
+            );
+        };
+
+        render(&mut pane, "[Send now][edit][cancel]".len() as u16 - 1);
+        assert!(pane.send_now.rect.is_some(), "[Send now] survives");
+        assert!(pane.edit_button.rect.is_none(), "[edit] is dropped first");
+
+        render(&mut pane, "[Send now][cancel]".len() as u16 - 1);
+        assert!(pane.send_now.rect.is_none(), "[Send now] can't fit");
+        assert!(pane.edit_button.rect.is_some(), "[edit] takes the space");
+    }
+
     /// On panes too narrow for the full `[Send now][edit][cancel]` chain, a button that can't fit right of the content area's left edge is dropped.
     /// Saturating toward 0 would land rects outside `inner` and overlap.
     /// Overlaps mis-route clicks: send-now is hit-tested before edit, so overlapped cells would fire it.
