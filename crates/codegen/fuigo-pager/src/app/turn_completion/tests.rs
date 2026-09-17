@@ -1226,11 +1226,9 @@ fn real_end_marker_stays_plain_with_running_work() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
-        Some("p1"),
     );
 
     let block = last_marker_block(&agent);
-    assert_eq!(block.prompt_id.as_deref(), Some("p1"));
     assert_eq!(block.event.message(), "Worked for 2.0s");
     assert_eq!(
         agent.watchers().commands,
@@ -1248,7 +1246,6 @@ fn workless_marker_renders_legacy_text() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
-        Some("p1"),
     );
 
     let block = last_marker_block(&agent);
@@ -1388,7 +1385,6 @@ fn turn_end_after_park_pushes_single_marker() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(5)),
         }),
-        Some("p1"),
     );
 
     assert_eq!(

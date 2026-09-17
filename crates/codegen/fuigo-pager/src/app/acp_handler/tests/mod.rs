@@ -1299,19 +1299,6 @@ pub(super) fn fuigo_hook_execution_notif(
 ) -> acp::ExtNotification {
     fuigo_hook_execution_notif_for_prompt(session_id, event_name, None, is_replay)
 }
-pub(super) fn count_lifecycle_blocks(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> usize {
-    use crate::scrollback::blocks::tool::ToolCallBlock;
-    (0..sb.len())
-        .filter(|i| {
-            matches!(
-                    sb.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
-                )
-        })
-        .count()
-}
 /// Work-only status lines ("N … still running") pushed as system rows.
 /// Never pushed in production; tests assert emptiness.
 pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {

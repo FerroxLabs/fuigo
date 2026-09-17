@@ -172,7 +172,7 @@ fn dense_entry_lines(
 ) -> Vec<Line<'static>> {
     let mode = dense_mode(entry);
     let ctx = entry.context_with_mode(width, mode, appearance, cwd);
-    let output = entry.output_with_hooks(&ctx);
+    let output = entry.output_uncached(&ctx);
     let keep_blanks = !entry.is_foldable();
     output
         .lines
