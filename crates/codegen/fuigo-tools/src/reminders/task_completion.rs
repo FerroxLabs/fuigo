@@ -524,9 +524,13 @@ fn inline_subagent_output_capped(
 /// tool when one exists, uncapped when `None` (this notification is then
 /// the only place the model will see it).
 ///
-/// KEEP IN SYNC: the exact wording of this message is a compatibility
-/// surface — downstream mirrors reproduce it verbatim (grep for
-/// `format_subagent_completion_reminder`). Update them when changing it.
+/// KEEP IN SYNC: the exact wording is a compatibility surface — it is both
+/// the between-turn reminder and the auto-wake PROMPT the model reads
+/// (`fuigo-shell` `agent/subagent/spawn.rs` builds it from the same call).
+/// It is pinned verbatim by `format_subagent_completion_success_with_poll_tool`
+/// below; change the wording and that golden text in the same commit, and
+/// re-check the auto-wake expectations in `fuigo-shell`
+/// (`session/acp_session_tests/auto_wake_suppression_tests.rs`).
 pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,
