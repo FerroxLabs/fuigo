@@ -47,6 +47,33 @@ fn apply_permission_mode_override(
     meta.insert("yoloMode".into(), serde_json::Value::Bool(mode.is_always_approve()));
     meta.insert("autoMode".into(), serde_json::Value::Bool(mode.is_auto()));
 }
+/// MCP discovery reads and parses several config sources (global and project, from `cwd` up to the repository root).
+/// Session-open paths have no resolved per-vendor compat in scope; the default (all-on) preserves existing behavior.
+pub(crate) async fn discover_mcp_servers(cwd: PathBuf) -> Vec<acp::McpServer> {
+    discover_mcp_servers_with(cwd, |cwd| {
+        fuigo_shell::util::config::load_mcp_servers(
+            cwd,
+            &fuigo_tools::types::compat::CompatConfig::default(),
+        )
+    })
+    .await
+}
+
+/// [`discover_mcp_servers`] with an injectable loader (tests observe where the loader runs).
+pub(crate) async fn discover_mcp_servers_with<F>(cwd: PathBuf, load: F) -> Vec<acp::McpServer>
+where
+    F: FnOnce(&Path) -> Vec<acp::McpServer> + Send + 'static,
+{
+    let started = std::time::Instant::now();
+    let servers = load(&cwd);
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        server_count = servers.len(),
+        "mcp server discovery"
+    );
+    servers
+}
+
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,

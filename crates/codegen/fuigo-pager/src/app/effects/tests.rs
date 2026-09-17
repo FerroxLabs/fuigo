@@ -2940,3 +2940,45 @@ async fn submitted_api_key_waits_for_acp_authentication() {
         assert!(rx.try_recv().is_err());
     }
 }
+
+/// Session open/load/resume must not stall the UI thread on MCP config discovery: the loader runs on the
+/// blocking pool, i.e. on a different thread than the async caller (a current_thread runtime here).
+#[tokio::test]
+async fn discover_mcp_servers_runs_the_loader_off_the_calling_thread() {
+    let caller = std::thread::current().id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let servers = discover_mcp_servers_with(dir.path().to_path_buf(), move |cwd| {
+        tx.send((std::thread::current().id(), cwd.to_path_buf()))
+            .expect("record loader thread");
+        Vec::new()
+    })
+    .await;
+    let (loader_thread, seen_cwd) = rx.recv().expect("loader ran");
+    assert!(servers.is_empty());
+    assert_eq!(seen_cwd, dir.path());
+    assert_ne!(
+        loader_thread, caller,
+        "MCP discovery must run on the blocking pool, not inline on the async caller"
+    );
+}
+
+/// The async wrapper is the same discovery as the synchronous loader it replaces at the four session-open sites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discover_mcp_servers_matches_synchronous_discovery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join(".mcp.json"),
+        r#"{"mcpServers":{"probe":{"command":"probe-bin","args":["--stdio"]}}}"#,
+    )
+    .expect("write .mcp.json");
+    let expected = fuigo_shell::util::config::load_mcp_servers(
+        dir.path(),
+        &fuigo_tools::types::compat::CompatConfig::default(),
+    );
+    let discovered = discover_mcp_servers(dir.path().to_path_buf()).await;
+    assert_eq!(
+        serde_json::to_value(&discovered).expect("serialize discovered"),
+        serde_json::to_value(&expected).expect("serialize expected"),
+    );
+}
