@@ -419,6 +419,13 @@ pub struct BashOutput {
     pub output_for_prompt: String,
     pub exit_code: i32,
     pub command: String,
+    /// The producer dropped part of the result: `output` is not the whole thing.
+    ///
+    /// Recovery depends on `output_file`, and the two must be read together. The tool paths that set this also
+    /// write the full result to `output_file`, so `read_file` gets it back. Interactive bash mode (`! cmd`) has no
+    /// output file — it sets `output_file: String::new()` — so a `true` there means the terminal runner hit its
+    /// `output_byte_limit` (1 MiB) and the dropped tail is gone for good, not that it can be fetched. Do not render
+    /// a retrieval hint off this flag alone; check `output_file` is non-empty first.
     pub truncated: bool,
     pub signal: Option<String>,
     pub timed_out: bool,
@@ -428,6 +435,8 @@ pub struct BashOutput {
     pub current_dir: String,
     /// Path to the output file where full output is stored.
     /// Use read_file tool to retrieve full output when truncated.
+    /// Empty when the producer kept no file — interactive bash mode (`! cmd`) is the case that matters, and there
+    /// a `truncated: true` has no recovery path at all. See [`BashOutput::truncated`].
     pub output_file: String,
     /// Total bytes of output (before truncation).
     pub total_bytes: usize,
