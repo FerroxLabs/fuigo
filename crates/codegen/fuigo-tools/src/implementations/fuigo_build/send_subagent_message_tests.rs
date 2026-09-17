@@ -270,9 +270,13 @@ fn tool_description_promises_only_the_delivery_the_engine_implements() {
         );
     }
 
-    // The per-variant schema descriptions ship to the model too.
-    let schema = serde_json::to_value(schemars::schema_for!(SendSubagentMessageInput))
-        .expect("input schema serializes");
+    // The per-variant schema descriptions ship to the model too — and this
+    // reads the SHIPPING schema, not `schemars::schema_for!`. What the model
+    // receives is `registry::types::generate_schema` (draft07,
+    // `inline_subschemas`, root `title`/`description` stripped), the same call
+    // `register_tool` and `ToolConfig` make; `schema_for!` would be a
+    // different generator with a different dialect.
+    let schema = crate::registry::types::generate_schema::<SendSubagentMessageInput>();
     let schema_text = schema.to_string();
     for unkept in [
         "ahead of pending steers",
