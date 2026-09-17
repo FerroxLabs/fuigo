@@ -4624,6 +4624,46 @@ fn transient_connectivity_classification() {
     );
 }
 
+/// A connect-phase probe failure means the server was never reached; a legacy
+/// retry against the same endpoint would only double the time-to-error, so the
+/// probe surfaces the failure instead of returning a legacy verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_connect_failure_surfaces_instead_of_legacy_fallback() {
+    // A port that just stopped listening: connection refused at connect phase.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    drop(listener);
+
+    let client = fake_http_client_probing(&url, 5);
+    let config = HttpConfig {
+        url: url.clone(),
+        headers: vec![],
+        local_agent_endpoint: false,
+    };
+    let http_client = McpClient::build_http_client(
+        &config,
+        "fake",
+        crate::mcp_http_client::WarnBudget::default(),
+    )
+    .expect("client builds");
+    let transport = StreamableHttpClientTransport::with_client(
+        http_client,
+        StreamableHttpClientTransportConfig::with_uri(url.as_str()),
+    );
+
+    let err = match client.probe_modern(transport).await {
+        Err(err) => err,
+        Ok(ProbeVerdict::Modern(_)) => panic!("no server is listening"),
+        Ok(ProbeVerdict::Legacy { probe_error }) => {
+            panic!("connect failures must not become a legacy verdict: {probe_error}")
+        }
+    };
+    assert!(
+        err.is_connect_failure(),
+        "the surfaced error must classify as a connect failure: {err}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_connect_handshake_classifies_connect_phase() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

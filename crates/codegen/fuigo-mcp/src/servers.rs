@@ -3733,6 +3733,17 @@ impl McpClient {
         // is not a timeout; a server that speaks the requested version pays nothing. The
         // `server/discover` probe is not repeated: a server that answered `initialize` at all has
         // already shown it is a legacy server.
+        //
+        // LOAD-BEARING for callers that budget around a handshake (today:
+        // `acp_session_impl::mcp`'s per-server init budget, `2 * startup_timeout_sec + 5`). The
+        // `!Timeout` condition is what bounds the non-OAuth worst case at ONE
+        // `handshake_budget_secs()` — probe + startup — and not two: a legacy phase that consumes
+        // its whole `startup_timeout_sec` window returns `McpError::Timeout` and suppresses this
+        // retry, so probe + startup + a second startup is unreachable. "probe <= startup" does NOT
+        // bound it on its own (with the 30 s default, probe + startup + retry = 10 + 30 + 30 = 70 s,
+        // past that 65 s budget). Widening this gate to retry after a timeout therefore silently
+        // pushes those callers' budgets past their windows. (The OAuth refresh retry below is not
+        // covered by this argument and can already exceed them; it predates the probe split.)
         if let Some(retry_transport) = restore_for_fallback
             && let Err(err) = &result
             && !matches!(err, McpError::Timeout { .. })
