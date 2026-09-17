@@ -774,6 +774,12 @@ fn scheduled_loop(task_id: &str) -> crate::app::agent::ScheduledTaskInfo {
         last_subagent_id: None,
     }
 }
+/// Paint the dashboard, then read the tick demand. Since dash c5c57d9 the dashboard's demand comes from what the
+/// last frame painted (`painted_animations`), so upstream 4827113 draws before every read here too.
+fn painted_tick_demand(app: &mut AppView) -> TickDemand {
+    let _ = paint_dashboard(app);
+    app.tick_demand()
+}
 /// The dashboard paints a `Working` spinner for background work on a turn-idle agent; the tick demand must
 /// keep up with it, or the spinner freezes on its first frame.
 #[test]
@@ -787,7 +793,11 @@ fn tick_demand_dashboard_fast_while_background_work_runs() {
             .get(&id)
             .is_some_and(|agent| agent.session.state.is_idle())
     );
-    assert_eq!(app.tick_demand(), TickDemand::None, "idle dashboard parks");
+    assert_eq!(
+        painted_tick_demand(&mut app),
+        TickDemand::None,
+        "idle dashboard parks"
+    );
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -795,7 +805,7 @@ fn tick_demand_dashboard_fast_while_background_work_runs() {
         .bg_tasks
         .insert("m1".to_owned(), running_bg_task("m1", true));
     assert_eq!(
-        app.tick_demand(),
+        painted_tick_demand(&mut app),
         TickDemand::Fast,
         "a running monitor keeps the Working spinner ticking"
     );
@@ -808,7 +818,7 @@ fn tick_demand_dashboard_fast_while_background_work_runs() {
         .unwrap()
         .status = crate::app::agent::BgTaskStatus::Done;
     assert_eq!(
-        app.tick_demand(),
+        painted_tick_demand(&mut app),
         TickDemand::None,
         "a finished task lingers in bg_tasks for history but must not metronome"
     );
@@ -819,12 +829,12 @@ fn tick_demand_dashboard_fast_while_background_work_runs() {
         .bg_tasks
         .insert("t1".to_owned(), running_bg_task("t1", false));
     assert_eq!(
-        app.tick_demand(),
+        painted_tick_demand(&mut app),
         TickDemand::Fast,
         "a running background command keeps the spinner ticking"
     );
     app.agents.get_mut(&id).unwrap().session.bg_tasks.clear();
-    assert_eq!(app.tick_demand(), TickDemand::None);
+    assert_eq!(painted_tick_demand(&mut app), TickDemand::None);
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -832,7 +842,7 @@ fn tick_demand_dashboard_fast_while_background_work_runs() {
         .scheduled_tasks
         .insert("l1".to_owned(), scheduled_loop("l1"));
     assert_eq!(
-        app.tick_demand(),
+        painted_tick_demand(&mut app),
         TickDemand::Fast,
         "an active /loop keeps the spinner ticking"
     );
