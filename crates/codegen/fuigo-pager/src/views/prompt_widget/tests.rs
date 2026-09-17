@@ -653,6 +653,30 @@
         assert_ne!(pw.textarea.text(), before);
     }
 
+    /// Plan and permission are independent axes on the info line: entering plan mode never hides the
+    /// active permission flag.
+    #[test]
+    fn mode_flags_show_plan_and_permission_together() {
+        use crate::app::actions::PermissionLabel;
+        let theme = Theme::current();
+        let cases = [
+            (Some("plan"), PermissionLabel::AlwaysApprove, vec!["plan", "always-approve"]),
+            (Some("plan"), PermissionLabel::Auto, vec!["plan", "auto"]),
+            (Some("plan approval"), PermissionLabel::Ask, vec!["plan approval"]),
+            (None, PermissionLabel::AlwaysApprove, vec!["always-approve"]),
+            (None, PermissionLabel::Auto, vec!["auto"]),
+            (None, PermissionLabel::Ask, vec![]),
+        ];
+        for (plan_label, permission, expected) in cases {
+            let flags = mode_flags(plan_label, permission, &theme);
+            let texts: Vec<&str> = flags.iter().map(|f| f.text).collect();
+            assert_eq!(texts, expected, "{plan_label:?} + {permission:?}");
+        }
+        let flags = mode_flags(Some("plan"), PermissionLabel::Auto, &theme);
+        assert_eq!(flags[0].color, Some(theme.accent_plan));
+        assert_eq!(flags[1].color, Some(theme.accent_system));
+    }
+
     #[test]
     fn unknown_ctrl_key_is_ignored() {
         let mut pw = PromptWidget::new();

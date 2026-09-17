@@ -1,4 +1,4 @@
-//! The session header (status bar) row: `branch worktree path` on the left.
+//! The session header (status bar) row: `branch worktree path` on the left, and the prompt info line's mode flags.
 use super::{AgentView, AppRenderParams, BannerSlotParams, test_fixtures};
 use crate::actions::ActionRegistry;
 use crate::app::bundle::BundleState;
@@ -93,4 +93,28 @@ fn session_header_always_shortens_deep_cwd() {
         !row.contains("(worktree of"),
         "no leftover main-repo suffix, row = {row:?}"
     );
+}
+
+/// Plan mode and the permission mode are independent axes: the info line reads `plan · always-approve`
+/// (or `plan · auto`) instead of hiding the permission flag while the agent is in plan mode.
+#[test]
+fn info_line_shows_plan_and_permission_flags_together() {
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    for (yolo, auto, expected) in [(true, false, "always-approve"), (false, true, "auto")] {
+        let mut agent = agent_at(120);
+        agent.plan_mode_active = true;
+        agent.session.set_yolo_mode_for_test(yolo);
+        agent.session.set_auto_mode_for_test(auto);
+        let buf = draw(&mut agent, &registry);
+        let rows: Vec<String> = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+        let info = rows
+            .iter()
+            .find(|row| row.contains("plan"))
+            .unwrap_or_else(|| panic!("no info line mentions plan: {rows:#?}"));
+        assert!(
+            info.contains(expected),
+            "plan mode must keep the {expected} flag visible, row = {info:?}"
+        );
+    }
 }

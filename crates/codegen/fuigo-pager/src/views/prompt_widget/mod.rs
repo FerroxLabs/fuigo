@@ -291,6 +291,33 @@ pub struct PromptFlag<'a> {
     pub bold: bool,
 }
 
+/// Info-line mode flags shared by the chat prompt and the dashboard peek badge: plan label, then permission.
+pub fn mode_flags<'a>(
+    plan_label: Option<&'a str>,
+    permission: crate::app::actions::PermissionLabel,
+    theme: &Theme,
+) -> Vec<PromptFlag<'a>> {
+    use crate::app::actions::PermissionLabel;
+    let mut flags = Vec::new();
+    if let Some(text) = plan_label {
+        flags.push(PromptFlag {
+            text,
+            color: Some(theme.accent_plan),
+            bold: false,
+        });
+        return flags;
+    }
+    if permission != PermissionLabel::Ask {
+        flags.push(PromptFlag {
+            text: permission.as_canonical(),
+            // Blue `accent_system` reads as "system/automation", distinct from plan
+            color: (permission == PermissionLabel::Auto).then_some(theme.accent_system),
+            bold: false,
+        });
+    }
+    flags
+}
+
 /// Optional info line rendered below the prompt text.
 ///
 /// The default is blank: a caller that wants the bottom border without any info text passes it, and [`Self::is_blank`] then skips the text pass.
