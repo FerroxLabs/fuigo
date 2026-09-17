@@ -1041,6 +1041,19 @@ impl AgentView {
                     self.sync_timeline_hover_preview();
                     changed = true;
                 }
+                // The dock's row hover and its `[stop]` tint are what the next
+                // click trusts, so a move over the dock has to mark the frame
+                // changed here; the paint-time `sync_dock_hover_from_pointer`
+                // only re-derives it once something else has asked to repaint.
+                if hit == Some(AgentPane::Dock) {
+                    let new = self.dock_item_at(self.pane_areas.dock, mouse.row);
+                    if new != self.dock_hovered {
+                        self.dock_hovered = new;
+                        changed = true;
+                    }
+                } else if self.dock_hovered.take().is_some() {
+                    changed = true;
+                }
                 changed |= self
                     .set_hovered_follow_up_chip(self.follow_up_chip_at(mouse.column, mouse.row));
                 changed |= self.hit_context.update_hover(mouse.column, mouse.row);

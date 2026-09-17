@@ -522,6 +522,7 @@ impl TaskEntry {
         current_cron: Option<&str>,
         is_queued: bool,
         linked: Option<(String, bool)>,
+        now: DateTime<Utc>,
     ) -> Self {
         let linked_running = linked.as_ref().is_some_and(|(_, running)| *running);
         let theme = Theme::current();
@@ -530,41 +531,18 @@ impl TaskEntry {
         } else {
             info.prompt.clone()
         };
-        let countdown = |schedule: &str, created: std::time::Instant| -> String {
-            if let Some(secs) = crate::util::parse_schedule_interval_secs(schedule) {
-                let approx = created + std::time::Duration::from_secs(secs);
-                let now = std::time::Instant::now();
-                if approx > now {
-                    format!(" (next in {})", format_duration(approx.duration_since(now)))
-                } else {
-                    " (due now)".to_string()
-                }
-            } else {
-                String::new()
-            }
-        };
         let is_provisional = info.task_id.starts_with("provisional-");
+        // The "next in …"/"due now" countdown lives in one place
+        // ([`super::scheduled_next::next_suffix`]) so the tasks pane and the
+        // dock Watchers row can never drift apart on the same loop.
         let suffix = if current_cron == Some(&info.task_id) || linked_running {
             " (running)".to_string()
         } else if is_queued {
             " (queued)".to_string()
         } else if is_provisional {
             " (starting)".to_string()
-        } else if let Some(n) = &info.next_fire_at {
-            if let Ok(dt) = DateTime::<chrono::FixedOffset>::parse_from_rfc3339(n) {
-                let dt = dt.with_timezone(&Utc);
-                let now = Utc::now();
-                if dt > now {
-                    let dur = (dt - now).to_std().unwrap_or_default();
-                    format!(" (next in {})", format_duration(dur))
-                } else {
-                    " (due now)".to_string()
-                }
-            } else {
-                countdown(&info.human_schedule, info.created_at)
-            }
         } else {
-            countdown(&info.human_schedule, info.created_at)
+            super::scheduled_next::next_suffix(info, now)
         };
         // Capitalize the tag for display (`loop` becomes `Loop`) so it reads as a proper label, matching the monitor row's `Monitor` tag
         let tag_display = {
@@ -913,6 +891,7 @@ impl TasksPane {
         }
 
         // Add scheduled task items (always "running")
+        let now = Utc::now();
         for info in scheduled.values() {
             let linked = info.last_subagent_id.as_deref().and_then(|sid| {
                 subagents
@@ -925,6 +904,7 @@ impl TasksPane {
                 current_cron_task_id,
                 queued_cron_ids.contains(info.task_id.as_str()),
                 linked,
+                now,
             ));
         }
 

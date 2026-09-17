@@ -956,6 +956,10 @@ impl AgentView {
             self.hit_announcement_cta.clear();
             self.hit_upgrade_cta.clear();
             self.privacy_banner.clear_hits();
+            // A takeover frame paints no dock, so it must still spend the
+            // pending reveal: a flag that survives the child view would have
+            // `dock_max_rows()` budget the raised ask on the way back.
+            self.take_dock_row_request();
             return self.draw_subagent_fullscreen(
                 &child_sid.clone(),
                 area,
@@ -1530,6 +1534,10 @@ impl AgentView {
             data.stop_hovered = crate::views::dock::hovered_stop_button_rect(layout.dock, data)
                 .is_some_and(|hit| hit.rect.contains((col, row).into()));
         }
+        // Cleared unconditionally: a frame that paints no dock (Ctrl+G hidden,
+        // or a terminal too short for one) must not leave the previous frame's
+        // kill rect and `DockKillId` live in the field.
+        self.dock_stop_button = None;
         if let Some(dock) = &dock_data {
             self.cache_dock_stop_at(layout.dock, dock);
             let body = crate::views::dock::queue_body_rect(layout.dock, dock);
