@@ -398,7 +398,23 @@ pub use fuigo_shared::session::session_dir;
 type RelocationResult<T> = crate::session::storage::relocation::Result<T>;
 type SummaryReader = fn(&Path) -> RelocationResult<Summary>;
 
+// Test-only count of `storage_view` loads on this thread, so a batch API can pin "one view per
+// call" rather than merely "the right answer". Thread-local because the suite runs tests in
+// parallel and each test body owns its own thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STORAGE_VIEW_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reader for [`STORAGE_VIEW_LOADS`].
+#[cfg(test)]
+pub(crate) fn storage_view_loads() -> usize {
+    STORAGE_VIEW_LOADS.with(std::cell::Cell::get)
+}
+
 fn storage_view(sessions_root: &Path) -> RelocationResult<RelocationView> {
+    #[cfg(test)]
+    STORAGE_VIEW_LOADS.with(|n| n.set(n.get() + 1));
     RelocationView::load_for_sessions_root(sessions_root)
 }
 
