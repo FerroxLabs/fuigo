@@ -3629,12 +3629,13 @@ impl McpClient {
     /// On rare contention the slot stays `Initializing`; the wait-timeout fallback below then surfaces a clear error rather than blocking forever.
     pub async fn ensure_initialized(&self) -> Result<McpService, McpError> {
         // Bound how long a parked caller waits on `init_done` before surfacing an error
-        // `try_handshake` is itself bounded per phase: the `server/discover` probe plus the legacy
-        // `initialize` with its full `startup_timeout_sec` (see `handshake_budget_secs`)
+        // The holder's whole `ensure_initialized` — not one `try_handshake` — is what a waiter has
+        // to sit through: the probe phase, the legacy phase, the protocol-version fallback, and for
+        // an OAuth client a token refresh and a second handshake (see `handshake_worst_case_secs`)
         // Anything beyond that plus a 1 s margin means the holder was dropped without restoring the transport (cancellation under heavy contention)
         // Wedging silently would recreate the exact "stuck client" failure mode
         let inflight_wait =
-            std::time::Duration::from_secs(self.handshake_budget_secs().saturating_add(1));
+            std::time::Duration::from_secs(self.handshake_worst_case_secs().saturating_add(1));
 
         // Drive the loop body until we either return directly or break out with an owned `PendingTransport`
         // We deliberately use a labelled `loop` with a `break <expr>`
@@ -3734,16 +3735,20 @@ impl McpClient {
         // `server/discover` probe is not repeated: a server that answered `initialize` at all has
         // already shown it is a legacy server.
         //
-        // LOAD-BEARING for callers that budget around a handshake (today:
-        // `acp_session_impl::mcp`'s per-server init budget, `2 * startup_timeout_sec + 5`). The
-        // `!Timeout` condition is what bounds the non-OAuth worst case at ONE
-        // `handshake_budget_secs()` — probe + startup — and not two: a legacy phase that consumes
-        // its whole `startup_timeout_sec` window returns `McpError::Timeout` and suppresses this
-        // retry, so probe + startup + a second startup is unreachable. "probe <= startup" does NOT
-        // bound it on its own (with the 30 s default, probe + startup + retry = 10 + 30 + 30 = 70 s,
-        // past that 65 s budget). Widening this gate to retry after a timeout therefore silently
-        // pushes those callers' budgets past their windows. (The OAuth refresh retry below is not
-        // covered by this argument and can already exceed them; it predates the probe split.)
+        // LOAD-BEARING for everything that budgets around a handshake — today the waiter park
+        // above and `Self::get_tool_registrations`, both sized on `handshake_worst_case_secs()`.
+        // This retry costs a SECOND full `startup_timeout_sec`, so ONE attempt is bounded by
+        // probe + 2 * startup (10 + 30 + 30 = 70 s at the defaults), which is what
+        // `version_fallback_secs()` accounts for.
+        //
+        // The `!Timeout` gate does NOT cut that to one `handshake_budget_secs()`. It only
+        // suppresses the retry when the legacy phase runs its window out: `serve_legacy` maps
+        // everything that fails BEFORE the window expires to `McpError::HandshakeFailed`, so a
+        // legacy failure at `startup_timeout_sec - ε` — a 401, a dropped connection, a malformed
+        // reply — still fires it, and probe + startup + a second startup is reachable. (An earlier
+        // revision of this comment claimed the opposite; it was wrong, and its own worked example
+        // contradicted it.) Widening the gate to retry after a timeout would not change the bound
+        // either, but it would make the 70 s worst case the COMMON case for a hung server.
         if let Some(retry_transport) = restore_for_fallback
             && let Err(err) = &result
             && !matches!(err, McpError::Timeout { .. })
@@ -3983,6 +3988,57 @@ impl McpClient {
             .saturating_add(self.probe_timeout_secs())
     }
 
+    /// Allowance for the protocol-version fallback retry inside [`Self::ensure_initialized`]: a
+    /// second legacy `initialize` at [`FALLBACK_PROTOCOL_VERSION`], on a fresh transport, with the
+    /// full `startup_timeout_sec`. Zero for stdio/ACP, whose transports are not rebuildable
+    /// ([`restorable_http_transport`] returns `None`, so the retry cannot fire).
+    ///
+    /// One `ensure_initialized` ATTEMPT is therefore bounded by probe + 2 × startup, not by
+    /// [`Self::handshake_budget_secs`]: that retry's gate is `!matches!(err, McpError::Timeout
+    /// { .. })`, and [`Self::serve_legacy`] returns [`McpError::HandshakeFailed`] — never
+    /// `Timeout` — for everything that fails BEFORE the window expires, so a legacy phase that
+    /// fails at `startup_timeout_sec - ε` still fires it. At the 30 s default that is
+    /// 10 + 30 + 30 = 70 s.
+    fn version_fallback_secs(&self) -> u64 {
+        if self.http_config.is_some() {
+            self.startup_timeout_sec
+        } else {
+            0
+        }
+    }
+
+    /// Worst case for [`Self::ensure_initialized`]: one attempt (probe + legacy + the
+    /// protocol-version fallback, [`Self::version_fallback_secs`]), or for an OAuth-capable client
+    /// a failed attempt, a token refresh, and a full retry.
+    ///
+    /// The OAuth retry runs AFTER the protocol-version fallback block and is a single
+    /// [`Self::try_handshake`], so it costs one [`Self::handshake_budget_secs`], not another
+    /// attempt-with-fallback.
+    ///
+    /// Everything that puts a timeout around a handshake — the waiter park below, and
+    /// [`Self::get_tool_registrations`] — must be sized on THIS, not on
+    /// [`Self::handshake_budget_secs`].
+    fn handshake_worst_case_secs(&self) -> u64 {
+        let one_attempt = self
+            .handshake_budget_secs()
+            .saturating_add(self.version_fallback_secs());
+        if self.auth_manager.is_some() && self.http_config.is_some() {
+            one_attempt
+                .saturating_add(Self::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS)
+                .saturating_add(self.handshake_budget_secs())
+        } else {
+            one_attempt
+        }
+    }
+
+    /// Waiter allowance for the token-refresh interlude between an OAuth client's two handshake
+    /// attempts: metadata/credential hydration is bounded by [`OAUTH_DISCOVERY_TIMEOUT`]-sized
+    /// steps, plus the refresh POST itself. The POST rides rmcp's own OAuth client without a total
+    /// request deadline, so this covers the nominal path; a pathological hung refresh can still
+    /// outlast waiters, which predates the probe split and needs a deadline inside rmcp's refresh
+    /// to close fully.
+    const OAUTH_REFRESH_RETRY_ALLOWANCE_SECS: u64 = 15;
+
     /// Smallest whole-second deadline that holds both handshake phases (one second each).
     pub const MIN_HANDSHAKE_DEADLINE_SECS: u64 = 2;
 
@@ -4062,8 +4118,22 @@ impl McpClient {
         }
     }
 
-    /// Phase 2 (and the only phase for stdio): the legacy
-    /// `initialize` handshake, on its own fresh transport with the FULL startup budget — the probe phase never erodes it, so `startup_timeout_sec` keeps its pre-probe meaning for legacy servers. Its failure is surfaced directly (never wrapped in a fallback-specific error), so the auth and transport classifiers on [`McpError::HandshakeFailed`] see the same errors they saw before the probe existed.
+    /// Phase 2 (and the only phase for stdio): the legacy `initialize` handshake, on its own fresh
+    /// transport with the full `startup_timeout_sec`. Its failure is surfaced directly (never
+    /// wrapped in a fallback-specific error), so the auth and transport classifiers on
+    /// [`McpError::HandshakeFailed`] see the same errors they saw before the probe existed.
+    ///
+    /// The probe phase does not erode this window, but it does not follow that
+    /// `startup_timeout_sec` keeps its pre-probe MEANING for every caller: a caller that derives
+    /// the budget from an outer deadline ([`Self::max_startup_within_deadline`], today the bind
+    /// path) hands the legacy phase `deadline - DISCOVER_PROBE_TIMEOUT_SECS`, so a 30 s deadline
+    /// leaves 20 s here rather than 30. A legacy server that ACCEPTS `server/discover` and never
+    /// answers it — non-conformant; a legacy SDK answers method-not-found at once — and then needs
+    /// 20-30 s for `initialize` connects at 30 s of raw startup budget but not at a 30 s deadline.
+    /// Upstream has the identical formula and default, and the probe is not skippable (2026-07-28
+    /// session-less servers reject every `tools/call` on a legacy session), so the lever is the
+    /// operator's: `mcp_startup_timeout_secs` on the ordinary config path, the discovery deadline
+    /// on the bind path.
     /// The `initialize` names `protocol_version`: `REQUESTED_PROTOCOL_VERSION` on the first
     /// attempt, `FALLBACK_PROTOCOL_VERSION` on the retry [`Self::ensure_initialized`] makes for an
     /// HTTP server that rejects the requested version's session.
@@ -4522,7 +4592,33 @@ impl McpClient {
         }
     }
 
+    /// The handshake plus the first `tools/list`, bounded so a server that connects and then stalls
+    /// cannot hold a caller indefinitely.
+    ///
+    /// The bound lives HERE, not in the callers. `ensure_initialized` bounds each handshake phase,
+    /// but the post-handshake `tools/list` round-trip is otherwise unbounded, and a server that
+    /// connects and then stalls on it would block `mcp_initialized` forever — hanging the pager's
+    /// "Connecting MCPs (N/M)…" spinner. A caller cannot size this window from
+    /// `startup_timeout_sec` alone: only the client knows whether the probe phase, the
+    /// protocol-version fallback and an OAuth refresh retry are in play
+    /// ([`Self::handshake_worst_case_secs`]).
     pub async fn get_tool_registrations(
+        &self,
+        mcp_state: Arc<Mutex<McpState>>,
+    ) -> Result<Vec<McpToolRegistration>, McpError> {
+        let list_window = self
+            .startup_timeout_sec
+            .max(Self::DISCOVER_PROBE_TIMEOUT_SECS);
+        let budget = std::time::Duration::from_secs(
+            self.handshake_worst_case_secs().saturating_add(list_window),
+        );
+        match tokio::time::timeout(budget, self.list_tool_registrations(mcp_state)).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::timeout(&self.server_name, budget)),
+        }
+    }
+
+    async fn list_tool_registrations(
         &self,
         mcp_state: Arc<Mutex<McpState>>,
     ) -> Result<Vec<McpToolRegistration>, McpError> {

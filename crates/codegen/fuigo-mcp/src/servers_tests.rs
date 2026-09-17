@@ -1700,6 +1700,9 @@ enum DiscoverBehavior {
     /// Legacy middleware that 500s the probe with a non-JSON body — one of the
     /// malformed shapes that must still fall back to `initialize`.
     NonJsonServerError,
+    /// A server that ACCEPTS `server/discover` and never answers it, so the probe
+    /// phase burns its whole [`McpClient::probe_timeout_secs`] before the legacy fallback.
+    Swallow,
 }
 
 #[derive(Clone, Default)]
@@ -1708,6 +1711,15 @@ struct FakeMcpOptions {
     /// When set, `initialize` is rejected with an "Unauthorized" JSON-RPC
     /// error, for asserting that fallback errors keep their auth classification.
     init_unauthorized: bool,
+    /// Delay before every `initialize` reply. Lets a legacy phase fail just SHORT of
+    /// `startup_timeout_sec`, which is what fires the protocol-version fallback retry
+    /// (`serve_legacy` maps a pre-window failure to `HandshakeFailed`, not `Timeout`).
+    init_delay_ms: u64,
+    /// `initialize` requests from this 0-based index on are accepted and never answered,
+    /// so that phase burns its whole `startup_timeout_sec`.
+    init_hang_from: Option<usize>,
+    /// Accept `tools/list` and never answer it: the post-handshake round-trip stalls.
+    list_hang: bool,
 }
 
 #[derive(Clone)]
@@ -1740,7 +1752,7 @@ async fn fake_handle_post(
     };
     match req["method"].as_str() {
         Some("initialize") => {
-            state.handles.inits.fetch_add(1, Ordering::Relaxed);
+            let init_n = state.handles.inits.fetch_add(1, Ordering::Relaxed);
             *state.handles.init_version.lock() =
                 req["params"]["protocolVersion"].as_str().map(str::to_owned);
             *state.handles.init_capabilities.lock() = Some(req["params"]["capabilities"].clone());
@@ -1749,6 +1761,15 @@ async fn fake_handle_post(
                 .init_user_agents
                 .lock()
                 .extend(header_values(&headers, axum::http::header::USER_AGENT));
+            if state.options.init_hang_from.is_some_and(|from| init_n >= from) {
+                std::future::pending::<()>().await;
+            }
+            if state.options.init_delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    state.options.init_delay_ms,
+                ))
+                .await;
+            }
             if state.options.init_unauthorized {
                 return axum::Json(err(-32001, "Unauthorized: token expired".to_string()))
                     .into_response();
@@ -1793,12 +1814,20 @@ async fn fake_handle_post(
                 DiscoverBehavior::MethodNotFound => {
                     axum::Json(err(-32601, "Method not found".to_string())).into_response()
                 }
+                DiscoverBehavior::Swallow => {
+                    std::future::pending::<()>().await;
+                    unreachable!("`std::future::pending` never resolves")
+                }
                 DiscoverBehavior::NonJsonServerError => (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     "middleware exploded",
                 )
                     .into_response(),
             }
+        }
+        Some("tools/list") if state.options.list_hang => {
+            std::future::pending::<()>().await;
+            unreachable!("`std::future::pending` never resolves")
         }
         Some("tools/list") => axum::Json(serde_json::json!({
             "jsonrpc": "2.0",
@@ -2276,6 +2305,182 @@ fn max_startup_within_deadline_fits_the_probe_phase() {
     for deadline in 0..McpClient::MIN_HANDSHAKE_DEADLINE_SECS {
         assert_eq!(budget(deadline), McpClient::MIN_HANDSHAKE_DEADLINE_SECS);
     }
+}
+
+/// An OAuth-capable client, for the budget arithmetic. The manager only has to EXIST for
+/// [`McpClient::handshake_worst_case_secs`] to admit a refresh retry, so it is pointed at a closed
+/// port: construction must not touch the network.
+async fn fake_http_auth_client_with_startup(url: &str, startup_timeout_sec: u64) -> Arc<McpClient> {
+    let manager = crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
+        .await
+        .expect("loopback auth manager");
+    let overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(startup_timeout_sec),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    };
+    Arc::new(McpClient::new_http_auth(
+        "fake".to_string(),
+        HttpConfig {
+            url: url.to_string(),
+            headers: vec![],
+            local_agent_endpoint: false,
+        },
+        Arc::new(tokio::sync::Mutex::new(manager)),
+        crate::credentials::ObservedAccessToken::default(),
+        None,
+        Some(&overrides),
+        None,
+    ))
+}
+
+/// The worst case a handshake waiter has to sit through is NOT one `try_handshake`.
+///
+/// One `ensure_initialized` attempt runs the `server/discover` probe, the legacy `initialize`, and
+/// — whenever that legacy phase fails before its window closes — the protocol-version fallback's
+/// second legacy `initialize`: probe + 2 * startup, 10 + 30 + 30 = 70 s at the defaults.
+/// (`serve_legacy` returns `HandshakeFailed`, not `Timeout`, for everything short of the window, so
+/// the `!Timeout` gate on that retry does not suppress it.) An OAuth-capable client can then
+/// refresh its token and run a further full handshake.
+#[tokio::test]
+async fn handshake_worst_case_covers_the_fallback_and_the_oauth_refresh_retry() {
+    let url = "http://127.0.0.1:1/mcp";
+    // Plain HTTP at the 30 s default: probe 10 + startup 30 + the fallback's second startup 30.
+    let http = fake_http_client_with_startup(url, 30, 5);
+    assert_eq!(http.handshake_budget_secs(), 40);
+    assert_eq!(http.version_fallback_secs(), 30);
+    assert_eq!(http.handshake_worst_case_secs(), 70);
+
+    // No `http_config` means no rebuildable HTTP transport, so no fallback retry and no OAuth
+    // refresh retry: one probe + startup.
+    let stdio = McpClient::stub("stdio-srv");
+    assert!(stdio.http_config.is_none());
+    assert_eq!(stdio.version_fallback_secs(), 0);
+    assert_eq!(stdio.handshake_worst_case_secs(), stdio.handshake_budget_secs());
+
+    // OAuth: a failed attempt (70), the refresh interlude (15), and a full retry. The retry runs
+    // after the fallback block, so it is one `handshake_budget_secs()` (40), not another 70.
+    let oauth = fake_http_auth_client_with_startup(url, 30).await;
+    assert_eq!(
+        oauth.handshake_worst_case_secs(),
+        70 + McpClient::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS + 40,
+    );
+    assert_eq!(oauth.handshake_worst_case_secs(), 125);
+    // Every handshake waiter must clear the non-OAuth 70 s bound the comment at the fallback gate
+    // records; the OAuth arm clears it with room for the second attempt.
+    assert!(oauth.handshake_worst_case_secs() >= 70);
+    assert!(http.handshake_worst_case_secs() >= 70);
+}
+
+/// Regression (U110): a waiter parked on `init_done` must budget for the holder's whole
+/// `ensure_initialized`, not for one `handshake_budget_secs()`.
+///
+/// The fake swallows `server/discover` (burning the whole probe phase), then rejects the first
+/// `initialize` just SHORT of the startup window — a `HandshakeFailed`, which fires the
+/// protocol-version fallback — and hangs the second one until its window expires. That is a
+/// legitimate 6 + 4 + 6 = 16 s handshake inside a 12 s `handshake_budget_secs()`. A park sized on
+/// one budget releases the waiter with the "init still in progress" wedge error at 13 s, while the
+/// holder is still working.
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_waiter_survives_the_protocol_version_fallback_retry() {
+    let (url, handles) = spawn_fake_mcp_with(
+        CallToolBehavior::HangThenOk { hang_ms: 0 },
+        FakeMcpOptions {
+            discover: DiscoverBehavior::Swallow,
+            init_unauthorized: true,
+            init_delay_ms: 4_000,
+            init_hang_from: Some(1),
+            list_hang: false,
+        },
+    )
+    .await;
+    let client = fake_http_client_with_startup(&url, 6, 5);
+    // probe 6 + startup 6. The fake's handshake legitimately runs past this.
+    assert_eq!(client.handshake_budget_secs(), 12);
+
+    let holder_client = Arc::clone(&client);
+    let holder = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let err = holder_client
+            .ensure_initialized()
+            .await
+            .expect_err("the fake never completes a handshake");
+        (err, started.elapsed())
+    });
+    // The holder is 6 s into the swallowed probe by now, so it owns the slot.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let waiter_client = Arc::clone(&client);
+    let waiter = tokio::spawn(async move { waiter_client.ensure_initialized().await });
+
+    let (holder_err, holder_elapsed) = holder.await.expect("holder task");
+    assert!(
+        matches!(holder_err, McpError::Timeout { .. }),
+        "the fallback phase hangs its whole window: {holder_err}"
+    );
+    // Premise: the holder legitimately outlasts one `handshake_budget_secs()`.
+    assert!(
+        holder_elapsed > std::time::Duration::from_secs(client.handshake_budget_secs()),
+        "holder finished in {holder_elapsed:?}, inside one handshake budget - the fake did not \
+         exercise the fallback retry"
+    );
+    // Both `initialize` attempts reached the wire: the rejection and the fallback.
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 2);
+    // The waiter must still be parked. A park of `handshake_budget_secs() + 1` expired ~2.5 s ago.
+    assert!(
+        !waiter.is_finished(),
+        "parked waiter was released before the holder published: its park does not cover the \
+         holder's worst case"
+    );
+    waiter.abort();
+    // The park that kept it: probe 6 + startup 6 + the fallback's second startup 6.
+    assert_eq!(client.handshake_worst_case_secs(), 18);
+    assert!(
+        holder_elapsed <= std::time::Duration::from_secs(client.handshake_worst_case_secs()),
+        "holder took {holder_elapsed:?}, past handshake_worst_case_secs"
+    );
+}
+
+/// The bound on "handshake + the first `tools/list`" belongs to the client, not to its callers.
+///
+/// `ensure_initialized` bounds each handshake phase, but the post-handshake `tools/list` is
+/// otherwise unbounded: a server that connects and then stalls on it holds the caller forever.
+/// Callers cannot size that window themselves — only the client knows whether a probe phase, a
+/// protocol-version fallback or an OAuth refresh retry are in play.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_registrations_are_bounded_when_tools_list_stalls() {
+    let (url, _handles) = spawn_fake_mcp_with(
+        CallToolBehavior::HangThenOk { hang_ms: 0 },
+        FakeMcpOptions {
+            list_hang: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_with_startup(&url, 1, 1);
+    let mcp_state = Arc::new(Mutex::new(McpState::new(vec![])));
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.get_tool_registrations(mcp_state),
+    )
+    .await
+    .expect("`get_tool_registrations` must bound itself, not hang on a stalled `tools/list`");
+    // `McpToolRegistration` is not `Debug`, so unwrap the `Err` by hand.
+    let Err(err) = outcome else {
+        panic!("the fake never answers `tools/list`; registrations must not succeed");
+    };
+
+    assert!(matches!(err, McpError::Timeout { .. }), "{err}");
+    // The bound it applied: (probe 1 + startup 1 + the fallback's second startup 1) plus a
+    // `max(startup, DISCOVER_PROBE_TIMEOUT_SECS)` list window.
+    let expected = client.handshake_worst_case_secs() + McpClient::DISCOVER_PROBE_TIMEOUT_SECS;
+    assert_eq!(expected, 13);
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(expected),
+        "cut off after {:?}, short of the handshake worst case plus the list window",
+        started.elapsed()
+    );
 }
 
 /// Wire-level counterpart: a 5s-startup client (the desktop bind path's size class) still
