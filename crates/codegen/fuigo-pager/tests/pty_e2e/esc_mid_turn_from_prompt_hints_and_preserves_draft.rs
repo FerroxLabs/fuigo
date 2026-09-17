@@ -57,7 +57,7 @@ async fn esc_mid_turn_from_prompt_hints_and_preserves_draft() {
     );
     assert!(
         !screen.contains("press again to clear"),
-        "running-turn Esc must cancel, never arm the idle clear\nscreen:\n{screen}"
+        "running-turn Esc must hint at the cancel key, never arm the idle clear\nscreen:\n{screen}"
     );
     assert!(
         !harness.contains_text("panicked"),
