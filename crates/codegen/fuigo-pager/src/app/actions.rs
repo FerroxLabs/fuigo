@@ -2018,6 +2018,9 @@ pub enum Effect {
     UnregisterActiveSession { session_id: acp::SessionId },
     /// Quit the application.
     Quit,
+    /// Reset a wedged xterm.js mouse tracker by toggling mouse reporting off and on.
+    /// Handled on the event-loop thread through the escape writer (never an inline tty write).
+    ResetMouseReporting,
     /// Toggle coding data sharing via ACP.
     SetCodingDataSharing {
         agent_id: AgentId,

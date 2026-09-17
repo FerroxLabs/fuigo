@@ -181,7 +181,12 @@ pub(super) fn last_session_event(sb: &ScrollbackState) -> Option<SessionEvent> {
 }
 pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    let mut app = AppView::new(
+        tx.clone(),
+        ModelState::default(),
+        Vec::new(),
+        crate::render::draw::EscapeWriter::disconnected(),
+    );
     app.leader_mode = true;
     let id = AgentId(0);
     let agent = make_agent(Some(session_id));
@@ -600,7 +605,12 @@ pub(super) fn make_fired_notif_with_subagent(
 /// Handlers that gate on `active_view` will mutate the wrong agent (or silently no-op).
 pub(super) fn make_app_two_agents() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    let mut app = AppView::new(
+        tx.clone(),
+        ModelState::default(),
+        Vec::new(),
+        crate::render::draw::EscapeWriter::disconnected(),
+    );
     let id0 = AgentId(0);
     let agent0 = make_agent(Some("sess-owner"));
     app.agents.insert(id0, agent0);

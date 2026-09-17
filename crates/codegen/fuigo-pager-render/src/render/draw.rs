@@ -70,6 +70,10 @@ pub struct WriterSync {
     written: Arc<AtomicU64>,
     failed: Arc<AtomicBool>,
     writer_active: Arc<AtomicBool>,
+    /// The one thread allowed to enqueue payloads; a second producer could interleave
+    /// `reserve_sequence` with `send` and put byte-order-sensitive escapes on the tty
+    /// out of order (see [`EscapeWriter`]).
+    producer: Arc<std::sync::OnceLock<std::thread::ThreadId>>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<WriterEvent>>,
 }
 impl Default for WriterSync {
@@ -84,6 +88,7 @@ impl WriterSync {
             written: Arc::new(AtomicU64::new(0)),
             failed: Arc::new(AtomicBool::new(false)),
             writer_active: Arc::new(AtomicBool::new(false)),
+            producer: Arc::new(std::sync::OnceLock::new()),
             event_tx: None,
         }
     }
@@ -93,6 +98,7 @@ impl WriterSync {
             written: Arc::new(AtomicU64::new(0)),
             failed: Arc::new(AtomicBool::new(false)),
             writer_active: Arc::new(AtomicBool::new(false)),
+            producer: Arc::new(std::sync::OnceLock::new()),
             event_tx: Some(event_tx),
         }
     }
@@ -155,7 +161,36 @@ pub struct WriterPayload {
     pub(crate) sequence: u64,
     pub(crate) data: Vec<u8>,
 }
+impl WriterPayload {
+    /// The raw bytes this payload writes to the tty.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
 pub type WriterSender = mpsc::Sender<WriterPayload>;
+fn writer_exited_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "terminal writer thread exited",
+    )
+}
+/// Send failure marks shared sync failed; the event loop surfaces it as fatal.
+/// One producer only: interleaved reserve+send would put byte-order-sensitive escapes on the tty out of order.
+fn send_payload(tx: &WriterSender, sync: &WriterSync, data: Vec<u8>) -> std::io::Result<()> {
+    let current = std::thread::current().id();
+    let producer = *sync.producer.get_or_init(|| current);
+    debug_assert_eq!(
+        producer, current,
+        "writer payloads must all come from the event-loop thread; a second producer thread \
+         can reorder terminal output (see EscapeWriter)"
+    );
+    let sequence = sync.reserve_sequence();
+    if tx.send(WriterPayload { sequence, data }).is_err() {
+        sync.mark_failed(writer_exited_error());
+        return Err(writer_exited_error());
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriterAlreadyActive;
 impl std::fmt::Display for WriterAlreadyActive {
@@ -188,6 +223,11 @@ impl TermWriter {
     pub fn writer_sync(&self) -> &WriterSync {
         &self.sync
     }
+    /// A cloneable, non-blocking handle onto this writer's queue for
+    /// out-of-band escapes (see [`EscapeWriter`]).
+    pub fn escape_writer(&self) -> EscapeWriter {
+        EscapeWriter::new(self.tx.clone(), self.sync.clone())
+    }
 }
 impl Write for TermWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
@@ -198,18 +238,7 @@ impl Write for TermWriter {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let sequence = self.sync.reserve_sequence();
-        let data = std::mem::take(&mut self.buf);
-        if self.tx.send(WriterPayload { sequence, data }).is_err() {
-            let error = std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "terminal writer thread exited",
-            );
-            self.sync
-                .mark_failed(std::io::Error::new(error.kind(), error.to_string()));
-            return Err(error);
-        }
-        Ok(())
+        send_payload(&self.tx, &self.sync, std::mem::take(&mut self.buf))
     }
 }
 impl Drop for TermWriter {
@@ -217,6 +246,64 @@ impl Drop for TermWriter {
         let _ = self.flush();
         self.sync.writer_active.store(false, Ordering::Release);
     }
+}
+/// Out-of-band terminal escapes (title/progress OSC, mouse-capture re-assert, keyboard-flag
+/// push/pop) enqueued on the writer thread's queue instead of written inline.
+///
+/// An inline `with_locked_stderr` write from the event-loop thread deadlocks the UI when the
+/// terminal stops reading the pty: the writer thread is already parked inside its own tty write
+/// holding that lock, so the event loop blocks behind it mid-turn.
+///
+/// Event-loop thread only. Drop every clone before [`WriterThread::join_within`] or the writer
+/// never sees the channel close.
+#[derive(Clone)]
+pub struct EscapeWriter {
+    tx: WriterSender,
+    sync: WriterSync,
+}
+impl EscapeWriter {
+    pub fn new(tx: WriterSender, sync: WriterSync) -> Self {
+        Self { tx, sync }
+    }
+    /// A writer with no writer thread behind it: sends fail against a private,
+    /// receiver-less channel and are dropped. For the headless leader (no tty) and tests;
+    /// any TUI view must get the live handle from [`TermWriter::escape_writer`] instead.
+    pub fn disconnected() -> Self {
+        let (tx, _rx) = mpsc::channel::<WriterPayload>();
+        Self {
+            tx,
+            sync: WriterSync::new(),
+        }
+    }
+    /// Never blocks. Covered by `wait_drained`. Send failure is recorded on the shared sync, not returned.
+    pub fn emit(&self, bytes: impl Into<Vec<u8>>) {
+        let data: Vec<u8> = bytes.into();
+        if data.is_empty() {
+            return;
+        }
+        let _ = send_payload(&self.tx, &self.sync, data);
+    }
+    /// Winapi-only commands run synchronously: a console API call, not a tty write, so they neither block on the pty nor take the stderr lock.
+    pub fn emit_command(&self, command: impl crossterm::Command) {
+        #[cfg(windows)]
+        if !command.is_ansi_code_supported() {
+            let _ = command.execute_winapi();
+            return;
+        }
+        let mut ansi = String::new();
+        if command.write_ansi(&mut ansi).is_ok() {
+            self.emit(ansi);
+        }
+    }
+}
+/// Outcome of [`WriterThread::join_within`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterJoin {
+    /// The thread drained its queue and exited.
+    Joined,
+    /// The thread was still running at the deadline (tty blocked, or a sender still alive)
+    /// and has been detached.
+    TimedOut,
 }
 /// Joining ensures all queued frames have been written to the terminal before teardown (e.g. `LeaveAlternateScreen`).
 pub struct WriterThread {
@@ -235,8 +322,42 @@ impl WriterThread {
             Err(_) => Err(std::io::Error::other("terminal writer thread panicked")),
         }
     }
+    /// Bounded join: wait at most `grace` for the writer to drain and exit, then detach it.
+    /// Every sender, including [`EscapeWriter`] clones, must be dropped first or this can only time out.
+    /// A timeout also covers a terminal that stopped reading (e.g. its pane was closed while we exit);
+    /// the thread is detached and teardown proceeds instead of hanging or crashing.
+    pub fn join_within(mut self, grace: Duration) -> std::io::Result<WriterJoin> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(WriterJoin::Joined);
+        };
+        let deadline = Instant::now() + grace;
+        while !handle.is_finished() {
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    grace_ms = grace.as_millis() as u64,
+                    queued = self.sync.queued(),
+                    written = self.sync.written(),
+                    "term-writer thread still running at teardown; detaching"
+                );
+                drop(handle);
+                return Ok(WriterJoin::TimedOut);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        match handle.join() {
+            Ok(result) => result.map(|()| WriterJoin::Joined),
+            Err(_) => Err(std::io::Error::other("terminal writer thread panicked")),
+        }
+    }
     pub fn writer_sync(&self) -> &WriterSync {
         &self.sync
+    }
+    #[cfg(test)]
+    fn for_test(handle: std::thread::JoinHandle<std::io::Result<()>>, sync: WriterSync) -> Self {
+        Self {
+            handle: Some(handle),
+            sync,
+        }
     }
 }
 impl Drop for WriterThread {
@@ -585,6 +706,54 @@ mod tests {
         assert_eq!(sync.written(), 0);
         assert!(matches!(events.try_recv(), Ok(WriterEvent::Failed(_))));
     }
+    /// The single-producer rule is a debug assertion: a payload sent from a second
+    /// thread must trip it rather than silently reorder the tty stream.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn send_from_a_second_thread_trips_the_producer_guard() {
+        let (tx, _rx) = mpsc::channel::<WriterPayload>();
+        let sync = WriterSync::new();
+        let writer = EscapeWriter::new(tx, sync);
+        writer.emit("first, latches this thread");
+        let other = std::thread::spawn(move || writer.emit("second thread"));
+        assert!(
+            other.join().is_err(),
+            "a second producer thread must trip the debug_assert"
+        );
+    }
+
+    /// Escapes ride the writer queue in order and participate in the
+    /// sequence protocol, so `wait_drained` covers them.
+    #[test]
+    fn escape_writer_enqueues_sequenced_payloads() {
+        let (tx, rx) = mpsc::channel::<WriterPayload>();
+        let sync = WriterSync::new();
+        let writer = EscapeWriter::new(tx, sync.clone());
+        writer.emit("\x1b[?1000h");
+        writer.emit(Vec::new());
+        writer.emit("\x07");
+        let first = rx.try_recv().expect("first payload");
+        let second = rx.try_recv().expect("second payload");
+        assert!(rx.try_recv().is_err(), "empty emit must not enqueue");
+        assert_eq!(first.data(), b"\x1b[?1000h");
+        assert_eq!(second.data(), b"\x07");
+        assert!(second.sequence > first.sequence);
+        assert_eq!(sync.queued(), 2);
+    }
+
+    /// A dead writer thread must surface as a writer failure (the event loop
+    /// exits on it), mirroring `TermWriter::flush`.
+    #[test]
+    fn escape_writer_send_failure_marks_sync_failed() {
+        let (sync, mut event_rx) = WriterSync::new_for_test();
+        let (tx, rx) = mpsc::channel::<WriterPayload>();
+        drop(rx);
+        let writer = EscapeWriter::new(tx, sync.clone());
+        writer.emit("\x07");
+        assert!(sync.failed());
+        assert!(matches!(event_rx.try_recv(), Ok(WriterEvent::Failed(_))));
+    }
+
     #[test]
     fn writer_sync_rejects_multiple_live_producers() {
         let (tx, _rx) = mpsc::channel::<WriterPayload>();

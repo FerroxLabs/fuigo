@@ -78,7 +78,12 @@
     #[test]
     fn models_update_keeps_app_current_when_still_in_catalog() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx,
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         let id = acp::ModelId::new(std::sync::Arc::from("grok-3"));
         app.models.available.insert(id.clone(), make_model_info("grok-3"));
         app.models.current = Some(id);
@@ -96,7 +101,12 @@
     #[test]
     fn models_update_adopts_broadcast_when_app_current_missing_from_catalog() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx,
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         let old = acp::ModelId::new(std::sync::Arc::from("opus"));
         app.models.available.insert(old.clone(), make_model_info("opus"));
         app.models.current = Some(old);
