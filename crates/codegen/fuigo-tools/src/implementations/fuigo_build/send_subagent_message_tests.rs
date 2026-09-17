@@ -7,8 +7,8 @@ use crate::implementations::fuigo_build::task::coordinator::{
     SubagentCoordinator, SubagentCoordinatorReceiver, SubagentProgress,
 };
 use crate::implementations::fuigo_build::task::types::{
-    ActiveAgentMessageOutcome, MAX_ACTIVE_AGENT_MESSAGE_BYTES, SubagentDepthCounter,
-    SubagentDescribeOutcome, SubagentValidateTypeOutcome,
+    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, MAX_ACTIVE_AGENT_MESSAGE_BYTES,
+    SubagentDepthCounter, SubagentDescribeOutcome, SubagentValidateTypeOutcome,
 };
 use crate::types::resources::{Resources, SharedResources};
 use crate::types::tool_metadata::test_ctx;
@@ -72,10 +72,11 @@ fn resources_with_backend(backend: ChannelBackend) -> Resources {
     resources
 }
 
-async fn run(
+async fn run_with_delivery(
     resources: SharedResources,
     subagent_id: &str,
     text: String,
+    delivery: Option<SendSubagentMessageDelivery>,
 ) -> SendSubagentMessageOutput {
     completes(fuigo_tool_runtime::Tool::run(
         &SendSubagentMessageTool,
@@ -83,10 +84,46 @@ async fn run(
         SendSubagentMessageInput {
             subagent_id: subagent_id.to_owned(),
             text,
+            delivery,
         },
     ))
     .await
     .unwrap()
+}
+
+async fn run(
+    resources: SharedResources,
+    subagent_id: &str,
+    text: String,
+) -> SendSubagentMessageOutput {
+    run_with_delivery(resources, subagent_id, text, None).await
+}
+
+async fn backend_operation(
+    delivery: Option<SendSubagentMessageDelivery>,
+) -> ActiveAgentMessageOperation {
+    let (backend, mut receiver) = coordinator_backend();
+    let send = run_with_delivery(
+        resources_with_backend(backend).into_shared(),
+        "sub-1",
+        "follow up".to_owned(),
+        delivery,
+    );
+    let respond = async move {
+        let ingress = completes(receiver.active_messages.recv())
+            .await
+            .expect("expected active-message ingress");
+        let operation = ingress.request.request.operation();
+        ingress
+            .request
+            .respond_to
+            .send(ActiveAgentMessageOutcome::Accepted {
+                message_id: "message-1".to_owned(),
+            })
+            .unwrap();
+        operation
+    };
+    completes(async { tokio::join!(send, respond) }).await.1
 }
 
 async fn run_backend_outcome(outcome: ActiveAgentMessageOutcome) -> SendSubagentMessageOutput {
@@ -116,6 +153,86 @@ fn required_input_keys_are_semantically_pinned() {
         .collect::<Vec<_>>();
     required.sort_unstable();
     assert_eq!(required, ["subagent_id", "text"]);
+    assert!(
+        schema
+            .pointer("/properties/delivery")
+            .is_some_and(serde_json::Value::is_object)
+    );
+}
+
+#[test]
+fn delivery_values_are_a_closed_snake_case_set() {
+    let values = [
+        SendSubagentMessageDelivery::Steer,
+        SendSubagentMessageDelivery::Queue,
+        SendSubagentMessageDelivery::Interject,
+    ]
+    .map(|value| serde_json::to_value(value).expect("serialize delivery"));
+    assert_eq!(values, ["steer", "queue", "interject"]);
+}
+
+#[test]
+fn unknown_delivery_value_fails_to_deserialize() {
+    let error = serde_json::from_value::<SendSubagentMessageInput>(serde_json::json!({
+        "subagent_id": "sub-1",
+        "text": "follow up",
+        "delivery": "urgent",
+    }))
+    .expect_err("an unknown delivery must fail closed");
+    assert!(
+        error.to_string().contains("unknown variant `urgent`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn wire_delivery_resolves_to_the_operation() {
+    let parse = |raw: serde_json::Value| {
+        serde_json::from_value::<SendSubagentMessageInput>(raw)
+            .expect("valid input")
+            .operation()
+    };
+    assert_eq!(
+        parse(serde_json::json!({"subagent_id": "a", "text": "t", "delivery": "interject"})),
+        ActiveAgentMessageOperation::Interject
+    );
+    assert_eq!(
+        parse(serde_json::json!({"subagent_id": "a", "text": "t", "delivery": "steer"})),
+        ActiveAgentMessageOperation::Steer
+    );
+    assert_eq!(
+        parse(serde_json::json!({"subagent_id": "a", "text": "t", "delivery": "queue"})),
+        ActiveAgentMessageOperation::Queue
+    );
+    // Omitted keeps the class every send carried before the field existed.
+    assert_eq!(
+        parse(serde_json::json!({"subagent_id": "a", "text": "t"})),
+        ActiveAgentMessageOperation::Queue
+    );
+}
+
+#[tokio::test]
+async fn omitted_delivery_reaches_the_backend_as_queue() {
+    assert_eq!(
+        ActiveAgentMessageOperation::Queue,
+        backend_operation(None).await
+    );
+}
+
+#[tokio::test]
+async fn delivery_steer_reaches_the_backend_as_steer() {
+    assert_eq!(
+        ActiveAgentMessageOperation::Steer,
+        backend_operation(Some(SendSubagentMessageDelivery::Steer)).await
+    );
+}
+
+#[tokio::test]
+async fn delivery_interject_reaches_the_backend_as_interject() {
+    assert_eq!(
+        ActiveAgentMessageOperation::Interject,
+        backend_operation(Some(SendSubagentMessageDelivery::Interject)).await
+    );
 }
 
 #[test]

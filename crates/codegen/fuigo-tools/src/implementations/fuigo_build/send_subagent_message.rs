@@ -2,18 +2,62 @@
 
 use crate::implementations::fuigo_build::task::backend::SubagentBackendResource;
 use crate::implementations::fuigo_build::task::types::{
-    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SubagentDepthCounter,
+    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
+    SubagentDepthCounter,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 pub const SEND_SUBAGENT_MESSAGE_TOOL_NAME: &str = "send_subagent_message";
 
+/// How the message reaches an active subagent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SendSubagentMessageDelivery {
+    /// Join the current turn at its next safe point.
+    Steer,
+    /// Wait as a later turn (default when omitted).
+    Queue,
+    /// Urgent: delivered ahead of pending steers at the earliest safe point; also interrupts a
+    /// wait on background work.
+    Interject,
+}
+
+impl From<SendSubagentMessageDelivery> for ActiveAgentMessageOperation {
+    fn from(delivery: SendSubagentMessageDelivery) -> Self {
+        match delivery {
+            SendSubagentMessageDelivery::Steer => ActiveAgentMessageOperation::Steer,
+            SendSubagentMessageDelivery::Queue => ActiveAgentMessageOperation::Queue,
+            SendSubagentMessageDelivery::Interject => ActiveAgentMessageOperation::Interject,
+        }
+    }
+}
+
+/// The one place an omitted `delivery` becomes an operation: `queue`, the
+/// class every send carried before the field existed.
+pub fn resolve_delivery(delivery: Option<SendSubagentMessageDelivery>) -> ActiveAgentMessageOperation {
+    match delivery {
+        Some(delivery) => ActiveAgentMessageOperation::from(delivery),
+        None => ActiveAgentMessageOperation::Queue,
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendSubagentMessageInput {
-    /// ID of the active subagent that should receive the message.
+    /// ID of the subagent that should receive the message (active, or completed and eligible to resume).
     pub subagent_id: String,
     /// Text to send to the subagent.
     pub text: String,
+    /// Delivery operation; omitted means `queue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SendSubagentMessageDelivery>,
+}
+
+impl SendSubagentMessageInput {
+    pub fn operation(&self) -> ActiveAgentMessageOperation {
+        resolve_delivery(self.delivery)
+    }
 }
 
 #[derive(
@@ -196,7 +240,12 @@ impl fuigo_tool_runtime::Tool for SendSubagentMessageTool {
         let (Some(0), Some(backend)) = (depth, backend) else {
             return Ok(SendSubagentMessageOutput::Unsupported);
         };
-        let request = match ActiveAgentMessageRequest::try_new(input.subagent_id, input.text) {
+        let operation = input.operation();
+        let request = match ActiveAgentMessageRequest::try_new_with_operation(
+            input.subagent_id,
+            input.text,
+            operation,
+        ) {
             Ok(request) => request,
             Err(outcome) => return Ok(outcome.into()),
         };

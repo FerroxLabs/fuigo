@@ -99,6 +99,7 @@ pub(crate) fn delivery_operation(operation: ActiveAgentMessageOperation) -> Oper
     match operation {
         ActiveAgentMessageOperation::Queue => Operation::Queue,
         ActiveAgentMessageOperation::Steer => Operation::Steer,
+        ActiveAgentMessageOperation::Interject => Operation::Interject,
     }
 }
 
@@ -168,7 +169,7 @@ impl MessageDeliveryHandle {
             return ActiveMessageAdmission::Rejected;
         }
         if operation != delivery_operation(delivery.operation())
-            || authorize_operation(OperationSet::QUEUE, operation).is_err()
+            || authorize_operation(OperationSet::QUEUE_STEER_AND_INTERJECT, operation).is_err()
         {
             return ActiveMessageAdmission::Unsupported;
         }
