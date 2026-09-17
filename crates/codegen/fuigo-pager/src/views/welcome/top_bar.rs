@@ -118,13 +118,13 @@ mod tests {
         assert_eq!(format_cwd_parts("~/fuigo", None), "~/fuigo");
     }
 
-    /// A linked worktree shows the `(worktree of …)` suffix (matching the session status bar) regardless of the worktree's human label.
-    /// The label is no longer shown here; the `worktree ` badge stands in for it.
+    /// A linked worktree shows the path only (matching the session status bar): the `worktree ` badge stands in
+    /// for the label, and no ` (worktree of …)` suffix is appended.
     #[test]
-    fn format_cwd_worktree_shows_main_repo() {
+    fn format_cwd_worktree_omits_main_repo_suffix() {
         assert_eq!(
             format_cwd_parts("~/wt/session-1", Some("~/fuigo")),
-            "~/wt/session-1 (worktree of ~/fuigo)"
+            "~/wt/session-1"
         );
     }
 
@@ -144,9 +144,10 @@ mod tests {
         );
     }
 
-    /// A worktree subdirectory shows the `(worktree of …)` suffix (matching the session status bar) while still showing the real subdirectory path.
+    /// A worktree subdirectory shows the real subdirectory path (matching the session status bar) with no
+    /// ` (worktree of …)` suffix; deep paths are middle-shortened to their last two components.
     #[test]
-    fn format_cwd_display_worktree_subdir_shows_main_repo() {
+    fn format_cwd_display_worktree_subdir_omits_main_repo_suffix() {
         let info = git_info::CwdGitInfo {
             branch: Some("kevin/x".into()),
             is_worktree: true,
@@ -155,7 +156,7 @@ mod tests {
         };
         assert_eq!(
             format_cwd_display(Path::new("/work/wt/location-picker/frontend"), Some(&info)),
-            "/work/wt/location-picker/frontend (worktree of ~/fuigo)",
+            "/w/w/location-picker/frontend",
         );
     }
 
