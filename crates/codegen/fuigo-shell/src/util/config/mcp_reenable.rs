@@ -54,6 +54,13 @@ impl McpDefinitionIndex {
         DisabledStubVerdict::Show
     }
 
+    /// Every discovered definition, keyed by server name (for policy verdicts on `mcp/list`).
+    pub(crate) fn definitions(&self) -> impl Iterator<Item = (&str, &acp::McpServer)> {
+        self.entries
+            .iter()
+            .map(|(name, server)| (name.as_str(), server))
+    }
+
     /// Sorted stub names for a stable list order.
     pub(crate) fn reenableable_for_list(
         &self,

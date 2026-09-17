@@ -146,6 +146,10 @@ pub struct McpServerSessionState {
     pub auth_required: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub setup_required: bool,
+    /// Managed-policy verdict for a server the merge dropped, so `/mcps` can say "blocked by policy"
+    /// instead of a generic "unavailable"; old pagers ignore the extra field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -454,6 +458,7 @@ pub(crate) fn build_mcp_catalog_with_gateway_tools(
                         .collect(),
                     auth_required,
                     setup_required: false,
+                    blocked_reason: None,
                 }),
             });
         }
@@ -548,6 +553,7 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
             tools: vec![],
             auth_required: false,
             setup_required: false,
+            blocked_reason: None,
         }),
     }
 }
@@ -949,6 +955,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 tools: vec![],
                 auth_required: false,
                 setup_required,
+                blocked_reason: None,
             }),
         });
     }
@@ -961,14 +968,28 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         plugin_registry: plugin_registry_snapshot.as_deref(),
         compat: &compat,
     };
-    let stubs = crate::util::config::reenableable_disabled_stubs(
-        &disabled_names,
-        &catalog_names,
-        &discovery,
-    );
-    for name in stubs {
-        servers.push(disabled_server_placeholder_entry(&name));
+    // One discovery pass per request: the index serves both the disabled
+    // stubs and (for a live session list) the blocked-reason verdicts.
+    let needs_stub_scan =
+        crate::util::config::needs_definition_scan(&disabled_names, &catalog_names);
+    let definition_index = if needs_stub_scan || session_snapshot.is_some() {
+        Some(crate::util::config::McpDefinitionIndex::build(&discovery))
+    } else {
+        None
+    };
+    let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
+    if needs_stub_scan && let Some(index) = &definition_index {
+        for name in index.reenableable_for_list(&disabled_names, &catalog_names, allowlist) {
+            servers.push(disabled_server_placeholder_entry(&name));
+        }
     }
+
+    // Carry the verdict for policy-dropped servers so the pager can say "blocked by policy"
+    // instead of a generic "unavailable"; computed only with a session snapshot.
+    let blocked_reasons: HashMap<String, String> = match (&session_snapshot, &definition_index) {
+        (Some(_), Some(index)) => list_blocked_reasons(index.definitions(), allowlist),
+        _ => HashMap::new(),
+    };
 
     if let Some(snapshot) = session_snapshot {
         if gateway_catalog.is_some()
@@ -1044,6 +1065,11 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 tools,
                 auth_required: snapshot.auth_required.contains(&entry.name),
                 setup_required: false,
+                // Only a server the merge actually dropped is "blocked" — a
+                // live one keeps its real status.
+                blocked_reason: (!enabled)
+                    .then(|| blocked_reasons.get(&entry.name).cloned())
+                    .flatten(),
             });
         }
 
@@ -1069,6 +1095,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                         tools: client_status.tools.clone(),
                         auth_required: snapshot.auth_required.contains(&client_status.name),
                         setup_required: false,
+                        blocked_reason: None,
                     }),
                 });
             }
@@ -1584,11 +1611,9 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         ));
     };
     let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
-    if !allowlist.is_server_allowed(probe) {
+    if let Some(message) = policy_enable_error(allowlist, probe) {
         rollback_prefs().await;
-        let reason =
-            crate::session::managed_mcp::McpDisabledReason::for_blocked_server(allowlist, probe);
-        return Err(crate::acp_error::invalid_params(reason.to_string()));
+        return Err(crate::acp_error::invalid_params(message));
     }
 
     // Clear disable only after resolve succeeds, then merge for a spawnable transport
@@ -1647,7 +1672,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             rollback_after_enable().await;
             return Err(crate::acp_error::invalid_params(
                 s.disabled_reason
-                    .map(|r| r.to_string())
+                    .map(|r| org_policy_message(&req.server_name, &r))
                     .unwrap_or_else(|| "blocked by organization policy".into()),
             ));
         }
@@ -1686,6 +1711,281 @@ struct McpToggleResponse {
     ok: bool,
 }
 
+/// The org-policy refusal for enabling or adding a server (one wording for both).
+fn org_policy_message(
+    name: &str,
+    reason: &crate::session::managed_mcp::McpDisabledReason,
+) -> String {
+    // The name is a case-sensitive identifier (long ones middle-truncate). The
+    // policy file appears by name only (doctor/JSON/logs keep full paths).
+    let path = reason.user_facing_source();
+    format!(
+        "The server {} is blocked by an organization policy ({path}).",
+        clamped_server_name(name)
+    )
+}
+
+/// Server names are unbounded user input; middle-truncate very long ones so the reason clause
+/// survives the pager's ~200-char error truncation. Short names print verbatim.
+fn clamped_server_name(name: &str) -> std::borrow::Cow<'_, str> {
+    const MAX_CHARS: usize = 40;
+    if name.chars().count() <= MAX_CHARS {
+        return name.into();
+    }
+    let head: String = name.chars().take(MAX_CHARS / 2).collect();
+    let tail_rev: Vec<char> = name.chars().rev().take(MAX_CHARS / 2 - 1).collect();
+    let tail: String = tail_rev.into_iter().rev().collect();
+    format!("{head}…{tail}").into()
+}
+
+/// User-facing refusal for enabling/spawning a policy-blocked server (`None` when it passes) —
+/// the one chokepoint for the toggle, setup, and upsert paths.
+pub(crate) fn policy_enable_error(
+    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+    server: &acp::McpServer,
+) -> Option<String> {
+    if allowlist.is_server_allowed(server) {
+        return None;
+    }
+    let reason =
+        crate::session::managed_mcp::McpDisabledReason::for_blocked_server(allowlist, server);
+    Some(org_policy_message(
+        crate::session::mcp_servers::mcp_server_name(server),
+        &reason,
+    ))
+}
+
+/// Verdicts for every discovered definition the policy would drop, keyed by server name;
+/// `mcp/list` copies them onto the rows the merge did not spawn.
+pub(crate) fn list_blocked_reasons<'a>(
+    definitions: impl IntoIterator<Item = (&'a str, &'a acp::McpServer)>,
+    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+) -> HashMap<String, String> {
+    definitions
+        .into_iter()
+        .filter_map(|(name, server)| {
+            policy_enable_error(allowlist, server).map(|message| (name.to_string(), message))
+        })
+        .collect()
+}
+
+/// `mcp/upsert`'s gate→persist sequence: the policy refusal comes BEFORE the config write, so a
+/// refused upsert leaves no state behind; generic over the persist future (unit-testable).
+pub(crate) async fn upsert_gate_then_persist<Fut>(
+    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+    server: &acp::McpServer,
+    persist: impl FnOnce() -> Fut,
+) -> Result<Fut::Output, String>
+where
+    Fut: std::future::Future,
+{
+    if let Some(message) = policy_enable_error(allowlist, server) {
+        return Err(message);
+    }
+    Ok(persist().await)
+}
+
+/// Typed failure out of [`enable_mcp_server_gated`]; each caller maps the
+/// arms onto its own wire error shape.
+#[derive(Debug)]
+pub(crate) enum GatedEnableError {
+    /// No definition resolves for the name (probe miss, or post-write merge
+    /// miss — the latter after rolling back the enable write).
+    NotFound,
+    /// Policy refused (probe verdict, or the post-write merge tag after
+    /// rollback), formatted via [`org_policy_message`].
+    PolicyRefused(String),
+    /// Persisting the enable failed; `save_mcp_server_enabled_in` rolled back
+    /// its own partial writes.
+    PersistFailed(String),
+    /// The live toggle failed after the enable write; the write has been
+    /// rolled back.
+    ToggleFailed(String),
+    /// A blocking discovery/merge task did not complete (any enable write has
+    /// been rolled back).
+    TaskFailed(String),
+}
+
+/// The gated enable's re-merge leg: any discover/merge divergence fails closed AND rolls back
+/// the just-persisted enable, or the write silently resurrects the server next session.
+pub(crate) async fn confirm_enabled_or_rollback<Fut>(
+    server_name: &str,
+    found: Option<crate::session::managed_mcp::McpServerWithPolicy>,
+    rollback: impl FnOnce() -> Fut,
+) -> Result<acp::McpServer, GatedEnableError>
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    match found {
+        Some(s) => match s.disabled_reason {
+            None => Ok(s.server),
+            Some(reason) => {
+                rollback().await;
+                Err(GatedEnableError::PolicyRefused(org_policy_message(
+                    server_name,
+                    &reason,
+                )))
+            }
+        },
+        None => {
+            rollback().await;
+            Err(GatedEnableError::NotFound)
+        }
+    }
+}
+
+/// The gated-enable core, generic over its five effects so the ordering (verdict before write,
+/// rollback on every failure past it) is unit-testable; [`enable_mcp_server_gated`] wires the real effects.
+pub(crate) async fn run_gated_enable<P, ProbeFut, PersistFut, RollFut, MergeFut, ToggleFut>(
+    server_name: &str,
+    probe: impl FnOnce() -> ProbeFut,
+    persist_enable: impl FnOnce() -> PersistFut,
+    rollback: impl Fn(P) -> RollFut,
+    merge_find: impl FnOnce() -> MergeFut,
+    toggle: impl FnOnce(acp::McpServer) -> ToggleFut,
+) -> Result<(), GatedEnableError>
+where
+    P: Clone,
+    ProbeFut: std::future::Future<Output = Result<(), GatedEnableError>>,
+    PersistFut: std::future::Future<Output = Result<P, String>>,
+    RollFut: std::future::Future<Output = ()>,
+    MergeFut: std::future::Future<
+            Output = Result<Option<crate::session::managed_mcp::McpServerWithPolicy>, String>,
+        >,
+    ToggleFut: std::future::Future<Output = Result<(), String>>,
+{
+    probe().await?;
+
+    // Clear the personal disable only after the policy passes. No-op (empty
+    // path list) when the server wasn't disabled.
+    let enable_paths = persist_enable()
+        .await
+        .map_err(GatedEnableError::PersistFailed)?;
+
+    let found = match merge_find().await {
+        Ok(found) => found,
+        Err(detail) => {
+            rollback(enable_paths).await;
+            return Err(GatedEnableError::TaskFailed(detail));
+        }
+    };
+    let server =
+        confirm_enabled_or_rollback(server_name, found, || rollback(enable_paths.clone())).await?;
+
+    if let Err(detail) = toggle(server).await {
+        // Without this rollback the persisted enable silently spawns the
+        // server in every later session while the client saw only an error.
+        rollback(enable_paths).await;
+        return Err(GatedEnableError::ToggleFailed(detail));
+    }
+    Ok(())
+}
+
+/// Discovery walks are synchronous disk scans: hop to the blocking pool, never the session
+/// actor's LocalSet. `McpDiscoveryInputs` borrows, so the owned inputs are rebuilt inside the task.
+async fn spawn_discovery<T: Send + 'static>(
+    cwd: std::path::PathBuf,
+    plugin_registry: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>,
+    compat: fuigo_tools::types::compat::CompatConfig,
+    walk: impl FnOnce(&crate::session::managed_mcp::McpDiscoveryInputs<'_>) -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        walk(&crate::session::managed_mcp::McpDiscoveryInputs {
+            cwd: &cwd,
+            plugin_registry: plugin_registry.as_deref(),
+            compat: &compat,
+        })
+    })
+    .await
+}
+
+/// The ONE gated enable sequence for `mcp/toggle`: policy verdict BEFORE any
+/// config write; every failure past the write rolls the enable back ([`run_gated_enable`]).
+async fn enable_mcp_server_gated(
+    agent: &MvpAgent,
+    handle: &crate::session::SessionHandle,
+    cwd: &std::path::Path,
+    server_name: &str,
+) -> Result<(), GatedEnableError> {
+    let plugin_reg = agent.plugin_registry_snapshot();
+    let compat = agent.cfg.borrow().compat_resolved;
+
+    let probe_reg = plugin_reg.clone();
+    let probe = || async move {
+        let discovered = spawn_discovery(
+            cwd.to_path_buf(),
+            probe_reg,
+            compat,
+            crate::session::managed_mcp::discover_mcp_definitions_ignoring_disable,
+        )
+        .await
+        .map_err(|e| GatedEnableError::TaskFailed(format!("MCP discovery task failed: {e}")))?;
+        let Some(probe) = discovered.get(server_name) else {
+            return Err(GatedEnableError::NotFound);
+        };
+        let allowlist =
+            &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
+        if let Some(message) = policy_enable_error(allowlist, probe) {
+            return Err(GatedEnableError::PolicyRefused(message));
+        }
+        Ok(())
+    };
+
+    let persist_enable = || async move {
+        crate::util::config::save_mcp_server_enabled_in(server_name, true, cwd)
+            .await
+            .map_err(|e| e.to_string())
+    };
+
+    let rollback = |paths: Vec<std::path::PathBuf>| async move {
+        if let Err(re) =
+            crate::util::config::restore_mcp_server_enabled_after_enable(server_name, &paths).await
+        {
+            tracing::warn!(
+                server = server_name,
+                error = %re,
+                "Failed to restore MCP enable state after enable failure"
+            );
+        }
+    };
+
+    let merge_reg = plugin_reg.clone();
+    let merge_find = || async move {
+        let cwd = cwd.to_path_buf();
+        let server_name = server_name.to_string();
+        // Full config walk: blocking pool, never the session actor's LocalSet.
+        tokio::task::spawn_blocking(move || {
+            crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
+                vec![],
+                &cwd,
+                merge_reg.as_deref(),
+                &compat,
+            )
+            .into_iter()
+            .find(|s| crate::session::mcp_servers::mcp_server_name(&s.server) == server_name)
+        })
+        .await
+        .map_err(|e| format!("MCP merge task failed: {e}"))
+    };
+
+    let toggle = |server: acp::McpServer| async move {
+        handle
+            .toggle_mcp_server(server_name.to_string(), true, Some(server))
+            .await
+            .map_err(|e| crate::sampling::error::acp_error_text(&e))
+    };
+
+    run_gated_enable(
+        server_name,
+        probe,
+        persist_enable,
+        rollback,
+        merge_find,
+        toggle,
+    )
+    .await
+}
+
 async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpToggleRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
@@ -1694,94 +1994,79 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .get_session_handle(&acp_id)
         .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
 
-    let gateway_connector_id = managed_gateway_connector_id(&req.server_name);
-
-    // Persist re-enable outside the session actor (async I/O). Config mutation happens atomically inside via ToggleMcpServer.
-    let server_config = if req.enabled {
-        let cwd = agent
-            .get_session_cwd(&acp_id)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        if let Some(connector_id) = gateway_connector_id {
-            if let Err(e) =
-                crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await
+    if let Some(connector_id) = managed_gateway_connector_id(&req.server_name) {
+        // Managed-gateway connectors are exempt from the MCP server policy by design (server-side
+        // curated); only local/plugin/project definitions pass the gated enable below.
+        let enable_paths = if req.enabled {
+            let cwd = agent
+                .get_session_cwd(&acp_id)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            // Propagate like the local-server sibling (PersistFailed): `mcp/list` derives gateway
+            // enablement from `disabled_mcp_servers`, so an unpersisted enable misreports ok.
+            Some(
+                crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd)
+                    .await
+                    .map_err(|e| {
+                        crate::acp_error::internal_error(format!(
+                            "failed to clear disabled MCP server entry: {e}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        if let Err(e) = handle
+            .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), req.enabled)
+            .await
+        {
+            // Roll the persisted enable back like the gated local sibling: without it, `mcp/list` shows
+            // enabled while the client only saw an error.
+            if let Some(paths) = enable_paths
+                && let Err(re) = crate::util::config::restore_mcp_server_enabled_after_enable(
+                    &req.server_name,
+                    &paths,
+                )
+                .await
             {
                 tracing::warn!(
                     server = req.server_name.as_str(),
-                    error = %e,
-                    "Failed to clear disabled MCP server entry for managed gateway connector"
+                    error = %re,
+                    "Failed to restore MCP enable state after gateway toggle failure"
                 );
             }
-            handle
-                .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), true)
-                .await
-                .map_err(|e| {
-                    crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
-                })?;
-            return to_ext_response(Ok(McpToggleResponse { ok: true }));
+            return Err(crate::acp_error::internal_error(
+                crate::sampling::error::acp_error_text(&e),
+            ));
         }
-        if let Err(e) =
-            crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await
-        {
-            tracing::warn!(
-                server = req.server_name.as_str(),
-                error = %e,
-                "Failed to persist server re-enable before lookup"
-            );
-        }
+        return to_ext_response(Ok(McpToggleResponse { ok: true }));
+    }
 
-        let all_servers_with_policy =
-            crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
-                vec![],
-                &cwd,
-                agent.plugin_registry_snapshot().as_deref(),
-                &agent.cfg.borrow().compat_resolved,
-            );
-        let found = all_servers_with_policy
-            .into_iter()
-            .find(|s| crate::session::mcp_servers::mcp_server_name(&s.server) == req.server_name);
-        match found {
-            Some(s) if s.disabled_reason.is_some() => {
-                let display = req.server_name.as_str();
-                // Capitalize first letter for display.
-                let mut chars = display.chars();
-                let capitalized: String = match chars.next() {
-                    Some(c) => c.to_uppercase().chain(chars).collect(),
-                    None => display.to_string(),
-                };
-                let path = match &s.disabled_reason {
-                    Some(
-                        crate::session::managed_mcp::McpDisabledReason::Allowlist { source }
-                        | crate::session::managed_mcp::McpDisabledReason::Denylist { source },
-                    ) => source.display().to_string(),
-                    None => String::new(),
-                };
-                return Err(crate::acp_error::invalid_params(format!(
-                    "The server {capitalized} can't be enabled due to an organization policy ({path}).",
-                )));
-            }
-            None => {
-                return Err(crate::acp_error::invalid_params(format!(
+    if req.enabled {
+        let cwd = agent
+            .get_session_cwd(&acp_id)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        enable_mcp_server_gated(agent, &handle, &cwd, &req.server_name)
+            .await
+            .map_err(|e| match e {
+                GatedEnableError::NotFound => crate::acp_error::invalid_params(format!(
                     "server '{}' not found in config",
                     req.server_name
-                )));
-            }
-            _ => {}
-        }
-        found.map(|s| s.server)
-    } else if let Some(connector_id) = gateway_connector_id {
-        handle
-            .toggle_managed_gateway_tool(connector_id.to_string(), String::new(), false)
-            .await
-            .map_err(|e| {
-                crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
+                )),
+                GatedEnableError::PolicyRefused(message) => {
+                    crate::acp_error::invalid_params(message)
+                }
+                GatedEnableError::PersistFailed(detail) => crate::acp_error::internal_error(
+                    format!("failed to clear disabled MCP server entry: {detail}"),
+                ),
+                GatedEnableError::ToggleFailed(detail) | GatedEnableError::TaskFailed(detail) => {
+                    crate::acp_error::internal_error(detail)
+                }
             })?;
         return to_ext_response(Ok(McpToggleResponse { ok: true }));
-    } else {
-        None
-    };
+    }
 
     handle
-        .toggle_mcp_server(req.server_name, req.enabled, server_config)
+        .toggle_mcp_server(req.server_name, false, None)
         .await
         .map_err(|e| {
             crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
@@ -1845,22 +2130,39 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpUpsertRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
 
-    // Persist to config.toml first.
-    crate::util::config::save_mcp_server_config(&req.server_name, &req.config)
-        .await
-        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
-
-    // Build the ACP server config for live addition.
-    let server_config = req
-        .config
-        .to_acp_mcp_server(&req.server_name)
-        .ok_or_else(|| crate::acp_error::invalid_params("server config is disabled"))?;
-
-    // Reuse the toggle path: enable=true with the built config.
+    // Resolve the session BEFORE the policy check and persist: a dead session id must fail
+    // without a config write.
     let handle = agent
         .get_session_handle(&acp_id)
         .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
 
+    // Build the ACP server config before persisting so a refused upsert
+    // leaves no state behind.
+    let server_config = req
+        .config
+        .to_acp_mcp_server(&req.server_name)
+        .ok_or_else(|| {
+            // `to_acp_mcp_server` is `None` for a disabled config or one whose
+            // setup is unresolved; name the actual cause.
+            let detail = if req.config.enabled {
+                "server config requires setup"
+            } else {
+                "server config is disabled"
+            };
+            crate::acp_error::invalid_params(detail)
+        })?;
+
+    // Policy check BEFORE persist and live spawn: /mcps Add/Edit is a spawn path, so a denied
+    // server must fail closed exactly like the setup/toggle siblings.
+    let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
+    upsert_gate_then_persist(allowlist, &server_config, || {
+        crate::util::config::save_mcp_server_config(&req.server_name, &req.config)
+    })
+    .await
+    .map_err(crate::acp_error::invalid_params)?
+    .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
+
+    // Reuse the toggle path: enable=true with the built config.
     handle
         .toggle_mcp_server(req.server_name, true, Some(server_config))
         .await
@@ -2103,6 +2405,7 @@ mod tests {
                             meta: None,
                             enabled: true,
                         }],
+                        blocked_reason: None,
                     }),
                 },
             ],
@@ -2132,6 +2435,7 @@ mod tests {
                 tools: vec![],
                 auth_required: false,
                 setup_required: false,
+                blocked_reason: None,
             }),
         })
         .unwrap();
@@ -2196,6 +2500,7 @@ mod tests {
                 }],
                 auth_required: false,
                 setup_required: false,
+                blocked_reason: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -2432,6 +2737,7 @@ mod tests {
                 tools: vec![],
                 auth_required: false,
                 setup_required: true,
+                blocked_reason: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -2505,6 +2811,7 @@ mod tests {
                 tools: vec![],
                 auth_required: false,
                 setup_required: false,
+                blocked_reason: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -2514,5 +2821,275 @@ mod tests {
         assert_eq!(json["session"]["enabled"], false);
         assert!(json["session"].get("status").is_none());
         assert!(json["session"].get("tools").is_none());
+    }
+
+    /// Deny policy for `https://evil.corp/*` pinned by a full-path source.
+    fn deny_evil_corp() -> fuigo_workspace::permission::resolution::McpServerAllowlist {
+        use fuigo_workspace::permission::resolution::{AllowedMcpServer, McpServerAllowlist};
+        McpServerAllowlist::new(
+            vec![],
+            vec![AllowedMcpServer::Http {
+                url_pattern: "https://evil.corp/*".into(),
+            }],
+            Some(std::path::PathBuf::from("/etc/fuigo/managed_config.toml")),
+        )
+    }
+
+    /// The shared enable/upsert gate refuses a policy-blocked server with the org-policy message and passes an allowed one.
+    #[test]
+    fn policy_enable_error_fails_closed_for_blocked_server() {
+        let allowlist = deny_evil_corp();
+        let denied = acp::McpServer::Http(
+            acp::McpServerHttp::new("exfil", "https://evil.corp/mcp").headers(vec![]),
+        );
+        let message = policy_enable_error(&allowlist, &denied)
+            .expect("denied server must fail closed before spawn");
+        assert_eq!(
+            message,
+            "The server exfil is blocked by an organization policy (managed_config.toml)."
+        );
+        assert!(
+            !message.contains("/etc/fuigo/"),
+            "user-facing refusal must name the policy file only, got: {message}"
+        );
+
+        let allowed = acp::McpServer::Http(
+            acp::McpServerHttp::new("ok", "https://ok.example.com/mcp").headers(vec![]),
+        );
+        assert_eq!(policy_enable_error(&allowlist, &allowed), None);
+    }
+
+    /// `mcp/list` carries the verdict only for the definitions the policy drops.
+    #[test]
+    fn list_blocked_reasons_annotates_only_policy_dropped_definitions() {
+        let allowlist = deny_evil_corp();
+        let denied = acp::McpServer::Http(
+            acp::McpServerHttp::new("exfil", "https://evil.corp/mcp").headers(vec![]),
+        );
+        let allowed = acp::McpServer::Http(
+            acp::McpServerHttp::new("ok", "https://ok.example.com/mcp").headers(vec![]),
+        );
+        let blocked = list_blocked_reasons([("exfil", &denied), ("ok", &allowed)], &allowlist);
+        assert_eq!(
+            blocked.get("exfil").map(String::as_str),
+            Some("The server exfil is blocked by an organization policy (managed_config.toml).")
+        );
+        assert!(!blocked.contains_key("ok"));
+    }
+
+    /// The upsert seam: the policy gate runs BEFORE persist — a refused upsert leaves no config write behind.
+    #[tokio::test]
+    async fn upsert_gate_refuses_before_persist() {
+        let allowlist = deny_evil_corp();
+        let persisted = std::cell::Cell::new(false);
+
+        let denied = acp::McpServer::Http(
+            acp::McpServerHttp::new("exfil", "https://evil.corp/mcp").headers(vec![]),
+        );
+        let err = upsert_gate_then_persist(&allowlist, &denied, || {
+            persisted.set(true);
+            std::future::ready(())
+        })
+        .await
+        .expect_err("denied upsert must be refused");
+        assert!(
+            err.contains("blocked by an organization policy") && err.contains("managed_config.toml"),
+            "got: {err}"
+        );
+        assert!(
+            !persisted.get(),
+            "refused upsert must not reach the config write"
+        );
+
+        let allowed = acp::McpServer::Http(
+            acp::McpServerHttp::new("ok", "https://ok.example.com/mcp").headers(vec![]),
+        );
+        upsert_gate_then_persist(&allowlist, &allowed, || {
+            persisted.set(true);
+            std::future::ready(())
+        })
+        .await
+        .expect("allowed upsert persists");
+        assert!(persisted.get());
+    }
+
+    /// The toggle seam: a merge refusal rolls back the just-persisted enable; an allowed outcome keeps the write.
+    #[tokio::test]
+    async fn toggle_merge_refusal_rolls_back_enable() {
+        use crate::session::managed_mcp::{McpDisabledReason, McpServerWithPolicy};
+
+        let server = || {
+            acp::McpServer::Http(
+                acp::McpServerHttp::new("corp", "https://denied.corp.com/mcp").headers(vec![]),
+            )
+        };
+        let rolled_back = std::cell::Cell::new(false);
+        let rollback = || {
+            rolled_back.set(true);
+            std::future::ready(())
+        };
+
+        // Blocked verdict: rollback, org-policy message (file name only).
+        let blocked = McpServerWithPolicy {
+            server: server(),
+            disabled_reason: Some(McpDisabledReason::Denylist {
+                source: std::path::PathBuf::from("/etc/fuigo/managed_config.toml"),
+            }),
+        };
+        let err = confirm_enabled_or_rollback("corp", Some(blocked), rollback)
+            .await
+            .expect_err("blocked merge outcome must refuse");
+        let GatedEnableError::PolicyRefused(message) = err else {
+            panic!("blocked merge outcome must refuse as PolicyRefused, got {err:?}");
+        };
+        assert!(
+            message.contains("blocked by an organization policy")
+                && message.contains("managed_config.toml")
+                && !message.contains("/etc/fuigo/"),
+            "got: {message}"
+        );
+        assert!(rolled_back.get(), "refusal must roll back the enable write");
+
+        // Vanished from the merge: also rolls back.
+        rolled_back.set(false);
+        let err = confirm_enabled_or_rollback("corp", None, rollback)
+            .await
+            .expect_err("vanished server must refuse");
+        assert!(
+            matches!(err, GatedEnableError::NotFound),
+            "vanished server must refuse as NotFound, got {err:?}"
+        );
+        assert!(rolled_back.get());
+
+        // Allowed: the write stands and the live config comes back.
+        rolled_back.set(false);
+        let confirmed = confirm_enabled_or_rollback(
+            "corp",
+            Some(McpServerWithPolicy {
+                server: server(),
+                disabled_reason: None,
+            }),
+            rollback,
+        )
+        .await
+        .expect("allowed server enables");
+        assert_eq!(
+            crate::session::mcp_servers::mcp_server_name(&confirmed),
+            "corp"
+        );
+        assert!(!rolled_back.get(), "allowed enable must keep the write");
+    }
+
+    /// What the [`run_gated_enable`] harness recorded, in call order.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum GatedStep {
+        Persist,
+        Rollback,
+        Toggle,
+    }
+
+    /// Drive the gated-enable seam with scripted outcomes, recording the persist/rollback/toggle order.
+    async fn drive_gated_enable(
+        probe_result: Result<(), GatedEnableError>,
+        merge_result: Result<Option<crate::session::managed_mcp::McpServerWithPolicy>, String>,
+        toggle_result: Result<(), String>,
+    ) -> (Result<(), GatedEnableError>, Vec<GatedStep>) {
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = run_gated_enable(
+            "corp",
+            || std::future::ready(probe_result),
+            || {
+                steps.borrow_mut().push(GatedStep::Persist);
+                std::future::ready(Ok::<u8, String>(7))
+            },
+            |_paths: u8| {
+                steps.borrow_mut().push(GatedStep::Rollback);
+                std::future::ready(())
+            },
+            || std::future::ready(merge_result),
+            |_server| {
+                steps.borrow_mut().push(GatedStep::Toggle);
+                std::future::ready(toggle_result)
+            },
+        )
+        .await;
+        (result, steps.into_inner())
+    }
+
+    fn merged_allowed() -> Option<crate::session::managed_mcp::McpServerWithPolicy> {
+        Some(crate::session::managed_mcp::McpServerWithPolicy {
+            server: acp::McpServer::Http(
+                acp::McpServerHttp::new("corp", "https://ok.example.com/mcp").headers(vec![]),
+            ),
+            disabled_reason: None,
+        })
+    }
+
+    /// Probe leg: a probe refusal returns before the enable write; a clean run persists then toggles.
+    #[tokio::test]
+    async fn gated_enable_seam_gates_before_the_write() {
+        let (result, steps) = drive_gated_enable(
+            Err(GatedEnableError::PolicyRefused("blocked".into())),
+            Ok(merged_allowed()),
+            Ok(()),
+        )
+        .await;
+        assert!(matches!(result, Err(GatedEnableError::PolicyRefused(_))));
+        assert!(
+            steps.is_empty(),
+            "a probe refusal must precede any write, got {steps:?}"
+        );
+
+        let (result, steps) = drive_gated_enable(Ok(()), Ok(merged_allowed()), Ok(())).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            steps,
+            vec![GatedStep::Persist, GatedStep::Toggle],
+            "a clean enable must keep the write"
+        );
+    }
+
+    /// Rollback legs: every failure past the enable write must roll it back (dropping `rollback` fails here).
+    #[tokio::test]
+    async fn gated_enable_seam_rolls_back_every_failure_past_the_write() {
+        let (result, steps) =
+            drive_gated_enable(Ok(()), Err("merge task failed".into()), Ok(())).await;
+        assert!(matches!(result, Err(GatedEnableError::TaskFailed(_))));
+        assert_eq!(steps, vec![GatedStep::Persist, GatedStep::Rollback]);
+
+        let (result, steps) = drive_gated_enable(Ok(()), Ok(None), Ok(())).await;
+        assert!(matches!(result, Err(GatedEnableError::NotFound)));
+        assert_eq!(steps, vec![GatedStep::Persist, GatedStep::Rollback]);
+
+        let (result, steps) =
+            drive_gated_enable(Ok(()), Ok(merged_allowed()), Err("spawn failed".into())).await;
+        assert!(matches!(result, Err(GatedEnableError::ToggleFailed(_))));
+        assert_eq!(
+            steps,
+            vec![GatedStep::Persist, GatedStep::Toggle, GatedStep::Rollback]
+        );
+    }
+
+    /// The `mcp/list` wire shape: `session.blockedReason` is additive and absent when there is no verdict.
+    #[test]
+    fn session_state_serializes_blocked_reason_only_when_present() {
+        let state = McpServerSessionState {
+            enabled: false,
+            status: None,
+            tools: vec![],
+            auth_required: false,
+            setup_required: false,
+            blocked_reason: Some("The server x is blocked by an organization policy (managed_config.toml).".into()),
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            json["blockedReason"].as_str(),
+            Some("The server x is blocked by an organization policy (managed_config.toml).")
+        );
+        let clean = McpServerSessionState {
+            blocked_reason: None,
+            ..state
+        };
+        assert!(serde_json::to_value(&clean).unwrap().get("blockedReason").is_none());
     }
 }
