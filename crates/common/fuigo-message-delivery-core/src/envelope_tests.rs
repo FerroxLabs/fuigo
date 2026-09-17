@@ -14,11 +14,11 @@ fn marker_constructors_set_principal_and_preserve_grant() {
 }
 
 #[test]
-fn queue_operation_set_authorizes_queue_and_rejects_steer() {
+fn queue_operation_set_authorizes_queue_and_rejects_every_other_operation() {
     assert!(authorize_operation(OperationSet::QUEUE, Operation::Queue).is_ok());
     assert!(authorize_operation(OperationSet::QUEUE, Operation::Steer).is_err());
-    assert!(authorize_operation(OperationSet::QUEUE_AND_STEER, Operation::Queue).is_ok());
-    assert!(authorize_operation(OperationSet::QUEUE_AND_STEER, Operation::Steer).is_ok());
+    assert!(authorize_operation(OperationSet::QUEUE, Operation::Interject).is_err());
+    assert!(authorize_operation(OperationSet::QUEUE, Operation::InterruptAndSend).is_err());
 }
 
 #[test]
@@ -28,5 +28,4 @@ fn queue_steer_and_interject_set_authorizes_three_and_rejects_interrupt() {
     assert!(authorize_operation(set, Operation::Steer).is_ok());
     assert!(authorize_operation(set, Operation::Interject).is_ok());
     assert!(authorize_operation(set, Operation::InterruptAndSend).is_err());
-    assert!(authorize_operation(OperationSet::QUEUE_AND_STEER, Operation::Interject).is_err());
 }
