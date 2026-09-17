@@ -1423,6 +1423,9 @@ fn init_terminal(
             std::time::Duration::ZERO
         };
         startup_typeahead.extend(event_loop::capture_startup_typeahead(drain_timeout));
+        // Resolve the bare Enters kept by the capture: one after non-empty typed text submits,
+        // a leading one is dropped.
+        event_loop::normalize_startup_submissions(&mut startup_typeahead);
         crate::theme::apply_cursor_color();
         let ctx = crate::terminal::terminal_context();
         let skip_reason: Option<&str> =
