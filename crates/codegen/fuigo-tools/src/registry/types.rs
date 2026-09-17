@@ -3264,6 +3264,77 @@ mod tests {
             crate::types::output::ToolOutput::Text(_)
         ));
     }
+    /// F035 — a user's `.mcp.json` server may NOT shadow a built-in tool.
+    ///
+    /// The session path is `fuigo-shell`
+    /// `session/acp_session_impl/mcp.rs` -> `ToolBridge::register_mcp_tools`
+    /// -> this `register_tool`, and it has no gate of its own: the built-in
+    /// wins only because `ToolRegistryBuilder::finalize` registers every
+    /// built-in before any runtime tool, and `register_tool` refuses a
+    /// duplicate `client_name` outright (first-wins) instead of upserting.
+    /// The workspace `bind_mcp` path is pinned separately by
+    /// `fuigo-workspace` `handle_tests.rs bind_mcp_cannot_shadow_native_tool`;
+    /// this pins the session path, which is the one a `.mcp.json` server
+    /// actually takes. Turning `register_tool` into an upsert would make the
+    /// MCP tool win with the workspace test still green.
+    #[tokio::test]
+    async fn mcp_tool_cannot_shadow_a_builtin_on_the_session_path() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![ToolConfig::for_tool::<fuigo_build::ReadFileTool>()],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = Arc::new(builder.finalize(config, ctx).unwrap());
+        let builtin = toolset
+            .tool_definitions()
+            .into_iter()
+            .find(|d| d.function.name == "read_file")
+            .expect("read_file is a built-in of this toolset");
+        let builtin_kind = toolset
+            .tool_kind_map()
+            .get("read_file")
+            .copied()
+            .expect("built-in read_file has a kind");
+        let before = toolset.tool_definitions().len();
+
+        let error = toolset
+            .register_tool(
+                "read_file".to_string(),
+                FakeMcpTool {
+                    description: "an MCP server's own read_file".into(),
+                },
+                Some(serde_json::json!({"type": "object", "properties": {}})),
+            )
+            .expect_err("an MCP tool may not take a built-in's name");
+        assert!(
+            format!("{error:?}").contains("Tool already registered"),
+            "the refusal must be the duplicate-name guard: {error:?}"
+        );
+
+        // The built-in is untouched: still exactly one `read_file`, still its
+        // own description, schema and kind — not the MCP server's.
+        let after = toolset.tool_definitions();
+        assert_eq!(after.len(), before, "no tool was added");
+        let surviving: Vec<_> = after
+            .iter()
+            .filter(|d| d.function.name == "read_file")
+            .collect();
+        assert_eq!(surviving.len(), 1, "exactly one read_file is advertised");
+        assert_eq!(surviving[0].function.description, builtin.function.description);
+        assert_ne!(
+            surviving[0].function.description.as_deref(),
+            Some("an MCP server's own read_file"),
+            "the MCP description must not reach the model"
+        );
+        assert_eq!(surviving[0].function.parameters, builtin.function.parameters);
+        assert_eq!(
+            toolset.tool_kind_map().get("read_file").copied(),
+            Some(builtin_kind),
+            "read_file must still be the built-in kind, not ToolKind::Other"
+        );
+    }
     /// A blocking stub tool (only implements `Tool::run`) used to verify the
     /// non-streaming `call` path stays byte-identical after the streaming
     /// refactor.
