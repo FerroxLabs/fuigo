@@ -70,6 +70,10 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     active: HashMap<String, ActiveChild<R::Control>>,
     completed: HashMap<String, CompletedChild>,
     completed_order: VecDeque<String>,
+    /// Completions displaced by a wake: the same id is pending again with
+    /// `resume_from` set to itself, and its runner resolves the resume source
+    /// from here until the new incarnation finishes.
+    woken: HashMap<String, CompletedChild>,
     waiters: HashMap<String, Vec<BlockingWaiter>>,
     drain_waiters: HashMap<PromptScope, Vec<oneshot::Sender<SubagentOutstandingReply>>>,
     workflow_cancel_waiters: HashMap<String, Vec<oneshot::Sender<SubagentCancelOutcome>>>,
@@ -243,6 +247,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             active: HashMap::new(),
             completed: HashMap::new(),
             completed_order: VecDeque::new(),
+            woken: HashMap::new(),
             waiters: HashMap::new(),
             drain_waiters: HashMap::new(),
             workflow_cancel_waiters: HashMap::new(),
@@ -633,21 +638,31 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id,
                 respond_to,
             } => {
-                let source_is_active = self.pending
-                        .get(&source_id)
-                        .is_some_and(|child| child.request.parent_session_id == parent_session_id)
-                        || self.active.get(&source_id).is_some_and(|child| {
-                            child.request.parent_session_id == parent_session_id
-                        })
-                        // Queued spawns resolve as "still running", matching
-                        // the query path's Initializing, not as missing.
-                        || self.queued.iter().any(|queued| {
-                            queued.request.id == source_id
-                                && queued.request.parent_session_id == parent_session_id
-                        });
+                // A wake incarnation (pending or queued with `resume_from` set
+                // to its own id) is the resumer, not a live source; it resolves
+                // from the completion it displaced.
+                let is_self_wake = |request: &SubagentRequest| {
+                    request.id == source_id && request.resume_from.as_deref() == Some(&*source_id)
+                };
+                let source_is_active = self.pending.get(&source_id).is_some_and(|child| {
+                    child.request.parent_session_id == parent_session_id
+                        && !is_self_wake(&child.request)
+                }) || self.active.get(&source_id).is_some_and(|child| {
+                    child.request.parent_session_id == parent_session_id
+                })
+                    // Queued spawns resolve as "still running", matching
+                    // the query path's Initializing, not as missing.
+                    || self.queued.iter().any(|queued| {
+                        queued.request.id == source_id
+                            && queued.request.parent_session_id == parent_session_id
+                            && !is_self_wake(&queued.request)
+                    });
                 let lookup = if source_is_active {
                     SubagentResumeLookup::Active
-                } else if let Some(child) = self.completed.get(&source_id)
+                } else if let Some(child) = self
+                    .completed
+                    .get(&source_id)
+                    .or_else(|| self.woken.get(&source_id))
                     && child.request.parent_session_id == parent_session_id
                 {
                     SubagentResumeLookup::Completed(SubagentResumeSource {
@@ -1026,6 +1041,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             explicitly_killed,
             should_surface,
         };
+        // A woken child's new completion replaces the one it displaced.
+        self.woken.remove(id);
         self.completed.insert(id.to_owned(), completed);
         self.completed_order.push_back(id.to_owned());
         self.running_count_changed();

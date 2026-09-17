@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::WaitForCancellationFutureOwned;
 
-use super::SubagentCoordinator;
+use super::super::admission::{AdmissionDecision, AdmissionError};
+use super::queue::{QueuedCaller, QueuedSpawn, StartOrigin};
+use super::{SubagentCoordinator, SubagentLimitDecision};
 use crate::implementations::fuigo_build::task::active_message::{
     ActiveMessageAdmissionLease, ActiveMessageIngress,
 };
@@ -306,7 +308,13 @@ pub(super) struct ParkedSpawnReadyMessage {
     pub(super) parent_session_id: String,
     pub(super) request: ActiveAgentMessageRequest,
     pub(super) respond_to: Option<oneshot::Sender<ActiveAgentMessageOutcome>>,
-    pub(super) deadline: tokio::time::Instant,
+    /// `None` for a wake: its text is the spawn's own prompt and the reply
+    /// waits for the child to start, however long the resume takes.
+    pub(super) deadline: Option<tokio::time::Instant>,
+    /// Set when the text already went out as the woken child's prompt: on
+    /// start the sender is told `Accepted` with this id instead of the text
+    /// being delivered a second time.
+    pub(super) initial_message_id: Option<String>,
 }
 
 impl Drop for ParkedSpawnReadyMessage {
@@ -342,7 +350,7 @@ impl SpawnReadyMessages {
     }
 
     pub(super) fn deadlines(&self) -> impl Iterator<Item = tokio::time::Instant> + '_ {
-        self.parked.iter().map(|parked| parked.deadline)
+        self.parked.iter().filter_map(|parked| parked.deadline)
     }
 
     pub(super) fn push(&mut self, parked: ParkedSpawnReadyMessage) {
@@ -361,7 +369,11 @@ impl SpawnReadyMessages {
     /// Saturated leftovers are replied here so capacity lives in one place.
     pub(super) fn admit(&mut self, subagent_id: &str) -> Vec<ActiveMessageIngress> {
         let mut admitted = Vec::new();
-        for parked in self.take(subagent_id) {
+        for mut parked in self.take(subagent_id) {
+            if let Some(message_id) = parked.initial_message_id.take() {
+                parked.reply(ActiveAgentMessageOutcome::Accepted { message_id });
+                continue;
+            }
             let Some((request, parent_session_id, respond_to)) = parked.into_request() else {
                 continue;
             };
@@ -395,7 +407,7 @@ impl SpawnReadyMessages {
     pub(super) fn expire(&mut self, now: tokio::time::Instant) {
         let (due, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.parked)
             .into_iter()
-            .partition(|parked| parked.deadline <= now);
+            .partition(|parked| parked.deadline.is_some_and(|deadline| deadline <= now));
         self.parked = live;
         for parked in due {
             parked.reply(ActiveAgentMessageOutcome::NotAcceptedBeforeDeadline);
@@ -472,21 +484,108 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id,
                 request,
                 respond_to: Some(respond_to),
-                deadline: tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT,
+                deadline: Some(tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT),
+                initial_message_id: None,
             });
             return;
         }
 
-        let completed_owned = self
+        let Some(completed) = self
             .completed
             .get(&subagent_id)
-            .is_some_and(|child| child.request.parent_session_id == parent_session_id);
-        let outcome = if completed_owned {
-            ActiveAgentMessageOutcome::NotActiveOrFinalizing
-        } else {
-            ActiveAgentMessageOutcome::NotFoundOrNotOwned
+            .filter(|child| child.request.parent_session_id == parent_session_id)
+        else {
+            let _ = respond_to.send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
+            return;
         };
-        let _ = respond_to.send(outcome);
+        // A workflow child belongs to its run; a cancelled or killed child
+        // stays down ("do not restart it").
+        if completed.request.owner.is_workflow()
+            || completed.result.cancelled
+            || !self.runner.supports_wake()
+            || self
+                .spawn_blocked_sessions
+                .contains(&completed.request.parent_session_id)
+        {
+            let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            return;
+        }
+        drop(permit);
+        self.wake_completed_child(subagent_id, parent_session_id, request, respond_to);
+    }
+
+    /// Continue a completed child as a new incarnation with the same id:
+    /// `resume_from` is its own id and the message text is its next prompt.
+    /// The sender hears `Accepted` once the child starts, or
+    /// `NotActiveOrFinalizing` if the incarnation ends before that.
+    fn wake_completed_child(
+        &mut self,
+        subagent_id: String,
+        parent_session_id: String,
+        request: ActiveAgentMessageRequest,
+        respond_to: oneshot::Sender<ActiveAgentMessageOutcome>,
+    ) {
+        let Some(completed) = self.completed.remove(&subagent_id) else {
+            let _ = respond_to.send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
+            return;
+        };
+        self.completed_order.retain(|id| id != &subagent_id);
+        let mut wake_request = completed.request.clone();
+        wake_request.prompt = request.text().to_string();
+        wake_request.resume_from = Some(subagent_id.clone());
+        wake_request.fork_context = false;
+        wake_request.parent_prompt_id = None;
+        // No caller awaits a wake: it is background work whose completion
+        // reports through the usual background-completion notice.
+        wake_request.run_in_background = true;
+        wake_request.await_to_completion = false;
+        wake_request.cancel_token = tokio_util::sync::CancellationToken::new();
+        self.woken.insert(subagent_id.clone(), completed);
+        let message_id = uuid::Uuid::now_v7().to_string();
+        self.spawn_ready.push(ParkedSpawnReadyMessage {
+            subagent_id: subagent_id.clone(),
+            parent_session_id,
+            request,
+            respond_to: Some(respond_to),
+            deadline: None,
+            initial_message_id: Some(message_id),
+        });
+        let running = self.session_running_count(&wake_request.parent_session_id);
+        match self.admission.admit(&wake_request, running) {
+            AdmissionDecision::Start => {
+                self.start_child(wake_request, None, None, StartOrigin::Direct);
+            }
+            AdmissionDecision::Enqueue => {
+                self.notify_limit(
+                    &wake_request,
+                    SubagentLimitDecision::QueuedAtConcurrentLimit {
+                        limit: self.admission.max_concurrent(),
+                    },
+                );
+                self.queued.push_back(QueuedSpawn {
+                    request: Box::new(wake_request),
+                    queued_at: tokio::time::Instant::now(),
+                    caller: QueuedCaller::Backgrounded,
+                });
+            }
+            AdmissionDecision::Reject(error) => {
+                self.notify_limit(
+                    &wake_request,
+                    match &error {
+                        AdmissionError::ConcurrentLimitReached { limit } => {
+                            SubagentLimitDecision::RejectedAtConcurrentLimit { limit: *limit }
+                        }
+                    },
+                );
+                // Nothing started: the terminal record goes back where it was.
+                if let Some(completed) = self.woken.remove(&subagent_id) {
+                    self.completed.insert(subagent_id.clone(), completed);
+                    self.completed_order.push_back(subagent_id.clone());
+                }
+                self.spawn_ready
+                    .reject(&subagent_id, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            }
+        }
     }
 
     fn owned_spawning_child(&self, id: &str, parent_session_id: &str) -> Option<SpawningChild> {

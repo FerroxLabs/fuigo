@@ -157,6 +157,13 @@ pub trait ChildRunner: 'static {
 
     fn on_completed(&self, completion: ChildCompletion<Self::CompletionData>);
 
+    /// Whether `run` can continue a completed child's persisted session in
+    /// place: a spawn whose `resume_from` is its own `id`. A message to a
+    /// completed child wakes it only on a runner that says so.
+    fn supports_wake(&self) -> bool {
+        false
+    }
+
     fn running_count_changed(&self, _running: usize) {}
 
     fn persisted_output_ref(&self, _completion_data: &Self::CompletionData) -> Option<String> {

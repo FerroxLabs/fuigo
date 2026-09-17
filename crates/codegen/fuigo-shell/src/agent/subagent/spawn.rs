@@ -216,6 +216,12 @@ impl coordinator::ChildRunner for ShellChildRunner {
             }
         })
     }
+    /// `handle_request` resumes a spawn whose `resume_from` is its own id in
+    /// place (same session dir, no copy), so a completed child can be woken.
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
     fn on_completed(&self, completion: coordinator::ChildCompletion<Self::CompletionData>) {
         let gateway = self.agent_ref.get().gateway.clone();
         let will_wake = will_wake_for(&completion);
