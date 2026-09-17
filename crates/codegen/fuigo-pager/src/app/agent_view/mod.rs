@@ -1718,6 +1718,11 @@ pub struct AgentView {
     /// adoption captures). Cleared on session reload.
     pub(crate) send_now_painted_blocks:
         std::collections::HashMap<String, (crate::scrollback::EntryId, bool)>,
+    /// Text of a send-now-painted prompt, keyed by prompt id, kept until the
+    /// shell's live user echo for it arrives (and is swallowed) or the paint is
+    /// adopted/retired. Without it a send-now'd queue row renders twice: once
+    /// from the optimistic paint and once from the racing `UserMessageChunk`.
+    pub(crate) send_now_echo_pending: std::collections::HashMap<String, String>,
     /// Cached official-marketplace candidates for the plugin CTA, populated on
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,
