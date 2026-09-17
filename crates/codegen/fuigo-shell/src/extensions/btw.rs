@@ -16,7 +16,9 @@ fn estimated_decoded_len(data: &str) -> usize {
     (b64.len().saturating_mul(3) / 4).saturating_sub(padding)
 }
 
-pub fn cap_side_question_images(images: Vec<acp::ImageContent>) -> (Vec<acp::ImageContent>, usize) {
+pub(crate) fn cap_side_question_images(
+    images: Vec<acp::ImageContent>,
+) -> (Vec<acp::ImageContent>, usize) {
     cap_side_question_images_to(images, SIDE_QUESTION_IMAGE_CAP)
 }
 
@@ -39,7 +41,7 @@ fn cap_side_question_images_to(
     (kept, omitted)
 }
 
-pub fn side_question_omit_notice(omitted: usize) -> String {
+pub(crate) fn side_question_omit_notice(omitted: usize) -> String {
     format!("{omitted} attached image(s) were not included (over the 50MB side-question limit).")
 }
 
