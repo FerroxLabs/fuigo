@@ -5743,10 +5743,10 @@ impl AppView {
         if matches!(self.active_view, ActiveView::AgentDashboard)
             && let Some(d) = self.dashboard.as_mut()
         {
-            d.spinner_tick = d.spinner_tick.wrapping_add(1);
-            needs_redraw = true;
-            d.dispatch.poll_file_search();
-            d.peek_reply.poll_file_search();
+            // A tick owes a repaint only when a painted spinner or blink changes frame on it; the counter still advances every tick
+            needs_redraw |= d.tick();
+            needs_redraw |= d.dispatch.poll_file_search();
+            needs_redraw |= d.peek_reply.poll_file_search();
         }
         if let Some(pending) = &self.pending_action
             && pending.expired()
@@ -6184,21 +6184,18 @@ impl AppView {
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
-                let agents_need = self.agents.values().any(|agent| {
-                    !agent.session.state.is_idle()
-                        || !agent.permission_queue.is_empty()
-                        || agent.session.loading_replay
-                        || agent
-                            .subagent_sessions
-                            .values()
-                            .any(|info| !info.finished && info.workflow_run_id.is_none())
-                        || agent.workflow_runs.iter().any(|run| run.is_active())
-                });
+                // The last frame says what animates: a working agent whose row the frame never painted (filtered,
+                // collapsed, folded) owes no ticks; the loop re-checks this after every paint so a freshly painted
+                // spinner arms its next tick
+                let rows_animate = self
+                    .dashboard
+                    .as_ref()
+                    .is_some_and(|d| d.painted_animations.any());
                 let dash_search = self.dashboard.as_ref().is_some_and(|d| {
                     d.dispatch.file_search.context().is_some()
                         || d.peek_reply.file_search.context().is_some()
                 });
-                if agents_need || dash_search {
+                if rows_animate || dash_search {
                     TickDemand::Fast
                 } else {
                     TickDemand::None
