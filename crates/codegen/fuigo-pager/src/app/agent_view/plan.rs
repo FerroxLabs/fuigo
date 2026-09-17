@@ -50,12 +50,6 @@ impl AgentView {
             && self.is_plan_viewer()
             && self.casual_commenting_range.is_some()
     }
-    /// Whether the prompt "auto" (LLM classifier mode) flag should render.
-    /// Extracted for unit testing the precedence.
-    /// Auto shows only when the session is in auto mode and neither yolo (always-approve wins) nor plan is active.
-    pub(super) fn auto_flag_visible(&self, effective_plan: bool) -> bool {
-        self.session.is_auto() && !self.session.is_yolo() && !effective_plan
-    }
     /// Whether plan content is available for preview.
     fn plan_preview_available(&self) -> bool {
         self.plan_body_for_preview().is_some()
@@ -780,23 +774,6 @@ impl AgentView {
         self.cancel_line_viewer();
         self.show_toast("Plan feedback sent.");
         InputOutcome::Action(Action::SendPrompt(text))
-    }
-}
-#[cfg(test)]
-mod prompt_flag_tests {
-    use super::test_fixtures::make_agent;
-    /// The prompt "auto" (classifier) mode flag shows only when the session is in Auto and neither yolo (always-approve wins) nor plan is active.
-    #[test]
-    fn auto_flag_visible_precedence() {
-        let mut agent = make_agent();
-        assert!(!agent.auto_flag_visible(false));
-        agent.session.auto_mode = true;
-        assert!(agent.auto_flag_visible(false));
-        assert!(!agent.auto_flag_visible(true));
-        agent.session.yolo_mode = true;
-        assert!(!agent.auto_flag_visible(false));
-        agent.session.yolo_mode = false;
-        assert!(agent.auto_flag_visible(false));
     }
 }
 #[cfg(test)]
