@@ -4,8 +4,11 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
 use fuigo_sampling_types::{
     ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy, ReasoningEffort,
+    ReasoningSummary,
 };
 
 use crate::attribution::SharedAttributionCallback;
@@ -41,6 +44,9 @@ pub struct SamplerConfig {
     pub subscription_resolver: Option<crate::subscription::SharedSubscriptionResolver>,
     pub api_key: Option<String>,
     pub base_url: String,
+    /// Resolved local directory for this model's mTLS client identity.
+    #[serde(default)]
+    pub mtls_cert_dir: Option<PathBuf>,
     pub model: String,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -65,11 +71,18 @@ pub struct SamplerConfig {
     pub context_window: u64,
     pub force_http1: bool,
     pub max_retries: Option<u32>,
+    /// Total-attempt ceiling for rate-limited requests.
+    /// `None` keeps the actor's [`RetryPolicy::rate_limit_retry_threshold`].
+    #[serde(default)]
+    pub rate_limit_retry_threshold: Option<u32>,
     pub stream_tool_calls: bool,
     pub idle_timeout_secs: Option<u64>,
 
     // Reasoning effort
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Overrides the Responses API `reasoning.summary` the request builder sets; `None` leaves it as built.
+    #[serde(default)]
+    pub reasoning_summary: Option<ReasoningSummary>,
 
     // Client identity
     pub origin_client: Option<OriginClientInfo>,
@@ -126,6 +139,7 @@ impl Default for SamplerConfig {
             subscription_resolver: None,
             api_key: None,
             base_url: String::new(),
+            mtls_cert_dir: None,
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,
@@ -139,9 +153,11 @@ impl Default for SamplerConfig {
             context_window: 0,
             force_http1: false,
             max_retries: None,
+            rate_limit_retry_threshold: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
             reasoning_effort: None,
+            reasoning_summary: None,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,
@@ -213,9 +229,15 @@ mod tests {
         let object = stripped.as_object_mut().unwrap();
         object.remove("doom_loop_recovery");
         object.remove("extra_response_includes");
+        object.remove("mtls_cert_dir");
+        object.remove("rate_limit_retry_threshold");
+        object.remove("reasoning_summary");
         let config: SamplerConfig = serde_json::from_value(stripped).unwrap();
         assert!(config.doom_loop_recovery.is_none());
         assert!(config.extra_response_includes.is_empty());
+        assert!(config.mtls_cert_dir.is_none());
+        assert!(config.rate_limit_retry_threshold.is_none());
+        assert!(config.reasoning_summary.is_none());
 
         let with_policy = SamplerConfig {
             doom_loop_recovery: Some(DoomLoopRecoveryPolicy {

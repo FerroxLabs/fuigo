@@ -320,7 +320,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
 
         let (kind, status_code, retry_after_secs, model_metadata) = match err {
             SamplingError::Auth { .. } => (SamplingErrorKind::Auth, None, None, None),
-            SamplingError::InvalidConfiguration(_) => (SamplingErrorKind::Api, None, None, None),
+            SamplingError::InvalidConfiguration(_) | SamplingError::MtlsConfiguration(_) => {
+                (SamplingErrorKind::Api, None, None, None)
+            }
             SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
             SamplingError::Serialization(_) => (SamplingErrorKind::Serialization, None, None, None),
             SamplingError::Api {

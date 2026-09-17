@@ -515,6 +515,7 @@ struct ClientDefaults {
     api_backend: ApiBackend,
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
+    reasoning_summary: Option<fuigo_sampling_types::ReasoningSummary>,
     extra_response_includes: Vec<String>,
     doom_loop_recovery: Option<fuigo_sampling_types::DoomLoopRecoveryPolicy>,
 }
@@ -791,8 +792,14 @@ impl SamplingClient {
             }
         }
 
-        let http = if config.force_http1 {
+        if config.force_http1 {
             tracing::info!("Using HTTP/1.1 for sampling client (force_http1=true)");
+        }
+        // A per-model mTLS identity gets its own HTTPS-only, no-redirect client; it is still built through
+        // `fuigo_extra_ca::build_reqwest_client`, so the egress blocklist applies to it as well.
+        let http = if let Some(cert_dir) = config.mtls_cert_dir.as_deref() {
+            crate::shared_http::mtls_client(cert_dir, config.force_http1)?
+        } else if config.force_http1 {
             crate::shared_http::client_http1().map_err(SamplingError::Http)?
         } else {
             crate::shared_http::client().map_err(SamplingError::Http)?
@@ -821,6 +828,7 @@ impl SamplingClient {
             api_backend: config.api_backend,
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
+            reasoning_summary: config.reasoning_summary,
             extra_response_includes: config.extra_response_includes,
             doom_loop_recovery: config.doom_loop_recovery,
         };
@@ -1352,6 +1360,28 @@ impl SamplingClient {
         // The API defaults `store` to true, which breaks ZDR compliance
         if request.inner.store.is_none() {
             request.inner.store = Some(false);
+        }
+
+        // Per-model `reasoning_summary` override: `none` omits the field (BYOK gateways that reject it), any other
+        // value replaces the built one. A non-interactive session's suppression still wins: nothing displays the
+        // summary there, so it is forced to `none` regardless of the model's setting.
+        let summary_override = if request.suppress_reasoning_summary {
+            Some(fuigo_sampling_types::ReasoningSummary::None)
+        } else {
+            self.defaults.reasoning_summary
+        };
+        if let Some(summary) = summary_override {
+            let summary = summary.to_responses_api();
+            match request.inner.reasoning.as_mut() {
+                Some(reasoning) => reasoning.summary = summary,
+                None if summary.is_some() => {
+                    request.inner.reasoning = Some(rs::Reasoning {
+                        effort: None,
+                        summary,
+                    });
+                }
+                None => {}
+            }
         }
 
         // Include encrypted reasoning content if not specified
@@ -2090,6 +2120,7 @@ impl SamplingClient {
         wrapper.x_fuigo_transient_retry = x_fuigo_transient_retry;
         wrapper.x_fuigo_agent_id = x_fuigo_agent_id;
         wrapper.extra_tool_entries = extra_tools;
+        wrapper.suppress_reasoning_summary = request.suppress_reasoning_summary;
 
         if let Some(trace) = trace {
             wrapper.trace = Some(trace);
@@ -2126,6 +2157,7 @@ impl SamplingClient {
         wrapper.x_fuigo_transient_retry = x_fuigo_transient_retry;
         wrapper.x_fuigo_agent_id = x_fuigo_agent_id;
         wrapper.extra_tool_entries = extra_tools;
+        wrapper.suppress_reasoning_summary = request.suppress_reasoning_summary;
 
         if let Some(trace) = trace {
             wrapper.trace = Some(trace);
@@ -2456,6 +2488,9 @@ mod tests {
             subscription: None,
             subscription_resolver: None,
             header_injector: None,
+            mtls_cert_dir: None,
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         }
     }
 
@@ -3526,5 +3561,109 @@ mod tests {
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
+    }
+
+    /// A request as the builder emits it: `reasoning.summary` already set to the built-in default.
+    fn built_response_request() -> CreateResponseWrapper {
+        CreateResponseWrapper::new(rs::CreateResponse {
+            reasoning: Some(rs::Reasoning {
+                effort: Some(rs::ReasoningEffort::High),
+                summary: Some(rs::ReasoningSummary::Concise),
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn client_with_summary(
+        summary: Option<fuigo_sampling_types::ReasoningSummary>,
+    ) -> SamplingClient {
+        SamplingClient::new(SamplerConfig {
+            reasoning_summary: summary,
+            ..minimal_config()
+        })
+        .expect("client should construct")
+    }
+
+    #[test]
+    fn reasoning_summary_unset_keeps_the_built_request() {
+        let client = client_with_summary(None);
+        let mut request = built_response_request();
+        client.apply_response_defaults(&mut request).unwrap();
+        let reasoning = request.inner.reasoning.expect("reasoning block kept");
+        assert_eq!(reasoning.effort, Some(rs::ReasoningEffort::High));
+        assert_eq!(reasoning.summary, Some(rs::ReasoningSummary::Concise));
+    }
+
+    #[test]
+    fn reasoning_summary_none_omits_the_field_but_keeps_effort() {
+        let client = client_with_summary(Some(fuigo_sampling_types::ReasoningSummary::None));
+        let mut request = built_response_request();
+        client.apply_response_defaults(&mut request).unwrap();
+        let body = serde_json::to_value(&request.inner).unwrap();
+        assert_eq!(
+            body.get("reasoning"),
+            Some(&serde_json::json!({ "effort": "high" }))
+        );
+        let reasoning = request
+            .inner
+            .reasoning
+            .expect("reasoning block kept for effort");
+        assert_eq!(reasoning.effort, Some(rs::ReasoningEffort::High));
+        assert_eq!(reasoning.summary, None);
+    }
+
+    #[test]
+    fn reasoning_summary_override_replaces_the_built_value() {
+        let client = client_with_summary(Some(fuigo_sampling_types::ReasoningSummary::Detailed));
+        let mut request = built_response_request();
+        client.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(
+            request.inner.reasoning.unwrap().summary,
+            Some(rs::ReasoningSummary::Detailed)
+        );
+    }
+
+    #[test]
+    fn reasoning_summary_adds_a_reasoning_block_only_when_there_is_something_to_send() {
+        let with_summary =
+            client_with_summary(Some(fuigo_sampling_types::ReasoningSummary::Auto));
+        let mut request = CreateResponseWrapper::new(rs::CreateResponse::default());
+        with_summary.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(
+            request.inner.reasoning,
+            Some(rs::Reasoning {
+                effort: None,
+                summary: Some(rs::ReasoningSummary::Auto),
+            })
+        );
+
+        let without = client_with_summary(Some(fuigo_sampling_types::ReasoningSummary::None));
+        let mut request = CreateResponseWrapper::new(rs::CreateResponse::default());
+        without.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(request.inner.reasoning, None);
+    }
+
+    /// Fuigo divergence (1.0.11 token work): a non-interactive session suppresses the summary at build time,
+    /// and a per-model `reasoning_summary` must not put it back.
+    #[test]
+    fn reasoning_summary_override_never_reinstates_a_suppressed_summary() {
+        let client = client_with_summary(Some(fuigo_sampling_types::ReasoningSummary::Detailed));
+        let mut request = CreateResponseWrapper::new(rs::CreateResponse {
+            reasoning: Some(rs::Reasoning {
+                effort: Some(rs::ReasoningEffort::High),
+                summary: None,
+            }),
+            ..Default::default()
+        });
+        request.suppress_reasoning_summary = true;
+        client.apply_response_defaults(&mut request).unwrap();
+        let reasoning = request.inner.reasoning.expect("reasoning block kept for effort");
+        assert_eq!(reasoning.effort, Some(rs::ReasoningEffort::High));
+        assert_eq!(reasoning.summary, None, "suppression wins over the per-model summary");
+
+        let mut request = CreateResponseWrapper::new(rs::CreateResponse::default());
+        request.suppress_reasoning_summary = true;
+        client.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(request.inner.reasoning, None);
     }
 }

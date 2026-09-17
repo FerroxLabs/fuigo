@@ -10,7 +10,7 @@ use fuigo_agent::prompt::skills::SkillsConfig;
 use fuigo_sampler::{AuthScheme, SamplerConfig};
 use fuigo_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
-    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
+    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption, ReasoningSummary,
     reasoning_effort_meta_value, reasoning_efforts_meta_value,
 };
 use fuigo_tools::types::compat::{
@@ -1083,6 +1083,8 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_retry_threshold: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_idle_timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_rate_limit_max_attempts: Option<u32>,
@@ -2029,6 +2031,38 @@ impl Config {
         } = super::config_model_override_parse::parse_model_overrides(raw_config);
         let (mut auth_providers, auth_provider_warnings) = parse_auth_providers(raw_config);
         let (model_providers, mut model_provider_warnings) = parse_model_providers(raw_config);
+        for (model_id, model) in &config_models {
+            let Some(cert_dir) = model.mtls_cert_dir.as_deref() else {
+                continue;
+            };
+            if cert_dir.as_os_str().is_empty() {
+                return Err(format!("model.{model_id}.mtls_cert_dir must not be empty"));
+            }
+            let base_url = model.base_url.as_deref().ok_or_else(|| {
+                format!("model.{model_id}.mtls_cert_dir requires base_url in the same model table")
+            })?;
+            let parsed_url = url::Url::parse(base_url)
+                .map_err(|error| format!("model.{model_id}.base_url is invalid: {error}"))?;
+            if parsed_url.scheme() != "https" || parsed_url.host_str().is_none() {
+                return Err(format!(
+                    "model.{model_id}.base_url must be an HTTPS URL with a host when mtls_cert_dir is set"
+                ));
+            }
+            if model.api_base_url.is_some() {
+                return Err(format!(
+                    "model.{model_id} cannot set both mtls_cert_dir and api_base_url; an mTLS identity must have one destination"
+                ));
+            }
+            if let Some(provider_id) = model.model_provider.as_deref()
+                && model_providers
+                    .get(provider_id)
+                    .is_some_and(|provider| provider.api_base_url.is_some())
+            {
+                return Err(format!(
+                    "model.{model_id} cannot use model_providers.{provider_id}.api_base_url with mtls_cert_dir; an mTLS identity must have one destination"
+                ));
+            }
+        }
         for (id, provider) in &model_providers {
             if let Some(auth) = &provider.auth {
                 let synthetic = model_provider_auth_name(id);
@@ -3796,6 +3830,9 @@ fn apply_global_scalar_defaults(
         if let Some(v) = models.max_retries {
             info.max_retries.get_or_insert(v);
         }
+        if let Some(v) = models.rate_limit_retry_threshold {
+            info.rate_limit_retry_threshold.get_or_insert(v);
+        }
         if let Some(v) = models.inference_idle_timeout_secs {
             info.inference_idle_timeout_secs.get_or_insert(v);
         }
@@ -3986,6 +4023,8 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 show_model_fingerprint: m.show_model_fingerprint,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             };
             (key, config)
         })
@@ -4082,6 +4121,9 @@ pub struct ModelEntryConfig {
     /// Can also be set via the `FUIGO_MAX_RETRIES` environment variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+    /// Total-attempt ceiling for rate-limited requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_retry_threshold: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_rate_limit_max_attempts: Option<u32>,
     /// Exclude from the client model picker; still usable internally (web_search, etc.).
@@ -4110,6 +4152,10 @@ pub struct ModelEntryConfig {
     /// Per-model opt-in: BYOK endpoints that don't understand the flag should leave this unset to avoid request errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
+    /// Responses API `reasoning.summary` for this model; unset keeps the built-in `concise`.
+    /// `none` omits the field for BYOK gateways that reject it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<ReasoningSummary>,
     /// Per-model Layer-3 LazinessDetector configuration.
     /// Defaults to the all-disabled state via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
@@ -4131,6 +4177,9 @@ pub struct ConfigModelOverride {
     pub model: Option<String>,
     pub model_family: Option<String>,
     pub base_url: Option<String>,
+    /// Directory containing this model's mTLS client certificate and private key.
+    /// Requires one HTTPS `base_url`; an alternate `api_base_url` is rejected.
+    pub mtls_cert_dir: Option<PathBuf>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub api_key: Option<String>,
@@ -4168,6 +4217,7 @@ pub struct ConfigModelOverride {
     pub agent_type: Option<String>,
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    pub rate_limit_retry_threshold: Option<u32>,
     pub subagent_rate_limit_max_attempts: Option<u32>,
     pub hidden: Option<bool>,
     pub supported_in_api: Option<bool>,
@@ -4182,6 +4232,7 @@ pub struct ConfigModelOverride {
     pub compaction_at_tokens: Option<CompactionAtTokens>,
     pub show_model_fingerprint: Option<bool>,
     pub stream_tool_calls: Option<bool>,
+    pub reasoning_summary: Option<ReasoningSummary>,
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(
@@ -4202,6 +4253,9 @@ impl ConfigModelOverride {
             if self.api_base_url.is_none() {
                 entry.api_base_url = None;
             }
+        }
+        if self.mtls_cert_dir.is_some() {
+            entry.mtls_cert_dir.clone_from(&self.mtls_cert_dir);
         }
         if self.name.is_some() {
             entry.info.name.clone_from(&self.name);
@@ -4248,6 +4302,9 @@ impl ConfigModelOverride {
         if self.max_retries.is_some() {
             entry.info.max_retries = self.max_retries;
         }
+        if self.rate_limit_retry_threshold.is_some() {
+            entry.info.rate_limit_retry_threshold = self.rate_limit_retry_threshold;
+        }
         if self.subagent_rate_limit_max_attempts.is_some() {
             entry.info.subagent_rate_limit_max_attempts = self.subagent_rate_limit_max_attempts;
         }
@@ -4287,6 +4344,9 @@ impl ConfigModelOverride {
         }
         if self.stream_tool_calls.is_some() {
             entry.info.stream_tool_calls = self.stream_tool_calls;
+        }
+        if self.reasoning_summary.is_some() {
+            entry.info.reasoning_summary = self.reasoning_summary;
         }
         if self.api_key.is_some() {
             entry.api_key.clone_from(&self.api_key);
@@ -4356,6 +4416,8 @@ pub struct ModelInfo {
     /// Per-chunk idle timeout for inference streaming (see `ModelEntryConfig`).
     pub inference_idle_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    /// Total-attempt ceiling for rate-limited requests (see `ModelEntryConfig`).
+    pub rate_limit_retry_threshold: Option<u32>,
     pub subagent_rate_limit_max_attempts: Option<u32>,
     /// Never show in picker (any auth). See also `supported_in_api`.
     pub hidden: bool,
@@ -4386,6 +4448,8 @@ pub struct ModelInfo {
     pub show_model_fingerprint: bool,
     /// When `Some(true)`, the sampler injects `stream_tool_calls: true`
     pub stream_tool_calls: Option<bool>,
+    /// Responses API `reasoning.summary` override (see `ModelEntryConfig`).
+    pub reasoning_summary: Option<ReasoningSummary>,
     /// Per-model Layer-3 LazinessDetector configuration. Defaults to the all-disabled state.
     /// The feature is per-model opt-in, with a second-step `max_nudges_per_session > 0` opt-in for actually injecting nudges.
     /// See [`LazinessDetectorPerModelConfig`].
@@ -4458,6 +4522,8 @@ impl ModelInfo {
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         }
     }
     pub(crate) fn from_config(entry: &ModelEntryConfig) -> Self {
@@ -4499,6 +4565,8 @@ impl ModelInfo {
             show_model_fingerprint: entry.show_model_fingerprint,
             stream_tool_calls: entry.stream_tool_calls,
             laziness_detector: entry.laziness_detector.clone(),
+            rate_limit_retry_threshold: entry.rate_limit_retry_threshold,
+            reasoning_summary: entry.reasoning_summary,
         }
     }
     /// Whether `id` is one of the ids this model sends: its own, or the one it uses at some effort.
@@ -4561,6 +4629,9 @@ impl ModelInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub info: ModelInfo,
+    /// Local mTLS client identity directory selected with an explicit model-level `base_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_cert_dir: Option<PathBuf>,
     pub api_key: Option<String>,
     pub env_key: Option<EnvKeys>,
     /// Named credential helper (`[model.<id>] auth_provider = "<name>"`), resolved against `[auth_provider.<name>]` by `resolve_model_list`.
@@ -4577,6 +4648,7 @@ impl ModelEntry {
         info.base_url = endpoints.resolve_inference_base_url();
         Self {
             info,
+            mtls_cert_dir: None,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -4589,6 +4661,7 @@ impl ModelEntry {
     pub(crate) fn from_config_entry(entry: &ModelEntryConfig) -> Self {
         Self {
             info: ModelInfo::from_config(entry),
+            mtls_cert_dir: None,
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             auth_provider: None,
@@ -5327,11 +5400,14 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             },
             api_key: Some(bearer),
             env_key: None,
             auth_provider: None,
             api_base_url: None,
+            mtls_cert_dir: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
@@ -5471,8 +5547,10 @@ pub(crate) fn sampling_config_for_model(
         context_window: info.context_window.get(),
         client_version,
         reasoning_effort: info.reasoning_effort,
+        reasoning_summary: info.reasoning_summary,
         force_http1: false,
         max_retries: info.max_retries,
+        rate_limit_retry_threshold: info.rate_limit_retry_threshold,
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
         idle_timeout_secs: None,
         client_identifier: None,
@@ -5489,6 +5567,7 @@ pub(crate) fn sampling_config_for_model(
         subscription: None,
         subscription_resolver: None,
         header_injector: None,
+        mtls_cert_dir: model.mtls_cert_dir.clone(),
     };
     if let Some(provider) = model.effective_auth_provider() {
         crate::auth::subscription::inference::configure(&mut sampler,provider,model.api_key.is_some() || model.env_key.is_some());
@@ -5570,11 +5649,14 @@ fn resolve_hidden_default_web_search_sampling_config(
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         },
         api_key: None,
         env_key: None,
         auth_provider: None,
         api_base_url: None,
+        mtls_cert_dir: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
     sampling_config_for_model(

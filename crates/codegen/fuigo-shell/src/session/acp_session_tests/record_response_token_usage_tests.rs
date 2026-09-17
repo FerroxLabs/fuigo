@@ -335,6 +335,7 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
                 env_key: None,
                 auth_provider: None,
                 api_base_url: None,
+                mtls_cert_dir: None,
             };
             entry.info.show_model_fingerprint = false;
             actor
