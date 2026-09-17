@@ -437,7 +437,7 @@ pub(super) fn handle_auth_complete(
             }
             let mut effects = dispatch(Action::RequestBundleStatus, app);
             if app.usage_visible {
-                effects.push(Effect::FetchAppBilling);
+                effects.push(Effect::FetchAppBilling { nonce: 0 });
             }
             effects.extend(retry_effects);
             return effects;
@@ -455,7 +455,7 @@ pub(super) fn handle_auth_complete(
         }
         // Fetch billing so the welcome screen can show a credit warning.
         if app.usage_visible {
-            effects.push(Effect::FetchAppBilling);
+            effects.push(Effect::FetchAppBilling { nonce: 0 });
         }
         // Fetch changelog (mirrors startup path for interactive login).
         effects.push(Effect::FetchChangelog);

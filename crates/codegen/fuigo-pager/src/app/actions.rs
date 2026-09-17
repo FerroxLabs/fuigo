@@ -2108,8 +2108,11 @@ pub enum Effect {
         nonce: u64,
     },
     /// Fetch billing data at the app level (no agent required).
-    /// Used on startup to populate the welcome-screen credit warning.
-    FetchAppBilling,
+    /// Used on startup to populate the welcome-screen credit warning, and by the dashboard's `/usage` modal.
+    FetchAppBilling {
+        /// Usage-modal fetch generation (`0` means a background refresh that settles no modal).
+        nonce: u64,
+    },
     /// Fetch per-session token/cost via `fuigo/session/usage` (auth-agnostic).
     FetchSessionUsage {
         agent_id: AgentId,
@@ -2949,10 +2952,18 @@ pub enum TaskResult {
         /// Usage-modal fetch generation (`0` means a background refresh).
         nonce: u64,
     },
-    /// App-level billing data (welcome screen).
+    /// App-level billing data (welcome screen, dashboard usage modal).
     AppBillingFetched {
         balance: Option<crate::views::credit_bar::CreditBalance>,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
+        /// Usage-modal fetch generation (`0` means a background refresh).
+        nonce: u64,
+    },
+    /// App-level billing fetch failed (transport or parse); the cached balance is kept.
+    AppBillingError {
+        error: String,
+        /// Usage-modal fetch generation (`0` means a background refresh).
+        nonce: u64,
     },
     GateRefreshed {
         settings: Option<fuigo_shell::util::config::RemoteSettings>,

@@ -1876,7 +1876,7 @@ pub(crate) async fn run(
         }
         // Fetch billing early so the welcome screen can show a credit warning.
         if app.usage_visible {
-            let effs = vec![super::actions::Effect::FetchAppBilling];
+            let effs = vec![super::actions::Effect::FetchAppBilling { nonce: 0 }];
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                 return Ok(finish_run(&mut app));
             }

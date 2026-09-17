@@ -22,6 +22,7 @@ pub mod peek_tail;
 pub mod render;
 pub mod row;
 pub mod state;
+mod usage_modal;
 
 pub use render::render_dashboard;
 pub use render::{
