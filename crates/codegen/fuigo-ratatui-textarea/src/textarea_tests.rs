@@ -135,6 +135,19 @@ fn set_text_preserves_cursor_clamped_across_grow_and_shrink() {
 }
 
 #[test]
+fn restore_elements_skips_out_of_bounds_ranges() {
+    let mut textarea = ta_with("short");
+    textarea.restore_elements([(0..5, ElementKind(1), None), (0..6, ElementKind(1), None)]);
+
+    let ranges: Vec<_> = textarea
+        .elements()
+        .iter()
+        .map(|element| element.range.clone())
+        .collect();
+    assert_eq!(ranges, vec![0..5]);
+}
+
+#[test]
 fn set_text_restores_zero_length_element_metadata_through_history() {
     let mut textarea = TextArea::new();
     let id = textarea.insert_element("", ElementKind(7), None);
@@ -2533,8 +2546,10 @@ fn wrapped_navigation_with_zwj_graphemes() {
     let pos_after_down = t.cursor();
     assert!(pos_after_down >= grapheme.len() * 2);
 
+    // Up from the last row must land on the row above (inside the second grapheme), not stay
+    // parked at this row's start; the old `grapheme.len() * 2` expectation encoded the stuck cursor.
     t.move_cursor_up();
-    assert_eq!(t.cursor(), grapheme.len() * 2);
+    assert_eq!(grapheme.len(), t.cursor());
 }
 
 #[test]
@@ -6385,4 +6400,69 @@ fn cmd_c_on_zero_width_selection_clears_it() {
     t.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
     assert!(t.selection.is_none());
     assert_eq!(t.take_clipboard(), None);
+}
+
+/// Wrapped-row index of the cursor; `cursor_pos` would report a phantom row for a full last row.
+fn cursor_row(t: &TextArea, width: u16) -> usize {
+    TextArea::wrapped_line_index_by_start(&t.wrapped_lines(width), t.cursor()).unwrap()
+}
+
+/// Up onto a narrower soft-wrapped row lands inside it, and the goal column survives the clamp.
+#[test]
+fn up_from_wide_row_lands_on_last_char_of_narrower_soft_row() {
+    let width = 8;
+    let mut t = ta_with("aaa bb ccccccc");
+    assert_eq!(vec![0..7, 7..14], *t.wrapped_lines(width));
+
+    t.move_cursor_up();
+    assert_eq!(6, t.cursor());
+    assert_eq!(0, cursor_row(&t, width));
+    assert_eq!(Some((6, 0)), t.cursor_pos(Rect::new(0, 0, width, 5)));
+
+    t.move_cursor_down();
+    assert_eq!(14, t.cursor());
+
+    t.move_cursor_up();
+    assert_eq!(6, t.cursor());
+    t.move_cursor_up();
+    assert_eq!(0, t.cursor());
+}
+
+/// A newline-terminated row is not soft-wrapped, so its exclusive end (the newline) is reachable.
+#[test]
+fn up_onto_newline_terminated_row_lands_on_the_newline() {
+    let mut t = ta_with("ab\ncdef");
+    assert_eq!(vec![0..2, 3..7], *t.wrapped_lines(8));
+
+    t.move_cursor_up();
+    assert_eq!(2, t.cursor());
+    assert_eq!(0, cursor_row(&t, 8));
+}
+
+/// Down onto a narrower soft-wrapped row lands on it instead of skipping to the row below.
+#[test]
+fn down_from_wide_row_lands_on_last_char_of_narrower_soft_row() {
+    let mut t = ta_with("ccccccc aaa bb ddddddd");
+    assert_eq!(vec![0..8, 8..15, 15..22], *t.wrapped_lines(8));
+    t.set_cursor(7);
+
+    t.move_cursor_down();
+    assert_eq!(14, t.cursor());
+    assert_eq!(1, cursor_row(&t, 8));
+
+    t.move_cursor_down();
+    assert_eq!(22, t.cursor());
+}
+
+/// A soft row closed by an atomic element has no cursor byte past the element's start.
+#[test]
+fn up_onto_soft_row_closed_by_element_lands_before_the_element() {
+    let mut t = TextArea::new();
+    t.insert_element("xyz", ElementKind(0), Some(Line::from("[ELEM]")));
+    t.insert_str("longword");
+    assert_eq!(vec![0..3, 3..11], *t.wrapped_lines(8));
+
+    t.move_cursor_up();
+    assert_eq!(0, t.cursor());
+    assert_eq!(0, cursor_row(&t, 8));
 }

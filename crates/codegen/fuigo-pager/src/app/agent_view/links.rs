@@ -2973,7 +2973,12 @@ mod link_click_tests {
         use crate::app::app_view::AppView;
         use crate::app::dispatch::{SwitchCause, dispatch, switch_to_agent};
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx.clone(),
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         let id = AgentId(0);
         let mut agent = make_agent();
         add_multiple_links(&mut agent);

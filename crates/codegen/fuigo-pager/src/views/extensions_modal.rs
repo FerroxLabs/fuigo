@@ -1112,6 +1112,28 @@ pub fn action_key_display(ch: char) -> &'static str {
     }
 }
 
+/// Row-scoped action verbs shared by the footer labels and the row hints, so the two cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionVerb {
+    Install,
+    Update,
+    Uninstall,
+    RemoveSource,
+    EnableDisable,
+}
+
+impl ActionVerb {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Update => "update",
+            Self::Uninstall => "uninstall",
+            Self::RemoveSource => "remove source",
+            Self::EnableDisable => "enable/disable",
+        }
+    }
+}
+
 /// Per-tab action keys for the extensions modal (footer, picker, telemetry).
 ///
 /// Space stays labeled `"toggle"` on the wire for telemetry / picker identity.
@@ -1126,18 +1148,18 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
         ],
         ExtensionsTab::Plugins => vec![
             ('r', "reload"),
-            ('u', "update"),
-            ('a', "install"),
+            ('u', ActionVerb::Update.label()),
+            ('a', ActionVerb::Install.label()),
             (' ', "toggle"),
-            ('x', "uninstall"),
+            ('x', ActionVerb::Uninstall.label()),
         ],
         ExtensionsTab::Marketplace => vec![
-            ('i', "install"),
+            ('i', ActionVerb::Install.label()),
             ('r', "refresh"),
-            ('u', "update"),
+            ('u', ActionVerb::Update.label()),
             ('a', "add source"),
-            ('d', "uninstall"),
-            ('x', "remove source"),
+            ('d', ActionVerb::Uninstall.label()),
+            ('x', ActionVerb::RemoveSource.label()),
         ],
         ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
         ExtensionsTab::Workflows => vec![('r', "reload")],
@@ -1176,7 +1198,7 @@ fn action_key_footer_desc_for_mapping(
         match selected_item_enabled_at(state, entry_data_indices, entry_group_keys, selected) {
             Some(true) => "disable",
             Some(false) => "enable",
-            None => "enable/disable",
+            None => ActionVerb::EnableDisable.label(),
         }
     } else {
         desc
@@ -1241,7 +1263,7 @@ fn selected_hook_policy_enforced_at(
 
 pub fn action_key_cheatsheet_desc(ch: char, desc: &'static str) -> &'static str {
     if ch == ' ' && desc == "toggle" {
-        "enable/disable"
+        ActionVerb::EnableDisable.label()
     } else {
         desc
     }
@@ -1913,6 +1935,26 @@ impl ExtensionsModalState {
         false
     }
 
+    pub fn active_tab_is_loading(&self) -> bool {
+        match self.active_tab {
+            ExtensionsTab::Hooks => matches!(self.hooks_data, TabDataState::Loading),
+            ExtensionsTab::Plugins => matches!(self.plugins_data, TabDataState::Loading),
+            ExtensionsTab::Marketplace => matches!(self.marketplace_data, TabDataState::Loading),
+            ExtensionsTab::Skills => matches!(self.skills_data, TabDataState::Loading),
+            ExtensionsTab::Workflows => matches!(self.workflows_data, TabDataState::Loading),
+            ExtensionsTab::McpServers => matches!(self.mcps_data, TabDataState::Loading),
+        }
+    }
+
+    pub fn has_tab_wide_pending_overlay(&self) -> bool {
+        self.pending_action.is_some() && self.pending_entry_index.is_none()
+    }
+
+    /// A spinner that renders without demanding ticks parks on its first frame.
+    pub fn needs_spinner_tick(&self) -> bool {
+        self.active_tab_is_loading() || self.has_tab_wide_pending_overlay()
+    }
+
     /// Switch to a different tab and reset the per-tab transient UI state.
     ///
     /// Clears anything tied to the previous tab's data indices or modal flow, so the new tab opens in a clean browse view.
@@ -2039,6 +2081,26 @@ impl ExtensionsModalState {
     /// Returns `None` if the selection is on a header or out of range.
     pub fn selected_data_index(&self) -> Option<usize> {
         data_index_at(&self.entry_data_indices, self.picker_state.selected)
+    }
+
+    /// Guidance for a row-scoped key pressed where the selection has no target: a group/source header,
+    /// or a plugin row for a source verb. The key stays bound even when the footer hides it.
+    pub fn post_select_row_hint(&mut self, noun: &str, verb: ActionVerb) {
+        if self.entry_data_indices.is_empty() {
+            return;
+        }
+        let sel = self.picker_state.selected;
+        let collapsed_header = self
+            .entry_group_keys
+            .get(sel)
+            .and_then(|key| key.as_deref())
+            .is_some_and(|key| !self.is_group_expanded(sel, key));
+        let verb = verb.label();
+        self.modal_message = Some(ModalMessage::Info(if collapsed_header {
+            format!("Expand this row (Enter), then select a {noun} row to {verb}.")
+        } else {
+            format!("Select a {noun} row to {verb}.")
+        }));
     }
 
     pub fn selected_item_enabled(&self) -> Option<bool> {
@@ -2643,14 +2705,7 @@ pub fn render_extensions_modal(
     };
 
     // Determine if this tab is loading.
-    let loading = match state.active_tab {
-        ExtensionsTab::Hooks => matches!(state.hooks_data, TabDataState::Loading),
-        ExtensionsTab::Plugins => matches!(state.plugins_data, TabDataState::Loading),
-        ExtensionsTab::Marketplace => matches!(state.marketplace_data, TabDataState::Loading),
-        ExtensionsTab::Skills => matches!(state.skills_data, TabDataState::Loading),
-        ExtensionsTab::Workflows => matches!(state.workflows_data, TabDataState::Loading),
-        ExtensionsTab::McpServers => matches!(state.mcps_data, TabDataState::Loading),
-    };
+    let loading = state.active_tab_is_loading();
 
     // Input mode hides the entry list (form overlay owns the content area).
     let in_input_mode = state.input.is_some() || state.mcp_setup.is_some();
@@ -3629,7 +3684,7 @@ pub fn render_extensions_modal(
             &non_selectable_clickable,
             Some(theme.bg_base),
             loading,
-            0,
+            tick,
             inner_x + inner_width - 1,
         );
         (content_hit.item_rects, content_hit.entry_indices)
@@ -4032,7 +4087,7 @@ fn render_input_form(buf: &mut Buffer, area: Rect, input: &ModalInput, theme: &T
                 buf.set_string(text_x, content_y, &display, placeholder_style);
             }
             if is_focused && let Some(cell) = buf.cell_mut((text_x, content_y)) {
-                cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+                cell.set_style(theme.block_cursor_over(theme.bg_base));
             }
         } else {
             let viewport = field.viewport(max_text_w);
@@ -4044,7 +4099,7 @@ fn render_input_form(buf: &mut Buffer, area: Rect, input: &ModalInput, theme: &T
                 if cx < inner.x + inner.width
                     && let Some(cell) = buf.cell_mut((cx, content_y))
                 {
-                    cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+                    cell.set_style(theme.block_cursor_over(theme.bg_base));
                 }
             }
         }
@@ -5039,6 +5094,63 @@ mod tests {
             "loading spinner shown instead of the empty placeholder"
         );
         assert_eq!(buffer_count(&buf, "No workflows available"), 0);
+    }
+
+    #[test]
+    fn select_row_hint_on_collapsed_header_asks_to_expand_first() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        state.entry_group_keys = vec![Some("user".into())];
+        state.entry_data_indices = vec![None];
+        state.picker_state.selected = 0;
+
+        state.post_select_row_hint("plugin", ActionVerb::Update);
+        assert_eq!(
+            state.modal_message,
+            Some(ModalMessage::Info("Select a plugin row to update.".into()))
+        );
+
+        state.plugins_collapsed_groups.insert("user".into());
+        state.post_select_row_hint("plugin", ActionVerb::Update);
+        assert_eq!(
+            state.modal_message,
+            Some(ModalMessage::Info(
+                "Expand this row (Enter), then select a plugin row to update.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn mcps_tab_loading_spinner_advances_with_tick() {
+        let frames = crate::glyphs::dot_spinner_frames();
+        let frame0 = frames.first().copied().unwrap_or("");
+        let frame2 = frames.get(2).copied().unwrap_or("");
+        assert_ne!(
+            frame0, frame2,
+            "dot spinner must change across an 8-tick stride (divisor 4)"
+        );
+
+        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        let area = Rect::new(0, 0, 100, 40);
+
+        let mut buf0 = Buffer::empty(area);
+        render_extensions_modal(&mut buf0, area, &mut state, None, false, 0);
+        let msg0 = format!("{frame0} Loading\u{2026}");
+        let msg2 = format!("{frame2} Loading\u{2026}");
+        assert_eq!(buffer_count(&buf0, &msg0), 1, "tick 0 must show {msg0:?}");
+        assert_eq!(
+            buffer_count(&buf0, &msg2),
+            0,
+            "tick 0 must not show {msg2:?}"
+        );
+
+        let mut buf2 = Buffer::empty(area);
+        render_extensions_modal(&mut buf2, area, &mut state, None, false, 8);
+        assert_eq!(buffer_count(&buf2, &msg2), 1, "tick 8 must show {msg2:?}");
+        assert_eq!(
+            buffer_count(&buf2, &msg0),
+            0,
+            "tick 8 must not show {msg0:?}"
+        );
     }
 
     #[test]

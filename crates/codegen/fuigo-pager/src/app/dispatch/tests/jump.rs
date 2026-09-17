@@ -1,4 +1,4 @@
-//! Tests for the `/jump` picker dispatchers.
+//! Tests for the `/jump` picker dispatchers and J/K viewport-top turn jumps.
 
 use super::*;
 
@@ -404,4 +404,71 @@ fn dismiss_restores_viewport() {
     assert_eq!(agent.scrollback.scroll_offset(), before_offset);
     assert_eq!(agent.scrollback.selected(), before_selected);
     assert!(agent.scrollback.is_follow_mode(), "follow restored");
+}
+
+#[test]
+fn next_response_jumps_to_the_turn_below_the_viewport_top() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    push_turns(&mut app, id, 1);
+    {
+        let sb = &mut app.agents.get_mut(&id).unwrap().scrollback;
+        for i in 1..7 {
+            sb.push_block(RenderBlock::user_prompt(format!("question {i}")));
+            sb.push_block(RenderBlock::agent_message("ok"));
+        }
+        sb.prepare_layout(80, 12);
+        sb.goto_bottom();
+    }
+
+    let target = app.agents.get(&id).expect("agent")
+        .scrollback
+        .turn_below_viewport_top()
+        .expect("trailing turns sit below the viewport top");
+    let prompt = app.agents.get(&id).expect("agent")
+        .scrollback
+        .turn(target)
+        .expect("target turn")
+        .prompt_index;
+
+    dispatch(Action::NextResponse, &mut app);
+
+    let agent = app.agents.get(&id).expect("agent");
+    // next_response would select the agent-message anchor, not the prompt
+    assert_eq!(Some(prompt), agent.scrollback.selected());
+    assert_eq!(Some(target), agent.scrollback.current_turn());
+    assert!(!agent.scrollback.is_follow_mode());
+}
+
+#[test]
+fn prev_response_aligns_the_current_prompt_from_mid_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    push_turns(&mut app, id, 2);
+    {
+        let sb = &mut app.agents.get_mut(&id).unwrap().scrollback;
+        sb.goto_top();
+        sb.scroll_down(3);
+    }
+
+    let target = app.agents.get(&id).expect("agent")
+        .scrollback
+        .turn_above_viewport_top()
+        .expect("prompt is strictly above the viewport top");
+    let prompt = app.agents.get(&id).expect("agent")
+        .scrollback
+        .turn(target)
+        .expect("target turn")
+        .prompt_index;
+    let before_scroll = app.agents.get(&id).expect("agent").scrollback.scroll_offset();
+    assert_eq!(0, target);
+    assert!(before_scroll > 0, "scrolled into the answer");
+
+    dispatch(Action::PrevResponse, &mut app);
+
+    let sb = &app.agents.get(&id).expect("agent").scrollback;
+    // prev_response would snap a response anchor or no-op; this aligns the prompt
+    assert_eq!(Some(prompt), sb.selected());
+    assert_eq!(Some(target), sb.current_turn());
+    assert!(sb.scroll_offset() < before_scroll);
 }

@@ -1595,6 +1595,9 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, false, true, 85)
@@ -1693,6 +1696,9 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, false, true, 85)

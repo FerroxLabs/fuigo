@@ -300,6 +300,8 @@ pub(crate) struct SubagentSpawnContext {
     pub task_output_tool_name: String,
     /// Resolved name of the scheduled-task deletion tool in the parent's toolset.
     pub scheduler_delete_tool_name: Option<String>,
+    /// Resolved name of the scheduled-task creation tool in the parent's toolset.
+    pub scheduler_create_tool_name: Option<String>,
     /// Whether auto-wake is enabled.
     /// When `false`, subagent completions are not injected as synthetic prompts.
     pub auto_wake_enabled: bool,
@@ -465,6 +467,7 @@ pub(crate) struct ShellCompletionData {
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: String,
     scheduler_delete_tool_name: Option<String>,
+    scheduler_create_tool_name: Option<String>,
     synthetic_trace_tx:
         Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
@@ -480,6 +483,7 @@ impl ShellCompletionData {
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
             task_output_tool_name: ctx.task_output_tool_name.clone(),
             scheduler_delete_tool_name: ctx.scheduler_delete_tool_name.clone(),
+            scheduler_create_tool_name: ctx.scheduler_create_tool_name.clone(),
             synthetic_trace_tx: ctx.synthetic_trace_tx.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
             telemetry_tokens: 0,
@@ -713,7 +717,7 @@ async fn read_parent_sampling_config(
                 client_version: creds.client_version,
                 reasoning_effort: cfg.reasoning_effort,
                 force_http1: false,
-                max_retries: None,
+                max_retries: cfg.max_retries.or(ctx.sampling_config.max_retries),
                 stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
                 idle_timeout_secs: None,
                 client_identifier: ctx.sampling_config.client_identifier.clone(),
@@ -740,6 +744,9 @@ async fn read_parent_sampling_config(
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: ctx.sampling_config.header_injector.clone(),
+                mtls_cert_dir: cfg.mtls_cert_dir,
+                rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
+                reasoning_summary: cfg.reasoning_summary,
             };
             crate::auth::subscription::inference::inherit(&mut inherited,&ctx.sampling_config);
             if let Some(provider) = crate::auth::subscription::inference::selected_for_endpoint(&inherited.model,&inherited.base_url) {
@@ -1106,24 +1113,45 @@ async fn bootstrap_initial_context(
             ..Default::default()
         };
         use crate::session::storage::StorageAdapter as _;
-        return match storage
-            .copy_session_data(&source_session_info, child_session_info, copy_options)
-            .await
-        {
+        // A woken child continues its own session in place, so there is
+        // nothing to copy: `copy_session_data` onto itself is destructive.
+        // Measured, not assumed (`session/storage/jsonl` `copy_session_data_sync`):
+        // it creates the target dir FIRST and then reads the source summary,
+        // so with source == target it fails `NotFound` on the freshly created
+        // dir's missing `summary.json` before writing anything — that ENOENT
+        // is the failure an unguarded wake actually produces. (It does NOT
+        // empty the transcript: the source chat is read before
+        // `File::create(chat_file(target))`, so a self-copy would rewrite it
+        // with identical content.) Past that first read the remaining steps
+        // are the real damage: `remove_dir_all` on the target's workflows and
+        // goal-state dirs deletes this session's own, `copy_updates_streaming`
+        // reads and writes one updates file, `copy_sidecar_file` copies
+        // usage/tool_state onto themselves, and `fork_summary` rewrites the
+        // summary with the session as its own parent. Upstream skips the copy
+        // for the same reason (`xai-grok-shell` `agent/subagent/mod.rs`).
+        let is_same_session = source.child_session_id == child_session_info.id.0.as_ref()
+            && source.child_cwd == child_session_info.cwd;
+        let copy_result = if is_same_session {
+            Ok(None)
+        } else {
+            storage
+                .copy_session_data(&source_session_info, child_session_info, copy_options)
+                .await
+                .map(Some)
+        };
+        return match copy_result {
             Ok(result) => {
                 let conversation = match storage.load_chat_history_from_dir(child_session_dir) {
                     Ok(items) if !items.is_empty() => items,
                     Ok(_) => {
                         return BootstrapInitialContext::ResumeAbort(format!(
-                            "Cannot resume from subagent '{}': \
-                             copied transcript is empty",
+                            "Cannot resume from subagent '{}': transcript is empty",
                             source.subagent_id,
                         ));
                     }
                     Err(e) => {
                         return BootstrapInitialContext::ResumeAbort(format!(
-                            "Cannot resume from subagent '{}': \
-                             failed to load copied transcript: {e}",
+                            "Cannot resume from subagent '{}': failed to load transcript: {e}",
                             source.subagent_id,
                         ));
                     }
@@ -1160,14 +1188,22 @@ async fn bootstrap_initial_context(
                     resume_window::ResumeForceCompact::Arm => true,
                     resume_window::ResumeForceCompact::NotNeeded => false,
                 };
-                tracing::info!(
-                    subagent_id = %request.id,
-                    source_subagent = %source.subagent_id,
-                    chat_messages = result.chat_messages_copied,
-                    tool_state = result.tool_state_copied,
-                    estimated_tokens,
-                    "Resume-copied source child session data into new child"
-                );
+                match result {
+                    Some(result) => tracing::info!(
+                        subagent_id = %request.id,
+                        source_subagent = %source.subagent_id,
+                        chat_messages = result.chat_messages_copied,
+                        tool_state = result.tool_state_copied,
+                        estimated_tokens,
+                        "Resume-copied source child session data into new child"
+                    ),
+                    None => tracing::info!(
+                        subagent_id = %request.id,
+                        chat_messages = conversation.len(),
+                        estimated_tokens,
+                        "Resumed child session in place (wake)"
+                    ),
+                }
                 BootstrapInitialContext::Ready(resume_initial_context(conversation, force_compact))
             }
             Err(e) => BootstrapInitialContext::ResumeAbort(format!(

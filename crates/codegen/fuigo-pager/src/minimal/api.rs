@@ -297,10 +297,7 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
             .iter()
             .any(|e| Some(e.id.as_str()) != running);
     let has_payload = !agent.prompt.text().trim().is_empty() || has_queued_follow_up;
-    if crate::actions::ActionRegistry::interjection_possible(
-        agent.session.state.is_turn_running(),
-        has_payload,
-    ) {
+    if crate::actions::ActionRegistry::interjection_possible(agent.can_send_now(), has_payload) {
         return false;
     }
     !agent.pinned_upgrade_cta_live
@@ -402,6 +399,8 @@ pub fn start_minimal_btw(v: &mut AgentView, question: String) -> uuid::Uuid {
         request_id: Some(request_id),
         revision: uuid::Uuid::new_v4(),
     });
+    // Same overlay identity as the previous Done panel; drop its highlight before replace.
+    v.clear_btw_owned_selection();
     v.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading { question });
     v.btw_focused = false;
     request_id
@@ -459,6 +458,7 @@ pub fn clear_minimal_btw(v: &mut AgentView) {
     v.last_btw_selection_model = Default::default();
     v.hit_btw_close.clear();
     clear_btw_drag_state(v);
+    v.clear_btw_owned_selection();
 }
 
 /// Clear text-drag state only when it belongs to the minimal `/btw` surface.

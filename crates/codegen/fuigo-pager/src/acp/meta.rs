@@ -84,6 +84,8 @@ pub mod user_message_chunk_meta {
     /// When true, the chunk must not become a scrollback user prompt.
     /// See [`fuigo_shell::session::PromptOrigin::hide_user_echo_from_scrollback`].
     pub const HIDE_FROM_SCROLLBACK: &str = "hideFromScrollback";
+    /// When true, the chunk is a persisted mid-turn interjection; replay renders its `displayText` as an interjection block.
+    pub const INTERJECTION: &str = fuigo_shell::session::storage::INTERJECTION_META_KEY;
 }
 
 /// Extract the numeric counter from an `eventId` (`"{sessionId}-{counter}"`).

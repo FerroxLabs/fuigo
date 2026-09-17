@@ -105,13 +105,21 @@ fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig) -> StartupPrefetch
     if ran_prefetch {
         #[cfg(test)]
         PREFETCH_RUNS.with(|c| c.set(c.get() + 1));
-        let (settings, source) = match startup_prefetch::accept() {
-            startup_prefetch::Accept::Consumed(settings) => (settings.map(|s| *s), "prefetch"),
-            startup_prefetch::Accept::Miss => (
-                startup_prefetch::fetch_now_before_policy_gate(cfg),
-                "fallback",
-            ),
+        let deadline = crate::http::STARTUP_SETTINGS_WAIT_DEADLINE;
+        let started = std::time::Instant::now();
+        let (settings, source, degraded) = match startup_prefetch::accept_within(deadline) {
+            (startup_prefetch::Accept::Consumed(settings), degraded) => {
+                (settings.map(|s| *s), "prefetch", degraded)
+            }
+            (startup_prefetch::Accept::Miss, _) => {
+                let (settings, degraded) =
+                    startup_prefetch::fetch_now_before_policy_gate(cfg, deadline);
+                (settings, "fallback", degraded)
+            }
         };
+        if let Some(cause) = degraded {
+            crate::agent::models::record_degraded_start(cause, deadline, started.elapsed());
+        }
         if settings.is_some() {
             cfg.remote_settings = settings;
             crate::util::config::set_remote_campaigns_from_settings(cfg.remote_settings.as_ref());
@@ -120,7 +128,7 @@ fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig) -> StartupPrefetch
     } else {
         // Settings were supplied; consuming anyway lands the models cache
         // (policy-checked) and leaves nothing stale for a later pass.
-        let _ = startup_prefetch::accept();
+        let _ = startup_prefetch::accept_within(crate::http::STARTUP_SETTINGS_WAIT_DEADLINE);
     }
     crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
     if ran_prefetch {

@@ -15,8 +15,12 @@ use crate::notification::{
     DurableNotificationTargets, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
     ScheduledTaskRemovedReason,
 };
-use crate::reminders::format_loop_iteration_prompt;
-use crate::types::resources::{SharedResources, State};
+use crate::reminders::{
+    ScheduledWakeupTools, child_poll, format_loop_iteration_prompt_with_tools, schedule_tool_names,
+};
+use crate::types::resources::{NativeToolClientNames, SharedResources, State};
+use crate::types::template_renderer::TemplateRenderer;
+use crate::types::tool::ToolKind;
 
 use super::interval::interval_to_human;
 use super::types::{
@@ -675,8 +679,27 @@ impl SchedulerActor {
         };
 
         let subagent_id = uuid::Uuid::now_v7().to_string();
-        let framed_prompt =
-            format_loop_iteration_prompt(prompt, task_id, human_schedule, prior_summary.as_deref());
+        let (poll, delete, create) = {
+            let res = self.resources.lock().await;
+            let names = res.get::<NativeToolClientNames>();
+            let poll = res
+                .get::<TemplateRenderer>()
+                .and_then(|renderer| renderer.tool_for_kind(ToolKind::BackgroundTaskAction))
+                .map(str::to_owned);
+            let delete = names.and_then(|n| n.0.get("scheduler_delete").cloned());
+            let create = names.and_then(|n| n.0.get("scheduler_create").cloned());
+            (poll, delete, create)
+        };
+        let framed_prompt = format_loop_iteration_prompt_with_tools(
+            prompt,
+            task_id,
+            human_schedule,
+            prior_summary.as_deref(),
+            ScheduledWakeupTools {
+                child: child_poll(poll.as_deref(), last_subagent_id.as_deref()),
+                schedule: schedule_tool_names(delete.as_deref(), create.as_deref()),
+            },
+        );
         let description = format!(
             "loop: {} ({human_schedule})",
             truncate_chars(prompt.lines().next().unwrap_or(prompt), 60)

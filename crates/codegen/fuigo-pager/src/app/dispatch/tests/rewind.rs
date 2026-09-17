@@ -117,6 +117,90 @@ fn cancel_rewind_effect_carries_the_rewound_prompt_id() {
     assert!(agent.is_rewound_prompt(&pid));
 }
 
+fn shared_row(id: &str, text: &str, position: usize) -> crate::app::prompt_queue::QueueEntryWire {
+    crate::app::prompt_queue::QueueEntryWire {
+        id: id.into(),
+        version: 1,
+        owner: None,
+        last_editor: None,
+        kind: "prompt".into(),
+        text: text.into(),
+        position,
+        combined_texts: None,
+    }
+}
+
+/// An early Ctrl+C can land before the server's `queue/changed` removes the just-sent prompt's own row from the
+/// shared queue. That row is the in-flight prompt itself, not a held follow-up: the rewind still happens, drops
+/// the row locally, and the cancel carries the rewound id.
+#[test]
+fn cancel_rewinds_when_the_only_shared_row_is_the_in_flight_prompt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    dispatch(Action::SendPrompt("rewind me".into()), &mut app);
+    let pid = app.agents[&id]
+        .session
+        .current_prompt_id
+        .clone()
+        .expect("turn running");
+    app.agents.get_mut(&id).unwrap().shared_queue = vec![shared_row(&pid, "rewind me", 0)];
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                rewind_prompt_id: Some(p),
+                ..
+            }] if *p == pid
+        ),
+        "the in-flight prompt's own row must not block the rewind, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
+    assert_eq!(agent.prompt.text(), "rewind me");
+    assert!(
+        agent.shared_queue.is_empty(),
+        "the rewound prompt's own row is dropped locally"
+    );
+    assert!(agent.is_rewound_prompt(&pid));
+}
+
+/// Any OTHER queued row is a follow-up held behind the turn: the standard cancel runs so the agent drains it next.
+#[test]
+fn cancel_does_not_rewind_when_another_shared_row_is_queued() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    dispatch(Action::SendPrompt("keep running".into()), &mut app);
+    let pid = app.agents[&id]
+        .session
+        .current_prompt_id
+        .clone()
+        .expect("turn running");
+    app.agents.get_mut(&id).unwrap().shared_queue = vec![
+        shared_row(&pid, "keep running", 0),
+        shared_row("p2", "follow-up", 1),
+    ];
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::CancelTurn {
+                rewind_prompt_id: None,
+                ..
+            }]
+        ),
+        "a held follow-up must force the standard cancel, got {effects:?}"
+    );
+    let agent = &app.agents[&id];
+    assert!(agent.prompt.text().is_empty(), "no rewind into the composer");
+    assert_eq!(agent.shared_queue.len(), 2, "the standard cancel leaves the queue to the agent");
+    assert!(!agent.is_rewound_prompt(&pid));
+}
+
 /// No prompt id means no optimistic rewind; send a standard cancel.
 #[test]
 fn cancel_without_prompt_id_skips_rewind_and_sends_normal_cancel() {

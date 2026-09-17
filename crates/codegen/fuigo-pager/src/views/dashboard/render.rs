@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 
+use super::animation::{Animation, NEEDS_INPUT_BLINK_DIVISOR, PaintedAnimations, SPINNER_DIVISOR};
 use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
 use super::row::{DashboardRow, RowBadge, build_rows_with_roster, build_rows_with_workspace};
 use super::state::{
@@ -16,13 +17,6 @@ use crate::app::agent_view::AgentView;
 use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 use crate::util::format_time_ago;
-
-/// Show each spinner frame for this many animation ticks.
-/// The frames come from [`crate::glyphs::dot_spinner_frames`] so they degrade to an ASCII pulse on legacy Windows consoles.
-const SPINNER_DIVISOR: u64 = 4;
-/// How many ticks each phase of the `NeedsInput` bullet blink lasts.
-/// At the ~30 Hz dashboard tick this toggles roughly every 0.33 s, about a 1.5 Hz blink.
-const NEEDS_INPUT_BLINK_DIVISOR: u64 = 10;
 
 // Row markers use the filled (◆) / hollow (◇) diamonds from `crate::glyphs` (with CP437 fallbacks on legacy consoles)
 // The dashboard uses diamonds instead of circles so this view reads differently from sibling activity views, which use circles
@@ -101,6 +95,8 @@ pub fn render_dashboard(
     dashboard_sessions_loading: bool,
     // Promo upgrade CTA to paint in the header after the location label (`None` means no CTA); field meanings live on [`HeaderUpgradeCta`]
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    // App-level cached allowance the session-less `/usage` modal renders from
+    credit_balance: Option<&crate::views::credit_bar::CreditBalance>,
 ) -> Option<(u16, u16)> {
     // Cache whether a pinned (non-dismissible) promo CTA is live so the key handler can steal Ctrl+O for it; the dispatch re-resolves the gate
     state.pinned_upgrade_cta_live = upgrade_cta.is_some_and(|cta| cta.pinned);
@@ -108,6 +104,9 @@ pub fn render_dashboard(
     let theme = Theme::current();
     // `spinner_tick` is bumped in `AppView::tick()`, not here, so the spinner advances even when no redraw was triggered by other state changes
     state.last_area = area;
+    // Every painter below marks the cadence it actually put on screen; the tick gate reads this after the frame
+    // A row the frame never painted (filtered, collapsed, folded) leaves nothing marked, so it owes no repaints
+    state.painted_animations = PaintedAnimations::default();
 
     // Paint the full area with the theme's base background BEFORE any sub-renderer runs (mirrors `welcome::render` and `PromptWidget::draw`)
     // Cells no sub-renderer touches in a frame would keep the previous frame's paint, and the dashboard would look like it doesn't cover the panel
@@ -116,9 +115,8 @@ pub fn render_dashboard(
 
     let home = cached_home();
     let rows = if workspace_dashboard_enabled {
-        workspace_snapshot
-            .map(|snapshot| build_rows_with_workspace(agents, snapshot, home))
-            .unwrap_or_default()
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(agents, workspace_snapshot);
+        build_rows_with_workspace(agents, workspace_snapshot, &provisional, home)
     } else {
         build_rows_with_roster(
             agents,
@@ -421,6 +419,18 @@ pub fn render_dashboard(
             &modal.mode,
             &theme,
             /* compact */ false,
+        );
+        return None;
+    }
+
+    if let Some(modal) = state.usage_modal.as_mut() {
+        crate::views::usage_modal::render_usage_modal(
+            buf,
+            area,
+            modal,
+            credit_balance,
+            /* compact */ false,
+            &theme,
         );
         return None;
     }
@@ -797,6 +807,10 @@ fn render_header(
     // Chips render right-aligned within `chip_area` so they sit immediately to the left of the `[+ New Agent]` button
     // Capture the per-chip rects so the left label's width budget stops short of the leftmost chip instead of painting over it
     let chip_rects = status.render(buf, chip_area);
+    // Mark the spinner from the painted chip, not the working count: a chip the bar had no room for animates nothing
+    if chip_rects.contains_key("working") {
+        state.painted_animations.mark(Animation::Spinner);
+    }
 
     // Paint the current location (git branch and cwd, with worktree label) on the left, mirroring the welcome top bar and the agent status bar
     // That way the dashboard shows WHERE a dispatched session will run
@@ -1989,6 +2003,14 @@ fn render_row(
     } else {
         state_color(row.state, theme)
     };
+    // A blink whose two phases resolve to the same colour (no truecolor blend) paints nothing that moves
+    match row.state.animation() {
+        Some(Animation::Spinner) => state.painted_animations.mark(Animation::Spinner),
+        Some(Animation::Blink) if needs_input_blink_visible(theme) => {
+            state.painted_animations.mark(Animation::Blink);
+        }
+        Some(Animation::Blink) | None => {}
+    }
     let icon_w = UnicodeWidthStr::width(icon) as u16;
     // Title-row paint cursor
     // There is no leading 1-col gap before the marker: it IS the leftmost cell, mirroring the wide-mode header which starts flush-left at col 0
@@ -2265,6 +2287,28 @@ fn render_row(
             }
         }
     }
+
+    // Terminal theme (Reset band slots): the selection/hover cue is reverse video over the content
+    // lines; `bg_highlight`/`bg_hover` paint nothing there. RGB themes keep their baked band.
+    if theme.is_bandless() {
+        let hovered = state.hovered_row.as_ref().is_some_and(|h| *h == row.id);
+        // Skip while renaming (editable line), like the narrow path.
+        if (selected || hovered) && !renaming {
+            let content = Rect {
+                x: rect.x,
+                y: rect.y + row_content_offset(rect.height, row),
+                width: rect.width,
+                height: row_content_height(row).min(rect.height),
+            };
+            // Normalize fgs first: colored glyphs (the state symbol, the `Pending:` badge) would
+            // invert into colored background patches; on the band they take the text's default fg.
+            crate::render::color::force_area_fg(buf, content, Color::Reset);
+            buf.set_style(
+                content,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
+        }
+    }
 }
 
 fn render_narrow_rows(
@@ -2390,6 +2434,10 @@ fn render_narrow_rows(
             theme.bg_base
         };
 
+        // Both branches below paint the state icon; narrow NeedsInput is a static diamond, so only the spinner animates here
+        if row.state == RowState::Working {
+            state.painted_animations.mark(Animation::Spinner);
+        }
         if renaming && let Some(rn) = state.rename.as_ref() {
             // Mirror the wide layout: keep the marker and state icon chrome and swap only the label for `rename: {draft}`
             // The editing row then stays column-aligned with its neighbours
@@ -2464,6 +2512,15 @@ fn render_narrow_rows(
                     .row_delete_rects
                     .push((row.id.clone(), Rect::new(dx, y, delete_w, 1)));
             }
+        }
+        // Terminal theme (Reset band slots): same uniform reverse-video cue as the wide rows.
+        // Skip while renaming (editable line).
+        if theme.is_bandless() && (selected || hovered) && !renaming {
+            crate::render::color::force_area_fg(buf, line_rect, Color::Reset);
+            buf.set_style(
+                line_rect,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
         }
         if !row.is_more_placeholder {
             state.row_rects.push((row.id.clone(), line_rect));
@@ -2931,7 +2988,9 @@ fn render_slash_dropdown(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3054,7 +3113,9 @@ fn render_file_search_dropdown_for(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3524,9 +3585,17 @@ fn needs_input_bullet_color(tick: u64, theme: &Theme) -> Color {
     if bright {
         theme.warning
     } else {
-        crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
-            .unwrap_or(theme.warning)
+        needs_input_dim_color(theme).unwrap_or(theme.warning)
     }
+}
+
+fn needs_input_dim_color(theme: &Theme) -> Option<Color> {
+    crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
+}
+
+/// Whether the `NeedsInput` blink paints two distinct colours on this theme; when both phases fall back to `warning` there is nothing to animate.
+fn needs_input_blink_visible(theme: &Theme) -> bool {
+    needs_input_dim_color(theme).is_some_and(|dim| dim != theme.warning)
 }
 
 fn badge_color(badge: RowBadge, theme: &Theme) -> Color {

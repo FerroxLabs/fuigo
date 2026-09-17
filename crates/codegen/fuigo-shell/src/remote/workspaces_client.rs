@@ -5,7 +5,15 @@ use serde::Deserialize;
 
 use crate::auth::AuthManager;
 
-const FUIGO_WEB_URL: &str = "https://grok.com";
+/// Env vars that can name the workspaces host, in precedence order.
+///
+/// No compiled default (upstream: the vendor's web origin). With none set the
+/// workspaces list is not available and [`WsError::NotConfigured`] says so.
+pub(crate) const WORKSPACES_BASE_URL_ENV_CHAIN: [&str; 3] = [
+    "FUIGO_WORKSPACES_BASE_URL",
+    "FUIGO_CONVERSATIONS_BASE_URL",
+    "FUIGO_CODE_WEB_URL",
+];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +46,11 @@ pub struct ListWorkspacesPage {
 pub enum WsError {
     #[error("no OAuth credentials for workspaces:read")]
     NoOauth,
+    /// No workspaces host is configured; the feature is unavailable rather than pointed at a vendor.
+    #[error(
+        "the workspaces list needs FUIGO_WORKSPACES_BASE_URL (or FUIGO_CODE_WEB_URL) to be configured; it is not available otherwise"
+    )]
+    NotConfigured,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("request blocked by egress policy: {0}")]
@@ -68,23 +81,24 @@ struct ListWorkspacesResponseWire {
 
 pub struct WorkspacesClient {
     http: reqwest::Client,
-    base_url: String,
+    /// `None` when no env var in [`WORKSPACES_BASE_URL_ENV_CHAIN`] is set: every
+    /// request fails closed with [`WsError::NotConfigured`].
+    base_url: Option<String>,
     auth: Arc<AuthManager>,
 }
 
 impl WorkspacesClient {
     pub fn new(auth: Arc<AuthManager>) -> Self {
-        let base_url = first_nonempty_env(&[
-            "FUIGO_WORKSPACES_BASE_URL",
-            "FUIGO_CONVERSATIONS_BASE_URL",
-            "FUIGO_CODE_WEB_URL",
-        ])
-        .unwrap_or_else(|| FUIGO_WEB_URL.to_string());
         Self {
             http: crate::http::shared_client(),
-            base_url,
+            base_url: first_nonempty_env(&WORKSPACES_BASE_URL_ENV_CHAIN),
             auth,
         }
+    }
+
+    /// The configured host, or the fail-closed error every request returns without one.
+    fn base(&self) -> Result<&str, WsError> {
+        self.base_url.as_deref().ok_or(WsError::NotConfigured)
     }
 
     pub(crate) async fn list_workspaces(&self, q: &WsQuery) -> Result<ListWorkspacesPage, WsError> {
@@ -92,8 +106,9 @@ impl WorkspacesClient {
         if !auth.is_fuigo_auth() {
             return Err(WsError::NoOauth);
         }
+        let base = self.base()?;
 
-        let url = format!("{}/rest/workspaces", self.base_url);
+        let url = format!("{}/rest/workspaces", base);
         let mut query: Vec<(&str, String)> = vec![("pageSize", q.page_size.to_string())];
         if let Some(token) = q.page_token.as_deref().filter(|s| !s.is_empty()) {
             query.push(("pageToken", token.to_owned()));
@@ -148,10 +163,7 @@ impl WorkspacesClient {
     }
 }
 
-fn first_nonempty_env(keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
-}
+pub(crate) use super::skills_client::first_nonempty_env;
 
 #[cfg(test)]
 mod tests {
@@ -188,6 +200,64 @@ mod tests {
         assert!(w.create_time.is_none());
         assert!(w.kind.is_none());
         assert!(wire.next_page_token.is_none());
+    }
+
+    // ===== No vendor host as a default (1.0.20, REM-1 / REM-3) =====
+
+    /// Row 5: with none of the env vars set the client resolves NO host.
+    /// Upstream fell back to its vendor's web origin here.
+    /// (Inspects `Debug` output only, so it compiles against the pre-fix `String` too.)
+    #[test]
+    #[serial_test::serial]
+    fn workspaces_client_without_env_names_no_vendor_host() {
+        let _a = fuigo_test_support::EnvGuard::unset("FUIGO_WORKSPACES_BASE_URL");
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client =
+            WorkspacesClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        let rendered = format!("{:?}", client.base_url);
+        assert!(
+            !rendered.contains("grok.com"),
+            "workspaces base fell back to a vendor host: {rendered}"
+        );
+    }
+
+    /// Row 5, typed: unset means `None` and `list_workspaces` fails closed naming the variable
+    /// (after the auth gate, so a no-OAuth caller still sees `NoOauth` as before).
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn workspaces_client_without_env_fails_closed_with_a_true_message() {
+        let _a = fuigo_test_support::EnvGuard::unset("FUIGO_WORKSPACES_BASE_URL");
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client =
+            WorkspacesClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        assert_eq!(client.base_url, None);
+        let err = client
+            .list_workspaces(&WsQuery {
+                page_size: 10,
+                ..WsQuery::default()
+            })
+            .await
+            .expect_err("no host, no request");
+        let shown = err.to_string();
+        assert!(matches!(err, WsError::NotConfigured), "{shown}");
+        assert!(shown.contains("FUIGO_WORKSPACES_BASE_URL"), "{shown}");
+        assert!(!shown.contains("grok.com"), "{shown}");
+    }
+
+    /// Row 5, set: precedence `FUIGO_WORKSPACES_BASE_URL` > `FUIGO_CONVERSATIONS_BASE_URL` > `FUIGO_CODE_WEB_URL`, verbatim.
+    #[test]
+    #[serial_test::serial]
+    fn workspaces_client_env_chain_precedence_is_unchanged() {
+        let am = crate::remote::skills_client::tests::test_auth_manager;
+        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        assert_eq!(WorkspacesClient::new(am()).base_url.as_deref(), Some("https://web.example.test"));
+        let _conv =
+            fuigo_test_support::EnvGuard::set("FUIGO_CONVERSATIONS_BASE_URL", "https://conv.example.test");
+        assert_eq!(WorkspacesClient::new(am()).base_url.as_deref(), Some("https://conv.example.test"));
+        let _ws = fuigo_test_support::EnvGuard::set("FUIGO_WORKSPACES_BASE_URL", "https://ws.example.test");
+        assert_eq!(WorkspacesClient::new(am()).base_url.as_deref(), Some("https://ws.example.test"));
     }
 }
 

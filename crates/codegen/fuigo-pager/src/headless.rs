@@ -28,6 +28,10 @@ use fuigo_shell::util::config as cli_config;
 use fuigo_telemetry::startup::PendingStartup;
 
 use crate::acp::model_state::{EffortTokenError, ModelState};
+use crate::app::worktree_session::{
+    CREATE_METHOD, RESUME_METHOD, WorktreeRpcError, WorktreeSpec, create_worktree,
+    new_worktree_id, note_orphaned_worktree, resume_session_into_worktree,
+};
 use crate::acp::spawn::{AgentShutdownGuard, spawn_fuigo_shell};
 use crate::client_identity::{HEADLESS_CLIENT_TYPE, PAGER_CLIENT_VERSION};
 use crate::headless::reducer::{
@@ -36,8 +40,11 @@ use crate::headless::reducer::{
 };
 
 mod ext_protocol;
+mod prompt_ack;
 mod reducer;
+use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
 use ext_protocol::{ExtEvent, handle_ext_notification, reply_headless_ext_method};
+use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
 
 mod cli;
 pub use cli::{HeadlessPrompt, OutputFormat, parse_json_schema, parse_permission_rules_lenient};
@@ -64,6 +71,8 @@ pub struct HeadlessOptions {
     /// Fork on resume/continue (`--fork-session`).
     pub fork_session: bool,
     pub worktree: Option<String>,
+    /// `--worktree-ref`: branch, tag, or commit the new worktree is based on.
+    pub worktree_ref: Option<String>,
     pub restore_code: bool,
     pub agent: Option<String>,
     pub agents_json: Option<String>,
@@ -207,7 +216,7 @@ impl HeadlessEmitter {
     fn on_lifecycle(&mut self, event: Lifecycle) {
         match self.format {
             OutputFormat::Plain => {
-                eprintln!("{}", event.plain_message());
+                crate::best_effort_stderr::eprint_line(&event.plain_message());
             }
             OutputFormat::Json => {}
             OutputFormat::StreamingJson | OutputFormat::StreamingMessagesJson => {
@@ -337,7 +346,7 @@ impl HeadlessEmitter {
                 let _ = self.write_out(b"\n", false);
                 // Plain has no terminal document: the failure goes to stderr, as `on_error` does.
                 if let Some(error) = error {
-                    eprintln!("{error}");
+                    crate::best_effort_stderr::eprint_line(error);
                 }
             }
             OutputFormat::Json => {
@@ -383,7 +392,7 @@ impl HeadlessEmitter {
     /// Emit the max turns marker for the active format.
     fn on_max_turns(&mut self) {
         match self.format {
-            OutputFormat::Plain => eprintln!("Max turns reached"),
+            OutputFormat::Plain => crate::best_effort_stderr::eprint_line("Max turns reached"),
             // Conveyed by `stopReason` in the terminal JSON and result.
             OutputFormat::Json => {}
             OutputFormat::StreamingJson | OutputFormat::StreamingMessagesJson => {
@@ -398,7 +407,7 @@ impl HeadlessEmitter {
     /// Emit the terminal error; `stop_reason_override` stamps a Messages stop reason (e.g. `max_tokens`).
     fn on_error(&mut self, message: &str, stop_reason_override: Option<&str>) {
         match self.format {
-            OutputFormat::Plain => eprintln!("{message}"),
+            OutputFormat::Plain => crate::best_effort_stderr::eprint_line(message),
             OutputFormat::Json => {
                 let mut err = serde_json::json!({"type":"error","message": message});
                 if let Some(usage) = &self.usage {
@@ -560,6 +569,7 @@ fn build_headless_init_request(
         .meta(meta.as_object().cloned())
 }
 
+#[derive(Debug)]
 struct OpenedSession {
     session_id: acp::SessionId,
     models: ModelState,
@@ -719,6 +729,88 @@ async fn fork_then_open(
             "fork succeeded as {child} but load failed: {e}"
         )),
     }
+}
+
+/// Mirrors `Effect::CreateWorktreeSession`. A `-s` UUID also names the worktree, and
+/// `open_session_with_id` checks its availability under the worktree cwd, which is why
+/// `materialize_startup_for_cwd` skipped that check when `has_worktree` is set.
+async fn open_session_in_new_worktree(
+    acp_tx: &AcpAgentTx,
+    cwd: &Path,
+    spec: &WorktreeSpec,
+    session_id: Option<&str>,
+    deadline: RunDeadline,
+) -> anyhow::Result<OpenedSession> {
+    let created = with_send_deadline(
+        CREATE_METHOD,
+        deadline.budget(None),
+        create_worktree(acp_tx, cwd, spec, &new_worktree_id(session_id)),
+    )
+    .await?;
+    tracing::info!(
+        worktree = %created.worktree_root.display(),
+        session_cwd = %created.session_cwd.display(),
+        copy_mode = ?spec.copy_mode(),
+        "headless: worktree created"
+    );
+    let opened = match session_id {
+        Some(sid) => open_session_with_id(acp_tx, &created.session_cwd, sid, deadline).await,
+        None => open_session(acp_tx, &created.session_cwd, None, None, deadline).await,
+    };
+    opened.map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            note_orphaned_worktree(&e.to_string(), &created.worktree_root)
+        )
+    })
+}
+
+/// Mirrors the `load_session_id` branch of `Effect::CreateWorktreeSession`: the agent creates the
+/// worktree and restores into it, then the session is loaded at the cwd it reports.
+async fn resume_session_in_new_worktree(
+    acp_tx: &AcpAgentTx,
+    cwd: &Path,
+    spec: &WorktreeSpec,
+    session_id: &str,
+    restore_code: Option<bool>,
+    local_miss: bool,
+    deadline: RunDeadline,
+) -> anyhow::Result<OpenedSession> {
+    let resumed = with_send_deadline(
+        RESUME_METHOD,
+        deadline.budget(None),
+        resume_session_into_worktree(
+            acp_tx,
+            cwd,
+            spec,
+            session_id,
+            restore_code,
+            local_miss.then_some(session_id),
+        ),
+    )
+    .await?;
+    tracing::info!(
+        session_id = %resumed.session_id,
+        worktree = %resumed.worktree_root.display(),
+        session_cwd = %resumed.session_cwd.display(),
+        code_restored = resumed.code_restored,
+        "headless: session resumed into worktree"
+    );
+    // resume_session already restored code; asking again on load would redo it.
+    open_session(
+        acp_tx,
+        &resumed.session_cwd,
+        Some(&resumed.session_id),
+        None,
+        deadline,
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            note_orphaned_worktree(&e.to_string(), &resumed.worktree_root)
+        )
+    })
 }
 
 /// Apply `-m` / effort after session open.
@@ -924,6 +1016,12 @@ impl SendErrorText for anyhow::Error {
     }
 }
 
+impl SendErrorText for WorktreeRpcError {
+    fn send_error_text(&self) -> String {
+        self.0.clone()
+    }
+}
+
 impl SendErrorText for String {
     fn send_error_text(&self) -> String {
         self.clone()
@@ -948,13 +1046,14 @@ where
     }
 }
 
-/// `--worktree` is ignored here: headless never creates a worktree, so a remote miss must not take `DeferToWorktree`.
+/// With `-w`, a remote miss defers to the worktree resume path like the TUI; without it headless restores in place.
 fn headless_materialize_ctx(
     resume_title_pinned: bool,
     restore_code: bool,
+    has_worktree: bool,
 ) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
-        has_worktree: false,
+        has_worktree,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,
@@ -993,8 +1092,8 @@ pub async fn run_single_turn(
     if options.include_partial_messages
         && options.output_format != OutputFormat::StreamingMessagesJson
     {
-        eprintln!(
-            "warning: --include-partial-messages only affects --output-format streaming-messages-json; ignoring it"
+        crate::best_effort_stderr::eprint_line(
+            "warning: --include-partial-messages only affects --output-format streaming-messages-json; ignoring it",
         );
     }
 
@@ -1156,14 +1255,15 @@ pub async fn run_single_turn(
     use crate::app::session_startup::{self, MaterializedStartup, SessionStartupFlags};
     let has_resume_id = options.resume.as_deref().filter(|s| !s.is_empty());
     let resume_most_recent = options.resume.as_deref() == Some("");
+    let worktree =
+        WorktreeSpec::from_cli(options.worktree.as_deref(), options.worktree_ref.as_deref());
     let intent = session_startup::session_startup_intent_from_flags(SessionStartupFlags {
         session_id: options.session_id.as_deref(),
         resume_session_id: has_resume_id,
         resume_most_recent,
         continue_last_session: options.continue_last_session,
         fork_session: options.fork_session,
-        // Headless never creates a worktree from `-w`.
-        has_worktree: false,
+        has_worktree: worktree.is_some(),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))
     .inspect_err(|_| {
@@ -1172,7 +1272,11 @@ pub async fn run_single_turn(
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let materialized = session_startup::materialize_startup_for_cwd(
-        headless_materialize_ctx(options.resume_title_pinned, options.restore_code),
+        headless_materialize_ctx(
+            options.resume_title_pinned,
+            options.restore_code,
+            worktree.is_some(),
+        ),
         intent,
         &cwd_str,
     )
@@ -1194,16 +1298,46 @@ pub async fn run_single_turn(
     };
     let t_session = Instant::now();
     fuigo_telemetry::startup::enter(crate::acp::StartupPhase::SessionCreate);
-    let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None, deadline).await,
-        MaterializedStartup::NewWithId { session_id } => {
+    let opened = match (materialized, worktree.as_ref()) {
+        (MaterializedStartup::NewAuto, Some(spec)) => {
+            open_session_in_new_worktree(&acp_tx, &cwd, spec, None, deadline).await
+        }
+        (MaterializedStartup::NewWithId { session_id }, Some(spec)) => {
+            open_session_in_new_worktree(&acp_tx, &cwd, spec, Some(&session_id), deadline).await
+        }
+        (
+            MaterializedStartup::Resume {
+                session_id,
+                deferred_local_miss,
+                ..
+            },
+            Some(spec),
+        ) => {
+            resume_session_in_new_worktree(
+                &acp_tx,
+                &cwd,
+                spec,
+                &session_id,
+                restore_code,
+                deferred_local_miss,
+                deadline,
+            )
+            .await
+        }
+        (MaterializedStartup::NewAuto, None) => {
+            open_session(&acp_tx, &cwd, None, None, deadline).await
+        }
+        (MaterializedStartup::NewWithId { session_id }, None) => {
             open_session_with_id(&acp_tx, &cwd, &session_id, deadline).await
         }
-        MaterializedStartup::Resume {
-            session_id,
-            original_cwd,
-            ..
-        } => {
+        (
+            MaterializedStartup::Resume {
+                session_id,
+                original_cwd,
+                ..
+            },
+            None,
+        ) => {
             let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
             open_session(
                 &acp_tx,
@@ -1214,12 +1348,16 @@ pub async fn run_single_turn(
             )
             .await
         }
-        MaterializedStartup::Fork {
-            parent_session_id,
-            parent_cwd,
-            new_session_id,
-            ..
-        } => {
+        // Fork with `-w` never reaches here; the intent check above refuses it.
+        (
+            MaterializedStartup::Fork {
+                parent_session_id,
+                parent_cwd,
+                new_session_id,
+                ..
+            },
+            _,
+        ) => {
             fork_then_open(
                 &acp_tx,
                 &cwd,
@@ -1346,7 +1484,8 @@ pub async fn run_single_turn(
     let t_prompt = Instant::now();
     emitter.mark_prompt_started();
     let mut ttf_logged = false;
-    let prompt_fut = match prompt {
+    let ack_deadlines = PromptAckDeadlines::from_process_env();
+    let (prompt_fut, prompt_ack) = match prompt {
         Some(prompt) => {
             let prompt_blocks = prompt.into_content_blocks();
             let mut meta = serde_json::Map::new();
@@ -1360,16 +1499,26 @@ pub async fn run_single_turn(
                 "screenMode".to_string(),
                 serde_json::Value::String("headless".to_string()),
             );
+            // The shell echoes this id on every notification for the prompt; the acknowledgment watch keys on it
+            let prompt_id = uuid::Uuid::new_v4().to_string();
+            meta.insert(
+                "promptId".to_string(),
+                serde_json::Value::String(prompt_id.clone()),
+            );
             let request =
                 acp::PromptRequest::new(session_id.clone(), prompt_blocks).meta(Some(meta));
-            Some(Box::pin(acp_send(request, &acp_tx)))
+            (
+                Some(Box::pin(acp_send(request, &acp_tx))),
+                Some(PromptAckWatch::new(prompt_id, Instant::now())),
+            )
         }
-        None => None,
+        None => (None, None),
     };
     let TurnDriveOutcome {
         prompt_result,
         connection_closed,
         timed_out,
+        prompt_unacknowledged,
     } = match prompt_fut {
         Some(prompt_fut) => {
             drive_prompt_turn(
@@ -1382,13 +1531,30 @@ pub async fn run_single_turn(
                 deadline,
                 t_prompt,
                 &mut ttf_logged,
+                prompt_ack,
+                &ack_deadlines,
             )
             .await
         }
         None => TurnDriveOutcome::default(),
     };
 
-    crate::unified_log::flush_blocking().await;
+    if prompt_unacknowledged {
+        // A shell that never took the prompt may never answer the log notification either
+        if tokio::time::timeout(
+            prompt_ack::HEADLESS_ABORT_SEND_TIMEOUT,
+            crate::unified_log::flush_blocking(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "headless: unified log flush timed out behind the unacknowledged prompt"
+            );
+        }
+    } else {
+        crate::unified_log::flush_blocking().await;
+    }
 
     if track_active {
         // Non-blocking flock so a slow/network ~/.fuigo can't hang exit.
@@ -1571,6 +1737,8 @@ struct TurnDriveOutcome {
     connection_closed: bool,
     /// `options.total_timeout` elapsed before the turn ended.
     timed_out: bool,
+    /// The shell never acknowledged the prompt; exit-path awaits must stay bounded.
+    prompt_unacknowledged: bool,
 }
 
 /// Drive the prompt future and the ACP stream until the turn ends.
@@ -1589,11 +1757,16 @@ async fn drive_prompt_turn<F>(
     deadline: RunDeadline,
     t_prompt: Instant,
     ttf_logged: &mut bool,
+    prompt_ack: Option<PromptAckWatch>,
+    ack_deadlines: &PromptAckDeadlines,
 ) -> TurnDriveOutcome
 where
     F: Future<Output = Result<acp::PromptResponse, acp::Error>>,
 {
     tokio::pin!(prompt_fut);
+    let mut prompt_ack = prompt_ack;
+    // Set when the ack watch expires: the exit path must then stay bounded.
+    let mut prompt_unacknowledged = false;
     let mut prompt_result = None;
     // Tracked regardless of wait_for_background so the exit reaper always sees running work.
     let mut pending_bg: HashSet<BackgroundWork> = HashSet::new();
@@ -1654,6 +1827,11 @@ where
             } else {
                 Duration::from_secs(3600)
             };
+            // The branch is disabled once acknowledged; the far-future sleep is built but never polled
+            let ack_deadline = match prompt_ack.as_ref() {
+                Some(watch) => tokio::time::Instant::from_std(watch.hard_deadline(ack_deadlines)),
+                None => tokio::time::Instant::now() + Duration::from_secs(3600),
+            };
 
             tokio::select! {
                 biased;
@@ -1663,8 +1841,14 @@ where
                         connection_closed = true;
                         break;
                     };
+                    let msg = msg.boxed();
+                    if let Some(watch) = prompt_ack.as_ref()
+                        && headless_ack_signal(&msg, session_id, watch.prompt_id()).is_some()
+                    {
+                        prompt_ack = None;
+                    }
                     handle_headless_acp_message(
-                        msg.boxed(),
+                        msg,
                         &mut *emitter,
                         t_prompt,
                         &mut *ttf_logged,
@@ -1674,6 +1858,8 @@ where
                     );
                 }
                 res = &mut prompt_fut, if prompt_result.is_none() => {
+                    // The turn ended: nothing left to acknowledge
+                    prompt_ack = None;
                     prompt_result = Some(res);
                     prompt_done_at = Some(Instant::now());
                     if !options.wait_for_background {
@@ -1706,6 +1892,22 @@ where
                     && !pending_bg.is_empty() =>
                 {
                     // Wake to re-check the timeout at the top of the loop.
+                }
+                _ = tokio::time::sleep_until(ack_deadline), if prompt_ack.is_some() => {
+                    let Some(watch) = prompt_ack.take() else {
+                        unreachable!("branch precondition is `prompt_ack.is_some()`")
+                    };
+                    let err = abort_unacknowledged_prompt(
+                        acp_tx,
+                        session_id,
+                        watch.prompt_id(),
+                        watch.waited(Instant::now()),
+                        ack_deadlines,
+                    )
+                    .await;
+                    prompt_result = Some(Err(err));
+                    prompt_unacknowledged = true;
+                    break;
                 }
             }
         }
@@ -1747,6 +1949,7 @@ where
         prompt_result,
         connection_closed,
         timed_out,
+        prompt_unacknowledged,
     }
 }
 

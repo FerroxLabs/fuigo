@@ -483,7 +483,12 @@
         // The notification is CLIENT-scoped, so exactly ONE fires regardless of how many tabs were in auto
         // It omits `yolo_mode` so a sibling always-approve tab is preserved
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx,
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         // Two auto agents and one always-approve sibling, all with live sessions
         app.agents.insert(AgentId(0), make_agent(Some("sess-0")));
         app.agents.insert(AgentId(1), make_agent(Some("sess-1")));

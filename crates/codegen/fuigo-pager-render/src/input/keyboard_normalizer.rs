@@ -59,7 +59,9 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
             out.modifiers = KeyModifiers::CONTROL;
             return Some(out);
         }
-        if !self.delivery.benefits_from_rescue() {
+        if !self.delivery.benefits_from_rescue()
+            || super::terminal_support::os_modifier_rescue_suppressed()
+        {
             return None;
         }
         if !key.modifiers.is_empty() {
@@ -146,6 +148,27 @@ mod tests {
         assert_eq!(out.modifiers, KeyModifiers::CONTROL);
         assert!(!crate::input::key::is_text_input_key(&out));
         assert!(crate::key!('b', CONTROL).matches(&out));
+    }
+
+    /// A replayed (startup type-ahead) key must not be re-interpreted against the modifiers held
+    /// now: the OS probe is skipped while the guard is alive, but raw control-byte canonicalization
+    /// (which does not read the OS at all) still applies.
+    #[test]
+    fn queued_event_suppression_skips_os_probe_but_keeps_raw_ctrl_b_normalization() {
+        let n = make(
+            ModifierState {
+                command: true,
+                option: true,
+                ..Default::default()
+            },
+            drops_both(),
+        );
+        let _guard = crate::input::terminal_support::suppress_os_modifier_rescue();
+        assert!(n.rescue_key(bare(KeyCode::Backspace)).is_none());
+        let raw = KeyEvent::new(KeyCode::Char('\u{0002}'), KeyModifiers::NONE);
+        let out = n.rescue_key(raw).expect("raw Ctrl+B still canonicalizes");
+        assert_eq!(out.code, KeyCode::Char('b'));
+        assert_eq!(out.modifiers, KeyModifiers::CONTROL);
     }
 
     #[test]

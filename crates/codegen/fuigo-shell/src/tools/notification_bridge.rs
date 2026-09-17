@@ -78,6 +78,24 @@ pub(crate) struct NotificationBridgeConfig {
     /// When `true`, suppress the bash auto-wake synthetic prompt.
     /// Shared `Arc` written in one place; see `SessionActor::set_goal_loop_active_resource` for the rationale.
     pub goal_loop_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Coalesce live `EmitBackgroundTasksSnapshot` requests. Last-wins only
+    /// needs the latest list; a burst of completions shares one emit.
+    pub background_tasks_snapshot_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+/// Queue one durable `background_tasks` snapshot after a task starts or finishes; a burst shares one emit.
+fn request_background_tasks_snapshot(config: &NotificationBridgeConfig) {
+    if config
+        .background_tasks_snapshot_pending
+        .swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        return;
+    }
+    let _ = config
+        .session_cmd_tx
+        .send(SessionCommand::EmitBackgroundTasksSnapshot {
+            respond_to: None,
+            pending: Some(Arc::clone(&config.background_tasks_snapshot_pending)),
+        });
 }
 /// Returns `None` if the slot is unset (toolset not yet finalized) or if the resolved value is `None` (no such tool registered in this toolset).
 pub(crate) fn resolved_tool_name(slot: &std::sync::OnceLock<Option<String>>) -> Option<&str> {
@@ -327,6 +345,7 @@ async fn handle_notification(
                     acp::ExtNotification::new("fuigo/task_backgrounded", params.into());
                 config.gateway.forward_fire_and_forget(ext_notification);
             }
+            request_background_tasks_snapshot(config);
         }
         ToolNotification::FileWritten(written) => {
             let prompt_index = *config.prompt_index.lock().await;
@@ -588,6 +607,7 @@ async fn handle_notification(
                     title: None,
                     level: Some("info".into()),
                 });
+            request_background_tasks_snapshot(config);
         }
         ToolNotification::PlanModeEntered(entered) => {
             let activated = config.plan_mode.lock().activate_from_tool();

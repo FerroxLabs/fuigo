@@ -2712,6 +2712,11 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
+                    label: "double-click select",
+                    clickable: false,
+                    id: 0,
+                },
+                Shortcut {
                     label: esc_label,
                     clickable: false,
                     id: 0,

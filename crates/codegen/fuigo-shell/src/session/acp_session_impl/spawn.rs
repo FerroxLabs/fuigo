@@ -74,6 +74,13 @@ fn subagent_sampler_rate_limit_threshold(is_subagent: bool, pacer_max_attempts: 
         fuigo_sampler::RATE_LIMIT_RETRY_THRESHOLD
     }
 }
+/// Prefer the model-resolved config; the separate argument remains for legacy spawn call sites.
+fn session_max_retries_source(
+    sampling_config_max_retries: Option<u32>,
+    spawn_max_retries: Option<u32>,
+) -> Option<u32> {
+    sampling_config_max_retries.or(spawn_max_retries)
+}
 /// Whether this session keeps the MCP meta-tools `search_tool` and `use_tool`.
 ///
 /// `AgentBuilder` drops both when this is false ("with none configured at session start they
@@ -204,8 +211,14 @@ mod cli_catchall_drop_tests {
 }
 #[cfg(test)]
 mod subagent_rate_limit_threshold_tests {
-    use super::subagent_sampler_rate_limit_threshold;
+    use super::{session_max_retries_source, subagent_sampler_rate_limit_threshold};
     use fuigo_sampler::{RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD};
+    #[test]
+    fn model_retry_budget_wins_over_legacy_spawn_budget() {
+        assert_eq!(session_max_retries_source(Some(6), Some(3)), Some(6));
+        assert_eq!(session_max_retries_source(Some(6), None), Some(6));
+        assert_eq!(session_max_retries_source(None, Some(3)), Some(3));
+    }
     #[test]
     fn main_session_always_keeps_sampler_retry() {
         assert_eq!(
@@ -287,7 +300,7 @@ pub(crate) async fn spawn_session_actor(
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     code_nav_enabled: bool,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
-    status_line_enabled: Arc<std::sync::atomic::AtomicBool>,
+    client_caps: crate::session::notifications::SessionClientCaps,
     feedback_proxy_url: Option<String>,
     feedback_user_token: Option<String>,
     feedback_alpha_test_key: Option<String>,
@@ -597,18 +610,26 @@ pub(crate) async fn spawn_session_actor(
             "FUIGO_DEBUG_CONTEXT_WINDOW override active"
         );
     }
+    let resolved_max_retries = fuigo_sampler::resolve_max_retries(session_max_retries_source(
+        sampling_config.max_retries,
+        max_retries,
+    ));
     let chat_state_sampling_config = fuigo_sampling_types::SamplingConfig {
         base_url: sampling_config.base_url.clone(),
+        mtls_cert_dir: sampling_config.mtls_cert_dir.clone(),
         model: sampling_config.model.clone(),
         max_completion_tokens: sampling_config.max_completion_tokens,
         temperature: sampling_config.temperature,
         top_p: sampling_config.top_p,
+        max_retries: Some(resolved_max_retries),
+        rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
         api_backend: sampling_config.api_backend.clone(),
         extra_headers: sampling_config.extra_headers.clone(),
         query_params: sampling_config.query_params.clone(),
         env_http_headers: sampling_config.env_http_headers.clone(),
         context_window: context_window_override.unwrap_or(baseline_context_window),
         reasoning_effort: sampling_config.reasoning_effort,
+        reasoning_summary: sampling_config.reasoning_summary,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
     let actor_pruning_config = fuigo_chat_state::PruningConfig {
@@ -733,6 +754,7 @@ pub(crate) async fn spawn_session_actor(
             auto_wake_enabled: tool_context.auto_wake_enabled,
             queue_exit_reminder_on_approved_exit: queue_exit_reminder_on_approved_exit.clone(),
             goal_loop_active: tool_context.goal_loop_active_gate.clone(),
+            background_tasks_snapshot_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     );
     let tool_context_for_handle = tool_context.clone();
@@ -1186,12 +1208,18 @@ pub(crate) async fn spawn_session_actor(
             agent.tool_bridge(),
         )
         .await;
+    let resolved_scheduler_create =
+        fuigo_tools::reminders::task_completion::resolve_scheduler_create_tool_name(
+            agent.tool_bridge(),
+        )
+        .await;
     let _ = task_output_tool_name.set(resolved_task_output.clone());
     let _ = read_tool_name.set(resolved_read);
     tool_context.task_output_tool_name = resolved_task_output.unwrap_or_else(|| {
         fuigo_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
     });
     tool_context.scheduler_delete_tool_name = resolved_scheduler_delete;
+    tool_context.scheduler_create_tool_name = resolved_scheduler_create;
     let scheduler_handle_for_handle = {
         let toolset = agent.tool_bridge().toolset();
         let res = toolset.resources.lock().await;
@@ -1361,7 +1389,9 @@ pub(crate) async fn spawn_session_actor(
         sampler_config_initial.doom_loop_recovery = None;
     }
     let sampler_retry_policy = fuigo_sampler::RetryPolicy {
-        max_retries: max_retries.unwrap_or(5),
+        // The actor policy keeps Fuigo's 5-attempt default; only the source of an explicit budget changed
+        max_retries: session_max_retries_source(sampling_config.max_retries, max_retries)
+            .unwrap_or(5),
         rate_limit_retry_threshold: subagent_sampler_rate_limit_threshold(
             is_subagent_spawn,
             subagent_rate_limit_max_attempts,
@@ -1422,6 +1452,45 @@ pub(crate) async fn spawn_session_actor(
     >();
     crate::session::workflow::registry::warm_builtin_cache();
     let workflow_session_dir = crate::session::persistence::session_dir(&session_info);
+    // Crash path: teardown never wrote `resume_status.json`, so rebuild it from what is left on disk
+    // (scheduler state, running subagent metas, restored workflow runs, the goal) before the first prompt consumes it
+    let resume_workflows: Vec<crate::session::resume_status::ResumeWorkflow> =
+        persisted_workflow_runs
+            .iter()
+            .filter(|run| {
+                use crate::session::workflow::tracker::WorkflowRunStatus;
+                let status = run.manifest.state.status;
+                status == WorkflowRunStatus::Active
+                    || status == WorkflowRunStatus::Interrupted
+                    || status.is_paused()
+            })
+            .map(|run| {
+                let state = &run.manifest.state;
+                crate::session::resume_status::ResumeWorkflow {
+                    run_id: state.run_id.clone(),
+                    objective: state.objective.clone(),
+                }
+            })
+            .collect();
+    let resume_goal = goal_tracker.lock().snapshot().and_then(|g| {
+        use crate::session::goal_tracker::GoalStatus;
+        if matches!(g.status, GoalStatus::Complete | GoalStatus::BudgetLimited) {
+            None
+        } else {
+            Some(crate::session::resume_status::ResumeGoal {
+                objective: g.objective.clone(),
+            })
+        }
+    });
+    if !startup_hints.is_subagent && !crate::session::resume_status::exists(&workflow_session_dir) {
+        let snapshot = crate::session::resume_status::reconstruct_from_disk(
+            &workflow_session_dir,
+            session_info.id.0.as_ref(),
+            resume_workflows,
+            resume_goal,
+        );
+        crate::session::resume_status::persist(&workflow_session_dir, &snapshot);
+    }
     let (workflow_store, workflow_snapshots) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
             Some(workflow_session_dir.clone()),
@@ -1513,6 +1582,26 @@ pub(crate) async fn spawn_session_actor(
                                 continue;
                             }
                         }
+                    }
+                    WorkflowSource::Pause { run_id } => {
+                        use fuigo_tools::implementations::fuigo_build::workflow::WorkflowControl;
+                        let _ = ack.send(
+                            manager
+                                .lock()
+                                .await
+                                .control_ack(run_id, WorkflowControl::Pause),
+                        );
+                        continue;
+                    }
+                    WorkflowSource::Stop { run_id } => {
+                        use fuigo_tools::implementations::fuigo_build::workflow::WorkflowControl;
+                        let _ = ack.send(
+                            manager
+                                .lock()
+                                .await
+                                .control_ack(run_id, WorkflowControl::Stop),
+                        );
+                        continue;
                     }
                 };
                 let resolved = match resolved {
@@ -1743,6 +1832,7 @@ pub(crate) async fn spawn_session_actor(
             gateway_enabled: gateway_enabled.clone(),
             persistence_tx: persistence.tx.clone(),
             disk_full: persistence.subscribe_disk_full(),
+            client_caps: client_caps.clone(),
         },
         permissions,
         tool_context,
@@ -1826,7 +1916,7 @@ pub(crate) async fn spawn_session_actor(
             remote_settings.as_ref().and_then(|r| r.uncharged_401_park),
         ),
         max_turns,
-        max_retries: fuigo_sampler::resolve_max_retries(max_retries),
+        max_retries: resolved_max_retries,
         rate_limit_waits: RateLimitWaitConfig::with_max_attempts(subagent_rate_limit_max_attempts),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
@@ -1853,7 +1943,7 @@ pub(crate) async fn spawn_session_actor(
         agent: std::cell::RefCell::new(agent),
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
-        status_line_enabled: status_line_enabled.clone(),
+        status_line_enabled: client_caps.status_line.clone(),
         models_manager,
         display_cwd: {
             let lock = std::sync::OnceLock::new();
@@ -2247,6 +2337,9 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let spawn_snapshot = crate::session::SpawnSnapshot {
+        applied_tool_overrides: session.effective_tool_overrides(),
+    };
     let telemetry_ctx = fuigo_telemetry::session_ctx::TelemetryCtx::new(
         session.session_info.id.0.to_string(),
         session.tool_context.prompt_index.clone(),
@@ -2301,7 +2394,8 @@ pub(crate) async fn spawn_session_actor(
             chat_state_handle: chat_state_handle_for_handle,
             signals_handle,
             gateway_enabled,
-            status_line_enabled,
+            status_line_enabled: client_caps.status_line.clone(),
+            client_caps,
             mcp_servers,
             initial_client_mcp_servers,
             display_cwd: None,
@@ -2310,6 +2404,7 @@ pub(crate) async fn spawn_session_actor(
             upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
+            spawn_snapshot,
             scheduler_background_loops,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
@@ -2403,7 +2498,7 @@ pub(crate) async fn spawn_session_on_thread(
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     code_nav_enabled: bool,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
-    status_line_enabled: Arc<std::sync::atomic::AtomicBool>,
+    client_caps: crate::session::notifications::SessionClientCaps,
     feedback_proxy_url: Option<String>,
     feedback_user_token: Option<String>,
     feedback_alpha_test_key: Option<String>,
@@ -2582,7 +2677,7 @@ pub(crate) async fn spawn_session_on_thread(
                         codebase_indexes,
                         code_nav_enabled,
                         fs_watch_caps,
-                        status_line_enabled,
+                        client_caps,
                         feedback_proxy_url,
                         feedback_user_token,
                         feedback_alpha_test_key,

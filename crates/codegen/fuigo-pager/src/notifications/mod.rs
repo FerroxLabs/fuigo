@@ -40,10 +40,16 @@ pub struct NotificationService {
     /// Whether we have already fired an `ApprovalRequired` terminal notification for the current batch of queued permissions.
     /// Set to `true` after the first notification; cleared via [`clear_permission_notification`] when the queue drains to empty.
     permission_notified: bool,
+    /// Out-of-band escape queue for notification/title/progress escapes;
+    /// see [`EscapeWriter`](crate::render::draw::EscapeWriter).
+    escape_writer: crate::render::draw::EscapeWriter,
 }
 
 impl NotificationService {
-    pub fn new(config: NotificationConfig) -> Self {
+    pub fn new(
+        config: NotificationConfig,
+        escape_writer: crate::render::draw::EscapeWriter,
+    ) -> Self {
         let terminal_ctx = crate::terminal::terminal_context();
         let protocol = resolve_protocol(config.method, terminal_ctx);
         let focus_tracker = focus::FocusTracker::new(
@@ -62,6 +68,7 @@ impl NotificationService {
             progress_active: false,
             progress_last_sent: None,
             permission_notified: false,
+            escape_writer,
         }
     }
 
@@ -103,6 +110,7 @@ impl NotificationService {
                 &event.title,
                 &event.body,
                 self.terminal_ctx,
+                &self.escape_writer,
             );
             fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::NotificationEmitted {
                 protocol: self.protocol.as_str(),
@@ -112,7 +120,7 @@ impl NotificationService {
         }
     }
 
-    /// Flush the tab title and progress bar to the idle state, writing directly to stderr.
+    /// Flush the tab title and progress bar to the idle state through the writer queue.
     /// Call before `notify()` so Ghostty's notification popup picks up the updated (non-spinning) title instead of a stale "Responding" subtitle.
     pub fn flush_idle_state(&mut self, state: &title::TitleState<'_>) {
         let mut buf = String::new();
@@ -127,13 +135,7 @@ impl NotificationService {
             self.clear_progress_into(&mut buf);
         }
 
-        if !buf.is_empty() {
-            fuigo_shell::util::with_locked_stderr(|stderr| {
-                use std::io::Write;
-                let _ = stderr.write_all(buf.as_bytes());
-                let _ = stderr.flush();
-            });
-        }
+        self.escape_writer.emit(buf);
     }
 
     /// Build escape sequences to set the title and progress bar to idle without writing to stderr.
@@ -197,22 +199,9 @@ impl NotificationService {
 
     pub fn shutdown(&mut self) {
         // Reset the tab title back to "fuigo" so it doesn't linger on the last activity label after exit
-        let title_esc = self.title_manager.reset();
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            use std::io::Write as _;
-            let _ = stderr.write_all(title_esc.as_bytes());
-            let _ = stderr.flush();
-        });
-
-        let mut buf = String::new();
+        let mut buf = self.title_manager.reset();
         self.clear_progress_into(&mut buf);
-        if !buf.is_empty() {
-            fuigo_shell::util::with_locked_stderr(|stderr| {
-                use std::io::Write as _;
-                let _ = stderr.write_all(buf.as_bytes());
-                let _ = stderr.flush();
-            });
-        }
+        self.escape_writer.emit(buf);
     }
 
     /// Returns `true` if a terminal notification for `ApprovalRequired` has already been emitted and should not be repeated.
@@ -251,6 +240,8 @@ impl NotificationService {
         self.progress_active
     }
 
+    /// Test-only: production callers pass the live writer from
+    /// [`TermWriter::escape_writer`](crate::render::draw::TermWriter::escape_writer).
     #[cfg(test)]
     fn new_for_test(config: NotificationConfig) -> Self {
         let terminal_ctx = crate::terminal::terminal_context();
@@ -270,6 +261,7 @@ impl NotificationService {
             progress_active: false,
             progress_last_sent: None,
             permission_notified: false,
+            escape_writer: crate::render::draw::EscapeWriter::disconnected(),
         }
     }
 }
@@ -304,6 +296,24 @@ pub fn load_notification_config(raw_config: &toml::Value) -> NotificationConfig 
 mod tests {
     use super::*;
     use crate::terminal::{TerminalContext, TerminalName};
+
+    /// Shutdown's title reset and progress clear ride the writer queue; nothing is written
+    /// inline under the stderr lock (that deadlocks when the terminal stops reading).
+    #[test]
+    fn shutdown_resets_the_title_through_the_writer_queue() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut svc = NotificationService::new_for_test(NotificationConfig::default());
+        svc.escape_writer =
+            crate::render::draw::EscapeWriter::new(tx, crate::render::draw::WriterSync::new());
+        svc.shutdown();
+        let payload = rx.try_recv().expect("shutdown escapes queued");
+        let text = String::from_utf8_lossy(payload.data()).into_owned();
+        assert!(
+            text.contains("fuigo"),
+            "the title reset must be on the queue, got {text:?}"
+        );
+        assert!(rx.try_recv().is_err(), "one payload per shutdown");
+    }
 
     #[test]
     fn resolve_protocol_auto_delegates_to_select() {

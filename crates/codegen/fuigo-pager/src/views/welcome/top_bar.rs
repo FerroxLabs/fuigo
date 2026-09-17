@@ -85,28 +85,20 @@ fn process_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// The tilde-collapsed cwd, with a `(worktree of …)` suffix when `info` reports a linked worktree's main repo.
-/// Matches the session status bar; the `worktree ` badge itself is painted by [`location_line`].
+/// The abbreviated, middle-shortened cwd. Linked worktrees use the `worktree ` badge painted by
+/// [`location_line`], not a ` (worktree of …)` path suffix; matches the session status bar.
 /// Pure formatting over the per-cwd git probe; nothing here spawns `git`.
 fn format_cwd_display(cwd: &Path, info: Option<&git_info::CwdGitInfo>) -> String {
-    let display = collapse_home(cwd);
+    // Match the session status bar: Path::strip_prefix via abbreviate_path (not a string prefix of USERPROFILE,
+    // so `C:\Users\foo` does not collapse neighbour `C:\Users\foobar` to `~bar`), then last-two shortening
+    let display = crate::util::display_location_path(cwd);
     let main_repo = info.and_then(|i| i.main_repo.as_deref());
     format_cwd_parts(&display, main_repo)
 }
 
-/// Pure formatting for the cwd display; no global state.
-fn format_cwd_parts(display: &str, main_repo: Option<&str>) -> String {
-    if let Some(main_repo) = main_repo {
-        format!("{display} (worktree of {main_repo})")
-    } else {
-        display.to_string()
-    }
-}
-
-fn collapse_home(dir: &std::path::Path) -> String {
-    // Match the session status bar: Path::strip_prefix via abbreviate_path, not a string prefix of USERPROFILE
-    // `C:\Users\foo` must not collapse neighbor `C:\Users\foobar` to `~bar`
-    crate::util::abbreviate_path(&dir.to_string_lossy()).into_owned()
+/// Pure formatting for the cwd display; no global state. The main repo is deliberately not appended.
+fn format_cwd_parts(display: &str, _main_repo: Option<&str>) -> String {
+    display.to_string()
 }
 
 #[cfg(test)]
@@ -118,18 +110,18 @@ mod tests {
         assert_eq!(format_cwd_parts("~/fuigo", None), "~/fuigo");
     }
 
-    /// A linked worktree shows the `(worktree of …)` suffix (matching the session status bar) regardless of the worktree's human label.
-    /// The label is no longer shown here; the `worktree ` badge stands in for it.
+    /// A linked worktree shows the path only (matching the session status bar): the `worktree ` badge stands in
+    /// for the label, and no ` (worktree of …)` suffix is appended.
     #[test]
-    fn format_cwd_worktree_shows_main_repo() {
+    fn format_cwd_worktree_omits_main_repo_suffix() {
         assert_eq!(
             format_cwd_parts("~/wt/session-1", Some("~/fuigo")),
-            "~/wt/session-1 (worktree of ~/fuigo)"
+            "~/wt/session-1"
         );
     }
 
     /// The header shows the ACTUAL cwd, not the git repo root: switching into a subdirectory of a repo reflects the subdirectory.
-    /// (`/work/...` is outside `$HOME`, so `collapse_home` leaves it verbatim.)
+    /// (`/work/...` is outside `$HOME`, so nothing collapses to `~`; deep paths keep their last two components full.)
     #[test]
     fn format_cwd_display_shows_subdir_not_repo_root() {
         let info = git_info::CwdGitInfo {
@@ -140,13 +132,14 @@ mod tests {
         };
         assert_eq!(
             format_cwd_display(Path::new("/work/fuigo/frontend/apps"), Some(&info)),
-            "/work/fuigo/frontend/apps",
+            "/w/f/frontend/apps",
         );
     }
 
-    /// A worktree subdirectory shows the `(worktree of …)` suffix (matching the session status bar) while still showing the real subdirectory path.
+    /// A worktree subdirectory shows the real subdirectory path (matching the session status bar) with no
+    /// ` (worktree of …)` suffix; deep paths are middle-shortened to their last two components.
     #[test]
-    fn format_cwd_display_worktree_subdir_shows_main_repo() {
+    fn format_cwd_display_worktree_subdir_omits_main_repo_suffix() {
         let info = git_info::CwdGitInfo {
             branch: Some("kevin/x".into()),
             is_worktree: true,
@@ -155,16 +148,16 @@ mod tests {
         };
         assert_eq!(
             format_cwd_display(Path::new("/work/wt/location-picker/frontend"), Some(&info)),
-            "/work/wt/location-picker/frontend (worktree of ~/fuigo)",
+            "/w/w/location-picker/frontend",
         );
     }
 
-    /// On a cache miss (`info == None`) the header still shows the raw cwd.
+    /// On a cache miss (`info == None`) the header still shows the raw cwd (shortened like every other path).
     #[test]
     fn format_cwd_display_cache_miss_shows_raw_cwd() {
         assert_eq!(
             format_cwd_display(Path::new("/work/fuigo/frontend/apps"), None),
-            "/work/fuigo/frontend/apps",
+            "/w/f/frontend/apps",
         );
     }
 
@@ -179,7 +172,8 @@ mod tests {
             return;
         }
         let neighbor = PathBuf::from(format!("{home}bar")).join("src");
-        let collapsed_neighbor = collapse_home(&neighbor);
+        let collapsed_neighbor =
+            crate::util::abbreviate_path(&neighbor.to_string_lossy()).into_owned();
         assert_eq!(
             collapsed_neighbor,
             neighbor.display().to_string(),
@@ -188,6 +182,10 @@ mod tests {
 
         let child = PathBuf::from(&home).join("src");
         let expected = format!("~/{}", Path::new("src").display());
-        assert_eq!(collapse_home(&child), expected);
+        assert_eq!(
+            crate::util::abbreviate_path(&child.to_string_lossy()).into_owned(),
+            expected
+        );
+        assert_eq!(format_cwd_display(&child, None), expected);
     }
 }

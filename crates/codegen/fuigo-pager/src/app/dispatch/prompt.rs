@@ -342,6 +342,29 @@ pub(super) fn dispatch_show_word_select_tip(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Gate + telemetry + show for one view. Tick path is the only caller.
+pub(in crate::app) fn present_export_copy_tip(
+    agent: &mut AgentView,
+    seen_counts: &mut std::collections::HashMap<&'static str, u32>,
+    gate: bool,
+) -> bool {
+    if !gate {
+        return false;
+    }
+    // Already on screen: that timer owns the slot (do not refresh TTL or re-count).
+    if agent.ephemeral_tip.current_key() == Some(crate::tips::export_copy::EXPORT_COPY_TIP_KEY) {
+        return false;
+    }
+    let shown = agent.show_ephemeral_tip(crate::tips::export_copy::export_copy_tip(), seen_counts);
+    if shown {
+        log_event(fuigo_telemetry::events::ContextualTip {
+            tip: fuigo_telemetry::events::ContextualTipKind::ExportCopy,
+            action: fuigo_telemetry::events::ContextualTipAction::Shown,
+        });
+    }
+    shown
+}
+
 /// Accept the word-select tip via its advertised chord.
 /// Flips `keep_text_selection` to `word_select` (cache, persist, and toast, the same path as the settings modal).
 /// Retires the tip so one impression maps to at most one acceptance.
@@ -468,13 +491,27 @@ pub(super) fn dispatch_send_prompt_inner(
     // Submitting the prompt retires any edit-contextual ephemeral tip (ambient tips live out their TTL across the submit)
     agent.ephemeral_tip.clear_on_submit();
 
-    let trimmed = text.trim();
+    // Image chips are composer chrome: `[Image #1] explain /btw q` must ask `explain q`, not carry the marker to the model.
+    let slash_input = agent.prompt.submitted_text_without_image_chips(&text);
+    // The raw text decides command-ness, like the slash branch below; a stripped ` /btw q` hoists.
+    let hoisted = if literal || text.trim().starts_with('/') {
+        None
+    } else {
+        crate::slash::mid_text_hoist::hoist_mid_text_command(
+            &slash_input,
+            agent.prompt.slash_controller.registry(),
+        )
+    };
 
     // Recorded before the registry runs, because most command outcomes return on their own path.
-    let recorded_as_command = !literal && consume_input && trimmed.starts_with('/');
+    let recorded_as_command =
+        !literal && consume_input && (hoisted.is_some() || text.trim().starts_with('/'));
     if recorded_as_command {
-        agent.record_prompt_in_history(trimmed);
+        // Up-arrow history recalls the message as typed, not the hoisted `/command` rewrite.
+        agent.record_prompt_in_history(text.trim());
     }
+    let text = hoisted.unwrap_or(text);
+    let trimmed = text.trim();
 
     let mut effects = Vec::new();
 
@@ -656,10 +693,16 @@ pub(super) fn dispatch_send_prompt_inner(
                 if consume_input {
                     // Inline `/feedback` composed alongside pasted images: the chips belong to the report
                     // Drain them into the action before the composer wipe destroys them
-                    if let Action::SendFeedback { images, .. }
-                    | Action::OpenFeedbackPane { images, .. } = &mut action
-                    {
-                        *images = agent.prompt.drain_images().into();
+                    match &mut action {
+                        Action::SendFeedback { images, .. }
+                        | Action::OpenFeedbackPane { images, .. } => {
+                            *images = agent.prompt.drain_images().into();
+                        }
+                        // Same as feedback: these images are the question, not leftover chips.
+                        Action::SendBtw { images, .. } => {
+                            *images = agent.prompt.drain_images();
+                        }
+                        _ => {}
                     }
                     agent.prompt.set_text("");
                 }
@@ -1129,7 +1172,7 @@ pub(super) fn handle_prompt_response(
                 &result,
                 Ok(pr) if pr.stop_reason == acp::StopReason::Cancelled
             );
-        // Send-now cancel: suppress the "Turn cancelled by user" marker (the new prompt follows right under the partial)
+        // Send-now cancel: suppress the "Turn cancelled" marker (the new prompt follows right under the partial)
         // Wire `cancelTrigger` wins, else the client-side expectation; consumed at every turn end (no stale flag)
         let expected_send_now = agent.expect_send_now_cancel.take();
         let wire_cancel_trigger = result.as_ref().ok().and_then(|pr| {
@@ -1271,13 +1314,6 @@ pub(super) fn handle_prompt_response(
             "turn ended; client returning to idle",
         );
 
-        // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
-        let ending_prompt_id = agent
-            .session
-            .current_prompt_id
-            .clone()
-            .or_else(|| response_pid.clone());
-
         agent.session.finish_turn(&mut agent.scrollback);
 
         // Insert the session event message (skip TurnCompleted for bash-mode, which has no agent turn)
@@ -1302,6 +1338,7 @@ pub(super) fn handle_prompt_response(
                         elapsed_ms: crate::app::turn_completion::duration_to_elapsed_ms(elapsed),
                         agent_result: None,
                         send_now_cancel,
+                        cancel_trigger: wire_cancel_trigger.as_deref(),
                         cancellation_category: wire_cancellation_category.as_deref(),
                         // Ok-path marker: the Error arm is unreachable here.
                         error_kind: None,
@@ -1310,11 +1347,7 @@ pub(super) fn handle_prompt_response(
                 )
             }
         };
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            ending_prompt_id.as_deref(),
-        );
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event);
 
         let notification = match (&result, was_cancelling) {
             (Ok(_), false) if !agent.bash_turn => {

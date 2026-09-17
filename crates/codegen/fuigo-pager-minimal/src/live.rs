@@ -16,6 +16,7 @@ use fuigo_pager::minimal_api;
 use fuigo_pager::render::Renderable;
 use fuigo_pager::scrollback::state::ScrollbackState;
 use fuigo_pager::scrollback::wrappers::EntryRenderer;
+use fuigo_pager::terminal::TerminalContext;
 use fuigo_pager::theme::Theme;
 use fuigo_pager::views::prompt_widget::{PromptBg, PromptStyle};
 use fuigo_pager::views::turn_status;
@@ -86,7 +87,7 @@ pub(super) fn prompt_style(
     }
 }
 /// Draw the pinned live region (tail + status + prompt) into the inline viewport.
-pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
+pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &TerminalContext) {
     let force_todos = minimal_api::minimal_show_todos(app);
     let auth_hint = crate::auth::minimal_auth_hint(
         &app.auth_state,
@@ -129,7 +130,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
     {
         clear_btw_geometry(agent);
     }
-    fuigo_pager::render::draw::draw_frame(terminal, cursor, |frame, _link_spans| {
+    fuigo_pager::render::draw::draw_frame(terminal, cursor, ctx, |frame, _link_spans| {
         let area = frame.area();
         if area.height == 0 || area.width < 4 {
             return (None, None);

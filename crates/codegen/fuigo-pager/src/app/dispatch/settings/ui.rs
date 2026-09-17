@@ -173,7 +173,7 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
             } else {
                 let (new_id, create_effects) =
                     crate::app::dispatch::session::lifecycle::dispatch_new_session_inner_with_id(
-                        app, None,
+                        app, None, false,
                     );
                 effects.extend(create_effects);
                 new_id
@@ -507,13 +507,13 @@ pub(in crate::app::dispatch) fn dispatch_toggle_mouse_capture(app: &mut AppView)
             "active_view": format!("{:?}", app.active_view),
         })),
     );
-    fuigo_shell::util::with_locked_stderr(|stderr| {
-        let _ = if enable {
-            crossterm::execute!(stderr, crossterm::event::EnableMouseCapture)
-        } else {
-            crossterm::execute!(stderr, crossterm::event::DisableMouseCapture)
-        };
-    });
+    if enable {
+        app.escape_writer
+            .emit_command(crossterm::event::EnableMouseCapture);
+    } else {
+        app.escape_writer
+            .emit_command(crossterm::event::DisableMouseCapture);
+    }
     // On legacy conhost, DisableMouseCapture restores the *pre-capture* stdin mode
     // That mode may itself have QuickEdit off (a per-window profile or a stale mode from a crashed run)
     // Assert it so "mouse off" actually hands the terminal native drag-select, the whole point of the toggle
@@ -703,6 +703,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             Some(Action::SetContextualHintSshWrap(*b))
         }
+        ("contextual_hints.export_copy", SettingValue::Bool(b)) => {
+            Some(Action::SetContextualHintExportCopy(*b))
+        }
         ("multiline_mode", SettingValue::Bool(b)) => Some(Action::SetMultilineMode(*b)),
         ("render_mermaid", SettingValue::Enum(s)) => {
             crate::appearance::RenderMermaid::from_canonical(s).map(Action::SetRenderMermaid)
@@ -886,6 +889,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         }
         ("contextual_hints.ssh_wrap", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.ssh_wrap = v, *b)
+        }
+        ("contextual_hints.export_copy", SettingValue::Bool(b)) => {
+            set_contextual_hint_inner(app, |h, v| h.export_copy = v, *b)
         }
         ("respect_manual_folds", SettingValue::Bool(b)) => set_respect_manual_folds_inner(app, *b),
         ("theme", SettingValue::Enum(s)) => set_theme_inner(app, s),

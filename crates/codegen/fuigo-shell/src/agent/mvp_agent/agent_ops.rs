@@ -1468,9 +1468,15 @@ impl MvpAgent {
             crate::agent::otel_gate::policy_channel_for(&proxy_url)
         };
         self.otel_gate.rearm_on_switch(&identity, channel);
-        let outcome = self.fetch_settings_self_healing_401(auth).await;
+        let outcome = self
+            .settings_manager
+            .fetch(auth, || self.fetch_settings_self_healing_401(auth))
+            .await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
-        self.otel_gate.resolve(&identity, outcome, live.as_deref())
+        match outcome {
+            Some(outcome) => self.otel_gate.resolve(&identity, outcome, live.as_deref()),
+            None => None,
+        }
     }
     /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`] refresh and re-fetch if it yields a *different* token.
     /// This recovers a 401 from a token that expired mid-fetch.
@@ -2337,6 +2343,7 @@ impl MvpAgent {
             allow_access_resolved_for: std::cell::RefCell::new(None),
             storage_mode: std::cell::Cell::new(storage_mode),
             otel_gate: crate::agent::otel_gate::OtelGate::default(),
+            settings_manager: super::settings_manager::SettingsManager::default(),
             default_yolo_mode,
             default_auto_mode,
             trace_upload_live: Arc::new(
@@ -2516,6 +2523,9 @@ impl MvpAgent {
                     "kept session resident across client disconnect (live work)"
                 );
                 continue;
+            }
+            if let Some(handle) = self.resident_handle(&id) {
+                handle.persist_resume_status().await;
             }
             self.request_session_shutdown(&id);
             if self.take_session(&id).is_some() {
@@ -2924,6 +2934,8 @@ impl MvpAgent {
                 let state = *state_rx.borrow_and_update();
                 let status = match state {
                     crate::relay::ConnectionState::Connected => {
+                        // `None` when FUIGO_CODE_WEB_URL is unset: the client is told the
+                        // session is syncing, not handed a URL to a host nobody configured.
                         let share_url = crate::relay::sync::build_share_url(
                             &session_id.0,
                         );
@@ -3933,16 +3945,56 @@ impl MvpAgent {
         meta: Option<&acp::Meta>,
         init: &acp::InitializeRequest,
     ) -> bool {
-        meta.and_then(|m| m.get(fuigo_status_line::CLIENT_STATUS_LINE_META))
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            fuigo_status_line::CLIENT_STATUS_LINE_META,
+            fuigo_status_line::STATUS_LINE_CAPABILITY,
+            false,
+        )
+    }
+    fn resolve_bool_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+        session_key: &str,
+        init_key: &str,
+        default: bool,
+    ) -> bool {
+        meta.and_then(|m| m.get(session_key))
             .or_else(|| {
-                init
-                    .client_capabilities
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get(fuigo_status_line::STATUS_LINE_CAPABILITY))
+                init.client_capabilities.meta.as_ref().and_then(|m| m.get(init_key))
             })
             .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+            .unwrap_or(default)
+    }
+    /// Whether the requesting client wants live `user_message_chunk` during a prompt.
+    /// Session `_meta` first: a leader multiplexes many clients behind one `initialize`.
+    pub(super) fn resolve_user_message_echo_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) -> bool {
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            crate::session::CLIENT_USER_MESSAGE_ECHO_META,
+            crate::session::USER_MESSAGE_ECHO_CAPABILITY,
+            false,
+        )
+    }
+    /// Assign live prompt echo for the reused resident actor. Can turn it off.
+    pub(super) fn attach_user_message_echo(
+        &self,
+        session_id: &acp::SessionId,
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        handle
+            .set_user_message_echo_wanted(
+                Self::resolve_user_message_echo_capability(meta, init),
+            );
     }
     /// Switch the row on for the resident actor an attach reuses and ask it to fill it.
     /// The store precedes the request because the emitter re-reads the capability when the wake lands.
@@ -4678,10 +4730,9 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("fuigo/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
-            let status_line_enabled = std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(
-                    Self::resolve_status_line_capability(session_meta, init),
-                ),
+            let client_caps = crate::session::notifications::SessionClientCaps::new(
+                Self::resolve_status_line_capability(session_meta, init),
+                Self::resolve_user_message_echo_capability(session_meta, init),
             );
             let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
@@ -4729,7 +4780,7 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
-                    status_line_enabled,
+                    client_caps,
                     feedback_proxy_url,
                     feedback_user_token,
                     feedback_alpha_test_key,

@@ -17,6 +17,7 @@ pub(crate) fn build_prefetched_map(
             env_key: None,
             auth_provider: None,
             api_base_url: m.api_base_url.clone().or(api_base_url_override.clone()),
+            mtls_cert_dir: None,
         };
         map.insert(key, entry);
     }
@@ -37,17 +38,22 @@ pub(crate) fn prefetch_models_blocking(
     )
 }
 
+/// Outcome of the startup settings request. `Skipped` (no session auth) is a healthy
+/// no-auth boot, not a degraded start; only `Failed` counts as an attempted fetch that
+/// yielded nothing.
+pub(in crate::agent::models) enum SettingsPrefetch {
+    Fetched(Box<crate::util::config::RemoteSettings>),
+    Failed,
+    Skipped,
+}
+
 /// Fetch models + settings without touching disk; the cache write is returned
 /// for the caller to commit.
 fn prefetch_uncommitted(
     endpoints: &config::EndpointsConfig,
     auth: Option<&FuigoAuth>,
     fetch_auth: ModelFetchAuth,
-) -> (
-    ModelsPrefetch,
-    Option<crate::util::config::RemoteSettings>,
-    Option<SettingsCacheWrite>,
-) {
+) -> (ModelsPrefetch, SettingsPrefetch, Option<SettingsCacheWrite>) {
     // Resolved once so both fetches see the same policy.
     let remote_fetch_enabled = crate::util::config::resolve_remote_fetch_enabled();
     let models = {
@@ -58,12 +64,19 @@ fn prefetch_uncommitted(
         Some(auth) if remote_fetch_enabled => {
             let origin = endpoints.proxy_url();
             let alpha_test_key = endpoints.alpha_test_key.as_deref();
-            SettingsCacheManager::new().load_or_fetch(auth, &origin, alpha_test_key, || {
-                let _timer = crate::instrumentation_timer!("startup.early_settings_fetch");
-                crate::remote::fetch_settings_blocking(&origin, auth, alpha_test_key).into_option()
-            })
+            let (settings, settings_write) =
+                SettingsCacheManager::new().load_or_fetch(auth, &origin, alpha_test_key, || {
+                    let _timer = crate::instrumentation_timer!("startup.early_settings_fetch");
+                    crate::remote::fetch_settings_blocking(&origin, auth, alpha_test_key)
+                        .into_option()
+                });
+            let settings = match settings {
+                Some(settings) => SettingsPrefetch::Fetched(Box::new(settings)),
+                None => SettingsPrefetch::Failed,
+            };
+            (settings, settings_write)
         }
-        _ => (None, None),
+        _ => (SettingsPrefetch::Skipped, None),
     };
     (models, settings, settings_write)
 }
@@ -235,13 +248,36 @@ pub(in crate::agent::models) fn resolve_disk_auth(
 
 pub(in crate::agent::models) fn run_prefetch(
     env: PrefetchEnv,
-) -> (
-    ModelsPrefetch,
-    Option<crate::util::config::RemoteSettings>,
-    Option<SettingsCacheWrite>,
-) {
+) -> (ModelsPrefetch, SettingsPrefetch, Option<SettingsCacheWrite>) {
     let mut timer = crate::instrumentation_timer!("startup.early_prefetch");
     let proxy_endpoint = env.endpoints.proxy_url();
     timer.with_field("endpoint", proxy_endpoint.as_str());
     prefetch_uncommitted(&env.endpoints, env.auth.as_ref(), env.model_fetch_auth)
+}
+
+/// Why a boot proceeded without remote settings at gate time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+pub(crate) enum DegradedStartCause {
+    #[strum(serialize = "settings fetch failed")]
+    FetchFailed,
+    #[strum(serialize = "deadline missed")]
+    DeadlineMissed,
+    #[strum(serialize = "prefetch thread died")]
+    ThreadDied,
+}
+
+/// A personal offline or slow-network boot is an expected path, so this is a debug-level
+/// trace rather than a warning.
+pub(crate) fn record_degraded_start(
+    cause: DegradedStartCause,
+    deadline: std::time::Duration,
+    wait: std::time::Duration,
+) {
+    tracing::debug!(
+        cause = cause.as_ref(),
+        deadline_ms = deadline.as_millis() as u64,
+        wait_ms = wait.as_millis() as u64,
+        outcome = "settings unavailable at gate time",
+        "startup proceeding without remote settings"
+    );
 }

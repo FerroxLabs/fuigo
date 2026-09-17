@@ -9,6 +9,39 @@ pub fn prompt_inset(compact: bool) -> u16 {
     if compact { 0 } else { 2 }
 }
 
+fn prompt_style(focus: WelcomePromptFocus, compact: bool, pad_left: u16, pad_right: u16) -> PromptStyle {
+    PromptStyle {
+        focused: focus == WelcomePromptFocus::Focused,
+        show_prefix: true,
+        vpad_top: 1,
+        compact,
+        chrome: true,
+        chrome_pad_left: pad_left,
+        chrome_pad_right: pad_right,
+        placeholder_override: Some("Type a message..."),
+        ..PromptStyle::default()
+    }
+}
+
+/// Rows the welcome layout should reserve for the composer: measured with the style and inset
+/// [`render_prompt`] draws with, so the layout reserves the rows the draft will paint into.
+pub fn desired_prompt_height(
+    prompt: &PromptWidget,
+    content_width: u16,
+    compact: bool,
+    max_height: u16,
+) -> u16 {
+    let inset = prompt_inset(compact);
+    // Focus only tints, never changes the row count; both render sites draw with a 2-column chrome pad
+    let style = prompt_style(WelcomePromptFocus::Focused, compact, 2, 2);
+    prompt.desired_height(
+        content_width.saturating_sub(inset * 2),
+        &style,
+        true,
+        max_height,
+    )
+}
+
 /// Returns the cursor position and the post-flush output that carries terminal-overlay ownership.
 #[allow(clippy::too_many_arguments)]
 pub fn render_prompt(
@@ -24,18 +57,7 @@ pub fn render_prompt(
     Option<(u16, u16)>,
     Option<crate::terminal::overlay::PostFlush>,
 ) {
-    let focused = focus == WelcomePromptFocus::Focused;
-    let style = PromptStyle {
-        focused,
-        show_prefix: true,
-        vpad_top: 1,
-        compact,
-        chrome: true,
-        chrome_pad_left: pad_left,
-        chrome_pad_right: pad_right,
-        placeholder_override: Some("Type a message..."),
-        ..PromptStyle::default()
-    };
+    let style = prompt_style(focus, compact, pad_left, pad_right);
 
     // Inset the prompt area so the selection box border sits over dark background.
     // In compact mode `prompt_inset` returns 0, matching the session layout
@@ -114,5 +136,61 @@ mod tests {
                 .contains("a=T"),
             "writing welcome output must commit its clear"
         );
+    }
+
+    #[test]
+    fn desired_prompt_height_grows_per_draft_line_up_to_max() {
+        let mut prompt = PromptWidget::new();
+        assert_eq!(
+            desired_prompt_height(&prompt, 80, false, 20),
+            super::super::PROMPT_HEIGHT
+        );
+
+        prompt.set_text("one\ntwo\nthree");
+        assert_eq!(
+            desired_prompt_height(&prompt, 80, false, 20),
+            super::super::PROMPT_HEIGHT + 2
+        );
+
+        prompt.set_text(&["line"; 30].join("\n"));
+        assert_eq!(desired_prompt_height(&prompt, 80, false, 20), 20);
+    }
+
+    #[test]
+    fn desired_prompt_height_counts_wrapped_rows_at_the_drawn_width() {
+        let mut prompt = PromptWidget::new();
+        prompt.set_text(&"word ".repeat(40));
+        let narrow = desired_prompt_height(&prompt, 40, false, 40);
+        let wide = desired_prompt_height(&prompt, 400, false, 40);
+        assert_eq!(wide, super::super::PROMPT_HEIGHT);
+        assert!(narrow > wide, "narrow={narrow} wide={wide}");
+    }
+
+    /// Compact mode draws with no inset, so the measured wrap width must follow the draw width.
+    #[test]
+    fn desired_prompt_height_measures_at_the_compact_draw_width() {
+        let mut prompt = PromptWidget::new();
+        prompt.set_text(&"word ".repeat(40));
+        for width in [40u16, 60, 80] {
+            let regular = desired_prompt_height(&prompt, width, false, 40);
+            let compact = desired_prompt_height(&prompt, width, true, 40);
+            let regular_text_width = width.saturating_sub(prompt_inset(false) * 2);
+            let compact_text_width = width.saturating_sub(prompt_inset(true) * 2);
+            assert!(
+                compact <= regular,
+                "width {width}: compact {compact} regular {regular}"
+            );
+            assert_eq!(
+                compact,
+                prompt.desired_height(
+                    compact_text_width,
+                    &prompt_style(WelcomePromptFocus::Focused, true, 2, 2),
+                    true,
+                    40
+                ),
+                "width {width}"
+            );
+            assert_ne!(regular_text_width, compact_text_width);
+        }
     }
 }

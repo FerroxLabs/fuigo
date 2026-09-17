@@ -26,14 +26,51 @@ mod yolo_toggle_report_tests {
 /// Best-effort removal of this session's scratch staging on teardown.
 /// A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
+/// Bound on joining a cancelled SessionStart hook task at session end.
+const DEFERRED_START_CANCEL_JOIN: std::time::Duration = std::time::Duration::from_millis(500);
+/// The SessionStart hook runs on its own local task so `session/new` and the first prompt do not
+/// wait on the command loop behind it. Session end cancels it and joins (bounded) before
+/// SessionEnd hooks fire, so a cancelled start never reports after the end.
+pub(super) struct DeferredStart {
+    cancel: tokio_util::sync::CancellationToken,
+    task: Option<tokio_util::task::AbortOnDropHandle<()>>,
+}
+impl DeferredStart {
+    pub(super) fn new() -> Self {
+        Self {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            task: None,
+        }
+    }
+    fn arm(&mut self, handle: tokio::task::JoinHandle<()>) {
+        let handle = tokio_util::task::AbortOnDropHandle::new(handle);
+        if self.cancel.is_cancelled() {
+            drop(handle);
+            return;
+        }
+        self.task = Some(handle);
+    }
+    async fn seal_and_join(&mut self) {
+        self.cancel.cancel();
+        if let Some(mut start) = self.task.take() {
+            tokio::select! {
+                biased;
+                _ = &mut start => {}
+                _ = tokio::time::sleep(DEFERRED_START_CANCEL_JOIN) => {}
+            }
+        }
+    }
+}
 /// SessionEnd hooks and stop dispatch.
 /// Shared so the channel-closed and Shutdown paths cannot drift on hook ordering (memory save still runs after this).
 pub(super) async fn fire_session_end_hooks(
     session: &SessionActor,
     reason: &str,
     timer: &SharedSessionEndTimer,
+    start: &mut DeferredStart,
 ) {
     let span = session_end::span(Phase::Hooks);
+    start.seal_and_join().await;
     let envelope = session.fire_hook(
         fuigo_hooks::event::HookEventName::SessionEnd,
         None,
@@ -79,7 +116,7 @@ async fn finish_session_exit_feedback(session: &SessionActor, timer: &SharedSess
     }
     if !session.startup_hints.is_subagent {
         let _tasks = session_end::timed_child(timer, Phase::BackgroundTasksSave, span.span());
-        session.persist_background_task_manifest().await;
+        session.persist_resume_status().await;
     }
     cleanup_session_scratch(session);
 }
@@ -140,6 +177,10 @@ impl SessionActor {
     }
 }
 async fn shutdown_workflows(session: &SessionActor, timer: &SharedSessionEndTimer) {
+    // Snapshot the live workflows before cancel_all turns them terminal (first snapshot wins)
+    if !session.startup_hints.is_subagent {
+        session.persist_resume_status().await;
+    }
     let span = session_end::span(Phase::Workflows);
     {
         let _drain = session_end::timed_child(timer, Phase::WorkflowsDrain, span.span());
@@ -234,6 +275,41 @@ async fn emit_session_end_timings(timer: &SharedSessionEndTimer, is_subagent: bo
     )
     .await;
 }
+/// The deferred startup jobs, owned by the run loop so a session ending mid-startup aborts them instead of leaving them detached.
+struct StartupTasks {
+    _mcp_init_prompt_promote: crate::util::AbortOnDrop,
+    _context_snapshot: Option<crate::util::AbortOnDrop>,
+}
+impl StartupTasks {
+    fn spawn(
+        session: &Arc<SessionActor>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
+    ) -> Self {
+        let session_for_mcp = session.clone();
+        let mcp_init_prompt_promote =
+            crate::util::AbortOnDrop(tokio::task::spawn_local(async move {
+                session_for_mcp.ensure_mcp_tools_initialized().await;
+                SessionActor::maybe_start_running_task(session_for_mcp.clone(), completion_tx)
+                    .await;
+            }));
+        let context_snapshot = if session.startup_hints.is_subagent {
+            tracing::info!("session_context_snapshot: skipped (subagent)");
+            None
+        } else {
+            let s = session.clone();
+            Some(crate::util::AbortOnDrop(tokio::task::spawn_local(
+                instrument_task!("session.context_snapshot", Parent::Inherit, async move {
+                    s.wait_for_mcp_initialized().await;
+                    s.emit_session_context_snapshot().await;
+                }),
+            )))
+        };
+        Self {
+            _mcp_init_prompt_promote: mcp_init_prompt_promote,
+            _context_snapshot: context_snapshot,
+        }
+    }
+}
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
@@ -266,6 +342,7 @@ pub(super) async fn run_session(
     }
     let _workflow_watch = crate::config::watcher::ProjectDiscoveryWatcher::start(
         std::path::Path::new(session.session_info.cwd.as_str()),
+        &crate::util::fuigo_home::fuigo_home(),
     )
     .map(|(mut watcher, mut changes)| {
         let session = session.clone();
@@ -302,12 +379,6 @@ pub(super) async fn run_session(
     {
         let s = session.clone();
         tokio::task::spawn_local(async move { s.maybe_notify_git_branch().await });
-    }
-    if session.startup_hints.is_subagent {
-        tracing::info!("session_context_snapshot: skipped (subagent)");
-    } else {
-        session.wait_for_mcp_initialized().await;
-        session.emit_session_context_snapshot().await;
     }
     tokio::task::spawn_local(super::status_line::run_status_emitter(Arc::downgrade(
         &session,
@@ -386,13 +457,7 @@ pub(super) async fn run_session(
             .await;
         });
     }
-    let session_for_mcp = session.clone();
-    let completion_tx_for_mcp = completion_tx.clone();
-    tokio::task::spawn_local(async move {
-        session_for_mcp.ensure_mcp_tools_initialized().await;
-        SessionActor::maybe_start_running_task(session_for_mcp.clone(), completion_tx_for_mcp)
-            .await;
-    });
+    let _startup_tasks = StartupTasks::spawn(&session, completion_tx.clone());
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
     let idle_flush_sleep = match session.idle_flush_timeout {
@@ -409,6 +474,7 @@ pub(super) async fn run_session(
     impl Drop for DreamTask { fn drop(&mut self) { if let Some(task) = &self.0 { task.abort(); } } }
     let mut dream_task = DreamTask(None);
     tokio::pin!(dream_check_sleep);
+    let mut deferred_start = DeferredStart::new();
     loop {
         tokio::select! {
                 biased;
@@ -525,7 +591,7 @@ pub(super) async fn run_session(
                         // Hooks fire BEFORE memory auto-save
                         let end_timer = session_end::SessionEndTimer::new_shared();
                         turn_end_queue.flush().await;
-                        fire_session_end_hooks(&session, "channel_closed", &end_timer).await;
+                        fire_session_end_hooks(&session, "channel_closed", &end_timer, &mut deferred_start).await;
                         session
                             .run_session_end_memory_pipeline(
                                 "channel closed, session summary saved",
@@ -876,11 +942,8 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::InjectNotification { prompt_id, prompt_blocks, priority, source } => {
                             let is_turn_active = session
-                                .tool_context
-                                .is_turn_active
-                                .as_ref()
-                                .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
-                                .unwrap_or(false);
+                                .session_turn_active
+                                .load(std::sync::atomic::Ordering::SeqCst);
 
                             if is_turn_active && priority == NotificationPriority::Next {
                                 // Mid-turn and `Next` priority: push to the shared buffer for the turn loop's `inject_pending_monitor_events`
@@ -1616,7 +1679,7 @@ pub(super) async fn run_session(
                                         schema,
                                         meta,
                                     );
-                                    if let Some(reg) = mcp_tool.into_registration() {
+                                    if let Ok(reg) = mcp_tool.into_registration() {
                                         mcp_state
                                             .disabled_tool_registrations
                                             .insert(qualified.clone(), reg);
@@ -1826,25 +1889,48 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::DispatchSessionStartHook { source } => {
-                            let envelope = session.fire_hook(
-                                fuigo_hooks::event::HookEventName::SessionStart,
-                                None,
-                                fuigo_hooks::event::HookPayload::SessionStart {
-                                    source,
-                                    model_id: None,
-                                    agent_type: None,
-                                },
-                            );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
-                                let ctx = session.hook_run_ctx();
-                                let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
-                                    &registry,
-                                    fuigo_hooks::event::HookEventName::SessionStart,
-                                    &envelope,
-                                    &ctx,
-                                )
-                                .await;
-                                session.send_hook_execution("session_start", None, None, &results).await;
+                            // Observe hooks cannot gate; don't hold session/new on the command loop.
+                            if !deferred_start.cancel.is_cancelled() {
+                                let s = session.clone();
+                                let cancel = deferred_start.cancel.clone();
+                                let handle = tokio::task::spawn_local(async move {
+                                    let run = async {
+                                        if cancel.is_cancelled() {
+                                            return;
+                                        }
+                                        let envelope = s.fire_hook(
+                                            fuigo_hooks::event::HookEventName::SessionStart,
+                                            None,
+                                            fuigo_hooks::event::HookPayload::SessionStart {
+                                                source,
+                                                model_id: None,
+                                                agent_type: None,
+                                            },
+                                        );
+                                        let Some(registry) = s.hook_registry.borrow().clone() else {
+                                            return;
+                                        };
+                                        let ctx = s.hook_run_ctx();
+                                        let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
+                                            &registry,
+                                            fuigo_hooks::event::HookEventName::SessionStart,
+                                            &envelope,
+                                            &ctx,
+                                        )
+                                        .await;
+                                        if cancel.is_cancelled() {
+                                            return;
+                                        }
+                                        s.send_hook_execution("session_start", None, None, &results)
+                                            .await;
+                                    };
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel.cancelled() => {}
+                                        _ = run => {}
+                                    }
+                                });
+                                deferred_start.arm(handle);
                             }
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
@@ -1900,10 +1986,10 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion { question, respond_to } => {
+                        SessionCommand::SideQuestion { question, images, respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_side_question(&question).await;
+                                let result = s.handle_side_question(&question, images).await;
                                 let _ = respond_to.send(result);
                             });
                         }
@@ -2109,6 +2195,19 @@ pub(super) async fn run_session(
                             });
                             let _ = respond_to.send(result);
                         }
+                        SessionCommand::EmitBackgroundTasksSnapshot {
+                            respond_to,
+                            pending,
+                        } => {
+                            session.emit_background_tasks_snapshot(pending).await;
+                            if let Some(respond_to) = respond_to {
+                                let _ = respond_to.send(());
+                            }
+                        }
+                        SessionCommand::PersistResumeStatus { respond_to } => {
+                            session.persist_resume_status().await;
+                            let _ = respond_to.send(());
+                        }
                         SessionCommand::PersistGitHead { commit, branch } => {
                             let _ = session.notifications.persistence_tx.send(
                                 PersistenceMsg::GitHead { commit, branch },
@@ -2150,7 +2249,7 @@ pub(super) async fn run_session(
                             // ── session_end (shutdown path) ────────────
                             // Hooks fire BEFORE memory auto-save
                             turn_end_queue.flush().await;
-                            fire_session_end_hooks(&session, "shutdown", &end_timer).await;
+                            fire_session_end_hooks(&session, "shutdown", &end_timer, &mut deferred_start).await;
                             session
                                 .run_session_end_memory_pipeline(
                                     "session summary saved",

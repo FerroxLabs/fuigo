@@ -206,6 +206,8 @@ pub struct SettingsModalState {
     /// When true, Esc/Enter from `PickingEnum` close the modal instead of returning to Browse.
     /// Set by deep-link open (`OpenSettingsFocus` / `/privacy`); cleared on leave from the picker.
     pub close_on_picker_exit: bool,
+    /// Last left-click on a picker radio: `(choice index, when)`.
+    pub(super) picker_last_click: Option<(usize, std::time::Instant)>,
 }
 
 impl SettingsModalState {
@@ -240,6 +242,7 @@ impl SettingsModalState {
             value_hit_rects: Vec::new(),
             editor_adornment_rects: (Rect::default(), Rect::default()),
             picker_choice_rects: Vec::new(),
+            picker_last_click: None,
             settings_breadcrumb_rect: None,
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
@@ -503,6 +506,7 @@ impl SettingsModalState {
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
         self.close_on_picker_exit = false;
+        self.picker_last_click = None;
     }
 
     pub fn focus_filter(&mut self) {
@@ -874,6 +878,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.small_screen" => Some(Action::SetContextualHintSmallScreen(new)),
         "contextual_hints.word_select" => Some(Action::SetContextualHintWordSelect(new)),
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
+        "contextual_hints.export_copy" => Some(Action::SetContextualHintExportCopy(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
         "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
@@ -1073,17 +1078,27 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
     }
 }
 
+/// The runtime gates that can hide an Enum choice, gathered once per picker query.
+#[derive(Clone, Copy)]
+pub(super) struct EnumChoiceGates {
+    pub auto_mode: bool,
+    pub kitty_releases: bool,
+    pub terminal_theme: bool,
+}
+
 /// Whether `(key, canonical)` is gated off and must not be offered as a choice.
-/// The gated pairs: `permission_mode`'s "auto" when the auto gate is off, and `voice_capture_mode`'s "hold" without key-release reporting.
-/// Pure (gates passed as args) so it's unit-testable without touching process globals.
+/// The gated pairs: `permission_mode`'s "auto" when the auto gate is off, `voice_capture_mode`'s "hold" without key-release reporting, and the theme keys' "terminal" while its rollout gate is off.
+/// Pure (gates passed as a value) so it's unit-testable without touching process globals.
 pub(super) fn enum_choice_gated_off(
     key: SettingKey,
     canonical: &str,
-    auto_mode_gate: bool,
-    kitty_releases: bool,
+    gates: EnumChoiceGates,
 ) -> bool {
-    (key == "permission_mode" && canonical == "auto" && !auto_mode_gate)
-        || (key == "voice_capture_mode" && canonical == "hold" && !kitty_releases)
+    (key == "permission_mode" && canonical == "auto" && !gates.auto_mode)
+        || (key == "voice_capture_mode" && canonical == "hold" && !gates.kitty_releases)
+        || ((key == "theme" || key == "auto_dark_theme" || key == "auto_light_theme")
+            && canonical == "terminal"
+            && !gates.terminal_theme)
 }
 
 /// The effective static Enum choices for a picker, hiding gated-off options so the modal never offers a choice the setter would silently no-op.
@@ -1093,11 +1108,13 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_releases_reported();
+    let gates = EnumChoiceGates {
+        auto_mode: snapshot.auto_mode_gate,
+        kitty_releases: crate::app::kitty_releases_reported(),
+        terminal_theme: crate::theme::cache::terminal_theme_enabled(),
+    };
     choices
         .iter()
-        .filter(|c| {
-            !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate, kitty_releases)
-        })
+        .filter(|c| !enum_choice_gated_off(key, c.canonical, gates))
         .collect()
 }

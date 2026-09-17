@@ -58,158 +58,6 @@ fn viewer_finalize_idles_and_pushes_completed_marker() {
     ));
 }
 
-fn one_stop_group() -> Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)> {
-    use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-    vec![(
-        "stop".to_string(),
-        vec![HookRunEntry {
-            name: "global/notify".into(),
-            status: HookRunStatus::Success {
-                elapsed: std::time::Duration::from_millis(12),
-            },
-            output: None,
-        }],
-    )]
-}
-
-/// Stop-hook groups attached to the last session-event marker.
-fn last_marker_groups(sb: &ScrollbackState) -> Option<usize> {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) => Some(b.stop_hooks.len()),
-            _ => None,
-        })
-}
-
-fn count_lifecycle_blocks(sb: &ScrollbackState) -> usize {
-    use crate::scrollback::blocks::tool::ToolCallBlock;
-    (0..sb.len())
-        .filter(|i| {
-            matches!(
-                sb.get(*i).map(|e| &e.block),
-                Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
-            )
-        })
-        .count()
-}
-
-#[test]
-fn marker_push_consumes_matching_stop_hook_stash() {
-    let mut agent = running_driver("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }),
-        Some("p1"),
-    );
-
-    assert_eq!(
-        last_marker_groups(&agent.scrollback),
-        Some(1),
-        "the stash must fold into the marker"
-    );
-    assert!(agent.pending_stop_hooks.is_none());
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-}
-
-#[test]
-fn marker_push_flushes_stale_stash_standalone() {
-    // A stash stamped with another turn's prompt id must not attach to this marker; it flushes as the legacy standalone block
-    let mut agent = running_driver("p2");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }),
-        Some("p2"),
-    );
-
-    assert_eq!(
-        last_marker_groups(&agent.scrollback),
-        Some(0),
-        "a stale stash must not attach to the new marker"
-    );
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
-#[test]
-fn marker_without_ending_pid_flushes_stamped_stash_standalone() {
-    // A stamped stash can't be confirmed against a marker whose ending turn id is missing
-    // It flushes standalone instead of folding into a marker it may not belong to
-    let mut agent = running_driver("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }),
-        None,
-    );
-
-    assert_eq!(
-        last_marker_groups(&agent.scrollback),
-        Some(0),
-        "an unconfirmable stamped stash must not attach to the marker"
-    );
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
-#[test]
-fn no_marker_flushes_stash_as_standalone_block() {
-    // The turn ends without a marker (a bash turn, or a rate limit): the held hooks still render, in the legacy standalone form
-    let mut agent = running_driver("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(&mut agent, None, Some("p1"));
-
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
-#[test]
-fn viewer_finalize_consumes_stop_hook_stash() {
-    // A viewer that stashed hooks mid-turn folds them into the marker the finalize pushes
-    let mut agent = running_viewer("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    let _ = finalize_turn_from_terminal(
-        &mut agent,
-        "s1",
-        TerminalSignal {
-            prompt_id: Some("p1"),
-            stop_reason: Some("end_turn"),
-            ..Default::default()
-        },
-    );
-
-    assert_eq!(last_marker_groups(&agent.scrollback), Some(1));
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
 #[test]
 fn viewer_finalize_duplicate_terminal_is_noop() {
     let mut agent = running_viewer("p1");
@@ -264,7 +112,7 @@ fn viewer_finalize_hook_denied_renders_blocked_marker() {
         other => panic!("expected TurnBlockedByHook, got {other:?}"),
     }
 
-    // An unknown category keeps the user-cancel copy (no false hook attribution)
+    // An unknown category stays unnamed (no false hook attribution, no "by user")
     let mut agent = running_viewer("p1");
     let _ = finalize_turn_from_terminal(
         &mut agent,
@@ -278,7 +126,32 @@ fn viewer_finalize_hook_denied_renders_blocked_marker() {
     );
     assert!(matches!(
         last_session_event(&agent.scrollback),
-        Some(SessionEvent::TurnCancelled { .. })
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::Unspecified,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn viewer_finalize_names_passive_cancel_from_wire_meta() {
+    let mut agent = running_viewer("p1");
+    let _ = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("cancelled"),
+            cancel_trigger: Some("session_close"),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        last_session_event(&agent.scrollback),
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::SessionClosed,
+            ..
+        })
     ));
 }
 
@@ -874,21 +747,92 @@ fn unknown_card_index_never_discards() {
     );
 }
 
-/// One chooser for every rail: only the hook-denied category flips the copy.
+/// One chooser for every rail: only the hook-denied category flips the marker kind.
 #[test]
 fn cancelled_turn_event_picks_marker_by_category() {
     let d = std::time::Duration::from_millis(700);
     assert!(matches!(
-        cancelled_turn_event(Some(HOOK_DENIED_CATEGORY), d),
+        cancelled_turn_event(None, Some(HOOK_DENIED_CATEGORY), d),
         SessionEvent::TurnBlockedByHook { .. }
     ));
     assert!(matches!(
-        cancelled_turn_event(None, d),
+        cancelled_turn_event(None, None, d),
         SessionEvent::TurnCancelled { .. }
     ));
     assert_eq!(
-        cancelled_turn_event(Some(HOOK_DENIED_CATEGORY), d).message(),
+        cancelled_turn_event(None, Some(HOOK_DENIED_CATEGORY), d).message(),
         "Turn blocked by a hook in 0.7s."
+    );
+}
+
+/// The banner names the cause from the wire meta; missing or unknown meta is plain "Turn cancelled", never "by user".
+#[test]
+fn cancelled_turn_event_names_passive_causes() {
+    let d = std::time::Duration::from_secs(10);
+    let banner = |trigger: Option<&str>, category: Option<&str>| {
+        cancelled_turn_event(trigger, category, d).message()
+    };
+    assert_eq!(
+        banner(Some("ctrl_c"), None),
+        "Turn cancelled by user in 10s."
+    );
+    assert_eq!(banner(Some("esc"), None), "Turn cancelled by user in 10s.");
+    assert_eq!(
+        banner(Some("mouse"), None),
+        "Turn cancelled by user in 10s."
+    );
+    assert_eq!(
+        banner(Some("dashboard_stop"), None),
+        "Turn cancelled by user in 10s."
+    );
+    assert_eq!(
+        banner(Some("session_close"), None),
+        "Turn cancelled because the session closed in 10s."
+    );
+    assert_eq!(
+        banner(Some("session_delete"), None),
+        "Turn cancelled because the session closed in 10s."
+    );
+    assert_eq!(
+        banner(Some("shutdown"), None),
+        "Turn cancelled because the session shut down in 10s."
+    );
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::MAX_TURNS_REACHED_CATEGORY)
+        ),
+        "Turn cancelled after reaching the turn limit in 10s."
+    );
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::PERMISSION_REJECTED_CATEGORY)
+        ),
+        "Turn cancelled because a permission was denied in 10s."
+    );
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::PERMISSION_CANCELLED_CATEGORY)
+        ),
+        "Turn cancelled because a permission prompt was dismissed in 10s."
+    );
+    assert_eq!(
+        banner(Some("host_interrupt"), None),
+        "Turn cancelled by the agent host in 10s."
+    );
+    assert_eq!(banner(None, None), "Turn cancelled in 10s.");
+    assert_eq!(
+        banner(
+            None,
+            Some(fuigo_shell::session::commands::MID_TURN_ABORT_CATEGORY)
+        ),
+        "Turn cancelled in 10s."
+    );
+    assert_eq!(
+        banner(Some("gateway_cancel"), None),
+        "Turn cancelled in 10s."
     );
 }
 
@@ -1282,11 +1226,9 @@ fn real_end_marker_stays_plain_with_running_work() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
-        Some("p1"),
     );
 
     let block = last_marker_block(&agent);
-    assert_eq!(block.prompt_id.as_deref(), Some("p1"));
     assert_eq!(block.event.message(), "Worked for 2.0s");
     assert_eq!(
         agent.watchers().commands,
@@ -1304,7 +1246,6 @@ fn workless_marker_renders_legacy_text() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
-        Some("p1"),
     );
 
     let block = last_marker_block(&agent);
@@ -1349,8 +1290,35 @@ fn viewer_finalize_suppresses_send_now_cancel_marker() {
     );
     assert!(matches!(
         last_session_event(&agent.scrollback),
-        Some(SessionEvent::TurnCancelled { .. })
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::User,
+            ..
+        })
     ));
+
+    // Wire `host_interrupt` is authoritative: a leaked stamp on Send Now paints the host banner.
+    let mut agent = running_viewer("p1");
+    agent.expect_send_now_cancel = Some("p-mine".into());
+    let _ = finalize_turn_from_terminal(
+        &mut agent,
+        "s1",
+        TerminalSignal {
+            prompt_id: Some("p1"),
+            stop_reason: Some("cancelled"),
+            cancel_trigger: Some("host_interrupt"),
+            ..Default::default()
+        },
+    );
+    match last_session_event(&agent.scrollback) {
+        Some(ev @ SessionEvent::TurnCancelled { .. }) => {
+            assert!(
+                ev.message().contains("agent host"),
+                "wire host_interrupt is authoritative: {}",
+                ev.message()
+            );
+        }
+        other => panic!("expected a host-interrupt banner, got {other:?}"),
+    }
 
     // Older shell (no meta): the local expectation is the fallback
     let mut agent = running_viewer("p1");
@@ -1417,7 +1385,6 @@ fn turn_end_after_park_pushes_single_marker() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(5)),
         }),
-        Some("p1"),
     );
 
     assert_eq!(
@@ -1434,6 +1401,7 @@ fn base_input<'a>(stop: TurnStopReason) -> TerminalMarkerInput<'a> {
         elapsed_ms: Some(1000),
         agent_result: None,
         send_now_cancel: false,
+        cancel_trigger: None,
         cancellation_category: None,
         error_kind: None,
         error_banner_present: false,
@@ -1502,7 +1470,13 @@ fn classifier_refusal_max_tokens_max_requests_unknown_are_completed() {
 #[test]
 fn classifier_cancelled_and_hook_denied() {
     let ev = terminal_marker(base_input(TurnStopReason::Cancelled)).unwrap();
-    assert!(matches!(ev, SessionEvent::TurnCancelled { .. }));
+    assert!(matches!(
+        ev,
+        SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::Unspecified,
+            ..
+        }
+    ));
     let mut input = base_input(TurnStopReason::Cancelled);
     input.cancellation_category = Some(HOOK_DENIED_CATEGORY);
     let ev = terminal_marker(input).unwrap();
@@ -1510,11 +1484,33 @@ fn classifier_cancelled_and_hook_denied() {
 }
 
 #[test]
+fn classifier_cancelled_uses_cancel_trigger() {
+    let mut input = base_input(TurnStopReason::Cancelled);
+    input.cancel_trigger = Some("ctrl_c");
+    assert!(matches!(
+        terminal_marker(input),
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::User,
+            ..
+        })
+    ));
+    let mut input = base_input(TurnStopReason::Cancelled);
+    input.cancel_trigger = Some("session_close");
+    assert!(matches!(
+        terminal_marker(input),
+        Some(SessionEvent::TurnCancelled {
+            cause: crate::scrollback::blocks::CancelledBy::SessionClosed,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn classifier_cancelled_missing_elapsed_is_zero() {
     let mut input = base_input(TurnStopReason::Cancelled);
     input.elapsed_ms = None;
     match terminal_marker(input) {
-        Some(SessionEvent::TurnCancelled { elapsed }) => {
+        Some(SessionEvent::TurnCancelled { elapsed, .. }) => {
             assert_eq!(elapsed, std::time::Duration::ZERO);
         }
         other => panic!("expected cancelled, got {other:?}"),

@@ -7,6 +7,7 @@
 pub mod clear_detector;
 pub mod clipboard_focus;
 pub mod ephemeral;
+pub mod export_copy;
 pub mod plan_nudge;
 pub mod render;
 pub mod send_now;

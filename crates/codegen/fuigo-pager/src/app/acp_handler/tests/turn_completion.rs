@@ -1140,26 +1140,10 @@
         );
     }
 
+    /// A wake turn ends without a marker: nothing lands in the real turn's scrollback.
     #[test]
-    fn wake_terminal_leaves_real_turn_stash_pending() {
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
+    fn wake_terminal_pushes_nothing() {
         let mut app = make_app_with_agent("sess-wake");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.pending_stop_hooks = Some(crate::app::agent_view::PendingStopHooks {
-                prompt_id: Some("pid-real".into()),
-                groups: vec![(
-                    "stop".to_string(),
-                    vec![HookRunEntry {
-                        name: "global/notify".into(),
-                        status: HookRunStatus::Success {
-                            elapsed: std::time::Duration::from_millis(12),
-                        },
-                        output: None,
-                    }],
-                )],
-            });
-        }
         let len_before = app.agents[&AgentId(0)].scrollback.len();
 
         let _ = handle_ext_notification(
@@ -1171,397 +1155,8 @@
         assert_eq!(
             agent.scrollback.len(),
             len_before,
-            "a wake terminal pushes nothing (no marker, no stash flush)"
+            "a wake terminal pushes nothing (no marker, no lifecycle block)"
         );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-        assert!(
-            agent.pending_stop_hooks.is_some(),
-            "the stash stays pending for its own turn's marker"
-        );
-    }
-
-    #[test]
-    fn live_stop_hooks_during_turn_stash_instead_of_standalone_block() {
-        // Driver order: the batch lands while the turn is still running (before the PromptResponse) and is held for the turn marker
-        let mut app = make_app_with_agent("sess-stop");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-stop", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "live stop hooks mid-turn must not push a standalone block"
-        );
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("stop hooks must be stashed for the marker");
-        assert_eq!(pending.prompt_id.as_deref(), Some("pid-1"));
-        assert_eq!(pending.groups.len(), 1);
-        assert_eq!(pending.groups[0].0, "stop");
-    }
-
-    #[test]
-    fn replayed_stop_hooks_render_as_standalone_block() {
-        // Replay keeps stop hooks standalone: the reconstructed marker is pushed with empty hook groups and must not fold the stash
-        let mut app = make_app_with_agent("sess-replay");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .loading_replay = true;
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-replay", "stop", true),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "replayed stop hooks keep the standalone lifecycle block"
-        );
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    /// The wire `blocked` flag splits a failed run.
-    /// A stop-gate block maps to `HookRunStatus::Blocked` (a decision, not a failure); a plain failure stays `Failed`.
-    #[test]
-    fn blocked_wire_flag_maps_to_blocked_status() {
-        use crate::scrollback::blocks::tool::HookRunStatus;
-        use fuigo_shell::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
-
-        let mut app = make_app_with_agent("sess-blocked");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_with_runs(
-                "sess-blocked",
-                "stop",
-                Some("pid-1"),
-                false,
-                vec![
-                    HookRunEntryDto {
-                        name: "gate".into(),
-                        status: HookRunStatusDto::Failed {
-                            error: "blocked stop: run the tests".into(),
-                            elapsed_ms: 7,
-                            blocked: true,
-                        },
-                        output: None,
-                    },
-                    HookRunEntryDto {
-                        name: "broken".into(),
-                        status: HookRunStatusDto::Failed {
-                            error: "exit code 1".into(),
-                            elapsed_ms: 3,
-                            blocked: false,
-                        },
-                        output: None,
-                    },
-                ],
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("stop hooks must be stashed for the marker");
-        let runs = &pending.groups[0].1;
-        assert!(
-            matches!(&runs[0].status, HookRunStatus::Blocked { detail, .. }
-                if detail == "blocked stop: run the tests"),
-            "blocked: true must map to Blocked, got {:?}",
-            runs[0].status
-        );
-        assert!(
-            matches!(&runs[1].status, HookRunStatus::Failed { .. }),
-            "blocked: false must stay Failed, got {:?}",
-            runs[1].status
-        );
-    }
-
-    #[test]
-    fn foreign_turn_stop_hooks_never_stash_under_running_turn() {
-        // A delayed batch from an ended turn (pid-old) lands while a later turn (pid-new) runs: a queued-prompt drain
-        // It renders standalone, not on pid-new's marker
-        let mut app = make_app_with_agent("sess-foreign");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-new".into());
-        }
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt("sess-foreign", "stop", Some("pid-old"), false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.pending_stop_hooks.is_none(),
-            "a foreign turn's batch must not stash under the running turn"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-
-        // The running turn's own batch (matching wire pid) still stashes.
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt("sess-foreign", "stop", Some("pid-new"), false),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("own-turn batch stashes");
-        assert_eq!(pending.prompt_id.as_deref(), Some("pid-new"));
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "own-turn batch must not add a standalone block"
-        );
-    }
-
-    #[test]
-    fn foreign_stop_hooks_refused_at_idle_tail_marker() {
-        // The delayed foreign batch lands after the later turn also ended: no turn is running, so only the marker's pid stamp keeps the batch off it
-        // A fresh event name proves the refusal is the pid check, not the same-name dedup
-        let mut app = make_app_with_agent("sess-idle-foreign");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-        let _ = handle(
-            make_agent_chunk_message_with_prompt("sess-idle-foreign", "chunk", "pid-new", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_turn_completed_notif("sess-idle-foreign", "pid-new", "end_turn", false),
-            &mut app,
-        );
-
-        // The marker's own batch (matching pid) merges…
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt(
-                "sess-idle-foreign",
-                "stop",
-                Some("pid-new"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "the marker's own batch (matching pid) merges"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-
-        // …a foreign-pid batch is refused even with a fresh event name.
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt(
-                "sess-idle-foreign",
-                "stop_failure",
-                Some("pid-old"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "a foreign-pid batch must not merge into another turn's marker"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    }
-
-    #[test]
-    fn stop_cancelled_hooks_fold_into_the_cancelled_marker() {
-        // The report is dispatched off the command loop, so it races the terminal in both directions
-        // The terminal first folds onto an existing marker, the batch first stashes
-        for terminal_first in [true, false] {
-            let mut app = make_app_with_agent("sess-cancelled-hooks");
-            app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-            let _ = handle(
-                make_agent_chunk_message_with_prompt(
-                    "sess-cancelled-hooks",
-                    "chunk",
-                    "pid-c",
-                    false,
-                ),
-                &mut app,
-            );
-            let terminal =
-                fuigo_turn_completed_notif("sess-cancelled-hooks", "pid-c", "cancelled", false);
-            let batch = fuigo_hook_execution_notif_for_prompt(
-                "sess-cancelled-hooks",
-                "stop_cancelled",
-                Some("pid-c"),
-                false,
-            );
-            for notif in if terminal_first {
-                [&terminal, &batch]
-            } else {
-                [&batch, &terminal]
-            } {
-                let _ = handle_ext_notification(notif, &mut app);
-            }
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                last_marker_stop_hook_groups(&agent.scrollback),
-                Some(1),
-                "the cancelled turn's hook batch must render inside its marker \
-                 (terminal_first={terminal_first})"
-            );
-            assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-        }
-    }
-
-    #[test]
-    fn stamped_stop_hooks_merge_past_interleaved_tail_block() {
-        // Viewer/race order with a block (compaction, recap, …) landing between the marker and the batch
-        // An exact pid match still merges into the marker instead of degrading to the standalone block
-        let mut app = make_app_with_agent("sess-interleaved");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-        let _ = handle(
-            make_agent_chunk_message_with_prompt("sess-interleaved", "chunk", "pid-new", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_turn_completed_notif("sess-interleaved", "pid-new", "end_turn", false),
-            &mut app,
-        );
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .scrollback
-            .push_block(RenderBlock::session_event(
-                crate::scrollback::blocks::SessionEvent::CompactionCompleted {
-                    tokens_before: Some(100),
-                    tokens_after: 10,
-                    elapsed_ms: Some(5),
-                },
-            ));
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt(
-                "sess-interleaved",
-                "stop",
-                Some("pid-new"),
-                false,
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "the stamped batch merges into its marker across the interleaved block"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-    }
-
-    #[test]
-    fn same_name_stash_repeat_goes_standalone() {
-        // A second batch with an already-stashed event name (a session-end `stop` landing mid-turn) renders standalone
-        // It must not duplicate the marker's `stop` group
-        let mut app = make_app_with_agent("sess-stash-dup");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-stash-dup", "stop", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-stash-dup", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("first batch stays");
-        assert_eq!(pending.groups.len(), 1, "no duplicate group in the stash");
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "the repeat renders as the standalone block"
-        );
-    }
-
-    #[test]
-    fn stash_key_prefers_wire_prompt_id() {
-        // A stamped batch stashed while the client-side pid is missing keys the stash by the wire pid
-        // The marker-push stale check can then still tell whether the stash belongs to the ending turn
-        let mut app = make_app_with_agent("sess-wire-key");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = None;
-        }
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt("sess-wire-key", "stop", Some("pid-a"), false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent.pending_stop_hooks.as_ref().expect("batch stashes");
-        assert_eq!(pending.prompt_id.as_deref(), Some("pid-a"));
-    }
-
-    #[test]
-    fn session_end_stop_hooks_without_live_turn_stay_standalone() {
-        // The session-end Stop batch fires with no turn running and no fresh marker in the tail: legacy standalone block
-        let mut app = make_app_with_agent("sess-end");
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-end", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    #[test]
-    fn non_stop_lifecycle_hooks_keep_standalone_block() {
-        // session_start and the other hook events are untouched by the stop-hook inlining
-        let mut app = make_app_with_agent("sess-ls");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-ls", "session_start", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-        assert!(agent.pending_stop_hooks.is_none());
     }
 
     #[test]
@@ -1844,79 +1439,6 @@
         assert!(agent.session.loading_replay);
     }
 
-    #[test]
-    fn wake_stop_hooks_render_standalone_at_arrival() {
-        // Never stashed: a stash keyed to a wake pid could wait for a marker that never comes.
-        let mut app = make_app_with_agent("sess-wake-idle");
-
-        // Hook beats the wake terminal.
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt(
-                "sess-wake-idle",
-                "stop",
-                Some("notifications-019f-abc"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "a wake stop batch renders standalone at arrival"
-        );
-        assert!(agent.pending_stop_hooks.is_none(), "never stashed");
-
-        // Hook trails the wake terminal: same standalone shape
-        let _ = handle_ext_notification(
-            &fuigo_wake_turn_completed_notif("sess-wake-idle", "task-completed-bg1", None),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt(
-                "sess-wake-idle",
-                "stop",
-                Some("task-completed-bg1"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 2);
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    #[test]
-    fn wake_stop_hooks_never_stash_under_local_turn() {
-        let mut app = make_app_with_agent("sess-wake-local");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-main".into());
-        }
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt(
-                "sess-wake-local",
-                "stop",
-                Some("task-completed-bg1"),
-                false,
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "the wake batch renders standalone under the running local turn"
-        );
-        assert!(
-            agent.pending_stop_hooks.is_none(),
-            "it must not stash onto the running local turn"
-        );
-    }
-
     fn begin_replay(app: &mut AppView) {
         app.agents
             .get_mut(&AgentId(0))
@@ -1985,10 +1507,111 @@
             &mut app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnCancelled { .. })
-        ));
+        match last_session_event(&agent.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { .. }) => {
+                // No meta at all (older shell): unnamed, never "by user"
+                assert_eq!(ev.message(), "Turn cancelled in 0.8s.");
+            }
+            other => panic!("expected an unnamed cancel, got {other:?}"),
+        }
+    }
+
+    /// The banner text for one cancelled `TurnCompleted` carrying `extra_meta`.
+    fn cancelled_banner(extra_meta: serde_json::Value) -> String {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &fuigo_turn_completed_replay("sess-1", "p1", "cancelled", Some(800), None, extra_meta),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { .. }) => ev.message(),
+            other => panic!("expected a cancel banner, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_session_close_names_session_closed() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "session_close" })),
+            "Turn cancelled because the session closed in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "session_delete" })),
+            "Turn cancelled because the session closed in 0.8s."
+        );
+    }
+
+    #[test]
+    fn replay_shutdown_names_shutdown() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "shutdown" })),
+            "Turn cancelled because the session shut down in 0.8s."
+        );
+    }
+
+    #[test]
+    fn replay_host_interrupt_names_agent_host() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "host_interrupt" })),
+            "Turn cancelled by the agent host in 0.8s."
+        );
+    }
+
+    #[test]
+    fn replay_user_gestures_name_user() {
+        for trigger in ["esc", "ctrl_c", "mouse", "dashboard_stop"] {
+            assert_eq!(
+                cancelled_banner(serde_json::json!({ "cancelTrigger": trigger })),
+                "Turn cancelled by user in 0.8s.",
+                "{trigger}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_policy_categories_beat_the_trigger() {
+        use fuigo_shell::session::commands::{
+            MAX_TURNS_REACHED_CATEGORY, PERMISSION_CANCELLED_CATEGORY,
+            PERMISSION_REJECTED_CATEGORY,
+        };
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancelTrigger": "ctrl_c",
+                "cancellationCategory": PERMISSION_REJECTED_CATEGORY,
+            })),
+            "Turn cancelled because a permission was denied in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancelTrigger": "esc",
+                "cancellationCategory": PERMISSION_CANCELLED_CATEGORY,
+            })),
+            "Turn cancelled because a permission prompt was dismissed in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancellationCategory": MAX_TURNS_REACHED_CATEGORY,
+            })),
+            "Turn cancelled after reaching the turn limit in 0.8s."
+        );
+    }
+
+    /// A client that sends `session/cancel` without `_meta.cancelTrigger` (Murage) ends with a trigger-less
+    /// `MidTurnAbort`; an unknown trigger is a future wire name. Both stay unnamed rather than claiming "by user".
+    #[test]
+    fn replay_unknown_or_triggerless_cancel_is_unnamed() {
+        assert_eq!(
+            cancelled_banner(serde_json::json!({
+                "cancellationCategory": fuigo_shell::session::commands::MID_TURN_ABORT_CATEGORY,
+            })),
+            "Turn cancelled in 0.8s."
+        );
+        assert_eq!(
+            cancelled_banner(serde_json::json!({ "cancelTrigger": "gateway_cancel" })),
+            "Turn cancelled in 0.8s."
+        );
     }
 
     #[test]
@@ -2314,38 +1937,6 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(agent.replayed_terminal_prompts.contains("task-completed-bg1"));
         assert_eq!(agent.scrollback.len(), len_before);
-    }
-
-    #[test]
-    fn replay_stop_hooks_stay_standalone() {
-        let mut app = make_app_with_agent("sess-1");
-        begin_replay(&mut app);
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt("sess-1", "stop", Some("p1"), true),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_turn_completed_replay(
-                "sess-1",
-                "p1",
-                "end_turn",
-                Some(10),
-                None,
-                serde_json::json!({}),
-            ),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif_for_prompt("sess-1", "stop", Some("p1"), true),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 2);
-        assert!(agent.pending_stop_hooks.is_none());
-        match last_session_event(&agent.scrollback) {
-            Some(SessionEvent::TurnCompleted { .. }) => {}
-            other => panic!("expected completed marker, got {other:?}"),
-        }
     }
 
     #[test]

@@ -110,6 +110,8 @@ pub enum Action {
     QuitConfirmed,
     /// Create a new session from the welcome screen.
     NewSession,
+    /// Leave the welcome screen for the session prepared in the background (or a fresh one when there is none).
+    LeaveHome,
     /// Ask whether the new session should use a git worktree.
     ChooseNewSessionMode,
     /// Exit the current session and return to the welcome screen.
@@ -582,6 +584,7 @@ pub enum Action {
     SetContextualHintSmallScreen(bool),
     SetContextualHintWordSelect(bool),
     SetContextualHintSshWrap(bool),
+    SetContextualHintExportCopy(bool),
     /// Commit the active theme (canonical name, e.g. `"fuigonight"`, `"auto"`).
     SetTheme(String),
     /// Commit the theme used when the OS is in dark mode.
@@ -763,7 +766,11 @@ pub enum Action {
     /// Save the currently displayed remember note from the review modal.
     SaveRememberNoteFromModal,
     /// Send a /btw side question (bypasses queue, works while agent is busy).
-    SendBtw(String),
+    /// `images` are composer attachments drained at submit; empty keeps the text-only wire.
+    SendBtw {
+        question: String,
+        images: Vec<crate::prompt_images::PastedImage>,
+    },
     /// Request a session recap ("where was I" summary).
     /// `auto` is `true` for the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
@@ -1040,6 +1047,33 @@ pub enum PermissionModeKind {
     /// Auto-approve all tool actions. `yolo_mode = true`.
     AlwaysApprove,
 }
+/// No `Default` arm, unlike [`PermissionModeKind`]: the runtime flags cannot tell `default` from `ask`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionLabel {
+    Ask,
+    Auto,
+    AlwaysApprove,
+}
+impl From<PermissionLabel> for PermissionModeKind {
+    fn from(label: PermissionLabel) -> Self {
+        match label {
+            PermissionLabel::Ask => Self::Ask,
+            PermissionLabel::Auto => Self::Auto,
+            PermissionLabel::AlwaysApprove => Self::AlwaysApprove,
+        }
+    }
+}
+impl PermissionLabel {
+    /// Shares [`PermissionModeKind::as_canonical`] so the info-line flags and the scrollback rows use one string table.
+    pub fn as_canonical(self) -> &'static str {
+        PermissionModeKind::from(self).as_canonical()
+    }
+}
+impl std::fmt::Display for PermissionLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_canonical())
+    }
+}
 impl PermissionModeKind {
     /// Canonical persisted/wire string for the kind.
     /// Matches the `EnumChoice.canonical` values in `settings/defs.rs::PERMISSION_MODE_CHOICES`.
@@ -1158,7 +1192,7 @@ impl PlanModeKind {
 /// The shell's deny-list treats every gesture value as a stop, so new variants need no shell change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTrigger {
-    /// Wire value `"esc"` (bare Esc mid-turn cancel in minimal / non-vim mode, plus the Esc cancel-retry while TurnCancelling).
+    /// Wire value `"esc"`. Kept for the cancel-cause wire and its stored history; since 1.0.20 a bare Esc never cancels a turn, so nothing emits it from a key press.
     Esc,
     /// `Ctrl+C` pressed (the default cancel keybinding).
     CtrlC,
@@ -1387,6 +1421,8 @@ pub enum AfterSessionDelete {
     Welcome,
     /// `/delete` from a dashboard-attached agent, or dashboard row delete.
     Dashboard,
+    /// The unused optimistic home session was abandoned: nothing to toast, no view to move.
+    UnusedHusk,
 }
 /// Async side effect produced by [`super::dispatch::dispatch`].
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
@@ -1565,6 +1601,8 @@ pub enum Effect {
     Compact {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        /// `/compact <instructions>`: forwarded as `userContext`; bare `/compact` sends none.
+        user_context: Option<String>,
     },
     /// Kill a background task.
     KillBgTask {
@@ -1963,6 +2001,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         question: String,
+        /// Text + image content blocks built from the composer's attachments; `None` keeps the text-only wire.
+        blocks: Option<Vec<acp::ContentBlock>>,
         /// Correlates minimal responses; fullscreen leaves this unset.
         minimal_request_id: Option<uuid::Uuid>,
     },
@@ -2018,6 +2058,9 @@ pub enum Effect {
     UnregisterActiveSession { session_id: acp::SessionId },
     /// Quit the application.
     Quit,
+    /// Reset a wedged xterm.js mouse tracker by toggling mouse reporting off and on.
+    /// Handled on the event-loop thread through the escape writer (never an inline tty write).
+    ResetMouseReporting,
     /// Toggle coding data sharing via ACP.
     SetCodingDataSharing {
         agent_id: AgentId,
@@ -2108,8 +2151,11 @@ pub enum Effect {
         nonce: u64,
     },
     /// Fetch billing data at the app level (no agent required).
-    /// Used on startup to populate the welcome-screen credit warning.
-    FetchAppBilling,
+    /// Used on startup to populate the welcome-screen credit warning, and by the dashboard's `/usage` modal.
+    FetchAppBilling {
+        /// Usage-modal fetch generation (`0` means a background refresh that settles no modal).
+        nonce: u64,
+    },
     /// Fetch per-session token/cost via `fuigo/session/usage` (auth-agnostic).
     FetchSessionUsage {
         agent_id: AgentId,
@@ -2949,10 +2995,18 @@ pub enum TaskResult {
         /// Usage-modal fetch generation (`0` means a background refresh).
         nonce: u64,
     },
-    /// App-level billing data (welcome screen).
+    /// App-level billing data (welcome screen, dashboard usage modal).
     AppBillingFetched {
         balance: Option<crate::views::credit_bar::CreditBalance>,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
+        /// Usage-modal fetch generation (`0` means a background refresh).
+        nonce: u64,
+    },
+    /// App-level billing fetch failed (transport or parse); the cached balance is kept.
+    AppBillingError {
+        error: String,
+        /// Usage-modal fetch generation (`0` means a background refresh).
+        nonce: u64,
     },
     GateRefreshed {
         settings: Option<fuigo_shell::util::config::RemoteSettings>,

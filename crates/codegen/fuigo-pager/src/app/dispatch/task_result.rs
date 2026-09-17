@@ -351,9 +351,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::AppBillingFetched { balance, autotopup } => {
+        TaskResult::AppBillingFetched {
+            balance,
+            autotopup,
+            nonce,
+        } => {
             app.credit_balance = balance;
             apply_auto_topup(&mut app.auto_topup, &autotopup);
+            if let Some(state) = app.dashboard.as_mut().and_then(|d| d.usage_modal.as_mut())
+                && state.fetch_nonce == nonce
+            {
+                state.billing_loading = false;
+                state.billing_error = None;
+            }
+            vec![]
+        }
+        TaskResult::AppBillingError { error, nonce } => {
+            if let Some(state) = app.dashboard.as_mut().and_then(|d| d.usage_modal.as_mut())
+                && state.fetch_nonce == nonce
+            {
+                state.billing_loading = false;
+                state.billing_error = Some(error);
+            }
             vec![]
         }
         TaskResult::GateRefreshed { settings } => handle_gate_refreshed(app, settings),
@@ -1239,6 +1258,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 app.leader_roster
                     .retain(|entry| entry.session_id != session_id);
                 app.show_toast("Session deleted");
+                return vec![];
+            }
+            if after == AfterSessionDelete::UnusedHusk {
+                app.dashboard_local_sessions
+                    .retain(|entry| entry.session_id != session_id);
+                app.leader_roster
+                    .retain(|entry| entry.session_id != session_id);
                 return vec![];
             }
             let sid = acp::SessionId::new(session_id.clone());

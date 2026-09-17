@@ -610,6 +610,10 @@ fn render_radio_row(
         Span::styled(label.to_string(), label_style),
     ]);
     buf.set_line(x, y, &line, w);
+    // Terminal theme (Reset bands): reverse video; no-op on RGB.
+    if is_cursor && panel_focused {
+        buf.set_style(row_rect, theme.selection_overlay());
+    }
 }
 
 #[cfg(test)]

@@ -638,6 +638,45 @@
         assert_ne!(pw.textarea.text(), before);
     }
 
+    /// Terminals without the kitty keyboard protocol send Ctrl+Shift+Z as plain Ctrl+Z, so Alt+Z is the fallback redo key.
+    #[test]
+    fn alt_z_redoes() {
+        let mut pw = PromptWidget::new();
+        pw.handle_key(&key!('x').to_key_event());
+        pw.handle_key(&key!('z', CONTROL).to_key_event()); // undo
+        let before = pw.textarea.text().to_string();
+
+        assert_eq!(
+            pw.handle_key(&key!('z', ALT).to_key_event()),
+            PromptEvent::Edited,
+        );
+        assert_ne!(pw.textarea.text(), before);
+    }
+
+    /// Plan and permission are independent axes on the info line: entering plan mode never hides the
+    /// active permission flag.
+    #[test]
+    fn mode_flags_show_plan_and_permission_together() {
+        use crate::app::actions::PermissionLabel;
+        let theme = Theme::current();
+        let cases = [
+            (Some("plan"), PermissionLabel::AlwaysApprove, vec!["plan", "always-approve"]),
+            (Some("plan"), PermissionLabel::Auto, vec!["plan", "auto"]),
+            (Some("plan approval"), PermissionLabel::Ask, vec!["plan approval"]),
+            (None, PermissionLabel::AlwaysApprove, vec!["always-approve"]),
+            (None, PermissionLabel::Auto, vec!["auto"]),
+            (None, PermissionLabel::Ask, vec![]),
+        ];
+        for (plan_label, permission, expected) in cases {
+            let flags = mode_flags(plan_label, permission, &theme);
+            let texts: Vec<&str> = flags.iter().map(|f| f.text).collect();
+            assert_eq!(texts, expected, "{plan_label:?} + {permission:?}");
+        }
+        let flags = mode_flags(Some("plan"), PermissionLabel::Auto, &theme);
+        assert_eq!(flags[0].color, Some(theme.accent_plan));
+        assert_eq!(flags[1].color, Some(theme.accent_system));
+    }
+
     #[test]
     fn unknown_ctrl_key_is_ignored() {
         let mut pw = PromptWidget::new();
@@ -791,6 +830,41 @@
             "exactly-threshold single-line paste must stay inline"
         );
         assert_eq!(pw.textarea.text(), text);
+    }
+
+    /// Display label of the single paste chip in the buffer, e.g. `[Pasted: 4 lines]`.
+    fn paste_chip_label(pw: &PromptWidget) -> String {
+        let elems = pw.textarea.elements();
+        assert_eq!(elems.len(), 1);
+        assert_eq!(elems[0].kind, KIND_PASTE);
+        elems[0]
+            .display
+            .as_ref()
+            .expect("chip has a display label")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn paste_paragraph_separators_create_chip() {
+        // Rich-text clipboards (macOS voice memos) separate paragraphs with U+2029, which str::lines() does not split on
+        let mut pw = PromptWidget::new();
+        assert_eq!(
+            pw.handle_paste("line1\u{2029}line2\u{2029}line3\u{2029}line4"),
+            PromptEvent::Edited
+        );
+        assert_eq!(paste_chip_label(&pw), "[Pasted: 4 lines]");
+        assert_eq!(pw.textarea.text(), "line1\nline2\nline3\nline4");
+    }
+
+    #[test]
+    fn paste_below_threshold_separators_become_newlines() {
+        let mut pw = PromptWidget::new();
+        assert_eq!(pw.handle_paste("ab\u{2029}cd"), PromptEvent::Edited);
+        assert!(pw.textarea.elements().is_empty());
+        assert_eq!(pw.textarea.text(), "ab\ncd");
     }
 
     #[test]
@@ -1288,7 +1362,7 @@
 
     #[test]
     fn repaste_with_bare_cr_expands_chip() {
-        // normalize_cr is an identity on \r\n; bare \r is its non-identity case
+        // normalize_line_breaks is an identity on \r\n; bare \r is its non-identity case
         // The chip stores the \n form, so the repaste comparison must normalize the incoming bytes before comparing
         let mut pw = PromptWidget::new();
         let text = "line1\rline2\rline3\rline4";
@@ -1891,26 +1965,34 @@
         assert!(pw.textarea.elements().is_empty());
     }
 
-    // ── normalize_cr tests ─────────────────────────────────────────
+    // ── normalize_line_breaks tests ─────────────────────────────────────────
 
     #[test]
-    fn normalize_cr_bare_cr() {
-        assert_eq!(normalize_cr("a\rb\rc"), "a\nb\nc");
+    fn normalize_line_breaks_bare_cr() {
+        assert_eq!(normalize_line_breaks("a\rb\rc"), "a\nb\nc");
     }
 
     #[test]
-    fn normalize_cr_crlf_preserved() {
-        assert_eq!(normalize_cr("a\r\nb\r\nc"), "a\r\nb\r\nc");
+    fn normalize_line_breaks_crlf_preserved() {
+        assert_eq!(normalize_line_breaks("a\r\nb\r\nc"), "a\r\nb\r\nc");
     }
 
     #[test]
-    fn normalize_cr_mixed() {
-        assert_eq!(normalize_cr("a\r\nb\rc"), "a\r\nb\nc");
+    fn normalize_line_breaks_mixed() {
+        assert_eq!(normalize_line_breaks("a\r\nb\rc"), "a\r\nb\nc");
     }
 
     #[test]
-    fn normalize_cr_no_cr() {
-        assert_eq!(normalize_cr("no cr\nhere"), "no cr\nhere");
+    fn normalize_line_breaks_no_cr() {
+        assert_eq!(normalize_line_breaks("no cr\nhere"), "no cr\nhere");
+    }
+
+    #[test]
+    fn normalize_line_breaks_unicode_separators() {
+        assert_eq!(normalize_line_breaks("a\u{2028}b\u{2029}c"), "a\nb\nc");
+        assert_eq!(normalize_line_breaks("a\r\nb\u{2029}c"), "a\r\nb\nc");
+        assert_eq!(normalize_line_breaks("a\r\u{2029}b"), "a\n\nb");
+        assert_eq!(normalize_line_breaks("a\u{2028}\r\nb"), "a\n\r\nb");
     }
 
     // ── Inline paste (handle_paste without element) ──────────────
@@ -1920,7 +2002,7 @@
         let mut pw = PromptWidget::new();
         let text = "line1\nline2\nline3";
         // Simulate Ctrl+Shift+V: insert_str directly, no element.
-        let normalized = normalize_cr(text);
+        let normalized = normalize_line_breaks(text);
         pw.textarea.insert_str(&normalized);
         assert_eq!(pw.textarea.text(), text);
         assert!(pw.textarea.elements().is_empty());
@@ -2281,6 +2363,44 @@
     }
 
     // ── set_images: identity-based pairing ───────────────────────────
+
+    /// A rewind/skill-injection restore can hand back a paste chip whose captured range no longer fits the
+    /// (shorter) buffer. The stale range must be dropped, and every element-text read must stay fallible so
+    /// the cursor sitting where the chip used to be never indexes past the buffer.
+    #[test]
+    fn stale_restored_paste_chip_never_panics_element_reads() {
+        use crate::app::agent::ChipElement;
+
+        let mut pw = PromptWidget::new();
+        pw.handle_paste("line1\nline2\nline3\nline4");
+        let captured: Vec<ChipElement> = pw
+            .textarea
+            .elements()
+            .iter()
+            .map(|e| ChipElement {
+                range: e.range.clone(),
+                kind: e.kind,
+                display: e.display.clone(),
+            })
+            .collect();
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].range.end > 3);
+
+        pw.set_text("abc");
+        pw.restore_chip_elements(&captured);
+        pw.set_cursor(3);
+
+        // On a textarea that keeps the stale range these reads index past the buffer and panic.
+        assert_eq!(pw.paste_element_at_cursor(), None);
+        assert_eq!(pw.paste_element_for_preview(), None);
+        assert_eq!(pw.file_ref_element_at_cursor(), None);
+        assert_eq!(pw.handle_paste("line1\nline2\nline3\nline4"), PromptEvent::Edited);
+        assert_eq!(
+            pw.textarea.elements().len(),
+            1,
+            "only the fresh chip exists: a chip range past the buffer end is not restored"
+        );
+    }
 
     /// Two restored chips with identical placeholder byte length must get distinct `element_id`s after `set_images`.
     /// A naive `find()`-by-byte-length match would collapse both chips onto the same `element_id`.

@@ -1385,6 +1385,35 @@
                 self.agent_mut().close_subagent_fullscreen();
             }
 
+            /// Deliver `update` on the child's own session stream through the real handler.
+            fn live_child_update(&mut self, update: acp::SessionUpdate) {
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                let request =
+                    acp::SessionNotification::new(acp::SessionId::new(self.child_sid), update)
+                        .meta(
+                            serde_json::json!({ "agentTimestampMs": 1 })
+                                .as_object()
+                                .cloned(),
+                        );
+                let _ = handle(
+                    AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs {
+                        request,
+                        response_tx: tx,
+                    }),
+                    &mut self.app,
+                );
+            }
+
+            fn live_user_echo(&mut self, text: &str) {
+                self.live_child_update(acp::SessionUpdate::UserMessageChunk(
+                    acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text))),
+                ));
+            }
+
+            fn live_tool_call(&mut self) {
+                self.live_child_update(make_tool_call("Read foo"));
+            }
+
             fn push_child_block(&mut self, block: RenderBlock) {
                 let sid = self.child_sid;
                 self.agent_mut()
@@ -1553,8 +1582,8 @@
         }
 
         #[test]
-        fn an_on_disk_prompt_echo_dedups_against_the_injected_prompt_on_open() {
-            // Same echo-dedup on open whether the view is freshly spawned or was first evicted back to the task-prompt baseline
+        fn the_persisted_echo_paints_the_prompt_once_on_open() {
+            // Same echo-paints-once on open whether the view is freshly spawned or was first evicted back to the empty baseline
             enum Entry {
                 FreshSpawn,
                 Evicted,
@@ -1572,24 +1601,83 @@
                 );
                 let mut s = Scenario::spawn(child_sid, Some(updates));
 
-                // Spawn injects the task prompt once and reads no transcript.
-                assert_eq!(s.prompts_matching(task), 1, "spawn injects the task prompt once");
-                assert_eq!(s.tool_calls(), 0, "spawn does not replay the transcript");
+                assert!(
+                    s.agent().subagent_views.get(child_sid).unwrap_or_else(|| panic!("missing map entry")).scrollback.is_empty(),
+                    "spawn seeds nothing and reads nothing"
+                );
+                assert!(
+                    !child_tracker_expects_user_echo(s.agent(), child_sid),
+                    "spawn arms no echo skip"
+                );
 
                 if matches!(entry, Entry::Evicted) {
                     s.finish();
-                    assert_eq!(s.prompts_matching(task), 1, "eviction keeps the task prompt");
-                    assert_eq!(s.tool_calls(), 0);
+                    assert!(
+                        s.agent().subagent_views.get(child_sid).unwrap_or_else(|| panic!("missing map entry")).scrollback.is_empty(),
+                        "eviction resets to the empty baseline"
+                    );
+                    assert!(
+                        !child_tracker_expects_user_echo(s.agent(), child_sid),
+                        "eviction arms no echo skip"
+                    );
                 }
 
                 s.open();
-                assert_eq!(
-                    s.prompts_matching(task),
-                    1,
-                    "the replayed on-disk echo must dedup against the injected prompt"
-                );
+                assert_eq!(s.prompts_matching(task), 1, "the replayed echo paints the prompt once");
                 assert_eq!(s.tool_calls(), 1);
             }
+        }
+
+        #[test]
+        fn a_live_echo_then_open_of_a_running_child_keeps_one_prompt() {
+            let child_sid = "child-echo-live-then-open";
+            let task = "scan src/ for auth";
+            write_subagent_meta_json(replay_disk_test_home(), "sess-parent", child_sid, task);
+            // Disk mirrors what the live stream delivers to a fresh child
+            let mut s = Scenario::spawn(child_sid, Some(child_user_message_line(child_sid, task)));
+
+            s.live_user_echo(task);
+            assert_eq!(s.prompts_matching(task), 1, "the live echo paints the prompt");
+
+            let reads_before = crate::app::subagent::test_support::transcript_reads();
+            s.open();
+            assert_eq!(
+                s.prompts_matching(task),
+                1,
+                "opening a running prompt-only child must not paint a second copy"
+            );
+            assert_eq!(
+                crate::app::subagent::test_support::transcript_reads(),
+                reads_before,
+                "the live echo closed the replay window: disk is not read"
+            );
+            assert_eq!(s.transcript(), ChildTranscript::NeedsReplay);
+
+            s.live_tool_call();
+            assert_eq!(s.tool_calls(), 1, "live blocks after the echo still land");
+            assert_eq!(s.prompts_matching(task), 1);
+        }
+
+        #[test]
+        fn a_later_different_user_message_still_appears() {
+            let child_sid = "child-echo-second-prompt";
+            let task = "scan src/ for auth";
+            let follow_up = "now check tests/ too";
+            write_subagent_meta_json(replay_disk_test_home(), "sess-parent", child_sid, task);
+            let mut s = Scenario::spawn(child_sid, None);
+
+            s.live_user_echo(task);
+            s.open();
+            s.live_tool_call();
+            s.live_user_echo(follow_up);
+
+            assert_eq!(s.prompts_matching(task), 1, "the task prompt stays single");
+            assert_eq!(
+                s.prompts_matching(follow_up),
+                1,
+                "a later, different user message is painted, not swallowed by a skip"
+            );
+            assert_eq!(s.tool_calls(), 1);
         }
 
         #[test]
@@ -1826,14 +1914,10 @@
     }
 
     #[test]
-    fn subagent_spawn_injects_meta_prompt_by_content_without_reading_disk() {
-        // (meta.json task prompt, whether spawn injects it and sets echo dedup)
-        let cases: &[(Option<&str>, bool)] = &[
-            (Some("explore handlers only"), true),
-            (Some("   "), false),
-            (None, false),
-        ];
-        for (idx, (meta, injects)) in cases.iter().enumerate() {
+    fn subagent_spawn_seeds_no_prompt_and_reads_no_disk() {
+        // meta.json still enriches SubagentInfo.prompt (tasks pane, status rows), but the child view gets no copy of it
+        let cases: &[Option<&str>] = &[Some("explore handlers only"), Some("   "), None];
+        for (idx, meta) in cases.iter().enumerate() {
             let child_sid = format!("child-inject-{idx}");
             with_replay_disk_home(|home| {
                 let parent_sid = "sess-parent";
@@ -1841,32 +1925,34 @@
                     write_subagent_meta_json(home, parent_sid, &child_sid, meta);
                 }
                 let mut app = make_app_with_agent(parent_sid);
+                let reads_before = crate::app::subagent::test_support::transcript_reads();
                 spawn_subagent_with_optional_updates(&mut app, &child_sid, None);
 
                 let agent = app.agents.get(&AgentId(0)).unwrap();
-                let injected = usize::from(*injects);
                 assert_eq!(
-                    child_scrollback_matching_prompt_count(agent, &child_sid, meta.unwrap_or("")),
-                    injected,
-                    "prompt injection for {meta:?}"
+                    agent.subagent_sessions.get(child_sid.as_str()).unwrap_or_else(|| panic!("missing map entry")).prompt.as_deref(),
+                    *meta,
+                    "meta.json enrichment for {meta:?}"
+                );
+                assert!(
+                    agent.subagent_views.get(&child_sid).unwrap().scrollback.is_empty(),
+                    "spawn leaves the child view empty for {meta:?}"
+                );
+                assert!(
+                    !child_tracker_expects_user_echo(agent, &child_sid),
+                    "spawn arms no echo skip for {meta:?}"
                 );
                 assert_eq!(
-                    agent.subagent_views.get(&child_sid).unwrap().scrollback.len(),
-                    injected,
-                    "scrollback holds only the injected prompt, if any, for {meta:?}"
-                );
-                assert_eq!(child_scrollback_tool_call_count(agent, &child_sid), 0);
-                assert_eq!(
-                    child_tracker_expects_user_echo(agent, &child_sid),
-                    *injects,
-                    "echo dedup for {meta:?}"
+                    crate::app::subagent::test_support::transcript_reads(),
+                    reads_before,
+                    "nothing read on spawn for {meta:?}"
                 );
                 assert!(
                     agent
                         .subagent_sessions
                         .get(&child_sid)
                         .is_some_and(|i| i.transcript.needs_replay()),
-                    "nothing read on spawn: the transcript stays NeedsReplay for {meta:?}"
+                    "the transcript stays NeedsReplay for the first open for {meta:?}"
                 );
             });
         }

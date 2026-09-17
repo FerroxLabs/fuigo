@@ -219,6 +219,30 @@ impl TextDrag {
         let (s, e) = self.ordered();
         s != e
     }
+
+    /// Released one-cell word/paragraph ranges have `start == end`.
+    fn covers_text(&self) -> bool {
+        let (s, e) = self.ordered();
+        s != e || !self.active
+    }
+}
+
+/// Markdown-quote `text` one `> ` per line (bare `>` on blank lines); empty input yields an empty string.
+pub(crate) fn format_blockquote(text: &str) -> String {
+    let text = text.trim_end_matches('\n');
+    if text.is_empty() {
+        return String::new();
+    }
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl BlockViewerPane {
@@ -1259,6 +1283,127 @@ impl BlockViewerPane {
         None
     }
 
+    /// The text a bare Enter quotes into the composer: the drag selection, else the visual range, else the current line
+    /// (in follow mode, the last visible body line).
+    pub fn selected_plain_text(&self) -> String {
+        if let Some(drag) = self.text_drag
+            && drag.covers_text()
+        {
+            let unified = self.unified_items_owned();
+            return self.text_for_drag(drag, &unified).unwrap_or_default();
+        }
+        if self.list_state.visual_mode {
+            return self.visual_plain_text().unwrap_or_default();
+        }
+        self.current_line_plain_text().unwrap_or_default()
+    }
+
+    fn unified_items_owned(&self) -> Vec<ContentLine> {
+        if self.cached_unified.len() == self.prepend_items.len() + self.items.len()
+            && !self.cached_unified.is_empty()
+        {
+            return self.cached_unified.clone();
+        }
+        let mut unified = self.prepend_items.clone();
+        unified.extend(self.items.iter().cloned());
+        unified
+    }
+
+    fn current_line_plain_text(&self) -> Option<String> {
+        if let Some(vi) = self.list_state.selected_index() {
+            return self.plain_text_at_physical(self.list_state.to_physical(vi));
+        }
+        if self.list_state.follow_mode {
+            self.follow_mode_plain_text()
+        } else {
+            None
+        }
+    }
+
+    fn follow_mode_plain_text(&self) -> Option<String> {
+        self.list_state.visible_range().rev().find_map(|vi| {
+            let text = self.body_plain_text_at_physical(self.list_state.to_physical(vi))?;
+            (!text.is_empty()).then_some(text)
+        })
+    }
+
+    fn plain_text_at_physical(&self, idx: usize) -> Option<String> {
+        let pre = self.prepend_items.len();
+        if idx < pre {
+            return self.prepend_items.get(idx).map(|item| item.copy_text());
+        }
+        self.items.get(idx - pre).map(|item| item.copy_text())
+    }
+
+    fn body_plain_text_at_physical(&self, idx: usize) -> Option<String> {
+        let pre = self.prepend_items.len();
+        if idx < pre {
+            return None;
+        }
+        self.items.get(idx - pre).map(|item| item.copy_text())
+    }
+
+    fn visual_plain_text(&self) -> Option<String> {
+        let range = self.list_state.copy_range()?;
+        let mut parts = Vec::new();
+        for vi in range {
+            let i = self.list_state.to_physical(vi);
+            if let Some(text) = self.plain_text_at_physical(i) {
+                parts.push(text);
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
+    /// Seed the body cursor on the first body line when nothing is selected (and the viewer is not following),
+    /// so a bare Enter always has a line to quote.
+    fn ensure_body_cursor(&mut self) {
+        if self.list_state.follow_mode {
+            return;
+        }
+        if let Some(id) = self.list_state.selected_id()
+            && self.contains_item_id(id)
+        {
+            return;
+        }
+        if let Some(first) = self.items.first() {
+            self.list_state.select_by_id(first.id);
+        }
+    }
+
+    pub(crate) fn contains_item_id(&self, id: u64) -> bool {
+        self.prepend_items.iter().any(|item| item.id == id)
+            || self.items.iter().any(|item| item.id == id)
+    }
+
+    /// Lay the viewer out without a buffer (tests): mirrors the layout half of `render`.
+    #[cfg(test)]
+    pub(crate) fn prepare_for_test(&mut self, area: Rect) {
+        self.last_content_area = area;
+        self.rebuild_unified_cache();
+        self.ensure_body_cursor();
+        self.list_state
+            .prepare_layout(&self.cached_unified, area.width, area.height);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_body_line_for_test(&mut self, body_idx: usize) {
+        let Some(id) = self.items.get(body_idx).map(|item| item.id) else {
+            return;
+        };
+        self.list_state.select_by_id(id);
+        self.rebuild_unified_cache();
+        let area = self.last_content_area;
+        if area.width > 0 {
+            self.list_state
+                .prepare_layout(&self.cached_unified, area.width, area.height);
+        }
+    }
+
     /// Rebuild the cached unified items vec (preamble then body).
     /// The cache retains its allocation across calls so repeated rebuilds within a frame avoid fresh heap allocations.
     /// Callers that hold `&mut self` call this first, then use `&self.cached_unified` via a disjoint borrow alongside `&mut self.list_state` etc.
@@ -1745,6 +1890,7 @@ impl BlockViewerPane {
             })
             .collect();
         self.rebuild_unified_cache();
+        self.ensure_body_cursor();
 
         if content_area.height > 0 && content_area.width > 0 && !self.cached_unified.is_empty() {
             let likely_scrollbar = self.cached_unified.len() > content_area.height as usize;
@@ -1782,5 +1928,128 @@ impl BlockViewerPane {
                 .style(self.list_style)
                 .render(render_area, buf, &mut self.list_state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    fn area() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    fn pane(text: &str) -> BlockViewerPane {
+        let mut pane = BlockViewerPane::for_plain_text("title", text);
+        pane.prepare_for_test(area());
+        pane
+    }
+
+    fn running_markdown_pane(text: &str) -> BlockViewerPane {
+        let entry = ScrollbackEntry::running(RenderBlock::agent_message(text));
+        let mut pane = BlockViewerPane::for_markdown(entry.id, &entry).expect("markdown");
+        pane.prepare_for_test(area());
+        pane
+    }
+
+    #[test]
+    fn format_blockquote_cases() {
+        assert_eq!(format_blockquote(""), "");
+        assert_eq!(format_blockquote("\n"), "");
+        assert_eq!(format_blockquote("\n\n"), "");
+        assert_eq!(format_blockquote("hello"), "> hello");
+        assert_eq!(format_blockquote("hello\n"), "> hello");
+        assert_eq!(format_blockquote("one\n\ntwo"), "> one\n>\n> two");
+        assert_eq!(
+            format_blockquote("one\ntwo\nthree\n"),
+            "> one\n> two\n> three"
+        );
+    }
+
+    /// `for_plain_text` prepends a title row and a blank row, so the body starts at item 2.
+    #[test]
+    fn selected_plain_text_seeds_cursor_on_first_row() {
+        let pane = pane("alpha\nbeta");
+        assert_eq!(pane.list_state.selected_index(), Some(0));
+        assert_eq!(pane.selected_plain_text(), "title");
+    }
+
+    #[test]
+    fn selected_plain_text_uses_current_line_after_nav() {
+        let mut pane = pane("alpha\nbeta\ngamma");
+        pane.select_body_line_for_test(2);
+        assert_eq!(pane.selected_plain_text(), "alpha");
+        assert!(pane.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(pane.selected_plain_text(), "beta");
+    }
+
+    #[test]
+    fn selected_plain_text_visual_range_joins_lines() {
+        let mut pane = pane("alpha\nbeta\ngamma");
+        pane.select_body_line_for_test(2);
+        assert!(pane.handle_key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+        assert!(pane.handle_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        pane.prepare_for_test(area());
+        assert_eq!(pane.selected_plain_text(), "alpha\nbeta");
+    }
+
+    #[test]
+    fn selected_plain_text_prefers_drag_selection() {
+        let mut pane = pane("hello world\nsecond");
+        pane.select_body_line_for_test(3);
+        pane.text_drag = Some(TextDrag {
+            anchor: TextEndpoint {
+                item_idx: 2,
+                col: 0,
+            },
+            head: TextEndpoint {
+                item_idx: 2,
+                col: 4,
+            },
+            active: false,
+        });
+        assert_eq!(pane.selected_plain_text(), "hello");
+    }
+
+    #[test]
+    fn selected_plain_text_follow_mode_quotes_last_visible_line() {
+        let pane = running_markdown_pane("hello\n\nworld");
+        assert!(pane.list_state.follow_mode);
+        assert_eq!(pane.list_state.selected_index(), None);
+        assert_eq!(pane.selected_plain_text(), "world");
+    }
+
+    #[test]
+    fn selected_plain_text_follow_mode_skips_offscreen_lines() {
+        let mut pane = running_markdown_pane("tail");
+        let start_id = pane.items.len() as u64;
+        for i in 0..40 {
+            pane.items.push(ContentLine {
+                content: Line::default(),
+                plain_text: String::new(),
+                id: start_id + i,
+                bg: None,
+            });
+        }
+        pane.prepare_for_test(Rect::new(0, 0, 80, 8));
+        assert!(pane.list_state.follow_mode);
+        assert_eq!(pane.list_state.selected_index(), None);
+        assert!(
+            pane.selected_plain_text().is_empty(),
+            "trailing blanks filling the viewport must not quote off-screen text"
+        );
+    }
+
+    #[test]
+    fn selected_plain_text_filter_uses_physical_index() {
+        let mut pane = pane("alpha\nbeta\ngamma");
+        pane.list_state
+            .set_filter(Some(crate::views::list_pane::ListMatcher::substring(
+                "gamma",
+            )));
+        pane.prepare_for_test(area());
+        assert_eq!(pane.list_state.selected_index(), Some(0));
+        assert_eq!(pane.selected_plain_text(), "gamma");
     }
 }

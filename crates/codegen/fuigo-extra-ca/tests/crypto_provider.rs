@@ -14,3 +14,16 @@ fn rustls_client_config_builds_and_is_shared() {
     let b = fuigo_extra_ca::rustls_client_config();
     assert!(std::sync::Arc::ptr_eq(&a, &b));
 }
+
+// A provider named at the config's call site would bypass the per-target choice
+// made by ensure_default_crypto_provider (ring on Windows ARM64).
+#[test]
+fn rustls_client_config_uses_the_process_default_provider() {
+    let config = fuigo_extra_ca::rustls_client_config();
+    let default =
+        rustls::crypto::CryptoProvider::get_default().expect("ensure installed a default");
+    assert!(
+        std::sync::Arc::ptr_eq(config.crypto_provider(), default),
+        "rustls_client_config must be built on the process default provider"
+    );
+}

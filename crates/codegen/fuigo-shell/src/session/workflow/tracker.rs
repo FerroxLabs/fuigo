@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use fuigo_tools::implementations::fuigo_build::workflow::WorkflowControl;
 use fuigo_workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,17 @@ impl WorkflowRunStatus {
 
     pub(crate) fn is_completion_reportable(self) -> bool {
         self.is_terminal() || self == Self::BudgetLimited
+    }
+
+    /// Whether the workflow tool may apply `control` to a run in this status:
+    /// pause only an active run; stop anything not already reported finished
+    /// (a budget-limited run is already stopped and needs `resume` with a
+    /// raised cap).
+    pub(crate) fn accepts(self, control: WorkflowControl) -> bool {
+        match control {
+            WorkflowControl::Pause => self == Self::Active,
+            WorkflowControl::Stop => !self.is_completion_reportable(),
+        }
     }
 
     pub fn is_paused(self) -> bool {
@@ -560,6 +572,14 @@ impl WorkflowTracker {
         Some(removed.state)
     }
 
+    /// Resolve a run id or session-unique display name to the run id.
+    pub(crate) fn find_run_id(&self, key: &str) -> Option<String> {
+        self.runs
+            .iter()
+            .find(|r| r.state.run_id == key || r.state.name == key)
+            .map(|r| r.state.run_id.clone())
+    }
+
     pub(crate) fn get(&self, run_id: &str) -> Option<WorkflowRunState> {
         self.runs
             .iter()
@@ -634,6 +654,11 @@ impl WorkflowTracker {
             terminal_at_restore_run_ids,
             status_reported_revisions: std::collections::HashMap::new(),
         }
+    }
+
+    /// The caller already learned this run's outcome; no completion wake fires for it.
+    pub(crate) fn mark_completion_reported(&mut self, run_id: &str) {
+        self.reported_terminal_run_ids.insert(run_id.to_owned());
     }
 
     pub(crate) fn is_unreported_completion(&self, run_id: &str, revision: u64) -> bool {

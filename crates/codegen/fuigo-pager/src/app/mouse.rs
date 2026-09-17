@@ -419,18 +419,57 @@ impl AgentView {
                 }
                 match self.pane_areas.hit_test(mouse.column, mouse.row) {
                     Some(AgentPane::Dock) => {
-                        self.set_active_pane(AgentPane::Dock, false);
-                        let row = mouse.row.saturating_sub(self.pane_areas.dock.y);
-                        let items = self.dock_items();
-                        match crate::views::dock::item_at(&self.dock_counts(), row) {
+                        let item = self.dock_item_at(self.pane_areas.dock, mouse.row);
+                        if let Some(hit) = self
+                            .dock_stop_button
+                            .clone()
+                            .filter(|hit| hit.rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            if self.pos_occluded(mouse.column, mouse.row) {
+                                return InputOutcome::Changed;
+                            }
+                            let Some(item) = item else {
+                                return InputOutcome::Changed;
+                            };
+                            let Some(action) = self.dock_stop_action(item) else {
+                                return InputOutcome::Changed;
+                            };
+                            if super::agent_view::DockKillId::from_action(&action).as_ref()
+                                != Some(&hit.id)
+                            {
+                                return InputOutcome::Changed;
+                            }
+                            return InputOutcome::Action(action);
+                        }
+                        match item {
                             Some(item) => {
-                                if let Some(idx) = items.iter().position(|it| *it == item) {
-                                    self.dock_cursor = idx;
+                                // Collapsing a section with a click must not leave
+                                // its header wearing the selection highlight.
+                                let collapsing_header = matches!(
+                                    item,
+                                    crate::views::dock::DockItem::Header(section)
+                                        if self.is_dock_section_expanded(section)
+                                );
+                                if !collapsing_header {
+                                    self.set_active_pane(AgentPane::Dock, false);
+                                    if let Some(idx) =
+                                        self.dock_items().iter().position(|it| *it == item)
+                                    {
+                                        self.dock_cursor = idx;
+                                    }
+                                } else if self.active_pane == AgentPane::Dock {
+                                    self.set_active_pane(AgentPane::Prompt, false);
                                 }
-                                self.dock_activate(item);
+                                self.activate_dock_item(item);
+                                self.dock_hovered =
+                                    self.dock_item_at(self.pane_areas.dock, mouse.row);
+                                self.cache_dock_stop_button();
                                 InputOutcome::Changed
                             }
-                            None => InputOutcome::Changed,
+                            None => {
+                                self.set_active_pane(AgentPane::Dock, false);
+                                InputOutcome::Changed
+                            }
                         }
                     }
                     Some(AgentPane::Todo) => {
@@ -477,7 +516,6 @@ impl AgentView {
                             return InputOutcome::Changed;
                         }
                         if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row)
-                            && self.session.state.is_turn_running()
                             && let InputOutcome::Action(action) = self.force_interject_queue_row(id)
                         {
                             return InputOutcome::Action(action);
@@ -990,8 +1028,7 @@ impl AgentView {
                             entry.block,
                             crate::scrollback::block::RenderBlock::AgentMessage(_)
                                 | crate::scrollback::block::RenderBlock::Btw(_)
-                        )
-                        || entry.hook_data.as_ref().is_some_and(|hd| hd.has_content()))
+                        ))
                 {
                     changed = true;
                 }
@@ -1000,6 +1037,19 @@ impl AgentView {
                 if new_timeline_hover != self.timeline_hover {
                     self.timeline_hover = new_timeline_hover;
                     self.sync_timeline_hover_preview();
+                    changed = true;
+                }
+                // The dock's row hover and its `[stop]` tint are what the next
+                // click trusts, so a move over the dock has to mark the frame
+                // changed here; the paint-time `sync_dock_hover_from_pointer`
+                // only re-derives it once something else has asked to repaint.
+                if hit == Some(AgentPane::Dock) {
+                    let new = self.dock_item_at(self.pane_areas.dock, mouse.row);
+                    if new != self.dock_hovered {
+                        self.dock_hovered = new;
+                        changed = true;
+                    }
+                } else if self.dock_hovered.take().is_some() {
                     changed = true;
                 }
                 changed |= self
@@ -1182,6 +1232,17 @@ impl AgentView {
             _ => InputOutcome::Unchanged,
         }
     }
+    /// Forget every pointer-derived highlight by replaying the hover pass at an off-screen position.
+    /// Used on screen-mode switches: minimal mode turns mouse capture off, so no motion event arrives to refresh hover state and the pre-switch highlight (hovered entry row, buttons, dropdown rows) would stick on the next fullscreen frame until the pointer moves.
+    /// Routing through [`Self::handle_mouse`] keeps this in lockstep with the real hover pass.
+    pub(crate) fn clear_pointer_hover(&mut self) {
+        let _ = self.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: u16::MAX,
+            row: u16::MAX,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        });
+    }
     /// Apply a scrollbar click or drag at the given screen row.
     ///
     /// Uses [`scrollbar_click_to_offset`], the same math as the thumb renderer.
@@ -1240,10 +1301,14 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        let running = agent.session.state.is_turn_running();
-        agent
-            .queue
-            .render(area, &mut buf, true, &layout_cfg, None, running);
+        agent.queue.render(
+            area,
+            &mut buf,
+            true,
+            &layout_cfg,
+            None,
+            agent.can_send_now(),
+        );
         agent.pane_areas.queue = area;
         let mut found = None;
         'find: for row in area.y..area.y + area.height {
@@ -1273,6 +1338,45 @@ mod tests {
     /// Left-click the row's `[edit]` button.
     fn click_edit(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.edit_click(c, r))
+    }
+    #[test]
+    fn mouse_send_now_tracks_automatic_wake_cancellation() {
+        let mut active = running_agent_local_only();
+        active.session.state = AgentState::Idle;
+        active.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        let id = active.queue.entry_ids()[0];
+        assert!(matches!(
+            click_send_now(&mut active, id),
+            InputOutcome::Action(Action::SendPromptNow { .. })
+        ));
+        let mut cancelling = running_agent_local_only();
+        cancelling.session.state = AgentState::Idle;
+        cancelling.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: true,
+        });
+        cancelling
+            .queue
+            .list_state
+            .select_by_id(cancelling.queue.entry_ids()[0]);
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        cancelling.queue.render(
+            area,
+            &mut buf,
+            true,
+            &crate::appearance::LayoutConfig::default(),
+            None,
+            cancelling.can_send_now(),
+        );
+        for row in area.y..area.y + area.height {
+            for col in area.x..area.x + area.width {
+                assert_eq!(cancelling.queue.send_now_click(col, row), None);
+            }
+        }
     }
     /// Mouse "Send now" (interject) on the last local row keeps the pane open when a server row remains.
     #[test]

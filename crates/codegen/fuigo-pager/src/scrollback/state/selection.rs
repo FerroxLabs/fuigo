@@ -19,7 +19,25 @@ impl ScrollbackState {
     }
 
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
         self.view_mode = mode;
+        // The visible slice just changed: a reserve whose prompt left it is released, and one that
+        // stays is re-derived against the new coordinates instead of keeping a stale row target
+        self.release_pin_reserve_outside_view();
+        if self.pin_reserve_active {
+            self.reset_pin_reserve_target();
+            self.compute_total_height_from_cache();
+            if self.follow_mode
+                && self.follow_preserve_scroll
+                && let Some(target) = self.pin_reserve_target
+            {
+                self.scroll_offset = target;
+            } else {
+                self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+            }
+        }
     }
 
     /// Get the range of entry indices visible in the current view mode.
@@ -522,6 +540,43 @@ impl ScrollbackState {
             self.expand_all_groups();
         } else {
             self.expanded_groups.clear();
+        }
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
+
+    /// Minimal mode's print-once commit pass stamps thinking entries `Expanded` directly into the shared state
+    /// (`minimal_commit_display_mode` in `fuigo-pager-minimal`), so a fullscreen → minimal → fullscreen round trip
+    /// would otherwise come back with every previously-folded thought sprung open.
+    pub fn reapply_thinking_fold_policy(&mut self) {
+        let target_mode = self.thinking_display_mode;
+        let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
+        let mut changed_ids = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if !matches!(entry.block, RenderBlock::Thinking(_))
+                || !entry.block.is_foldable()
+                || entry.is_running
+                || (respect_manual_folds && entry.display_mode_pinned)
+                || entry.display_mode == target_mode
+            {
+                continue;
+            }
+            entry.display_mode = target_mode;
+            entry.invalidate_cache();
+            changed_ids.push(*id);
+        }
+        if changed_ids.is_empty() {
+            return;
+        }
+        for &id in &changed_ids {
+            self.dirty_heights.insert(id);
+        }
+        // Do not clear `expanded_groups`: those keys are user-expanded tool-call
+        // groups and were never stamped by minimal.
+        for id in &changed_ids {
+            if let Some(idx) = self.entries.get_index_of(id) {
+                self.rekey_verb_group_expansion(idx);
+            }
         }
         self.gaps_may_be_dirty = true;
         self.bump_generation();

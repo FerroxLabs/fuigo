@@ -717,6 +717,7 @@ fn contextual_tip_kind_label(t: events::ContextualTipKind) -> &'static str {
         events::ContextualTipKind::SmallScreen => "small_screen",
         events::ContextualTipKind::WordSelect => "word_select",
         events::ContextualTipKind::SshWrap => "ssh_wrap",
+        events::ContextualTipKind::ExportCopy => "export_copy",
     }
 }
 

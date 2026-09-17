@@ -4753,6 +4753,7 @@ dependencies = [
  "async-openai",
  "async-stream",
  "axum",
+ "blake3",
  "chrono",
  "eventsource-stream",
  "fuigo-auth",
@@ -4765,10 +4766,12 @@ dependencies = [
  "reqwest 0.12.24",
  "serde",
  "serde_json",
+ "strum 0.27.2",
  "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -5474,7 +5477,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "semver",
 ]

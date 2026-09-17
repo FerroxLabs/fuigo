@@ -379,6 +379,7 @@ impl SessionActor {
             })),
         );
         let policy = input_origin.policy();
+        self.open_subagent_spawn_admission();
         if let Some(completion_id) = input_origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
@@ -1116,7 +1117,6 @@ impl SessionActor {
         }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
-        self.open_subagent_spawn_admission();
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
@@ -2361,7 +2361,8 @@ impl SessionActor {
                 span.record("parent_agent_id", parent);
             }
         }
-        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
+        let sampling_config = self.chat_state_handle.get_sampling_config().await;
+        if let Some(cfg) = sampling_config.as_ref() {
             let span = tracing::Span::current();
             span.record("model_id", cfg.model.as_str());
             if let Some(effort) = cfg.reasoning_effort {
@@ -2410,7 +2411,11 @@ impl SessionActor {
         let mut todo_gate_fires: u32 = 0;
         let mut length_salvage_streak = LengthSalvageStreak::default();
         let mut auth_retry_schedule = AuthRetrySchedule::new();
-        let mut rate_limit_waits = self.rate_limit_wait_budget();
+        let mut rate_limit_waits = self.rate_limit_wait_budget(
+            sampling_config
+                .as_ref()
+                .and_then(|config| config.rate_limit_retry_threshold),
+        );
         let mut transient_retry_attempts: u32 = 0;
         let transient_retry_enabled =
             self.transient_retry_enabled && !self.attach_non_interactive.get();

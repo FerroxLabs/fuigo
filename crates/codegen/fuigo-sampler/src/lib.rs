@@ -21,6 +21,7 @@ pub mod execution_budget;
 pub(crate) mod request_accounting;
 pub mod handle;
 pub mod metrics;
+mod prewarm;
 pub mod retry;
 pub mod sampling_log;
 mod shared_http;
@@ -45,6 +46,7 @@ pub use events::{
 };
 pub use handle::{CollectedSamplingResult, DoomLoopRecoveryAttempt, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
+pub use prewarm::{PrewarmOutcome, PrewarmReport, prewarm_transport};
 pub use retry::{
     DEFAULT_MAX_RETRIES, EMPTY_RESPONSE_MAX_ATTEMPTS, EMPTY_RESPONSE_RETRY_BACKOFF,
     MAX_RETRY_BACKOFF, RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision,

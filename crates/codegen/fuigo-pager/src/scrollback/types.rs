@@ -161,6 +161,9 @@ pub struct BlockLine {
     pub joiner: Option<String>,
     /// Link target for rows whose painted text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
+    /// Display width of the `subsequent_indent` prefix this wrapped line carries (blockquote/list `│ ` bars).
+    /// Not part of the logical pre-wrap content, so hyperlink column mapping excludes it.
+    pub indent_width: usize,
 }
 
 impl Default for BlockLine {
@@ -176,6 +179,7 @@ impl Default for BlockLine {
             selection_text: None,
             joiner: None,
             link_target: None,
+            indent_width: 0,
         }
     }
 }
@@ -707,6 +711,7 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+            indent_width: 0,
         };
     }
 

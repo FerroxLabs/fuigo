@@ -22,20 +22,6 @@ struct InterjectRequest {
     content: Vec<acp::ContentBlock>,
 }
 
-/// Split a `content` array into the model-safe text and the image blocks.
-///
-/// The Text block (when present and non-empty) is the client's REWRITTEN text.
-/// The rewrite strips failed-orphan placeholders and drops `[Image #N: <path>]` paths.
-/// It must win over the raw `text` param, which exists for legacy clients and display.
-/// Returns `(text_override, images)`.
-fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::ImageContent>) {
-    let text_override = content.iter().find_map(|block| match block {
-        acp::ContentBlock::Text(tb) if !tb.text.trim().is_empty() => Some(tb.text.clone()),
-        _ => None,
-    });
-    (text_override, crate::session::image_blocks(content))
-}
-
 /// Handle `fuigo/interject`: queue a mid-turn user interjection.
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req: InterjectRequest = parse_params(args)?;
@@ -49,7 +35,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         )));
     };
 
-    let (text_override, images) = split_content(req.content);
+    let (text_override, images) = super::content::split_content(req.content);
     let _ = session.cmd_tx.send(SessionCommand::Interject {
         text: text_override.unwrap_or(req.text),
         id: req.interjection_id,
@@ -76,7 +62,7 @@ mod tests {
         .expect("legacy params must parse");
         assert_eq!(req.text, "steer left");
         assert_eq!(req.interjection_id.as_deref(), Some("i1"));
-        let (text_override, images) = split_content(req.content);
+        let (text_override, images) = crate::extensions::content::split_content(req.content);
         assert_eq!(text_override, None);
         assert!(images.is_empty());
     }
@@ -94,7 +80,7 @@ mod tests {
             ],
         }))
         .expect("content params must parse");
-        let (text_override, images) = split_content(req.content);
+        let (text_override, images) = crate::extensions::content::split_content(req.content);
         assert_eq!(
             text_override.as_deref(),
             Some("look at [Image #1]"),

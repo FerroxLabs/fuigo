@@ -170,7 +170,7 @@ fn facts(
 ) -> (DiagnosticFacts, ClipboardRecovery) {
     let ctx = snapshot.common.terminal;
     let available_themes = match snapshot.color_level {
-        RuntimeEvidence::Available(color_level) => crate::theme::ThemeKind::ALL
+        RuntimeEvidence::Available(color_level) => crate::theme::ThemeKind::selectable()
             .iter()
             .copied()
             .filter(|kind| color_level.has_truecolor() || !kind.requires_truecolor())
@@ -242,7 +242,7 @@ fn facts(
                     RuntimeEvidence::Unavailable => RuntimeFact::Unavailable,
                 },
                 available_themes,
-                total_themes: crate::theme::ThemeKind::ALL.len(),
+                total_themes: crate::theme::ThemeKind::selectable().len(),
             },
             keyboard,
             newline,

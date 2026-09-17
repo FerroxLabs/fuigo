@@ -200,7 +200,11 @@ impl ShellToolsetConfig {
     pub fn new(base: Option<Self>, sampling_config: Option<SamplerConfig>) -> Self {
         let default_base = SamplerConfig {
             api_key: None,
-            base_url: "https://api.x.ai/v1".to_string(),
+            // Fuigo's inference default, not the upstream vendor's endpoint: this
+            // placeholder is never dialled (no key, and every production
+            // `SamplerConfig` is built in agent/config.rs), but a default must
+            // still not name a host the user never chose.
+            base_url: crate::agent::config::FUIGO_API_BASE_URL_DEFAULT.to_string(),
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,
@@ -234,6 +238,9 @@ impl ShellToolsetConfig {
             subscription: None,
             subscription_resolver: None,
             header_injector: None,
+            mtls_cert_dir: None,
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         };
         let mut toolset = base.unwrap_or_else(|| Self {
             bash: BashToolConfig::default(),
@@ -395,6 +402,42 @@ impl FileToolset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The placeholder `SamplerConfig` built when no base config is supplied names Fuigo's own
+    /// inference default, not the upstream vendor's endpoint.
+    ///
+    /// In scope for "no vendor host as a default" even though it is not one of the brief's eight
+    /// rows: it is a compiled DEFAULT naming `api.x.ai`, and the one `api.x.ai` the invariant
+    /// allows is the `--provider xai` endpoint in `agent/key_discovery.rs`, which a user opts into
+    /// by name. This one applied to everybody. It is never dialled (no api_key, and every
+    /// production `SamplerConfig` comes from `agent/config.rs`), so nothing about request routing
+    /// changes; what changes is that a default no longer names a host the user never chose.
+    #[test]
+    fn placeholder_web_search_sampler_base_is_fuigos_own_default() {
+        let placeholder = ShellToolsetConfig::new(None, None);
+        assert_eq!(
+            placeholder.web_search.base_url,
+            crate::agent::config::FUIGO_API_BASE_URL_DEFAULT
+        );
+        assert!(
+            !placeholder.web_search.base_url.contains("x.ai"),
+            "a compiled default must not name the upstream vendor: {}",
+            placeholder.web_search.base_url
+        );
+        assert!(
+            placeholder.web_search.api_key.is_none(),
+            "the placeholder carries no credential, so it is never dialled"
+        );
+        // An explicitly supplied sampling config still wins, exactly as before.
+        let supplied = ShellToolsetConfig::new(
+            None,
+            Some(SamplerConfig {
+                base_url: "https://sampler.example.test/v1".to_string(),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(supplied.web_search.base_url, "https://sampler.example.test/v1");
+    }
 
     #[test]
     fn file_toolset_default_is_standard() {

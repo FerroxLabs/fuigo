@@ -257,6 +257,8 @@ pub(super) fn set_picker_idx(
         // The caller bounds-checks already; this re-check protects a future caller that does not
         return SettingsKeyOutcome::Unchanged;
     }
+    // Focus moves cancel a pending double-click.
+    state.picker_last_click = None;
     state.transition_to_picking_enum(setting_key, new_idx, original_value, supports_preview);
     // Preview dispatch for static Enums with preview support.
     if supports_preview
@@ -1020,20 +1022,38 @@ fn handle_picker_mouse(
         .iter()
         .position(|r| r.height > 0 && rect_contains(*r, column, row));
     let Some(target_idx) = clicked_idx else {
+        state.picker_last_click = None;
         return SettingsKeyOutcome::Unchanged;
     };
-    if target_idx == current_idx {
-        // Already focused: re-clicking the same choice is a no-op; commit fires on Enter, not on a re-click
-        return SettingsKeyOutcome::Unchanged;
+    // Do not move focus and then Enter-commit: that drops the preview Action
+    // and can persist a different radio than the one clicked.
+    if picker_click_is_double(state, target_idx) && target_idx == current_idx {
+        state.picker_last_click = None;
+        let synthetic = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        return handle_picking_enum(state, &synthetic);
     }
-    // Reuse the keyboard nav helper to update `choices_idx` and fire the matching preview Action (when the kind supports it)
-    set_picker_idx(
-        state,
-        setting_key,
-        target_idx,
-        original_value,
-        supports_preview,
-    )
+    let outcome = if target_idx == current_idx {
+        // Already focused: a single re-click is a no-op; commit fires on Enter or a double-click
+        SettingsKeyOutcome::Unchanged
+    } else {
+        // Reuse the keyboard nav helper to update `choices_idx` and fire the matching preview Action (when the kind supports it)
+        set_picker_idx(
+            state,
+            setting_key,
+            target_idx,
+            original_value,
+            supports_preview,
+        )
+    };
+    // Arm after `set_picker_idx`, which clears a pending double-click.
+    state.picker_last_click = Some((target_idx, std::time::Instant::now()));
+    outcome
+}
+
+fn picker_click_is_double(state: &SettingsModalState, idx: usize) -> bool {
+    state.picker_last_click.is_some_and(|(prev, at)| {
+        prev == idx && at.elapsed().as_millis() < crate::app::agent_view::MULTI_CLICK_TIMEOUT_MS
+    })
 }
 
 /// Handle a mouse event while the modal is in `PickingGroup` mode.

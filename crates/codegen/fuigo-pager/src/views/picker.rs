@@ -520,7 +520,7 @@ fn render_search_bar_with_label_viewport(
                 // This matches the rename overlay's cursor style
                 if let Some(cell) = buf.cell_mut((cursor_x, y)) {
                     let cursor_fg = if let Some(c) = bg { c } else { theme.bg_base };
-                    cell.set_style(Style::default().fg(cursor_fg).bg(theme.text_primary));
+                    cell.set_style(theme.block_cursor_over(cursor_fg));
                 }
             }
         }
@@ -944,6 +944,10 @@ pub fn render_picker_row(
         None => base_bg,
     };
     let meta_fg = embed.map_or(theme.gray, |e| e.fg(theme.gray));
+    // Terminal theme: this row is about to take the reverse-video overlay, where the fold glyph's
+    // bright-black fg would invert into a background patch. Give it the row's normal text fg so it
+    // inverts like the title.
+    let reversed_row = embed.is_none() && (row.selected || hovered) && theme.is_bandless();
 
     // Fill row background.
     let row_rect = Rect {
@@ -953,6 +957,13 @@ pub fn render_picker_row(
         height: 1,
     };
     buf.set_style(row_rect, Style::default().bg(row_bg));
+    if embed.is_none() {
+        if hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        } else if row.selected {
+            buf.set_style(row_rect, theme.selection_overlay());
+        }
+    }
 
     // Left side: indent + cursor indicator + fold indicator + label.
     let indent_str = if row.indent > 0 {
@@ -1025,6 +1036,19 @@ pub fn render_picker_row(
                 fold_width,
             );
             cur_x += fold_width;
+        } else if reversed_row {
+            let glyph = if row.expanded {
+                format!("{} ", crate::glyphs::diamond_filled())
+            } else {
+                format!("{} ", crate::glyphs::chevron())
+            };
+            buf.set_span(
+                cur_x,
+                y,
+                &Span::styled(glyph, Style::default().fg(theme.text_primary).bg(row_bg)),
+                fold_width,
+            );
+            cur_x += fold_width;
         } else {
             cur_x += crate::views::modal_window::render_fold_indicator(
                 buf,
@@ -1038,7 +1062,11 @@ pub fn render_picker_row(
         }
     } else {
         // Non-expandable: show ◆ diamond to indicate a leaf entry.
-        let diamond_fg = embed.map_or(theme.gray_dim, |e| e.fg(theme.gray_dim));
+        let diamond_fg = if reversed_row {
+            theme.text_primary
+        } else {
+            embed.map_or(theme.gray_dim, |e| e.fg(theme.gray_dim))
+        };
         let style = Style::default().fg(diamond_fg).bg(row_bg);
         buf.set_span(
             cur_x,
@@ -2717,6 +2745,7 @@ pub fn handle_picker_input(
             if key.code == KeyCode::Esc {
                 let query_changed = config.vim_normal_first && !state.query().is_empty();
                 state.search_active = false;
+                state.selection_hidden = false;
                 // vim_normal_first: Esc leaves search for nav mode and clears the query in one step (mirrors scrollback vim-mode)
                 if config.vim_normal_first {
                     state.clear_query();
@@ -2836,36 +2865,9 @@ pub fn handle_picker_input(
                 return PickerOutcome::Changed;
             }
 
-            // Printable characters while tabs focused: exit focus and start a search query (mirrors behavior from non-active search hint)
-            if config.show_search_hint && !state.search_active {
-                if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
-                    state.tabs_focused = false;
-                    state.search_active = true;
-                    return PickerOutcome::Changed;
-                }
-                if !config.search_only_on_slash
-                    && !config.vim_normal_first
-                    && is_legacy_alt_word_key(key)
-                {
-                    return PickerOutcome::Changed;
-                }
-                if !config.search_only_on_slash
-                    && !config.vim_normal_first
-                    && is_plain_query_character(key)
-                {
-                    let outcome = state.edit_query(key);
-                    if outcome == LineEditOutcome::TextChanged {
-                        state.tabs_focused = false;
-                        state.search_active = true;
-                    }
-                    if let Some(outcome) = finish_query_edit(state, outcome) {
-                        return outcome;
-                    }
-                }
-            }
-
-            // For other keys (action keys, Esc, etc.) while tabs focused we fall through so the normal paths can still apply
-            // L/R fall through too; the tabs block later returns for them
+            // Everything else falls through to the shared handlers: action keys (Space included), the `f`
+            // filter key, h/l tab cycling, `/` and printable chars (which clear `tabs_focused` where they
+            // start a query). Capturing printable chars here swallowed the action keys.
         }
 
         // Ctrl+F: toggle mode.
@@ -3101,6 +3103,7 @@ pub fn handle_picker_input(
         if config.show_search_hint && !state.search_active {
             if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
                 state.search_active = true;
+                state.tabs_focused = false;
                 return PickerOutcome::Changed;
             }
             if !config.search_only_on_slash
@@ -3181,6 +3184,51 @@ mod tests {
 
     fn press_up() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+    }
+
+    fn left_click(column: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Clicking the search bar hides the list selection; leaving search with Esc must bring it back.
+    /// Ported from upstream `dashboard_picker_esc_after_search_click_restores_the_selection`,
+    /// asserted on the shared handler every picker host routes through.
+    #[test]
+    fn esc_after_search_click_restores_the_selection() {
+        let config = cfg(true, false);
+        let mut state = PickerState {
+            selected: 1,
+            hit_areas: Some(PickerHitAreas {
+                close_button: Rect::default(),
+                search_bar: Rect::new(4, 6, 40, 1),
+                item_rects: vec![Rect::new(4, 8, 40, 1)],
+                entry_indices: vec![1],
+                tab_rects: vec![],
+                filter_rect: None,
+            }),
+            ..Default::default()
+        };
+
+        let clicked = handle_picker_input(&left_click(5, 6), &mut state, 2, &config);
+        assert!(matches!(clicked, PickerOutcome::Changed));
+        assert!(state.search_active, "clicking search must focus it");
+        assert!(
+            state.selection_hidden,
+            "clicking search hides the selection"
+        );
+
+        let escaped = handle_picker_input(&press_esc(), &mut state, 2, &config);
+        assert!(matches!(escaped, PickerOutcome::Changed));
+        assert!(!state.search_active);
+        assert!(
+            !state.selection_hidden,
+            "Esc leaving search must restore the list selection"
+        );
     }
 
     #[test]
@@ -3614,6 +3662,60 @@ mod tests {
         let outcome = handle_picker_input(&press('i'), &mut state, 3, &config);
         assert!(matches!(outcome, PickerOutcome::Action('i')));
         assert!(!state.search_active);
+    }
+
+    #[test]
+    fn tabs_focused_keys_reach_the_shared_handlers() {
+        // The tab bar holding focus only claims Up/Down/Enter: action keys (Space included) and the advertised `f`
+        // filter key act on the still-selected row, h/l cycle tabs, `/` and any other printable char start a query.
+        let focused = || PickerState {
+            tabs_focused: true,
+            ..PickerState::default()
+        };
+        for vim in [false, true] {
+            let mut config = cfg(true, vim);
+            config.tabs = Some(&["a", "b", "c"]);
+            config.action_keys = &[('u', "update"), (' ', "toggle")];
+            config.filter_label = Some("All");
+
+            for c in ['u', ' '] {
+                let mut state = focused();
+                let outcome = handle_picker_input(&press(c), &mut state, 3, &config);
+                assert!(
+                    matches!(outcome, PickerOutcome::Action(ch) if ch == c),
+                    "vim={vim} c={c:?}"
+                );
+                assert!(state.query().is_empty(), "vim={vim} c={c:?}");
+                assert!(!state.search_active, "vim={vim} c={c:?}");
+            }
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('f'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::FilterCycled), "vim={vim}");
+            assert!(!state.search_active, "vim={vim}");
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('l'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::TabChanged(1)), "vim={vim}");
+            let outcome = handle_picker_input(&press('h'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::TabChanged(2)), "vim={vim}");
+            assert!(state.query().is_empty(), "vim={vim}");
+
+            let mut state = focused();
+            let outcome = handle_picker_input(&press('/'), &mut state, 3, &config);
+            assert!(matches!(outcome, PickerOutcome::Changed), "vim={vim}");
+            assert!(state.search_active, "vim={vim}");
+            assert!(!state.tabs_focused, "vim={vim}");
+        }
+
+        let mut config = cfg(true, false);
+        config.tabs = Some(&["a", "b"]);
+        let mut state = focused();
+        let outcome = handle_picker_input(&press('a'), &mut state, 3, &config);
+        assert!(matches!(outcome, PickerOutcome::QueryChanged));
+        assert_eq!(state.query(), "a");
+        assert!(state.search_active);
+        assert!(!state.tabs_focused);
     }
 
     #[test]

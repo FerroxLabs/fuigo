@@ -23,6 +23,7 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
 use fuigo_tools::types::output::{BashOutput, ToolOutput};
 use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
+use fuigo_shell::session::storage::chunk_meta_flag;
 use fuigo_tools::util::strip_redundant_session_cd;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -745,9 +746,9 @@ impl AcpUpdateTracker {
         id
     }
     /// The Edit block of `entry` if it qualifies for coalescing with an adjacent same-file Edit.
-    /// Qualifying means: completed successfully with hunks, a trustworthy one-liner summary, and no per-entry attachments a merge would misplace.
+    /// Qualifying means: completed successfully with hunks and a trustworthy one-liner summary.
     fn coalescable_edit(entry: &ScrollbackEntry) -> Option<&EditToolCallBlock> {
-        if entry.is_running || entry.is_pending_user_input || entry.hook_data.is_some() {
+        if entry.is_running || entry.is_pending_user_input {
             return None;
         }
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
@@ -1487,7 +1488,11 @@ impl AcpUpdateTracker {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let mut block = if let Some(dt) = display_override {
+        let mut block = if chunk_meta_flag(&chunk, user_message_chunk_meta::INTERJECTION) {
+            crate::scrollback::blocks::UserPromptBlock::interjection(
+                display_override.unwrap_or(text),
+            )
+        } else if let Some(dt) = display_override {
             if text.contains("<command-name>") {
                 self.skip_next_skill_body = true;
             }

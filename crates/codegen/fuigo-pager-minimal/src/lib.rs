@@ -66,8 +66,14 @@ use fuigo_pager::app::app_view::AppView;
 /// Opening the synchronized update before the commits batches the whole frame (commits, viewport reposition, live redraw) into one atomic present.
 /// The matching `EndSynchronizedUpdate` is emitted by `draw_frame` (step 4), which every path through this function reaches.
 /// Its own inner `BeginSynchronizedUpdate` is redundant but harmless: DEC 2026 is a mode, not a counter, so the first End closes it.
+///
+/// The opening marker here and the closing marker of the live frame must be decided by one synchronization policy on one terminal context.
+/// Under tmux neither is emitted (see `fuigo_pager::terminal::should_emit_synchronized_output`).
 pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
-    let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
+    let ctx = fuigo_pager::terminal::terminal_context();
+    if fuigo_pager::terminal::should_emit_synchronized_output(ctx) {
+        let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
+    }
     let _ = terminal.autoresize();
     // Pending permission/question marks are synced ONCE, up front (see `commit::sync_pending_marks`)
     // The viewport sizing (`sync_viewport` / `tail_height` / `will_commit`) and the commit pass then judge committability against the same state
@@ -79,7 +85,7 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
     overlay::sync_viewport(app, terminal);
     commit::commit_active(app, terminal);
     commit::expand_pending(app, terminal);
-    live::draw_live(app, terminal);
+    live::draw_live(app, terminal, ctx);
 }
 
 /// Register the minimal-mode render hooks with `fuigo-pager`.

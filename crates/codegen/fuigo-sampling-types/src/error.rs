@@ -156,6 +156,9 @@ pub enum SamplingError {
     },
     #[error("invalid client configuration: {0}")]
     InvalidConfiguration(&'static str),
+    /// The model's mTLS endpoint or local client identity cannot be used safely.
+    #[error("invalid mTLS client configuration: {0}")]
+    MtlsConfiguration(String),
     #[error("request error: {0}")]
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
@@ -450,6 +453,7 @@ impl SamplingError {
             SamplingError::Api { .. }
             | SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)
@@ -465,6 +469,7 @@ impl SamplingError {
         match self {
             SamplingError::Auth { .. } => false,
             SamplingError::InvalidConfiguration(_) => false,
+            SamplingError::MtlsConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
             SamplingError::Api { status, .. } => is_retryable_api_status(*status),
@@ -555,6 +560,7 @@ impl SamplingError {
             // Explicit so a new variant must state its size classification.
             SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)
@@ -578,6 +584,7 @@ impl SamplingError {
             // Explicit so a new variant must state its size classification.
             SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)

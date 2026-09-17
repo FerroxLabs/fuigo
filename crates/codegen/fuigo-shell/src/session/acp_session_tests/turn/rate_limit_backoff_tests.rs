@@ -282,6 +282,54 @@ pub(super) async fn pump_local_tasks() {
     }
 }
 
+/// F023: a per-model `rate_limit_retry_threshold` survives session request reconstruction and hands 429s to the sampler,
+/// so the separate subagent wait loop is switched off (one 429 layer per role, never stacked).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn explicit_sampler_threshold_disables_subagent_wait_budget() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            let (actor, _retries) =
+                actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true)
+                    .await;
+            let mut config = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("test actor has sampling config");
+            config.max_retries = Some(3);
+            config.rate_limit_retry_threshold = Some(4);
+            actor.chat_state_handle.update_sampling_config(config);
+
+            let reconstructed = actor.reconstruct_full_config().await;
+            assert_eq!(
+                reconstructed.max_retries,
+                Some(3),
+                "session request reconstruction must preserve the model retry budget"
+            );
+            assert_eq!(
+                reconstructed.rate_limit_retry_threshold,
+                Some(4),
+                "session request reconstruction must preserve the model threshold"
+            );
+            let config = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("test actor has sampling config");
+            let budget = actor.rate_limit_wait_budget(config.rate_limit_retry_threshold);
+
+            assert!(
+                !budget.can_wait(),
+                "an explicit sampler threshold must disable the separate subagent 429 wait loop"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn subagent_429_wait_is_owned_and_capped_by_the_pacer() {
     let local = tokio::task::LocalSet::new();
@@ -297,7 +345,7 @@ async fn subagent_429_wait_is_owned_and_capped_by_the_pacer() {
                     .await;
             let request = conversation_request(&actor).await;
             let requests_before = server.request_count();
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
 
             let started = tokio::time::Instant::now();
             let outcome = tokio::time::timeout(
@@ -352,7 +400,7 @@ async fn paced_wait_notifies_the_client_with_a_retrying_state() {
                 actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true)
                     .await;
             let request = conversation_request(&actor).await;
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(30),
@@ -415,7 +463,7 @@ async fn exhausted_subagent_budget_notifies_exhausted_with_the_attempts_taken() 
                 actor_under_test(&server, SessionKind::Subagent, sampler_surfaces_429(), true)
                     .await;
             let request = conversation_request(&actor).await;
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(60),
@@ -484,7 +532,7 @@ async fn main_session_429_is_owned_by_the_sampler_never_the_pacer() {
                     actor_under_test(&server, SessionKind::Main, sampler_retries_429(), true).await;
                 let request = conversation_request(&actor).await;
                 let requests_before = server.request_count();
-                let mut budget = actor.rate_limit_wait_budget();
+                let mut budget = actor.rate_limit_wait_budget(None);
 
                 let outcome = tokio::time::timeout(
                     Duration::from_secs(30),
@@ -555,7 +603,7 @@ async fn run_burst(n: usize, cap: usize) -> BurstMetrics {
         .into_iter()
         .map(|(actor, request)| {
             tokio::task::spawn_local(async move {
-                let mut budget = actor.rate_limit_wait_budget();
+                let mut budget = actor.rate_limit_wait_budget(None);
                 tokio::time::timeout(
                     Duration::from_secs(60),
                     actor.run_turn_via_sampler(

@@ -560,75 +560,31 @@ fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
     );
 }
 
+/// A mixed verb-group run labels every kind in the rendered header, and expanding it keeps each member at its ordinary
+/// collapsed row height (only the first member carries the synthetic header row).
+/// Retargeted from the hook-aggregation test: its hook suffix pinned removed machinery, this is the live half.
 #[test]
-fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members() {
+fn rendered_mixed_verb_group_header_labels_every_kind_and_members_keep_row_height() {
     use crate::scrollback::ScrollbackState;
-    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
 
     crate::appearance::cache::set_group_tool_verbs(true);
     crate::appearance::cache::set_show_thinking_blocks(false);
     let mut state = ScrollbackState::new();
-    let first = state.push_block(RenderBlock::read("a.rs", None));
-    let second = state.push_block(RenderBlock::list_dir_with_output("src", "a.rs"));
-    let third = state.push_block(RenderBlock::search("TODO", 1, Vec::new()));
-    let elapsed = std::time::Duration::from_millis(1);
-    state.attach_hooks(
-        first,
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "ok-hook".to_owned(),
-            status: HookRunStatus::Success { elapsed },
-            output: None,
-        }],
-    );
-    state.attach_hooks(
-        second,
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "blocked-hook".to_owned(),
-            status: HookRunStatus::Blocked {
-                detail: "denied".to_owned(),
-                elapsed,
-            },
-            output: None,
-        }],
-    );
-    state.attach_hooks(
-        third,
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "failed-hook".to_owned(),
-            status: HookRunStatus::Failed {
-                error: "exit 1".to_owned(),
-                elapsed,
-            },
-            output: None,
-        }],
-    );
-    let narrow_viewport = Rect::new(0, 0, 80, 24);
-    state.prepare_layout(narrow_viewport.width, narrow_viewport.height);
-    let (narrow_buf, _) = render_state(&state, narrow_viewport, true);
-    let narrow_header = buffer_row_text(&narrow_buf, 0);
-    assert!(
-        narrow_header.contains("1 failed]"),
-        "narrow headers must reserve the complete outcome suffix: {narrow_header:?}"
-    );
+    state.push_block(RenderBlock::read("a.rs", None));
+    state.push_block(RenderBlock::list_dir_with_output("src", "a.rs"));
+    state.push_block(RenderBlock::search("TODO", 1, Vec::new()));
 
     let viewport = Rect::new(0, 0, 120, 24);
     state.prepare_layout(viewport.width, viewport.height);
     let (buf, _) = render_state(&state, viewport, true);
     let header_row = buffer_row_text(&buf, 0);
     assert!(
-        header_row.contains(
-            "Read 1 file, Listed 1 dir, Searched 1 pattern  [hooks: 1 ok, 1 blocked, 1 failed]"
-        ),
-        "collapsed header must show every hidden hook outcome: {header_row:?}"
+        header_row.contains("Read 1 file, Listed 1 dir, Searched 1 pattern"),
+        "collapsed header labels every member kind: {header_row:?}"
     );
-    // A collapsed group has no rail, so the diamond at the content column carries the error colour.
-    assert_eq!(
-        buf[(HorizontalLayout::ACCENT + 2, 0)].fg,
-        Theme::current().accent_error,
-        "failed hook marks the group header as errored"
+    assert!(
+        !header_row.contains("[hooks:"),
+        "no hook suffix exists any more: {header_row:?}"
     );
 
     state.set_selected(Some(0));
@@ -649,30 +605,6 @@ fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members
             "expanded member {idx} keeps its ordinary collapsed row height"
         );
     }
-    let (buf, _) = render_state(&state, viewport, true);
-    let rows: Vec<String> = (0..viewport.height)
-        .map(|y| buffer_row_text(&buf, y))
-        .collect();
-    let hook_rows: Vec<_> = rows.iter().filter(|row| row.contains("[hooks:")).collect();
-    assert_eq!(
-        hook_rows.len(),
-        4,
-        "the group header and each member carry one compact hook summary: {rows:?}"
-    );
-    assert_eq!(
-        hook_rows
-            .iter()
-            .filter(|row| row.contains("[hooks: 1]"))
-            .count(),
-        3,
-        "each expanded member keeps one standalone compact suffix: {rows:?}"
-    );
-    assert!(
-        ["ok-hook", "blocked-hook", "failed-hook", "post_tool_use"]
-            .iter()
-            .all(|detail| rows.iter().all(|row| !row.contains(detail))),
-        "expanded groups must not reveal per-hook detail sections: {rows:?}"
-    );
 }
 
 /// A hidden thinking entry inside a folded run stays transparent through the whole production path.
@@ -3245,20 +3177,10 @@ fn overlay_pretty_link_url_with_cjk_text() {
 }
 
 /// Long URL inside a blockquote. The OverlayLink for the URL must cover continuation rows so OSC 8 is present on every wrapped row.
-///
-/// KNOWN-BUG: `map_hyperlinks_to_overlay` accumulates `cumulative_col` using `line.content.width()`.
-/// That width INCLUDES the `│ ` indent injected by `word_wrap_line_with_joiners` on continuation rows.
-/// Two consequences for blockquote/list URL wraps:
-///   (a) Cosmetic: the OverlayLink on continuation rows starts at `content_x`, covering the `│ ` indent.
-///       The indent characters are OSC 8 wrapped and inherit the terminal's auto-styling (underline/colour).
-///   (b) Functional: `cumulative_col` over-counts by `indent_width` cells per continuation row.
-///       The last `indent_width` cells of the URL on each continuation row are therefore not covered by an OverlayLink and are not clickable.
-///       With N continuation rows the unclickable tail accumulates to `N * indent_width` cells.
-/// The invariant that OSC 8 is present on every wrapped row of the URL IS satisfied, and this test pins it.
-/// Once the bug is fixed (needs `BlockLine` to carry the `subsequent_indent` width), tighten the assertions:
-/// `col_start == content_x + indent_width` on continuation rows, and `sum(fragment_widths) == url.display_width()`.
+/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
 #[test]
 fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/blockquote/path/with/many/hyphens-and-segments-here";
     let markdown = format!("> See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3278,6 +3200,20 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // The indent width for blockquote continuation is 2 ("│ ")
+    let indent_width: u16 = 2;
+
+    // Continuation rows (all but the first) must start after the indent
+    for frag in group.get(1..).into_iter().flatten() {
+        assert_eq!(
+            frag.col_start,
+            content_x + indent_width,
+            "OverlayLink on continuation row must start exactly at content_x + indent_width; got col_start={} but expected {}",
+            frag.col_start,
+            content_x + indent_width
+        );
+    }
+
     // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
@@ -3289,14 +3225,25 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Long URL inside a list item. Same OSC-coverage invariant as the blockquote test above.
-/// See that test for the rationale and the related indent-inclusion bug.
-/// Both its symptoms apply here too.
-/// The indent inherits the URL styling, and the last `indent_width` URL cells of each continuation row are not clickable.
+/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
 #[test]
 fn overlay_pretty_link_url_in_list_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/list/item/path/with/many/hyphens-and-segments-here";
     let markdown = format!("- See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3316,6 +3263,17 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // Top-level list items render as "\u{2022} \u{2026}" with no quote-bar indent on continuation rows
+    // Continuation OverlayLinks start at content_x (no indent offset)
+    for frag in group.get(1..).into_iter().flatten() {
+        assert_eq!(
+            frag.col_start, content_x,
+            "OverlayLink on list continuation row must start at content_x (no quote-bar indent); got col_start={} but expected {}",
+            frag.col_start, content_x
+        );
+    }
+
+    // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
             frag.col_start >= content_x,
@@ -3326,6 +3284,18 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Width changes trigger `set_max_table_width` resets inside `MarkdownContent::ensure_wrapped`.

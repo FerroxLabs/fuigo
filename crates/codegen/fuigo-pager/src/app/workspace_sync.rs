@@ -102,9 +102,38 @@ pub(crate) fn drain(app: &mut AppView) -> Vec<Effect> {
     app.workspace_write_in_flight = true;
     vec![Effect::UpsertWorkspaceMembers { store, members }]
 }
-fn agent_to_new_member(agent: &AgentView) -> Option<NewMember> {
+/// Live agents that render as provisional dashboard rows: the adoption rules minus the session id, which binds late,
+/// and not already covered by a committed member (that row renders through the member path under the same id).
+/// A bound id the store would reject can never persist, so it gets no row either.
+pub(crate) fn provisional_agent_ids(
+    agents: &indexmap::IndexMap<super::agent::AgentId, AgentView>,
+    snapshot: Option<&fuigo_dashboard_store::WorkspaceSnapshot>,
+) -> Vec<super::agent::AgentId> {
+    let is_member = |session_id: &SessionId| {
+        snapshot.is_some_and(|snapshot| {
+            snapshot
+                .members
+                .iter()
+                .any(|member| member.kind == MemberKind::Build && member.session_id == *session_id)
+        })
+    };
+    agents
+        .iter()
+        .filter(|(_, agent)| is_adoptable(agent))
+        .filter(|(_, agent)| match agent.session.session_id.as_ref() {
+            None => true,
+            Some(id) => SessionId::new(id.0.to_string()).is_ok_and(|id| !is_member(&id)),
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+/// Whether `agent` can ever become a workspace member; the session id is checked separately because it binds late.
+fn is_adoptable(agent: &AgentView) -> bool {
     let cwd = agent.session.cwd.to_string_lossy();
-    if agent.conversation_entry || !agent.session.cwd.is_absolute() || cwd.len() > MAX_CWD_BYTES {
+    !(agent.conversation_entry || !agent.session.cwd.is_absolute() || cwd.len() > MAX_CWD_BYTES)
+}
+fn agent_to_new_member(agent: &AgentView) -> Option<NewMember> {
+    if !is_adoptable(agent) {
         return None;
     }
     let session_id = SessionId::new(agent.session.session_id.as_ref()?.0.to_string()).ok()?;
@@ -396,5 +425,54 @@ mod tests {
             effects.as_slice(),
             [Effect::UpsertWorkspaceMembers { members, .. }] if members.len() == 1
         ));
+    }
+    /// An unbound dispatch and a bound-but-unwritten agent are provisional; committed members, conversation entries and
+    /// relative-cwd agents never are.
+    #[test]
+    fn provisional_ids_cover_unbound_and_unwritten_but_not_committed_or_ineligible() {
+        use super::super::agent::AgentId;
+        let mut unbound = crate::app::agent_view::test_fixtures::make_agent();
+        unbound.session.cwd = "/tmp/workspace-sync".into();
+        assert!(unbound.session.session_id.is_none());
+        let unwritten = eligible_agent();
+        let mut committed = eligible_agent();
+        committed.session.session_id = Some(acp::SessionId::new("committed"));
+        let mut conversation = eligible_agent();
+        conversation.conversation_entry = true;
+        let mut relative = eligible_agent();
+        relative.session.cwd = "relative/path".into();
+        let agents = indexmap::IndexMap::from([
+            (AgentId(1), unbound),
+            (AgentId(2), unwritten),
+            (AgentId(3), committed),
+            (AgentId(4), conversation),
+            (AgentId(5), relative),
+        ]);
+        let snapshot = fuigo_dashboard_store::WorkspaceSnapshot {
+            grouping: fuigo_dashboard_store::Grouping::State,
+            members: vec![Member {
+                session_id: SessionId::new("committed").unwrap(),
+                kind: MemberKind::Build,
+                origin: MemberOrigin::Local,
+                cwd: Some("/tmp/workspace-sync".into()),
+                title: None,
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 0,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        };
+        assert_eq!(
+            provisional_agent_ids(&agents, Some(&snapshot)),
+            vec![AgentId(1), AgentId(2)]
+        );
+        assert_eq!(
+            provisional_agent_ids(&agents, None),
+            vec![AgentId(1), AgentId(2), AgentId(3)],
+            "with no snapshot yet every eligible agent is provisional"
+        );
     }
 }

@@ -525,21 +525,31 @@ pub(crate) struct ProjectDiscoveryWatcher {
 }
 
 impl ProjectDiscoveryWatcher {
-    pub(crate) fn start(cwd: &Path) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
+    pub(crate) fn start(
+        cwd: &Path,
+        fuigo_home: &Path,
+    ) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
         let project_root = crate::session::workflow::registry::project_root(cwd);
         let project_fuigo = project_root.join(".fuigo");
+        // Fuigo home's root sees constant unrelated writes from every fuigo process
+        if paths_equal(&project_fuigo, fuigo_home) {
+            tracing::debug!(
+                project_fuigo = %project_fuigo.display(),
+                "project .fuigo is fuigo home; skills watcher owns it"
+            );
+            return None;
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let project_fuigo_for_events = project_fuigo.clone();
         let mut debouncer =
             new_filtered_debouncer(SKILLS_DEBOUNCE, move |res: DebounceEventResult| {
                 let Ok(events) = res else { return };
                 let mut change = None;
-                for event in events
+                for next in events
                     .iter()
                     .filter(|event| event.path.starts_with(&project_fuigo_for_events))
+                    .filter_map(|event| discovery_change_for_path(&event.path))
                 {
-                    let next = discovery_change_for_path(&event.path)
-                        .unwrap_or(DiscoveryChange::Workflows);
                     if next == DiscoveryChange::Skills {
                         change = Some(next);
                         break;
@@ -1252,6 +1262,51 @@ mod tests {
             discovery_change_for_path(&fuigo.join("skills/review/SKILL.md")),
             Some(DiscoveryChange::Skills)
         );
+    }
+
+    #[test]
+    fn project_discovery_watcher_skips_project_grok_equal_to_grok_home() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path();
+        git2::Repository::init(project).unwrap();
+        let project_fuigo = project.join(".fuigo");
+        fs::create_dir_all(project_fuigo.join("workflows")).unwrap();
+        // Nested cwd: the guard must compare the discovered git root's .fuigo, not cwd's
+        let cwd = project.join("sub");
+        fs::create_dir(&cwd).unwrap();
+
+        assert!(ProjectDiscoveryWatcher::start(&cwd, &project_fuigo).is_none());
+        assert!(ProjectDiscoveryWatcher::start(&cwd, &project.join("other-home")).is_some());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn project_discovery_watcher_ignores_unclassified_files_under_project_grok() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path();
+        git2::Repository::init(project).unwrap();
+        let project_fuigo = project.join(".fuigo");
+        fs::create_dir_all(project_fuigo.join("workflows")).unwrap();
+
+        let (_w, mut rx) = ProjectDiscoveryWatcher::start(project, &project.join("other-home"))
+            .expect("project watcher should start");
+
+        // Batch-mode debounce delivers about SKILLS_DEBOUNCE after the first raw event
+        let settle = SKILLS_DEBOUNCE + Duration::from_millis(500);
+        fs::write(project_fuigo.join("fuigo-leader.log"), "leader").unwrap();
+        std::thread::sleep(settle);
+        assert!(
+            rx.try_recv().is_err(),
+            "unclassified files under the project .fuigo must not fire"
+        );
+
+        fs::write(
+            project_fuigo.join("workflows").join("a.rhai"),
+            "complete(\"ok\");",
+        )
+        .unwrap();
+        std::thread::sleep(settle);
+        assert_eq!(rx.try_recv().ok(), Some(DiscoveryChange::Workflows));
     }
 
     #[test]

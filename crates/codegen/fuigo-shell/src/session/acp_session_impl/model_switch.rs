@@ -57,6 +57,9 @@ impl SessionActor {
                 max_completion_tokens: sampling_config.max_completion_tokens,
                 temperature: sampling_config.temperature,
                 top_p: sampling_config.top_p,
+                max_retries: Some(fuigo_sampler::resolve_max_retries(
+                    sampling_config.max_retries,
+                )),
                 api_backend: sampling_config.api_backend.clone(),
                 extra_headers: sampling_config.extra_headers.clone(),
                 query_params: sampling_config.query_params.clone(),
@@ -64,6 +67,9 @@ impl SessionActor {
                 context_window: new_context_window,
                 reasoning_effort: sampling_config.reasoning_effort,
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),
+                mtls_cert_dir: sampling_config.mtls_cert_dir.clone(),
+                rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
+                reasoning_summary: sampling_config.reasoning_summary,
             });
         let existing = self.chat_state_handle.get_credentials().await;
         let session_key = self

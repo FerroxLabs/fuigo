@@ -67,28 +67,72 @@ fn seed_tool_call(view: &mut AgentView) {
     );
 }
 #[test]
-fn scrollback_is_prompt_only_classifies_content() {
+fn scrollback_is_footer_only_classifies_content() {
     let empty = make_min_child_view();
-    assert!(scrollback_is_prompt_only(&empty.scrollback), "empty");
+    assert!(scrollback_is_footer_only(&empty.scrollback), "empty");
+    let mut footer = make_min_child_view();
+    footer.scrollback.push_block(RenderBlock::session_event(
+        crate::scrollback::blocks::SessionEvent::TurnCompleted { elapsed: None },
+    ));
+    assert!(scrollback_is_footer_only(&footer.scrollback), "footer");
     let mut prompt = make_min_child_view();
     prompt
         .scrollback
         .push_block(RenderBlock::user_prompt("scan src/"));
     assert!(
-        scrollback_is_prompt_only(&prompt.scrollback),
-        "injected prompt"
+        !scrollback_is_footer_only(&prompt.scrollback),
+        "echoed prompt is content"
     );
     let mut tool = make_min_child_view();
     seed_tool_call(&mut tool);
-    assert!(!scrollback_is_prompt_only(&tool.scrollback), "tool call");
-    let mut both = make_min_child_view();
-    both.scrollback
-        .push_block(RenderBlock::user_prompt("scan src/"));
-    seed_tool_call(&mut both);
-    assert!(
-        !scrollback_is_prompt_only(&both.scrollback),
-        "prompt + tool call"
+    assert!(!scrollback_is_footer_only(&tool.scrollback), "tool call");
+}
+#[test]
+fn a_running_child_whose_view_holds_only_the_echoed_prompt_is_not_replayed() {
+    let home = tempfile::tempdir().unwrap();
+    let child_sid = "child-echo-holds";
+    let session_dir = home
+        .path()
+        .join("sessions")
+        .join(urlencoding::encode("/tmp").as_ref())
+        .join(child_sid);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
+    let echo = format!(
+        r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"scan src/"}}}}}}}}"#
     );
+    std::fs::write(session_dir.join("updates.jsonl"), echo + "\n").unwrap();
+    set_replay_fuigo_home_for_tests(Some(home.path().to_path_buf()));
+    let mut parent = make_min_child_view();
+    let mut child = make_min_child_view();
+    child.session.tracker.handle_update(
+        acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new("scan src/"),
+        ))),
+        &NotificationMeta::default(),
+        &mut child.scrollback,
+    );
+    assert_eq!(child.scrollback.len(), 1);
+    parent
+        .subagent_views
+        .insert(child_sid.to_string(), Box::new(child));
+    let mut info = make_info();
+    info.child_session_id = child_sid.into();
+    parent.subagent_sessions.insert(child_sid.to_string(), info);
+    let before = test_support::transcript_reads();
+    assert_eq!(
+        ensure_subagent_child_replayed(&mut parent, child_sid),
+        ChildReplayOutcome::ViewHoldsLiveBlocks,
+        "a live echo closes the replay window like any other live block"
+    );
+    assert_eq!(test_support::transcript_reads(), before, "disk is not read");
+    let child = parent.subagent_views.get(child_sid).unwrap();
+    assert_eq!(
+        child.scrollback.len(),
+        1,
+        "the prompt is painted exactly once"
+    );
+    set_replay_fuigo_home_for_tests(None);
 }
 #[test]
 fn a_disk_backed_child_is_not_replayed_again() {
@@ -186,10 +230,8 @@ fn an_empty_read_of_a_running_resumed_child_stays_needs_replay_and_retries() {
     let child_sid = "child-resumed-empty";
     set_replay_fuigo_home_for_tests(Some(home.path().to_path_buf()));
     let mut parent = make_min_child_view();
-    let mut child = make_min_child_view();
-    child
-        .scrollback
-        .push_block(RenderBlock::user_prompt("task only"));
+    // A freshly spawned child view is empty: the task prompt arrives as the child stream's own echo
+    let child = make_min_child_view();
     parent
         .subagent_views
         .insert(child_sid.to_string(), Box::new(child));
@@ -561,10 +603,8 @@ fn child_view_for_live_update_hydrates_a_resumed_child_before_returning_it() {
     std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
     set_replay_fuigo_home_for_tests(Some(home.path().to_path_buf()));
     let mut parent = make_min_child_view();
-    let mut child = make_min_child_view();
-    child
-        .scrollback
-        .push_block(RenderBlock::user_prompt("task only"));
+    // A freshly spawned child view is empty: the task prompt arrives as the child stream's own echo
+    let child = make_min_child_view();
     parent
         .subagent_views
         .insert(child_sid.to_string(), Box::new(child));

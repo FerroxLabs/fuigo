@@ -349,7 +349,7 @@ pub(in crate::app::dispatch) fn dispatch_startup_fork_session(
             });
         return vec![];
     }
-    let (_agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None);
+    let (_agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None, false);
     let agent_id = app
         .agents
         .keys()

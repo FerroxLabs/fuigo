@@ -661,6 +661,11 @@ pub struct AppView {
     pub notification_service: NotificationService,
     /// The status row follows whichever agent is on screen, so the app owns it.
     pub(crate) status_line: crate::app::status_line::StatusLineState,
+    /// Out-of-band terminal escapes enqueued on the writer thread instead of written inline
+    /// under the stderr lock; see [`EscapeWriter`](crate::render::draw::EscapeWriter).
+    /// Taking that lock on the event-loop thread mid-session deadlocks the UI when the terminal
+    /// stops reading the pty (the writer thread is parked inside its own tty write holding it).
+    pub(crate) escape_writer: crate::render::draw::EscapeWriter,
     /// Escape sequences (title, progress bar) accumulated by the last `update_notifications()` tick.
     /// Consumed by `draw()` and appended to the frame's `post_flush_escapes` so they are written inside the synchronized output block.
     pub(crate) pending_notification_escapes: Option<String>,
@@ -819,6 +824,11 @@ pub struct AppView {
     /// Whether the welcome screen prompt is currently capturing focus (user typed in it).
     /// When true, menu shortcuts like n/w/q are disabled and Escape unfocuses the prompt.
     pub welcome_prompt_focused: bool,
+    /// Session created in the background while the welcome screen stays up; the first interaction reveals it.
+    /// `None` once revealed or abandoned.
+    pub home_session_agent: Option<AgentId>,
+    /// Welcome husk. Survives reveal, which clears `home_session_agent`; a load that opens a different session drops it while it is still empty.
+    pub optimistic_home_husk: Option<AgentId>,
     /// Sticky flag: set once the user types in the welcome prompt, hides the tip for the rest of the session (even if the input is cleared).
     pub welcome_tip_typing_dismissed: bool,
     /// Effects queued by notification handlers (drained by the event loop).
@@ -1030,6 +1040,8 @@ pub struct AppView {
     /// Passed to `show_ephemeral_tip`, which increments the matching key in place.
     /// In-memory only and per-session: never persisted to disk, so each pager run starts fresh (count 0).
     pub tip_seen_counts: std::collections::HashMap<&'static str, u32>,
+    /// `/copy` or `/export` was used this run: the export-copy tip is moot for every view from then on.
+    pub export_copy_slash_used: bool,
     /// Terminal height (rows) from startup / the last `Event::Resize`.
     /// Feeds the auto-compact derivation (`views::agent::effective_compact`).
     /// The render-value compact flag is forced on while the terminal is `AUTO_COMPACT_MAX_ROWS` or shorter.
@@ -1513,6 +1525,7 @@ impl AppView {
         acp_tx: AcpAgentTx,
         models: ModelState,
         bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
+        escape_writer: crate::render::draw::EscapeWriter,
     ) -> Self {
         let slash_mru =
             std::rc::Rc::new(std::cell::RefCell::new(crate::slash::mru::SlashMru::new()));
@@ -1544,8 +1557,12 @@ impl AppView {
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::from_settings(),
             appearance: AppearanceConfig::default(),
-            notification_service: NotificationService::new(Default::default()),
+            notification_service: NotificationService::new(
+                Default::default(),
+                escape_writer.clone(),
+            ),
             status_line: Default::default(),
+            escape_writer,
             pending_notification_escapes: None,
             deferred_notification: None,
             tracing_rx: None,
@@ -1563,6 +1580,8 @@ impl AppView {
             slash_mru,
             command_tags,
             welcome_prompt_focused: true,
+            home_session_agent: None,
+            optimistic_home_husk: None,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -1652,6 +1671,7 @@ impl AppView {
             contextual_hints: Default::default(),
             remote_contextual_hints: None,
             tip_seen_counts: Default::default(),
+            export_copy_slash_used: false,
             last_known_terminal_rows: 0,
             small_screen_tip_evaluated: false,
             ssh_wrap_tip_evaluated: false,
@@ -2219,8 +2239,7 @@ impl AppView {
         }
     }
     /// App-level Esc owners that consume the key BEFORE any agent input routing.
-    /// This is the render-boundary decision handed to the agent hint path (`AgentView::draw`, then `esc_would_cancel_turn`).
-    /// A hint bar rendered beneath one of these thus never advertises `Esc cancel`.
+    /// This is the render-boundary decision handed to the agent hint path (`AgentView::draw`).
     ///
     /// Mirrors `handle_input`'s intercepts, in their order:
     /// - the focused dev tracing pane (step 1a consumes all non-global keys)
@@ -2274,6 +2293,10 @@ impl AppView {
             ActiveView::Agent(id) => self.agents.get(&id),
             _ => None,
         }
+    }
+    /// The unused session prepared behind the welcome screen, if any (see `home_session_agent`).
+    pub fn home_session(&self) -> Option<&AgentView> {
+        self.home_session_agent.and_then(|id| self.agents.get(&id))
     }
     /// Session ID of the active agent, if one exists and has an established session.
     pub fn active_session_id(&self) -> Option<&str> {
@@ -2843,6 +2866,7 @@ impl AppView {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
                 &mut WelcomeInputCtx {
+                    registry: &self.registry,
                     auth_state: &self.auth_state,
                     trust_state: &self.trust_state,
                     consent_state: &self.consent_state,
@@ -3461,6 +3485,8 @@ use crate::views::session_picker::{
 };
 /// Context for welcome-view input handling.
 struct WelcomeInputCtx<'a> {
+    /// The welcome screen looks up `ActionId::OpenSessions` here, so it opens the session picker on the same key the agent screen uses.
+    registry: &'a crate::actions::ActionRegistry,
     auth_state: &'a AuthState,
     /// Folder-trust state.
     /// When `Pending` (and auth is `Done`), the trust question intercepts keys and swallows the rest so no session starts.
@@ -4061,7 +4087,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
         {
-            return InputOutcome::Action(Action::NewSession);
+            return InputOutcome::Action(Action::LeaveHome);
         }
         if matches!(ctx.auth_state, AuthState::Done) {
             if ctx.upgrade_cta_keyboard && key!('o', CONTROL).matches(key) {
@@ -4072,7 +4098,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
             }
-            if key!(F(3)).matches(key) {
+            if ctx.registry.matches_id(ActionId::OpenSessions, key) {
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
@@ -4089,7 +4115,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
         }
         if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
-            return InputOutcome::ActionThenForward(Action::NewSession);
+            return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if *ctx.prompt_focused
             && matches!(ctx.auth_state, AuthState::Done)
@@ -4097,7 +4123,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && (crate::input::key::is_text_input_key(key)
                 || (ch == 'v' && crate::input::key::is_paste_key(key)))
         {
-            return InputOutcome::ActionThenForward(Action::NewSession);
+            return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if *ctx.prompt_focused {
             let had_highlight = ctx.prompt.textarea.selection_range().is_some();
@@ -4133,7 +4159,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if crate::input::key::is_text_input_key(key) {
                 *ctx.prompt_focused = true;
                 *ctx.menu_index = None;
-                return InputOutcome::ActionThenForward(Action::NewSession);
+                return InputOutcome::ActionThenForward(Action::LeaveHome);
             }
         }
         match ctx.auth_state {
@@ -4254,7 +4280,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if !ctx.has_access || ctx.is_zdr_blocked {
                     return InputOutcome::Unchanged;
                 }
-                return InputOutcome::ActionThenForward(Action::NewSession);
+                return InputOutcome::ActionThenForward(Action::LeaveHome);
             }
             AuthState::Authenticating {
                 mode: AuthMode::Loopback | AuthMode::ApiKey,
@@ -4859,7 +4885,8 @@ impl AppView {
                     })
             });
         let fps_frame_started = fps_overlay.as_ref().map(|_| std::time::Instant::now());
-        crate::render::draw::draw_frame(terminal, cursor, |f, link_spans| {
+        let terminal_ctx = crate::terminal::terminal_context();
+        crate::render::draw::draw_frame(terminal, cursor, terminal_ctx, |f, link_spans| {
             let full_area = f.area();
             let tracing_height = 0u16;
             #[allow(unused_variables)]
@@ -5327,6 +5354,7 @@ impl AppView {
                                 self.workspace_snapshot.as_ref(),
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
+                                self.credit_balance.as_ref(),
                             );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
@@ -5543,7 +5571,7 @@ impl AppView {
             || self.welcome_doc_viewer.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard
-                if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some()))
+                if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some() || d.usage_modal.is_some()))
             || cloud_modal_open
     }
     /// Store the resolved per-tip gates and propagate the prompt-relevant tips (undo and plan nudge) to every agent's prompt.
@@ -5743,10 +5771,10 @@ impl AppView {
         if matches!(self.active_view, ActiveView::AgentDashboard)
             && let Some(d) = self.dashboard.as_mut()
         {
-            d.spinner_tick = d.spinner_tick.wrapping_add(1);
-            needs_redraw = true;
-            d.dispatch.poll_file_search();
-            d.peek_reply.poll_file_search();
+            // A tick owes a repaint only when a painted spinner or blink changes frame on it; the counter still advances every tick
+            needs_redraw |= d.tick();
+            needs_redraw |= d.dispatch.poll_file_search();
+            needs_redraw |= d.peek_reply.poll_file_search();
         }
         if let Some(pending) = &self.pending_action
             && pending.expired()
@@ -5797,6 +5825,11 @@ impl AppView {
                 agent.btw_state,
                 Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
             ) && spinner_frame_tick;
+            needs_redraw |= agent
+                .extensions_modal
+                .as_ref()
+                .is_some_and(|m| m.needs_spinner_tick())
+                && spinner_frame_tick;
             needs_redraw |= matches!(
                 agent.active_modal.as_ref(),
                 Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -5846,6 +5879,24 @@ impl AppView {
             needs_redraw |= agent.prompt.history_search.poll();
             needs_redraw |= agent.poll_scrollback_search();
             needs_redraw |= agent.tick_toast();
+            if !self.export_copy_slash_used
+                && let Some(child_sid) = agent.active_subagent.clone()
+                && let Some(child_view) = agent.subagent_views.get_mut(&child_sid)
+            {
+                if child_view.tick_export_copy_detector() {
+                    needs_redraw |= super::dispatch::present_export_copy_tip(
+                        child_view,
+                        &mut self.tip_seen_counts,
+                        self.contextual_hints.export_copy,
+                    );
+                }
+            } else if !self.export_copy_slash_used && agent.tick_export_copy_detector() {
+                needs_redraw |= super::dispatch::present_export_copy_tip(
+                    agent,
+                    &mut self.tip_seen_counts,
+                    self.contextual_hints.export_copy,
+                );
+            }
             needs_redraw |= agent.tick_extensions_result_notice();
             needs_redraw |= agent.tick_ephemeral_tip();
             needs_redraw |= agent.tick_mode_banner();
@@ -6125,7 +6176,7 @@ impl AppView {
                     || agent
                         .extensions_modal
                         .as_ref()
-                        .is_some_and(|m| m.result_notice.is_some())
+                        .is_some_and(|m| m.result_notice.is_some() || m.needs_spinner_tick())
                     || agent.ephemeral_tip_needs_tick()
                     || agent.mode_switch_banner.is_some()
                     || agent.has_drag_autoscroll()
@@ -6184,21 +6235,18 @@ impl AppView {
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {
-                let agents_need = self.agents.values().any(|agent| {
-                    !agent.session.state.is_idle()
-                        || !agent.permission_queue.is_empty()
-                        || agent.session.loading_replay
-                        || agent
-                            .subagent_sessions
-                            .values()
-                            .any(|info| !info.finished && info.workflow_run_id.is_none())
-                        || agent.workflow_runs.iter().any(|run| run.is_active())
-                });
+                // The last frame says what animates: a working agent whose row the frame never painted (filtered,
+                // collapsed, folded) owes no ticks; the loop re-checks this after every paint so a freshly painted
+                // spinner arms its next tick
+                let rows_animate = self
+                    .dashboard
+                    .as_ref()
+                    .is_some_and(|d| d.painted_animations.any());
                 let dash_search = self.dashboard.as_ref().is_some_and(|d| {
                     d.dispatch.file_search.context().is_some()
                         || d.peek_reply.file_search.context().is_some()
                 });
-                if agents_need || dash_search {
+                if rows_animate || dash_search {
                     TickDemand::Fast
                 } else {
                     TickDemand::None

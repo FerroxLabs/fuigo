@@ -20,7 +20,7 @@ use crate::scrollback::blocks::ContextInfoBlock;
 use crate::theme::Theme;
 use crate::views::credit_bar::CreditBalance;
 use crate::views::modal_window::{
-    self as mw, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
+    self as mw, ModalSizing, ModalWindowConfig, ModalWindowOutcome, ModalWindowState, Shortcut,
 };
 
 /// Footer shortcut ID for "copy session ID".
@@ -257,6 +257,8 @@ impl UsageInfoModalState {
 /// Outcome of a content key/mouse event. Chrome events (Esc, `[✗]`, tab clicks, footer clicks) are handled by the caller via `modal_window`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageModalOutcome {
+    /// The chrome asked to close (Esc, `[✗]`); only [`route_usage_modal_key`] / [`route_usage_modal_mouse`] emit it.
+    Close,
     /// Copy the session ID to the clipboard (the caller owns clipboard and toast).
     /// Emitted by the `c` shortcut and the footer button.
     CopySessionId,
@@ -265,6 +267,84 @@ pub enum UsageModalOutcome {
     CopyText(String),
     Changed,
     Unchanged,
+}
+
+/// The modal's chrome config: no title, tabs, footer, or fold tree of its own (tabs and shortcuts are painted by `render_usage_modal`).
+fn chrome_cfg() -> ModalWindowConfig<'static> {
+    ModalWindowConfig {
+        title: "",
+        tabs: None,
+        shortcuts: &[],
+        sizing: ModalSizing::default(),
+        fold_info: None,
+    }
+}
+
+/// Route a key: `modal_window` chrome first (Esc closes), then the content keys.
+pub fn route_usage_modal_key(state: &mut UsageInfoModalState, key: &KeyEvent) -> UsageModalOutcome {
+    match mw::handle_modal_key(&mut state.window, key, &chrome_cfg()) {
+        ModalWindowOutcome::CloseRequested => UsageModalOutcome::Close,
+        ModalWindowOutcome::Unhandled => handle_usage_modal_key(state, key),
+        // The chrome config declares no tabs, footer, or fold tree, so these never fire for keys
+        ModalWindowOutcome::Handled
+        | ModalWindowOutcome::TabChanged(_)
+        | ModalWindowOutcome::ShortcutActivated(_)
+        | ModalWindowOutcome::CollapseGroup
+        | ModalWindowOutcome::ExpandGroup
+        | ModalWindowOutcome::CollapseDetails
+        | ModalWindowOutcome::ExpandDetails
+        | ModalWindowOutcome::JumpToParent(_) => UsageModalOutcome::Changed,
+    }
+}
+
+/// Route a mouse event: chrome first (close button, tab headers, footer buttons stay clickable), then drag / wheel / click-to-copy.
+pub fn route_usage_modal_mouse(
+    state: &mut UsageInfoModalState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) -> UsageModalOutcome {
+    match mw::handle_modal_mouse(&mut state.window, kind, column, row) {
+        ModalWindowOutcome::CloseRequested => UsageModalOutcome::Close,
+        ModalWindowOutcome::TabChanged(idx) => {
+            state.set_tab(UsageInfoTab::from_index(idx));
+            UsageModalOutcome::Changed
+        }
+        ModalWindowOutcome::ShortcutActivated(id) => {
+            // Footer click: drop gesture and hover
+            state.clear_text_drag();
+            if id == COPY_SESSION_ID_SHORTCUT {
+                UsageModalOutcome::CopySessionId
+            } else if id == COPY_ALL_SESSION_INFO_SHORTCUT
+                && let Some(text) = state.session_info_copy_all()
+            {
+                UsageModalOutcome::CopyText(text)
+            } else {
+                UsageModalOutcome::Changed
+            }
+        }
+        ModalWindowOutcome::Handled => {
+            // Same rule as content: a bare Moved with an active drag is a lost Up, and a non-empty drag still copies
+            // The pending press is left alone for click-to-copy
+            if matches!(kind, MouseEventKind::Moved) {
+                if state.has_active_drag() {
+                    return state.finish_lost_drag();
+                }
+                state.hovered_copy_line = None;
+            } else {
+                // Same-tab click and other chrome Downs: drop gesture and hover
+                state.clear_text_drag();
+            }
+            UsageModalOutcome::Changed
+        }
+        ModalWindowOutcome::Unhandled => handle_usage_modal_mouse(state, kind, column, row),
+        // Fold-tree navigation belongs to the settings modal; this window has no fold info
+        ModalWindowOutcome::CollapseGroup
+        | ModalWindowOutcome::ExpandGroup
+        | ModalWindowOutcome::CollapseDetails
+        | ModalWindowOutcome::ExpandDetails
+        | ModalWindowOutcome::JumpToParent(_) => UsageModalOutcome::Changed,
+    }
 }
 
 pub fn handle_usage_modal_key(
@@ -930,7 +1010,7 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
             let value_idx = lines.len();
             let hovered = state.hovered_copy_line == Some(value_idx);
             let label_style = if hovered {
-                theme.muted().bg(theme.bg_hover)
+                theme.muted().patch(theme.hover_overlay())
             } else {
                 theme.muted()
             };
@@ -969,7 +1049,7 @@ fn session_info_content(state: &UsageInfoModalState, theme: &Theme) -> TabConten
 fn copy_value_style(theme: &Theme, hovered: bool) -> Style {
     let mut style = Style::default().fg(theme.text_primary);
     if hovered {
-        style = style.bg(theme.bg_hover);
+        style = style.patch(theme.hover_overlay());
     }
     style
 }

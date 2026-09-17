@@ -894,8 +894,10 @@ mod tests {
             registry.lookup(&ctrl_r, When::ScrollbackFocused),
             Some(ActionId::ToggleMouseCapture)
         );
-        // Not on agent/prompt contexts (Ctrl+R is deliberately unbound there; agent keeps the model picker on Ctrl+M)
-        assert_eq!(registry.lookup(&ctrl_r, When::AgentScreen), None);
+        assert_eq!(
+            registry.lookup(&ctrl_r, When::AgentScreen),
+            Some(ActionId::OpenSessions)
+        );
         assert_eq!(registry.lookup(&ctrl_r, When::PromptFocused), None);
         assert_eq!(
             registry.lookup(&ctrl_m, When::AgentScreen),
