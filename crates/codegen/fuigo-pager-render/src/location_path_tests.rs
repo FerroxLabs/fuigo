@@ -82,7 +82,7 @@ fn shorten_location_path_multi_dot_dirs_are_not_traversal() {
     assert_eq!(shorten_location_component("."), ".");
     assert_eq!(shorten_location_component(".."), "..");
     assert_eq!(shorten_location_component("..."), "...");
-    assert_eq!(shorten_location_component(".fuigo"), ".g");
+    assert_eq!(shorten_location_component(".fuigo"), ".f");
     assert_eq!(shorten_location_component("..cache"), "..c");
     assert_eq!(shorten_location_component("...foo"), "...f");
     assert_eq!(shorten_location_component("Documents"), "D");

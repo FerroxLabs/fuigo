@@ -590,7 +590,9 @@ fn build_entries_lists_undo_and_redo() {
 
     let (redo_keys, redo_help) = pseudo_hint(&entries, "redo").expect("redo row");
     assert!(redo_keys.contains(&key!('z', CONTROL | SHIFT)));
-    assert!(redo_keys.contains(&key!('r', CONTROL)));
+    // Ctrl+R now opens the session picker; Alt+Z is redo's fallback chord
+    assert!(redo_keys.contains(&key!('z', ALT)));
+    assert!(!redo_keys.contains(&key!('r', CONTROL)));
     assert_eq!(redo_help, Some(REDO_LONG_HELP));
 }
 

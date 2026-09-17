@@ -1277,8 +1277,8 @@ mod tests {
         );
 
         // Plan plus always-approve shows `plan` only
-        // Plan mode blocks edits in every permission mode (shell-side gate), so the plan badge is the honest one
-        // Yolo stays on underneath and reappears once plan exits
+        // Plan and the permission mode are independent axes: plan mode never hides the permission flag,
+        // so the badge reads `plan · always-approve` (yolo still wins over auto within the permission axis)
         planp.auto_approve = true;
         planp.auto = true;
         let plan_yolo_bottom = badge_row(&planp, 6);
@@ -1287,8 +1287,8 @@ mod tests {
             "plan flag must show in plan+yolo: {plan_yolo_bottom:?}",
         );
         assert!(
-            !plan_yolo_bottom.contains("always-approve") && !plan_yolo_bottom.contains("auto"),
-            "plan suppresses always-approve and auto: {plan_yolo_bottom:?}",
+            plan_yolo_bottom.contains("always-approve") && !plan_yolo_bottom.contains(" auto"),
+            "plan keeps always-approve visible and yolo still wins over auto: {plan_yolo_bottom:?}",
         );
 
         // Yolo without plan shows `always-approve` (and it wins over auto)
