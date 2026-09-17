@@ -36,6 +36,7 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::TokyoNight as u8 => ThemeKind::TokyoNight,
         x if x == ThemeKind::RosePineMoon as u8 => ThemeKind::RosePineMoon,
         x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
+        x if x == ThemeKind::Terminal as u8 => ThemeKind::Terminal,
         x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
         _ => ThemeKind::FuigoNight,
     }
@@ -66,7 +67,7 @@ pub fn current_kind() -> ThemeKind {
         // Two threads racing into the seed path is harmless: the disk read is idempotent and `store` is atomic
         // Worst case both threads call `load_from_disk` once
         if let Some(kind) = load_from_disk() {
-            CURRENT.store(kind as u8, Ordering::Relaxed);
+            store_kind(kind);
         }
         LOADED.store(true, Ordering::Release);
     }
@@ -78,27 +79,49 @@ pub fn current_kind() -> ThemeKind {
 /// Used by the dispatcher (after `Action::SetTheme` is processed) and by the live-preview path during the picker.
 /// Disk-write happens via `Effect::PersistSetting`, NOT here.
 pub fn set(kind: ThemeKind) {
-    CURRENT.store(kind as u8, Ordering::Relaxed);
+    store_kind(kind);
     LOADED.store(true, Ordering::Release);
 }
 
-// -- Terminal-native lock (minimal mode) --------------------------------------
+/// Store `kind` and re-derive everything keyed off terminal-nativeness.
+/// Every write to `CURRENT` goes through here so the markdown renderer
+/// can never drift from the selected theme.
+fn store_kind(kind: ThemeKind) {
+    CURRENT.store(kind as u8, Ordering::Relaxed);
+    sync_markdown_polarity();
+}
+
+// -- Terminal-native palette (minimal-mode lock + `terminal` theme) ----------
 
 #[must_use]
 pub fn terminal_native_locked() -> bool {
     TERMINAL_NATIVE_LOCK.load(Ordering::Relaxed)
 }
 
+/// Minimal-mode lock or the selected `terminal` theme. Loads `CURRENT` directly so it cannot re-seed from disk and drift from `Theme::current`.
+#[must_use]
+pub fn terminal_native_active() -> bool {
+    terminal_native_locked()
+        || theme_kind_from_u8(CURRENT.load(Ordering::Relaxed)).is_terminal_native()
+}
+
+/// Engage or clear the terminal-native theme lock.
 pub fn set_terminal_native_lock(locked: bool) {
     TERMINAL_NATIVE_LOCK.store(locked, Ordering::Relaxed);
+    sync_markdown_polarity();
+}
+
+/// Terminal-native: cap at ANSI-16 and use the dual-polarity accent map. Night pastels otherwise collapse to White and vanish on light profiles.
+fn sync_markdown_polarity() {
+    let native = terminal_native_active();
     // Cap quantization at ANSI-16 and switch syntax tokens to the dual-polarity accent map (default-fg grays and base ANSI hues)
-    // Without the polarity-safe remap, night-theme pastels collapse to White and vanish on light terminal profiles in minimal mode
-    fuigo_markdown::set_color_level_cap(if locked {
+    // Without the polarity-safe remap, night-theme pastels collapse to White and vanish on light terminal profiles
+    fuigo_markdown::set_color_level_cap(if native {
         fuigo_markdown::ColorLevel::Basic
     } else {
         fuigo_markdown::ColorLevel::TrueColor
     });
-    fuigo_markdown::set_polarity_safe_syntax(locked);
+    fuigo_markdown::set_polarity_safe_syntax(native);
 }
 
 // -- Auto-mode ---------------------------------------------------------------
@@ -258,7 +281,7 @@ fn load_auto_theme_config() -> AutoThemeConfig {
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_for_test() {
     // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool pair is safe to reset without any cross-thread coordination
-    CURRENT.store(ThemeKind::FuigoNight as u8, Ordering::Relaxed);
+    store_kind(ThemeKind::FuigoNight);
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);
@@ -360,6 +383,36 @@ mod tests {
             set_terminal_native_lock(true);
             reset_for_test();
             assert!(!terminal_native_locked());
+        });
+    }
+
+    /// Chrome adaptations paint opaque backgrounds. Transparency survives only if `current()` returns `Theme::terminal()` before them.
+    #[test]
+    fn terminal_theme_serves_unadapted_terminal_palette() {
+        with_test_env(|| {
+            set(ThemeKind::Terminal);
+            assert_eq!(current_kind(), ThemeKind::Terminal, "kind is selectable");
+            assert!(
+                !terminal_native_locked(),
+                "the theme must not engage minimal mode's session lock"
+            );
+            assert!(terminal_native_active());
+            assert!(
+                fuigo_markdown::polarity_safe_syntax(),
+                "night pastels would collapse to White on a light profile"
+            );
+            assert_eq!(
+                super::super::Theme::current(),
+                super::super::Theme::terminal(),
+                "current() must serve the palette untouched by adaptations"
+            );
+
+            set(ThemeKind::FuigoNight);
+            assert!(!terminal_native_active());
+            assert!(
+                !fuigo_markdown::polarity_safe_syntax(),
+                "switching away must restore the RGB syntax palette"
+            );
         });
     }
 

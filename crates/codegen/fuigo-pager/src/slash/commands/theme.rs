@@ -16,6 +16,15 @@ use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 
 pub struct ThemeCommand;
 
+/// Canonical name plus every alias, so `/theme transparent` still ranks the `terminal` row.
+/// Only the picker's `match_text` carries the aliases; `insert_text` stays the canonical display name.
+fn picker_match_text(kind: ThemeKind) -> String {
+    std::iter::once(kind.display_name())
+        .chain(kind.aliases().iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl SlashCommand for ThemeCommand {
     slash_meta! {
         name: "theme",
@@ -65,7 +74,7 @@ impl SlashCommand for ThemeCommand {
         let auto_active = if is_auto { " (active)" } else { "" };
         let mut items = vec![ArgItem {
             display: "auto".to_string(),
-            match_text: "auto".to_string(),
+            match_text: picker_match_text(ThemeKind::Auto),
             insert_text: "auto".to_string(),
             description: format!("auto (follow system){auto_active}"),
         }];
@@ -79,7 +88,7 @@ impl SlashCommand for ThemeCommand {
             };
             ArgItem {
                 display: kind.display_name().to_string(),
-                match_text: kind.display_name().to_string(),
+                match_text: picker_match_text(*kind),
                 insert_text: kind.display_name().to_string(),
                 description: format!("{}{active}", kind.display_name()),
             }
@@ -282,6 +291,45 @@ mod tests {
                     "{} should not show (active) in auto mode",
                     item.insert_text
                 );
+            }
+        });
+    }
+
+
+    /// Typing an alias ranks its canonical row first; the row still inserts the canonical name.
+    #[test]
+    fn suggest_args_alias_ranks_canonical_row() {
+        with_test_env(|| {
+            let cmd = ThemeCommand;
+            let models = crate::acp::model_state::ModelState::default();
+            let ctx = AppCtx {
+                models: &models,
+                cwd: std::path::Path::new("."),
+                has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
+                screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
+            };
+            let items = cmd.suggest_args(&ctx, "").expect("should return items");
+            let mut matcher = crate::slash::matcher::FuzzyMatcher::new();
+            for (alias, canonical) in [
+                ("transparent", "terminal"),
+                ("dark", "fuigonight"),
+                ("light", "fuigoday"),
+                ("system", "auto"),
+            ] {
+                let hits = matcher.rank(&items, alias, items.len(), |item| &item.match_text);
+                let (top, _) = hits
+                    .first()
+                    .unwrap_or_else(|| panic!("{alias} matched nothing"));
+                let top = items
+                    .get(*top)
+                    .unwrap_or_else(|| panic!("{alias} ranked out-of-range index {top}"));
+                assert_eq!(top.insert_text, canonical, "top hit for {alias}");
             }
         });
     }

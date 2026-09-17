@@ -30,6 +30,8 @@ pub enum ThemeKind {
     TokyoNight = 2,
     RosePineMoon = 3,
     OscuraMidnight = 5,
+    /// Every bg is `Reset` so the terminal canvas shows through; legible on both polarities without appearance detection.
+    Terminal = 6,
     /// Meta-variant: follow system dark/light appearance.
     ///
     /// Resolved to a concrete theme at startup and on live appearance changes.
@@ -46,6 +48,7 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        ThemeKind::Terminal,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -54,7 +57,8 @@ impl ThemeKind {
     pub fn available() -> &'static [ThemeKind] {
         // Pick the right const slice for the detected color level; no heap allocation needed
         const ALL: &[ThemeKind] = ThemeKind::ALL;
-        const NO_TRUECOLOR: &[ThemeKind] = &[ThemeKind::FuigoNight, ThemeKind::FuigoDay];
+        const NO_TRUECOLOR: &[ThemeKind] =
+            &[ThemeKind::FuigoNight, ThemeKind::FuigoDay, ThemeKind::Terminal];
 
         if color_support::detect().has_truecolor() {
             ALL
@@ -70,6 +74,7 @@ impl ThemeKind {
             Self::FuigoDay => "fuigoday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
+            Self::Terminal => "terminal",
             Self::Auto => "auto",
         }
     }
@@ -85,26 +90,43 @@ impl ThemeKind {
             Self::FuigoDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
+            // Reset plus named ANSI-16 entries only — nothing to quantize.
+            Self::Terminal => false,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
         }
     }
 
-    /// Parse a theme name (case-insensitive).
+    /// Whether this kind paints the terminal-native palette ([`Theme::terminal`]) instead of an RGB palette, and so needs the same polarity-safe rendering paths as minimal mode's lock.
+    #[must_use]
+    pub fn is_terminal_native(self) -> bool {
+        self == Self::Terminal
+    }
+
+    /// Alternate lowercase spellings accepted by [`from_name`](Self::from_name), excluding [`display_name`](Self::display_name).
+    pub fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::FuigoNight => &["fuigo-night", "dark"],
+            Self::TokyoNight => &["tokyo-night", "tokyo"],
+            Self::FuigoDay => &["fuigo-day", "light", "day"],
+            Self::RosePineMoon => &["rosepine", "rose-pine", "rose-pine-moon"],
+            Self::OscuraMidnight => &["oscura"],
+            Self::Terminal => &["terminal-default", "transparent", "native"],
+            Self::Auto => &["system"],
+        }
+    }
+
+    /// Parse a theme name (case-insensitive) against [`display_name`](Self::display_name) and [`aliases`](Self::aliases).
     /// Every conversion from string to `ThemeKind` must go through this function.
     pub fn from_name(name: &str) -> Option<Self> {
         let lower = name.to_lowercase();
-        match lower.as_str() {
-            "auto" | "system" => Some(Self::Auto),
-            "fuigonight" | "fuigo-night" | "dark" => Some(Self::FuigoNight),
-            "tokyonight" | "tokyo-night" | "tokyo" => Some(Self::TokyoNight),
-            "fuigoday" | "fuigo-day" | "light" | "day" => Some(Self::FuigoDay),
-            "rosepine" | "rose-pine" | "rosepine-moon" | "rose-pine-moon" => {
-                Some(Self::RosePineMoon)
-            }
-            "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
-            _ => None,
-        }
+        Self::ALL
+            .iter()
+            .chain(std::iter::once(&Self::Auto))
+            .copied()
+            .find(|kind| {
+                kind.display_name() == lower || kind.aliases().contains(&lower.as_str())
+            })
     }
 
     /// Whether this is the meta "auto" variant (resolved at runtime).
@@ -138,6 +160,7 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "fuigoday" => "Fuigo Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
+        "terminal" => "Terminal",
         other => other,
     }
 }
@@ -255,12 +278,19 @@ impl Theme {
         if cache::terminal_native_locked() {
             return Self::terminal_default().quantized(level);
         }
-        let base = match cache::current_kind() {
+        let kind = cache::current_kind();
+        // Before polarity adaptations: contrast boost and ANSI16 overrides would paint opaque bgs over `Reset`.
+        if kind.is_terminal_native() {
+            return Self::terminal().quantized(level);
+        }
+        let base = match kind {
             ThemeKind::FuigoNight => Self::fuigonight(),
             ThemeKind::TokyoNight => Self::tokyonight(),
             ThemeKind::FuigoDay => Self::fuigoday(),
             ThemeKind::RosePineMoon => Self::rosepine_moon(),
             ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+            // Handled by the early return above.
+            ThemeKind::Terminal => Self::terminal(),
             // Auto is resolved to a concrete theme before being stored; if reached, fall back to FuigoNight
             ThemeKind::Auto => Self::fuigonight(),
         };
@@ -373,10 +403,10 @@ impl Theme {
     }
 
     /// Style for shell command suggestion ghost text (dimmed italic).
+    /// Inherits [`Self::dim`]'s polarity-safe rule on terminal-native
+    /// palettes instead of painting bright black.
     pub fn ghost_text_style(&self) -> ratatui::style::Style {
-        ratatui::style::Style::default()
-            .fg(self.gray_dim)
-            .add_modifier(ratatui::style::Modifier::ITALIC)
+        self.dim().add_modifier(ratatui::style::Modifier::ITALIC)
     }
 
     /// True when `bg_base` reads as dark per BT.709 luminance.
@@ -606,6 +636,35 @@ mod tests {
         assert_eq!(ThemeKind::from_name("SYSTEM"), Some(ThemeKind::Auto));
     }
 
+    /// Every alias parses back to its own kind, so no alias is shadowed by another kind's name.
+    #[test]
+    fn from_name_accepts_every_alias() {
+        for kind in ThemeKind::ALL.iter().chain([&ThemeKind::Auto]).copied() {
+            for alias in kind.aliases() {
+                assert_eq!(ThemeKind::from_name(alias), Some(kind), "alias {alias}");
+            }
+            assert_eq!(ThemeKind::from_name(kind.display_name()), Some(kind));
+        }
+    }
+
+    /// The transparent theme parses under its canonical name and aliases and is listed in every catalog.
+    #[test]
+    fn terminal_theme_parses_and_is_selectable() {
+        for name in ["terminal", "terminal-default", "transparent", "native", "TERMINAL"] {
+            assert_eq!(
+                ThemeKind::from_name(name),
+                Some(ThemeKind::Terminal),
+                "{name} must parse"
+            );
+        }
+        assert_eq!(canonical_name("transparent"), Some("terminal"));
+        assert_eq!(display_name_for_canonical("terminal"), "Terminal");
+        assert!(ThemeKind::ALL.contains(&ThemeKind::Terminal));
+        assert!(ThemeKind::available().contains(&ThemeKind::Terminal));
+        assert!(ThemeKind::Terminal.is_terminal_native());
+        assert!(!ThemeKind::Terminal.requires_truecolor());
+    }
+
     #[test]
     fn display_name_auto() {
         assert_eq!(ThemeKind::Auto.display_name(), "auto");
@@ -623,6 +682,7 @@ mod tests {
         assert!(!ThemeKind::TokyoNight.is_auto());
         assert!(!ThemeKind::RosePineMoon.is_auto());
         assert!(!ThemeKind::OscuraMidnight.is_auto());
+        assert!(!ThemeKind::Terminal.is_auto());
     }
 
     #[test]
@@ -948,6 +1008,22 @@ mod tests {
                 ThemeKind::TokyoNight => Theme::tokyonight(),
                 ThemeKind::RosePineMoon => Theme::rosepine_moon(),
                 ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+                // The terminal palette has no RGB scrollbar to contrast: the track defers to the
+                // canvas and the thumb is the bright-black decoration accent, which is legible on
+                // both polarities by construction. Assert that shape instead of an RGB delta.
+                ThemeKind::Terminal => {
+                    assert_eq!(
+                        Theme::terminal().scrollbar_bg,
+                        Color::Reset,
+                        "terminal track must defer to the canvas"
+                    );
+                    assert_eq!(
+                        Theme::terminal().scrollbar_fg,
+                        Color::DarkGray,
+                        "terminal thumb is the bright-black decoration accent"
+                    );
+                    continue;
+                }
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);

@@ -6479,6 +6479,15 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::RosePineMoon => crate::theme::Theme::rosepine_moon(),
         // Resolved via `Theme::current()` rather than a constructor because `theme::oscura` is a private module
         crate::theme::ThemeKind::OscuraMidnight => crate::theme::Theme::current(),
+        // The bandless terminal palette has no band tokens to contrast: the preview's containment
+        // comes from reverse video (`Theme::selection_overlay`), asserted in theme/terminal_default.rs.
+        crate::theme::ThemeKind::Terminal => {
+            assert!(
+                crate::theme::Theme::terminal().is_bandless(),
+                "the terminal palette must carry the preview with reverse video"
+            );
+            return;
+        }
         crate::theme::ThemeKind::Auto => crate::theme::Theme::fuigonight(),
     };
     assert_ne!(

@@ -138,6 +138,10 @@ impl ListOverlay {
                 height: 1,
             };
             buf.set_style(row_rect, Style::default().bg(row_bg));
+            // Bandless palette: the cursor row is reverse video (`bg_visual` is `Reset` there)
+            if is_cursor && focused {
+                buf.set_style(row_rect, theme.selection_overlay());
+            }
 
             let ctx = RowCtx {
                 is_cursor,
