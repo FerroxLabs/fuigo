@@ -379,6 +379,7 @@ impl SessionActor {
             })),
         );
         let policy = input_origin.policy();
+        self.open_subagent_spawn_admission();
         if let Some(completion_id) = input_origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
             if let Some(reservations) = &self.tool_context.task_completion_reservations {
@@ -1116,7 +1117,6 @@ impl SessionActor {
         }
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
-        self.open_subagent_spawn_admission();
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();

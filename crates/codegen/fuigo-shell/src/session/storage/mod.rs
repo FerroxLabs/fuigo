@@ -265,7 +265,9 @@ pub(crate) mod chat_rebuild {
     use agent_client_protocol as acp;
 
     use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator};
-    use crate::sampling::{AssistantItem, ContentPart, ConversationItem, ToolCall};
+    use crate::sampling::{
+        AssistantItem, ContentPart, ConversationItem, SyntheticReason, ToolCall, UserItem,
+    };
 
     /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and renames it over the target.
     /// A failed rebuild leaves the existing cache intact rather than a truncated partial that load would trust.
@@ -327,6 +329,7 @@ pub(crate) mod chat_rebuild {
     /// Tool completion flushes the agent item before emitting the result.
     struct ChatReducer {
         user_parts: Vec<ContentPart>,
+        user_is_interjection: bool,
         agent_text: String,
         agent_tool_calls: Vec<ToolCall>,
 
@@ -343,6 +346,7 @@ pub(crate) mod chat_rebuild {
         fn new() -> Self {
             Self {
                 user_parts: Vec::new(),
+                user_is_interjection: false,
                 agent_text: String::new(),
                 agent_tool_calls: Vec::new(),
                 in_user_turn: false,
@@ -397,6 +401,15 @@ pub(crate) mod chat_rebuild {
                 out.extend(self.flush_agent());
                 self.in_user_turn = true;
             }
+            // Interjections never merge with an adjacent prompt run (tool-only first response, drain right after the
+            // echo), and each interjection's text chunk opens its own item, as the live drain pushed them
+            let interjection = super::is_interjection_chunk(chunk);
+            let opens_interjection =
+                interjection && matches!(chunk.content, acp::ContentBlock::Text(_));
+            if interjection != self.user_is_interjection || opens_interjection {
+                out.extend(self.flush_user());
+            }
+            self.user_is_interjection = interjection;
 
             match &chunk.content {
                 acp::ContentBlock::Text(t) => {
@@ -516,10 +529,16 @@ pub(crate) mod chat_rebuild {
         }
 
         fn flush_user(&mut self) -> Option<ConversationItem> {
+            let interjection = std::mem::take(&mut self.user_is_interjection);
             if self.user_parts.is_empty() {
                 return None;
             }
-            let item = ConversationItem::user_with_parts(std::mem::take(&mut self.user_parts));
+            let content = std::mem::take(&mut self.user_parts);
+            let item = ConversationItem::User(UserItem {
+                content,
+                synthetic_reason: interjection.then_some(SyntheticReason::Interjection),
+                ..Default::default()
+            });
             self.item_count += 1;
             Some(item)
         }
@@ -550,6 +569,7 @@ pub(crate) mod chat_rebuild {
 
         fn reset(&mut self) {
             self.user_parts.clear();
+            self.user_is_interjection = false;
             self.agent_text.clear();
             self.agent_tool_calls.clear();
             self.tool_args.clear();
@@ -940,10 +960,23 @@ fn acp_user_chunk_prompt_index(update: &SessionUpdate) -> Option<usize> {
 pub(crate) const HOST_TURN_META_KEY: &str = "hostTurn";
 
 pub(crate) fn is_host_turn_chunk(chunk: &acp::ContentChunk) -> bool {
+    chunk_meta_flag(chunk, HOST_TURN_META_KEY)
+}
+
+/// `ContentChunk._meta` flag on a persisted mid-turn interjection's user chunks. The text block keeps the
+/// model-facing frame and carries the typed text in `displayText`; the pager keys on this for replay.
+pub const INTERJECTION_META_KEY: &str = "interjection";
+
+pub fn is_interjection_chunk(chunk: &acp::ContentChunk) -> bool {
+    chunk_meta_flag(chunk, INTERJECTION_META_KEY)
+}
+
+/// Boolean `ContentChunk._meta` flag; anything but a literal `true` reads as `false`.
+pub fn chunk_meta_flag(chunk: &acp::ContentChunk, key: &str) -> bool {
     chunk
         .meta
         .as_ref()
-        .and_then(|m| m.get(HOST_TURN_META_KEY))
+        .and_then(|m| m.get(key))
         .and_then(|v| v.as_bool())
         == Some(true)
 }
@@ -2153,6 +2186,178 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod rebuild_interjections {
+        use super::*;
+        use crate::sampling::{ContentPart, ConversationItem, SyntheticReason};
+        use std::sync::Arc;
+
+        fn text_chunk(text: &str) -> acp::ContentChunk {
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))
+        }
+
+        fn user(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::UserMessageChunk(text_chunk(text))
+        }
+
+        fn agent(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::AgentMessageChunk(text_chunk(text))
+        }
+
+        /// A persisted interjection chunk as the shell writes it: framed text plus the `interjection` flag.
+        fn interjection(typed: &str) -> acp::SessionUpdate {
+            let mut meta = serde_json::Map::new();
+            meta.insert(INTERJECTION_META_KEY.into(), serde_json::json!(true));
+            acp::SessionUpdate::UserMessageChunk(
+                text_chunk(&fuigo_interjection_core::format_interjection(
+                    typed.to_string(),
+                ))
+                .meta(Some(meta)),
+            )
+        }
+
+        fn tool_call(id: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::ToolCall(acp::ToolCall::new(acp::ToolCallId::new(id), "run"))
+        }
+
+        fn tool_done(id: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(id),
+                acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+            ))
+        }
+
+        fn rebuild(updates: Vec<acp::SessionUpdate>) -> Vec<ConversationItem> {
+            let sid = acp::SessionId::new(Arc::from("s"));
+            let dir = tempfile::tempdir().unwrap();
+            let envelopes: Vec<SessionUpdateEnvelope> = updates
+                .into_iter()
+                .map(|update| {
+                    SessionUpdate::Acp(Box::new(acp::SessionNotification::new(sid.clone(), update)))
+                })
+                .map(|u| SessionUpdateEnvelope::from_update(&u).unwrap())
+                .collect();
+            write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
+            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        /// `(text, is_interjection)` of every user item, in order.
+        fn users(items: &[ConversationItem]) -> Vec<(String, bool)> {
+            items
+                .iter()
+                .filter_map(|item| match item {
+                    ConversationItem::User(u) => Some((
+                        u.content
+                            .iter()
+                            .filter_map(|p| match p {
+                                ContentPart::Text { text } => Some(text.as_ref()),
+                                _ => None,
+                            })
+                            .collect(),
+                        u.synthetic_reason == Some(SyntheticReason::Interjection),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn framed(typed: &str) -> String {
+            fuigo_interjection_core::format_interjection(typed.to_string())
+        }
+
+        #[test]
+        fn interjection_keeps_persisted_frame_and_is_tagged() {
+            let items = rebuild(vec![
+                user("start the build"),
+                agent("building"),
+                interjection("ok run the stop for me"),
+                agent("stopping"),
+            ]);
+            assert_eq!(
+                users(&items),
+                [
+                    ("start the build".to_string(), false),
+                    (framed("ok run the stop for me"), true),
+                ]
+            );
+        }
+
+        /// Tool-only first response: no agent text closes the prompt run before the interjection lands.
+        #[test]
+        fn interjection_adjacent_to_prompt_run_is_a_separate_item() {
+            let items = rebuild(vec![
+                user("start the build"),
+                tool_call("c1"),
+                tool_done("c1"),
+                interjection("ok run the stop for me"),
+                agent("stopping"),
+            ]);
+            assert_eq!(
+                users(&items),
+                [
+                    ("start the build".to_string(), false),
+                    (framed("ok run the stop for me"), true),
+                ]
+            );
+        }
+
+        /// A batch drain pushes one item per interjection; a following prompt echo must not join the last one.
+        #[test]
+        fn consecutive_interjections_stay_distinct_and_next_prompt_is_plain() {
+            let items = rebuild(vec![
+                user("start"),
+                agent("working"),
+                interjection("first"),
+                interjection("second"),
+                user("next prompt"),
+                agent("done"),
+            ]);
+            assert_eq!(
+                users(&items),
+                [
+                    ("start".to_string(), false),
+                    (framed("first"), true),
+                    (framed("second"), true),
+                    ("next prompt".to_string(), false),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_meta_flag_requires_literal_true() {
+        let chunk = |meta: Option<serde_json::Value>| {
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("x")))
+                .meta(meta.map(|m| m.as_object().cloned().unwrap()))
+        };
+        assert!(chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": true}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": false}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": "true"}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": 1}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"other": true}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(&chunk(None), "k"));
+    }
 
     #[test]
     fn atomic_write_runs_file_sync_barrier_before_rename_replaces_target() {

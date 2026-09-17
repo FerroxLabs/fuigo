@@ -160,7 +160,7 @@ async fn side_question_projects_agent_messages_without_mutating_history() {
             actor.chat_state_handle.replace_conversation(raw);
 
             actor
-                .handle_side_question("what context matters?")
+                .handle_side_question("what context matters?", Vec::new())
                 .await
                 .expect("side question must succeed");
 
@@ -210,7 +210,7 @@ async fn auxiliary_calls_send_the_session_reasoning_effort() {
             ]);
 
             actor
-                .handle_side_question("what does xor mean here?")
+                .handle_side_question("what does xor mean here?", Vec::new())
                 .await
                 .expect("side question must succeed");
 
@@ -259,7 +259,7 @@ async fn side_question_routes_on_the_session_id_when_the_key_is_not_forwarded() 
             ]);
 
             actor
-                .handle_side_question("what does xor mean here?")
+                .handle_side_question("what does xor mean here?", Vec::new())
                 .await
                 .expect("side question must succeed");
 
@@ -1311,7 +1311,7 @@ async fn side_question_request_rides_parent_prompt_cache() {
             ]);
 
             let answer = actor
-                .handle_side_question("what does xor mean here?")
+                .handle_side_question("what does xor mean here?", Vec::new())
                 .await
                 .expect("side question must succeed against the mock server");
             assert!(!answer.is_empty());
@@ -1420,7 +1420,7 @@ async fn auxiliary_calls_keep_the_main_turn_prefix() {
             actor.chat_state_handle.replace_conversation(parent.clone());
 
             actor
-                .handle_side_question("what does xor mean here?")
+                .handle_side_question("what does xor mean here?", Vec::new())
                 .await
                 .expect("side question must succeed");
             let requests = server.requests();
@@ -1496,7 +1496,7 @@ async fn messages_side_calls_preserve_completed_reasoning() {
             actor.chat_state_handle.replace_conversation(parent.clone());
 
             actor
-                .handle_side_question("what matters most?")
+                .handle_side_question("what matters most?", Vec::new())
                 .await
                 .expect("side question must succeed");
             let body = server
@@ -1606,7 +1606,7 @@ async fn messages_side_calls_strip_reasoning_without_supported_thinking_effort()
                 actor.chat_state_handle.replace_conversation(parent);
 
                 actor
-                    .handle_side_question("what matters most?")
+                    .handle_side_question("what matters most?", Vec::new())
                     .await
                     .expect("side question must succeed");
                 let body = server
@@ -1717,7 +1717,7 @@ async fn side_question_trims_reasoning_orphaned_by_mid_turn_truncation() {
             ]);
 
             actor
-                .handle_side_question("what does xor mean here?")
+                .handle_side_question("what does xor mean here?", Vec::new())
                 .await
                 .expect("side question must succeed against the mock server");
 

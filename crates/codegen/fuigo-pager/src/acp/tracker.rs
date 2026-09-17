@@ -23,6 +23,7 @@ use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
 use fuigo_tools::types::output::{BashOutput, ToolOutput};
 use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
+use fuigo_shell::session::storage::chunk_meta_flag;
 use fuigo_tools::util::strip_redundant_session_cd;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1487,7 +1488,11 @@ impl AcpUpdateTracker {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let mut block = if let Some(dt) = display_override {
+        let mut block = if chunk_meta_flag(&chunk, user_message_chunk_meta::INTERJECTION) {
+            crate::scrollback::blocks::UserPromptBlock::interjection(
+                display_override.unwrap_or(text),
+            )
+        } else if let Some(dt) = display_override {
             if text.contains("<command-name>") {
                 self.skip_next_skill_body = true;
             }

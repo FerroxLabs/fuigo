@@ -1040,6 +1040,9 @@ pub struct SamplingConfig {
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    /// Model-resolved general retry budget; a spawned subagent inherits it from the parent's live config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
     /// Which API backend to use for this model
     #[serde(default)]
     pub api_backend: ApiBackend,

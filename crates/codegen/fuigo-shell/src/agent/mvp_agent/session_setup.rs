@@ -5,6 +5,7 @@
 use super::reasoning_effort::{
     EffortTarget, NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
 };
+use super::sampler_prewarm::spawn_sampler_transport_prewarm;
 use super::*;
 use crate::agent::session_metrics::SessionStartKind;
 /// Refusals resume must give verbatim, so a test cannot mistake some other `invalid_params` for the guard it is pinning.
@@ -32,6 +33,37 @@ async fn read_applied_tool_overrides(
         }
         Err(_) => {
             tracing::warn!("tool-overrides echo exceeded its budget; continuing without echo");
+            None
+        }
+    }
+}
+/// The default-model `session/new` echo: the signature admits only spawn-time data, never an actor channel, so this reply path cannot wait on session startup.
+fn spawn_snapshot_tool_overrides(
+    snapshot: &crate::session::SpawnSnapshot,
+) -> Option<fuigo_sampling_types::ToolOverrides> {
+    snapshot.applied_tool_overrides.clone()
+}
+/// Where the `session/new` reply's `toolOverrides` echo comes from — the whole of U022's SpawnSnapshot half.
+///
+/// The default-model reply reads spawn-time data only, so `session/new` returns while MCP tools and
+/// the rest of the actor's startup work are still in flight. Only a custom-model switch round-trips
+/// to the actor, because the switch is the one thing that resolves an override after spawn.
+///
+/// The arm ORDER is load-bearing and is the thing the test pins: the guarded arm must come first, or
+/// the catch-all `Some(handle)` swallows the default-model case and the reply waits on the actor again.
+pub(super) async fn new_session_tool_overrides_echo(
+    handle: Option<&crate::session::SessionHandle>,
+    session_id: &acp::SessionId,
+    default_model: bool,
+) -> Option<fuigo_sampling_types::ToolOverrides> {
+    match handle {
+        Some(handle) if default_model => spawn_snapshot_tool_overrides(&handle.spawn_snapshot),
+        Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
+        None => {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "session/new toolOverrides echo: session handle not found"
+            );
             None
         }
     }
@@ -463,6 +495,7 @@ impl MvpAgent {
             &session_id,
             EffortTarget::SummaryClient,
         );
+        spawn_sampler_transport_prewarm(&session_sampling.base_url);
         let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
         let relay_sync = self.start_relay_sync(&session_id, &session_info);
         let model_id = match &session_initial_model {
@@ -635,6 +668,11 @@ impl MvpAgent {
                 }
             }
         }
+        self.prewarm_final_model_base_url(
+            &session_id,
+            &session_sampling.base_url,
+            origin_client.clone(),
+        );
         if let Some(requested) = disallowed_custom {
             let current = self.models_manager.current_model_id();
             let reason = format!(
@@ -694,16 +732,14 @@ impl MvpAgent {
         } else {
             self.model_state(Some(&session_id))
         };
-        let applied_tool_overrides = match self.session_handle_waiting_for_load(&session_id).await {
-            Some(handle) => read_applied_tool_overrides(&handle.cmd_tx).await,
-            None => {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "session/new toolOverrides echo: session handle not found"
-                );
-                None
-            }
-        };
+        let applied_tool_overrides = new_session_tool_overrides_echo(
+            self.session_handle_waiting_for_load(&session_id)
+                .await
+                .as_ref(),
+            &session_id,
+            resolved_custom_model.is_none(),
+        )
+        .await;
         let mut meta = serde_json::json!({
             "currentWorkingDirectory": cwd.as_str().to_owned(),
             "codebaseIndexed": indexed_roots,
@@ -723,6 +759,7 @@ impl MvpAgent {
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
         self.attach_status_line(&session_id, arguments.meta.as_ref(), init);
+        self.attach_user_message_echo(&session_id, arguments.meta.as_ref(), init);
         #[cfg(all(feature = "local-workspace", unix))]
         local_ws_reap_guard.disarm();
         log_session_started(
@@ -887,6 +924,10 @@ impl MvpAgent {
             goal_mode_state: _persisted_goal_mode,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
+        let persisted_base_url = self
+            .resolve_sampling_config_for_model(&summary.current_model_id, origin_client.clone())
+            .base_url;
+        spawn_sampler_transport_prewarm(&persisted_base_url);
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
         self.set_turn_number(&session_id, summary.next_trace_turn);
@@ -954,6 +995,7 @@ impl MvpAgent {
             )
             .await?;
         self.attach_status_line(&session_id, request_meta.as_ref(), init);
+        self.attach_user_message_echo(&session_id, request_meta.as_ref(), init);
         let ClientCaps {
             code_nav: client_code_nav_enabled,
             terminal: client_terminal,
@@ -1015,6 +1057,11 @@ impl MvpAgent {
                 },
             )
             .await?;
+            self.prewarm_final_model_base_url(
+                &session_id,
+                &persisted_base_url,
+                origin_client.clone(),
+            );
             drop(spawn_timer);
             true
         } else {

@@ -57,6 +57,9 @@ impl SessionActor {
                 max_completion_tokens: sampling_config.max_completion_tokens,
                 temperature: sampling_config.temperature,
                 top_p: sampling_config.top_p,
+                max_retries: Some(fuigo_sampler::resolve_max_retries(
+                    sampling_config.max_retries,
+                )),
                 api_backend: sampling_config.api_backend.clone(),
                 extra_headers: sampling_config.extra_headers.clone(),
                 query_params: sampling_config.query_params.clone(),

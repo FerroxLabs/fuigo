@@ -2962,7 +2962,17 @@ pub(crate) async fn run(
                             // Inner result: `None` means init/auth failure (no load was attempted)
                             // `Some(loads)` means per-agent load outcomes with the optional mid-turn running prompt id from each reload response
                             let ok = tokio::time::timeout(timeout, async {
-                                let init_req = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(acp::ClientCapabilities::new().fs(acp::FileSystemCapabilities::new()).terminal(false)).meta(serde_json::json!({
+                                let mut echo_meta = serde_json::Map::new();
+                                echo_meta.insert(
+                                    fuigo_shell::session::USER_MESSAGE_ECHO_CAPABILITY.to_owned(),
+                                    serde_json::Value::Bool(true),
+                                );
+                                let init_req = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+                                    acp::ClientCapabilities::new()
+                                        .fs(acp::FileSystemCapabilities::new())
+                                        .terminal(false)
+                                        .meta(Some(echo_meta)),
+                                ).meta(serde_json::json!({
                                         "clientType": PAGER_CLIENT_TYPE,
                                         "clientVersion": PAGER_CLIENT_VERSION,
                                     }).as_object().cloned());

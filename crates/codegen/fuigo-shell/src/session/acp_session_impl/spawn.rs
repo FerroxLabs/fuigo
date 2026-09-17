@@ -74,6 +74,13 @@ fn subagent_sampler_rate_limit_threshold(is_subagent: bool, pacer_max_attempts: 
         fuigo_sampler::RATE_LIMIT_RETRY_THRESHOLD
     }
 }
+/// Prefer the model-resolved config; the separate argument remains for legacy spawn call sites.
+fn session_max_retries_source(
+    sampling_config_max_retries: Option<u32>,
+    spawn_max_retries: Option<u32>,
+) -> Option<u32> {
+    sampling_config_max_retries.or(spawn_max_retries)
+}
 /// Whether this session keeps the MCP meta-tools `search_tool` and `use_tool`.
 ///
 /// `AgentBuilder` drops both when this is false ("with none configured at session start they
@@ -204,7 +211,7 @@ mod cli_catchall_drop_tests {
 }
 #[cfg(test)]
 mod subagent_rate_limit_threshold_tests {
-    use super::subagent_sampler_rate_limit_threshold;
+    use super::{session_max_retries_source, subagent_sampler_rate_limit_threshold};
     use fuigo_sampler::{RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD};
     #[test]
     fn main_session_always_keeps_sampler_retry() {
@@ -234,6 +241,12 @@ mod subagent_rate_limit_threshold_tests {
             subagent_sampler_rate_limit_threshold(true, 8),
             RATE_LIMIT_RETRY_DISABLED
         );
+    }
+    #[test]
+    fn model_retry_budget_wins_over_legacy_spawn_budget() {
+        assert_eq!(session_max_retries_source(Some(6), Some(3)), Some(6));
+        assert_eq!(session_max_retries_source(Some(6), None), Some(6));
+        assert_eq!(session_max_retries_source(None, Some(3)), Some(3));
     }
 }
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
@@ -287,7 +300,7 @@ pub(crate) async fn spawn_session_actor(
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     code_nav_enabled: bool,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
-    status_line_enabled: Arc<std::sync::atomic::AtomicBool>,
+    client_caps: crate::session::notifications::SessionClientCaps,
     feedback_proxy_url: Option<String>,
     feedback_user_token: Option<String>,
     feedback_alpha_test_key: Option<String>,
@@ -597,12 +610,15 @@ pub(crate) async fn spawn_session_actor(
             "FUIGO_DEBUG_CONTEXT_WINDOW override active"
         );
     }
+    let max_retries = session_max_retries_source(sampling_config.max_retries, max_retries);
+    let resolved_max_retries = fuigo_sampler::resolve_max_retries(max_retries);
     let chat_state_sampling_config = fuigo_sampling_types::SamplingConfig {
         base_url: sampling_config.base_url.clone(),
         model: sampling_config.model.clone(),
         max_completion_tokens: sampling_config.max_completion_tokens,
         temperature: sampling_config.temperature,
         top_p: sampling_config.top_p,
+        max_retries: Some(resolved_max_retries),
         api_backend: sampling_config.api_backend.clone(),
         extra_headers: sampling_config.extra_headers.clone(),
         query_params: sampling_config.query_params.clone(),
@@ -1749,6 +1765,7 @@ pub(crate) async fn spawn_session_actor(
             gateway_enabled: gateway_enabled.clone(),
             persistence_tx: persistence.tx.clone(),
             disk_full: persistence.subscribe_disk_full(),
+            client_caps: client_caps.clone(),
         },
         permissions,
         tool_context,
@@ -1832,7 +1849,7 @@ pub(crate) async fn spawn_session_actor(
             remote_settings.as_ref().and_then(|r| r.uncharged_401_park),
         ),
         max_turns,
-        max_retries: fuigo_sampler::resolve_max_retries(max_retries),
+        max_retries: resolved_max_retries,
         rate_limit_waits: RateLimitWaitConfig::with_max_attempts(subagent_rate_limit_max_attempts),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
@@ -1859,7 +1876,7 @@ pub(crate) async fn spawn_session_actor(
         agent: std::cell::RefCell::new(agent),
         last_reported_branch: Arc::new(Mutex::new(None)),
         git_head_enabled: fs_watch_caps.git_head,
-        status_line_enabled: status_line_enabled.clone(),
+        status_line_enabled: client_caps.status_line.clone(),
         models_manager,
         display_cwd: {
             let lock = std::sync::OnceLock::new();
@@ -2253,6 +2270,9 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
+    let spawn_snapshot = crate::session::SpawnSnapshot {
+        applied_tool_overrides: session.effective_tool_overrides(),
+    };
     let telemetry_ctx = fuigo_telemetry::session_ctx::TelemetryCtx::new(
         session.session_info.id.0.to_string(),
         session.tool_context.prompt_index.clone(),
@@ -2307,7 +2327,8 @@ pub(crate) async fn spawn_session_actor(
             chat_state_handle: chat_state_handle_for_handle,
             signals_handle,
             gateway_enabled,
-            status_line_enabled,
+            status_line_enabled: client_caps.status_line.clone(),
+            client_caps,
             mcp_servers,
             initial_client_mcp_servers,
             display_cwd: None,
@@ -2316,6 +2337,7 @@ pub(crate) async fn spawn_session_actor(
             upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
+            spawn_snapshot,
             scheduler_background_loops,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
@@ -2409,7 +2431,7 @@ pub(crate) async fn spawn_session_on_thread(
     codebase_indexes: std::sync::Arc<parking_lot::Mutex<CodebaseIndexManager>>,
     code_nav_enabled: bool,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
-    status_line_enabled: Arc<std::sync::atomic::AtomicBool>,
+    client_caps: crate::session::notifications::SessionClientCaps,
     feedback_proxy_url: Option<String>,
     feedback_user_token: Option<String>,
     feedback_alpha_test_key: Option<String>,
@@ -2588,7 +2610,7 @@ pub(crate) async fn spawn_session_on_thread(
                         codebase_indexes,
                         code_nav_enabled,
                         fs_watch_caps,
-                        status_line_enabled,
+                        client_caps,
                         feedback_proxy_url,
                         feedback_user_token,
                         feedback_alpha_test_key,
