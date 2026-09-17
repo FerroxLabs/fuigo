@@ -706,6 +706,39 @@ mod tests {
         assert_eq!(sync.written(), 0);
         assert!(matches!(events.try_recv(), Ok(WriterEvent::Failed(_))));
     }
+    /// A writer thread that never exits (parked in a blocked tty write, or a sender
+    /// kept alive) must not hang teardown: the bounded join detaches it.
+    #[test]
+    fn join_within_times_out_on_a_stuck_writer_thread() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || -> std::io::Result<()> {
+            let _ = release_rx.recv();
+            Ok(())
+        });
+        let thread = WriterThread::for_test(handle, WriterSync::new());
+        let started = Instant::now();
+        let outcome = thread
+            .join_within(Duration::from_millis(50))
+            .expect("timeout is not an error");
+        assert_eq!(outcome, WriterJoin::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "join_within must return promptly at the deadline"
+        );
+        let _ = release_tx.send(());
+    }
+
+    /// A writer thread that drains and exits is joined normally.
+    #[test]
+    fn join_within_joins_a_finished_writer_thread() {
+        let handle = std::thread::spawn(|| -> std::io::Result<()> { Ok(()) });
+        let thread = WriterThread::for_test(handle, WriterSync::new());
+        assert_eq!(
+            thread.join_within(Duration::from_secs(5)).expect("join"),
+            WriterJoin::Joined
+        );
+    }
+
     /// The single-producer rule is a debug assertion: a payload sent from a second
     /// thread must trip it rather than silently reorder the tty stream.
     #[test]
