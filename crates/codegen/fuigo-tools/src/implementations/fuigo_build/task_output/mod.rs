@@ -32,7 +32,7 @@ use fuigo_tool_types::{
 /// positive waits are raised to the 5 s floor, and `0` is a snapshot.
 pub(crate) const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The blocking-wait ceiling: `FUIGO_MAX_WAIT_BLOCK_MS`, else 10 min.
+/// The blocking-wait ceiling: `FUIGO_MAX_WAIT_BLOCK_MS`, else `MAX_WAIT_BLOCK_MS_DEFAULT`.
 ///
 /// The same value fills `{max_wait_ms}` in the descriptions, so a wait can
 /// never exceed what the model was told it may ask for.
@@ -1285,13 +1285,20 @@ mod tests {
     #[test]
     fn capped_wait_timeout_clamps_and_defaults() {
         let cap = Duration::from_millis(fuigo_tool_types::MAX_WAIT_BLOCK_MS_DEFAULT);
+        // The default ceiling is one hour; a ten-minute default would make the
+        // clamp assertions below pass for the wrong reason.
+        assert_eq!(cap, Duration::from_millis(3_600_000));
         assert_eq!(capped_wait_timeout(None, cap), DEFAULT_WAIT_TIMEOUT);
         assert_eq!(
             capped_wait_timeout(Some(5_000), cap),
             Duration::from_millis(5_000)
         );
-        assert_eq!(capped_wait_timeout(Some(36_000_000), cap), cap);
-        assert_eq!(capped_wait_timeout(Some(600_000), cap), cap);
+        assert_eq!(capped_wait_timeout(Some(3_600_000), cap), cap);
+        assert_eq!(capped_wait_timeout(Some(7_200_000), cap), cap);
+        assert_eq!(
+            capped_wait_timeout(Some(600_000), cap),
+            Duration::from_millis(600_000)
+        );
     }
 
     /// A client that shortens the cap at finalize must also shorten the wait —
