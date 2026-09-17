@@ -434,6 +434,7 @@ impl AgentView {
         let mut loops: Vec<&crate::app::agent::ScheduledTaskInfo> =
             self.session.scheduled_tasks.values().collect();
         loops.sort_by_key(|s| s.created_at);
+        let now = chrono::Utc::now();
         rows.extend(loops.into_iter().map(|s| {
             (
                 DockWatcherId::Loop(s.task_id.clone()),
@@ -441,7 +442,11 @@ impl AgentView {
                     kind: "Loop".into(),
                     description: s.prompt.clone(),
                     activity: None,
-                    meta: s.human_schedule.clone(),
+                    meta: format!(
+                        "{}{}",
+                        s.human_schedule,
+                        crate::views::scheduled_next::next_suffix(s, now)
+                    ),
                     killable: true,
                     openable: false,
                     spinning: false,

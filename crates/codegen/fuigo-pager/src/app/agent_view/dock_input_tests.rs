@@ -286,6 +286,33 @@ fn tab_from_scrollback_skips_dock_when_hidden() {
     );
 }
 
+// ---------------------------------------------------------------- U113: loop
+// rows say when the next run is due.
+
+#[test]
+fn dock_loop_meta_includes_cadence_and_next_trigger() {
+    let mut agent = make_agent();
+    let next = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+    agent.session.scheduled_tasks.insert(
+        "loop-1".into(),
+        crate::app::agent::ScheduledTaskInfo {
+            task_id: "loop-1".into(),
+            prompt: "check CI".into(),
+            human_schedule: "every 30 minutes".into(),
+            created_at: std::time::Instant::now(),
+            next_fire_at: Some(next),
+            tag: "loop".into(),
+            last_subagent_id: None,
+        },
+    );
+    let rows = agent.dock_watcher_rows();
+    let meta = &rows.first().expect("loop row").1.meta;
+    assert!(
+        meta.starts_with("every 30 minutes (next in ") && !meta.contains("due now"),
+        "{meta}"
+    );
+}
+
 // ---------------------------------------------------------------- U118: a
 // click that collapses a section must not leave the header selected.
 

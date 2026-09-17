@@ -38,6 +38,7 @@ pub mod question_view;
 pub mod queue_pane;
 pub mod rewind;
 pub mod scroll_debug_hud;
+pub mod scheduled_next;
 pub mod session_picker;
 pub mod session_picker_surface;
 pub mod session_title;
