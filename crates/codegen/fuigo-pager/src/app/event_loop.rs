@@ -4506,10 +4506,8 @@ mod tests {
         use std::sync::atomic::Ordering;
         let mut app = crate::app::app_view::tests::test_app();
         let (tx, rx) = std::sync::mpsc::channel();
-        app.escape_writer = crate::render::draw::EscapeWriter::new(
-            tx,
-            crate::render::draw::WriterSync::new(),
-        );
+        app.escape_writer =
+            crate::render::draw::EscapeWriter::new(tx, crate::render::draw::WriterSync::new());
         let mut tasks = JoinSet::new();
         let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let was = crate::app::MOUSE_CAPTURE_ENABLED.swap(true, Ordering::AcqRel);

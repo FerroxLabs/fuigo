@@ -28,7 +28,6 @@ pub mod edit_highlight_worker;
 pub mod mermaid_worker;
 pub use fuigo_prompt_queue as prompt_queue;
 mod acp_handler;
-pub(crate) mod prompt_ack;
 mod connect_timeout;
 mod csi_filter;
 mod dispatch;
@@ -36,6 +35,7 @@ mod dispatch;
 mod display_refresh_startup;
 mod effects;
 pub(crate) mod error_display;
+pub(crate) mod prompt_ack;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
@@ -1764,10 +1764,8 @@ mod tests {
     #[test]
     fn gboom_keyboard_flags_ride_the_writer_queue() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let writer = crate::render::draw::EscapeWriter::new(
-            tx,
-            crate::render::draw::WriterSync::new(),
-        );
+        let writer =
+            crate::render::draw::EscapeWriter::new(tx, crate::render::draw::WriterSync::new());
         let prev = crate::terminal::pushed_kitty_flags();
         crate::terminal::set_pushed_kitty_flags(
             event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,

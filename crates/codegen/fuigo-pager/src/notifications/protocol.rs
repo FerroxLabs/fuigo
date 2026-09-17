@@ -195,7 +195,10 @@ mod tests {
         let (writer, rx) = capture_writer();
         emit_notification(NotificationProtocol::Osc777, "title", "body", &ctx, &writer);
         let payload = rx.try_recv().expect("one payload enqueued");
-        assert_eq!(payload.data(), "\x1b]777;notify;Fuigo;body\x1b\\".as_bytes());
+        assert_eq!(
+            payload.data(),
+            "\x1b]777;notify;Fuigo;body\x1b\\".as_bytes()
+        );
     }
 
     #[test]

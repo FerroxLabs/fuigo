@@ -39,8 +39,8 @@ mod ext_protocol;
 mod prompt_ack;
 mod reducer;
 use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
-use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
 use ext_protocol::{ExtEvent, handle_ext_notification, reply_headless_ext_method};
+use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
 
 mod cli;
 pub use cli::{HeadlessPrompt, OutputFormat, parse_json_schema, parse_permission_rules_lenient};
@@ -1413,7 +1413,9 @@ pub async fn run_single_turn(
         .await
         .is_err()
         {
-            tracing::warn!("headless: unified log flush timed out behind the unacknowledged prompt");
+            tracing::warn!(
+                "headless: unified log flush timed out behind the unacknowledged prompt"
+            );
         }
     } else {
         crate::unified_log::flush_blocking().await;
