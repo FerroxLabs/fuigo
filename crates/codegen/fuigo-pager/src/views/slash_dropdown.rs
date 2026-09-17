@@ -191,6 +191,16 @@ pub fn render_dropdown(
             height: 1,
         };
         buf.set_style(clamped, Style::default().bg(row_bg));
+        if let Some(&item_idx) = row_items.last()
+            && crate::views::modal_window::embedded_row_style(theme, item_idx == selected)
+                .is_none()
+        {
+            if item_idx == selected {
+                buf.set_style(clamped, theme.selection_overlay());
+            } else if hovered == Some(item_idx) {
+                buf.set_style(clamped, theme.hover_overlay());
+            }
+        }
         buf.set_line_safe(area.x, y, line, row_w as u16);
     }
 

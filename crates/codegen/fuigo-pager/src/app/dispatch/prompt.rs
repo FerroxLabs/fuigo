@@ -342,6 +342,29 @@ pub(super) fn dispatch_show_word_select_tip(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Gate + telemetry + show for one view. Tick path is the only caller.
+pub(in crate::app) fn present_export_copy_tip(
+    agent: &mut AgentView,
+    seen_counts: &mut std::collections::HashMap<&'static str, u32>,
+    gate: bool,
+) -> bool {
+    if !gate {
+        return false;
+    }
+    // Already on screen: that timer owns the slot (do not refresh TTL or re-count).
+    if agent.ephemeral_tip.current_key() == Some(crate::tips::export_copy::EXPORT_COPY_TIP_KEY) {
+        return false;
+    }
+    let shown = agent.show_ephemeral_tip(crate::tips::export_copy::export_copy_tip(), seen_counts);
+    if shown {
+        log_event(fuigo_telemetry::events::ContextualTip {
+            tip: fuigo_telemetry::events::ContextualTipKind::ExportCopy,
+            action: fuigo_telemetry::events::ContextualTipAction::Shown,
+        });
+    }
+    shown
+}
+
 /// Accept the word-select tip via its advertised chord.
 /// Flips `keep_text_selection` to `word_select` (cache, persist, and toast, the same path as the settings modal).
 /// Retires the tip so one impression maps to at most one acceptance.
@@ -468,13 +491,27 @@ pub(super) fn dispatch_send_prompt_inner(
     // Submitting the prompt retires any edit-contextual ephemeral tip (ambient tips live out their TTL across the submit)
     agent.ephemeral_tip.clear_on_submit();
 
-    let trimmed = text.trim();
+    // Image chips are composer chrome: `[Image #1] explain /btw q` must ask `explain q`, not carry the marker to the model.
+    let slash_input = agent.prompt.submitted_text_without_image_chips(&text);
+    // The raw text decides command-ness, like the slash branch below; a stripped ` /btw q` hoists.
+    let hoisted = if literal || text.trim().starts_with('/') {
+        None
+    } else {
+        crate::slash::mid_text_hoist::hoist_mid_text_command(
+            &slash_input,
+            agent.prompt.slash_controller.registry(),
+        )
+    };
 
     // Recorded before the registry runs, because most command outcomes return on their own path.
-    let recorded_as_command = !literal && consume_input && trimmed.starts_with('/');
+    let recorded_as_command =
+        !literal && consume_input && (hoisted.is_some() || text.trim().starts_with('/'));
     if recorded_as_command {
-        agent.record_prompt_in_history(trimmed);
+        // Up-arrow history recalls the message as typed, not the hoisted `/command` rewrite.
+        agent.record_prompt_in_history(text.trim());
     }
+    let text = hoisted.unwrap_or(text);
+    let trimmed = text.trim();
 
     let mut effects = Vec::new();
 

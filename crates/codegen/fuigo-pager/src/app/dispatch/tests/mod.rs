@@ -4,6 +4,7 @@ mod billing;
 mod cta_e2e;
 mod dashboard;
 mod jump;
+mod mid_text_btw;
 mod modes;
 mod notes;
 mod permissions;
@@ -144,6 +145,7 @@ fn test_app() -> AppView {
         contextual_hints: Default::default(),
         remote_contextual_hints: None,
         tip_seen_counts: Default::default(),
+        export_copy_slash_used: false,
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
         ssh_wrap_tip_evaluated: false,
@@ -211,6 +213,8 @@ fn test_app() -> AppView {
         command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_prompt_focused: false,
         welcome_tip_typing_dismissed: false,
+        home_session_agent: None,
+        optimistic_home_husk: None,
         welcome_menu_index: None,
         welcome_menu_rects: Vec::new(),
         welcome_show_changelog_action: false,
@@ -1017,12 +1021,14 @@ fn dashboard_row_order(app: &AppView) -> Vec<crate::views::dashboard::DashboardR
         &app.dashboard_local_sessions
     };
     let rows = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            home,
+        )
     } else {
         crate::views::dashboard::build_rows_with_roster(
             &app.agents,

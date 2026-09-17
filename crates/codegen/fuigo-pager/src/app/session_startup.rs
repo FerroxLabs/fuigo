@@ -50,6 +50,15 @@ impl DeferredStartupActions {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+    /// Whether draining these actions leaves the welcome screen (so no optimistic home session is worth creating).
+    pub fn leaves_home(&self) -> bool {
+        self.session.is_some()
+            || self.preferred_session_id.is_some()
+            || self.worktree
+            || self.new_session
+            || self.prompt.is_some()
+            || self.open_dashboard
+    }
     pub fn take(&mut self) -> Self {
         std::mem::take(self)
     }

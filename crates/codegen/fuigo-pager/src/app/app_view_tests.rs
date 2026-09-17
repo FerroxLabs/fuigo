@@ -153,6 +153,7 @@ pub(crate) fn test_app() -> AppView {
         contextual_hints: Default::default(),
         remote_contextual_hints: None,
         tip_seen_counts: Default::default(),
+        export_copy_slash_used: false,
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
         ssh_wrap_tip_evaluated: false,
@@ -217,6 +218,8 @@ pub(crate) fn test_app() -> AppView {
         command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_prompt_focused: false,
         welcome_tip_typing_dismissed: false,
+        home_session_agent: None,
+        optimistic_home_husk: None,
         welcome_menu_index: None,
         welcome_menu_rects: Vec::new(),
         welcome_show_changelog_action: false,
@@ -4115,7 +4118,7 @@ fn welcome_done_n_starts_session() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
     assert!(matches!(
         outcome,
-        InputOutcome::ActionThenForward(Action::NewSession)
+        InputOutcome::ActionThenForward(Action::LeaveHome)
     ));
 }
 #[test]
@@ -4137,7 +4140,7 @@ fn welcome_ctrl_v_creates_normal_session() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::CONTROL));
     assert!(matches!(
         outcome,
-        InputOutcome::ActionThenForward(Action::NewSession)
+        InputOutcome::ActionThenForward(Action::LeaveHome)
     ));
 }
 #[test]
@@ -4148,7 +4151,7 @@ fn welcome_cmd_v_creates_normal_session() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::SUPER));
     assert!(matches!(
         outcome,
-        InputOutcome::ActionThenForward(Action::NewSession)
+        InputOutcome::ActionThenForward(Action::LeaveHome)
     ));
 }
 #[test]
@@ -4648,8 +4651,8 @@ fn welcome_d_starts_session_when_no_warnings() {
     app.startup_warnings = vec![];
     let outcome = app.handle_input(&key_event(KeyCode::Char('d'), KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::ActionThenForward(Action::NewSession)),
-        "Expected NewSession when no warnings, got {outcome:?}"
+        matches!(outcome, InputOutcome::ActionThenForward(Action::LeaveHome)),
+        "Expected LeaveHome when no warnings, got {outcome:?}"
     );
 }
 #[test]
@@ -4659,8 +4662,8 @@ fn welcome_other_char_starts_session_even_with_warnings() {
     app.startup_warnings = vec![make_test_warning()];
     let outcome = app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::ActionThenForward(Action::NewSession)),
-        "Expected NewSession for 'a' even with warnings, got {outcome:?}"
+        matches!(outcome, InputOutcome::ActionThenForward(Action::LeaveHome)),
+        "Expected LeaveHome for 'a' even with warnings, got {outcome:?}"
     );
 }
 #[test]

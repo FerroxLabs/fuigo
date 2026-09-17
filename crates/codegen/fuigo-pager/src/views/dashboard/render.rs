@@ -95,6 +95,8 @@ pub fn render_dashboard(
     dashboard_sessions_loading: bool,
     // Promo upgrade CTA to paint in the header after the location label (`None` means no CTA); field meanings live on [`HeaderUpgradeCta`]
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    // App-level cached allowance the session-less `/usage` modal renders from
+    credit_balance: Option<&crate::views::credit_bar::CreditBalance>,
 ) -> Option<(u16, u16)> {
     // Cache whether a pinned (non-dismissible) promo CTA is live so the key handler can steal Ctrl+O for it; the dispatch re-resolves the gate
     state.pinned_upgrade_cta_live = upgrade_cta.is_some_and(|cta| cta.pinned);
@@ -113,9 +115,8 @@ pub fn render_dashboard(
 
     let home = cached_home();
     let rows = if workspace_dashboard_enabled {
-        workspace_snapshot
-            .map(|snapshot| build_rows_with_workspace(agents, snapshot, home))
-            .unwrap_or_default()
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(agents, workspace_snapshot);
+        build_rows_with_workspace(agents, workspace_snapshot, &provisional, home)
     } else {
         build_rows_with_roster(
             agents,
@@ -418,6 +419,18 @@ pub fn render_dashboard(
             &modal.mode,
             &theme,
             /* compact */ false,
+        );
+        return None;
+    }
+
+    if let Some(modal) = state.usage_modal.as_mut() {
+        crate::views::usage_modal::render_usage_modal(
+            buf,
+            area,
+            modal,
+            credit_balance,
+            /* compact */ false,
+            &theme,
         );
         return None;
     }
@@ -2274,6 +2287,28 @@ fn render_row(
             }
         }
     }
+
+    // Terminal theme (Reset band slots): the selection/hover cue is reverse video over the content
+    // lines; `bg_highlight`/`bg_hover` paint nothing there. RGB themes keep their baked band.
+    if theme.is_bandless() {
+        let hovered = state.hovered_row.as_ref().is_some_and(|h| *h == row.id);
+        // Skip while renaming (editable line), like the narrow path.
+        if (selected || hovered) && !renaming {
+            let content = Rect {
+                x: rect.x,
+                y: rect.y + row_content_offset(rect.height, row),
+                width: rect.width,
+                height: row_content_height(row).min(rect.height),
+            };
+            // Normalize fgs first: colored glyphs (the state symbol, the `Pending:` badge) would
+            // invert into colored background patches; on the band they take the text's default fg.
+            crate::render::color::force_area_fg(buf, content, Color::Reset);
+            buf.set_style(
+                content,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
+        }
+    }
 }
 
 fn render_narrow_rows(
@@ -2477,6 +2512,15 @@ fn render_narrow_rows(
                     .row_delete_rects
                     .push((row.id.clone(), Rect::new(dx, y, delete_w, 1)));
             }
+        }
+        // Terminal theme (Reset band slots): same uniform reverse-video cue as the wide rows.
+        // Skip while renaming (editable line).
+        if theme.is_bandless() && (selected || hovered) && !renaming {
+            crate::render::color::force_area_fg(buf, line_rect, Color::Reset);
+            buf.set_style(
+                line_rect,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
         }
         if !row.is_more_placeholder {
             state.row_rects.push((row.id.clone(), line_rect));
@@ -2944,7 +2988,9 @@ fn render_slash_dropdown(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3067,7 +3113,9 @@ fn render_file_search_dropdown_for(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);

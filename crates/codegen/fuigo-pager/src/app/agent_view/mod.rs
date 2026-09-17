@@ -479,7 +479,7 @@ pub struct TextClickState {
     pub click_count: u8,
 }
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
-pub(super) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
+pub(crate) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
 /// Minimum interval (ms) between clipboard toasts for rapid word/line
 /// selections. Drag completions always show the toast regardless.
 const CLIPBOARD_TOAST_DEBOUNCE_MS: u128 = 500;
@@ -655,16 +655,6 @@ pub(crate) struct PendingCancelResend {
     pub cancel_subagents: bool,
     /// Replayed so a resend still enables the shell's task-wake barrier.
     pub trigger: crate::app::actions::CancelTrigger,
-}
-/// Turn-end hook runs held for the live turn's marker. See [`AgentView::pending_stop_hooks`].
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PendingStopHooks {
-    /// The turn the stash belongs to; a stash that can't be matched to the
-    /// ending turn flushes standalone instead of attaching to its marker.
-    pub prompt_id: Option<String>,
-    /// `(event_name, runs)` per hook batch, in arrival order
-    /// (`stop_failure` before `stop` on error turns).
-    pub groups: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
 }
 /// Components for the deferred fork banner. Stored by
 /// `dispatch_fork_resolved` and formatted into the final banner text
@@ -1086,9 +1076,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// Turn-end hook runs waiting for the turn's marker, which they race. Consumed or flushed
-    /// by `push_turn_terminal_marker`; dropped on every replay-window entry.
-    pub(crate) pending_stop_hooks: Option<PendingStopHooks>,
     /// Goal id of the most recently cleared goal, captured from the dropped
     /// state (the `cleared` event itself carries an empty id). Drops a late
     /// in-flight `GoalUpdated` that would otherwise resurrect the cleared
@@ -1428,6 +1415,8 @@ pub struct AgentView {
     /// intercept refuses and the tick path retires the tip, so the long TTL
     /// can never shadow yank mid-edit. `None` while the tip is not showing.
     pub(crate) word_select_tip_prompt_snapshot: Option<String>,
+    /// Drag-copy cluster detector behind the `/copy` · `/export` tip; ticks down the Copied! toast before showing.
+    pub(crate) export_copy_detector: crate::tips::export_copy::ExportCopyDetector,
     /// When the last fold/nav double-click landed on assistant text (a
     /// word-select probe). A second probe within the repeat window is the
     /// repeated-selection-attempt signal that fires the word-select tip;
@@ -2144,7 +2133,9 @@ pub(crate) fn render_dropdown_chrome(
             panel_area,
             Style::default().fg(theme.text_primary).bg(theme.bg_light),
         );
-        let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+        let border_style = Style::default()
+            .fg(theme.panel_border_fg())
+            .bg(theme.bg_base);
         let border_line = Line::styled("\u{2500}".repeat(panel_width as usize), border_style);
         buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
         buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);

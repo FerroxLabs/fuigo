@@ -1090,6 +1090,9 @@ pub struct ContextualHintsRemote {
     /// SSH wrap session-load tip (recommend `fuigo wrap ssh` for remote sessions).
     #[serde(default)]
     pub ssh_wrap: Option<bool>,
+    /// Export/copy tip after repeated scrollback drag-copies (suggests `/copy` and `/export`).
+    #[serde(default)]
+    pub export_copy: Option<bool>,
 }
 /// Tolerant deserializer for `Option<Vec<RemoteAnnouncement>>`.
 /// Parses as Vec<Value>, tries each as RemoteAnnouncement, and drops failures with a warning.

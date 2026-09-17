@@ -47,6 +47,9 @@ pub(super) fn open_usage_info_modal(
     use crate::views::modal::ActiveModal;
     use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
 
+    if matches!(app.active_view, ActiveView::AgentDashboard) {
+        return open_dashboard_usage_modal(app, tab);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -109,6 +112,43 @@ pub(super) fn open_usage_info_modal(
     agent.active_modal = Some(ActiveModal::UsageInfo {
         state: Box::new(state),
     });
+    effects
+}
+
+/// Session-less variant: no session tabs to fetch, so only the account allowance is refreshed (agent-less `FetchAppBilling`).
+/// `chat_kind` follows the process-wide `--chat` flag, which is what every session created from this dashboard would carry.
+fn open_dashboard_usage_modal(
+    app: &mut AppView,
+    tab: crate::views::usage_modal::UsageInfoTab,
+) -> Vec<Effect> {
+    use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
+
+    let chat_kind = app.chat_mode;
+    let billing_reachable =
+        app.usage_visible && !chat_kind && app.usage_billing_redirect_url.is_none();
+    let ctx = UsageInfoContext {
+        session_id: None,
+        usage_visible: app.usage_visible,
+        chat_kind,
+        billing_redirect_url: app.usage_billing_redirect_url.clone(),
+        subscription_tier: app.subscription_tier.clone(),
+    };
+    let Some(dashboard) = app.dashboard.as_mut() else {
+        return vec![];
+    };
+    if let Some(state) = dashboard.usage_modal.as_mut() {
+        state.set_tab(tab);
+        return vec![];
+    }
+    let mut state = UsageInfoModalState::new(tab, ctx);
+    let mut effects = Vec::new();
+    if billing_reachable {
+        let nonce = next_usage_fetch_nonce();
+        state.fetch_nonce = nonce;
+        state.billing_loading = true;
+        effects.push(Effect::FetchAppBilling { nonce });
+    }
+    dashboard.usage_modal = Some(Box::new(state));
     effects
 }
 

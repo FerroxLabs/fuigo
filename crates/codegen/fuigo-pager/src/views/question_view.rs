@@ -1401,6 +1401,7 @@ pub fn build_flat_option_lines(
             None => theme.bg_light,
         };
 
+        let before = all_lines.len();
         build_single_option_lines(
             &mut all_lines,
             i,
@@ -1415,6 +1416,21 @@ pub fn build_flat_option_lines(
             theme,
             is_cursor_item,
         );
+        // Bandless palette: `bg_visual` is `Reset`, so the cursor / hovered row carries reverse video instead
+        if embed.is_none() && theme.is_bandless() {
+            let overlay = if is_cursor_item && panel_focused {
+                Some(theme.selection_overlay())
+            } else if is_hovered_item {
+                Some(theme.hover_overlay())
+            } else {
+                None
+            };
+            if let Some(overlay) = overlay {
+                for line in &mut all_lines[before..] {
+                    line.style = line.style.patch(overlay);
+                }
+            }
+        }
     }
 
     // The freeform row is hidden in InputMode (the prompt widget below replaces it)
@@ -1670,6 +1686,15 @@ fn build_freeform_line(
         None if is_hovered => hovered_bg(theme),
         None => theme.bg_light,
     };
+    // Bandless palette: `bg_visual`/`bg_hover` are `Reset`, so the cue is reverse video via the line
+    // style, which the painter applies to the whole row rect. No-op on RGB themes.
+    let overlay = if embed.is_none() && is_cursor && panel_focused {
+        Some(theme.selection_overlay())
+    } else if embed.is_none() && is_hovered {
+        Some(theme.hover_overlay())
+    } else {
+        None
+    };
 
     // Multi-select: [x]/[ ] checkboxes.  Single-select: (●)/(○) radio buttons.
     // Both are 3 display cells, same as option rows
@@ -1732,7 +1757,11 @@ fn build_freeform_line(
     }
     spans.push(Span::styled(label, label_style));
 
-    Line::from(spans).style(Style::default().bg(row_bg))
+    let mut style = Style::default().bg(row_bg);
+    if let Some(ov) = overlay {
+        style = style.patch(ov);
+    }
+    Line::from(spans).style(style)
 }
 
 /// Render the complete question view into the given area.

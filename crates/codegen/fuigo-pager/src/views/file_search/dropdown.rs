@@ -148,6 +148,19 @@ fn render_fuzzy_item(
             cell.set_style(Style::default().bg(row_bg));
         }
     }
+    if embed.is_none() {
+        let row_rect = Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
+        if is_selected {
+            buf.set_style(row_rect, theme.selection_overlay());
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        }
+    }
 
     // Arrow on the selected row, blank gutter on the rest.
     let prefix = if is_selected {

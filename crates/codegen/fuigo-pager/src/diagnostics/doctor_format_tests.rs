@@ -240,7 +240,7 @@ fn limited_color_output_is_stable() {
             "  multiplexer  None detected\n",
             "  ssh          no\n",
             "  color        256\n",
-            "  themes       2/5: fuigonight, fuigoday\n",
+            "  themes       3/6: fuigonight, fuigoday, terminal\n",
             "\n",
             "Clipboard\n",
             "  native       local (pbcopy)\n",

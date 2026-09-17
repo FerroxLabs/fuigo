@@ -118,6 +118,13 @@ pub fn render_dropdown(
             height: 1,
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
+        if crate::views::modal_window::embedded_row_style(theme, is_selected).is_none() {
+            if is_selected {
+                buf.set_style(row_rect, theme.selection_overlay());
+            } else if is_hovered {
+                buf.set_style(row_rect, theme.hover_overlay());
+            }
+        }
         buf.set_line_safe(area.x, y, &line, row_w as u16);
     }
 

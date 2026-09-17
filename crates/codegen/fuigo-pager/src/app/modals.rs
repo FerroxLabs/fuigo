@@ -457,6 +457,10 @@ impl AgentView {
                         }
                         UsageModalOutcome::Changed => InputOutcome::Changed,
                         UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
+                        UsageModalOutcome::Close => {
+                            self.active_modal = None;
+                            InputOutcome::Changed
+                        }
                     };
                 }
                 _ => return InputOutcome::Changed,
@@ -1666,6 +1670,10 @@ impl AgentView {
                         }
                         UsageModalOutcome::Changed => InputOutcome::Changed,
                         UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
+                        UsageModalOutcome::Close => {
+                            self.active_modal = None;
+                            InputOutcome::Changed
+                        }
                     };
                 }
                 _ => return InputOutcome::Changed,

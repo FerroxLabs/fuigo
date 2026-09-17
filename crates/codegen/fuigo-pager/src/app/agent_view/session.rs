@@ -186,7 +186,6 @@ impl AgentView {
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
-            pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
             turn_start_ms: None,
@@ -304,6 +303,7 @@ impl AgentView {
             toast: None,
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
+            export_copy_detector: Default::default(),
             last_word_select_probe: None,
             sticky_toast: None,
             mode_switch_banner: None,
@@ -511,7 +511,6 @@ impl AgentView {
         self.finished_wake_prompts.clear();
         self.pending_cancel_resend = None;
         self.cancel_latency = None;
-        self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
         self.optimistic_queue_ids.clear();

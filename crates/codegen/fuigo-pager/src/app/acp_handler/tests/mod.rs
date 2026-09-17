@@ -1312,19 +1312,6 @@ pub(super) fn count_lifecycle_blocks(
         })
         .count()
 }
-/// Stop-hook groups on the last turn-terminal session-event marker, if any.
-pub(super) fn last_marker_stop_hook_groups(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> Option<usize> {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.event.is_turn_terminal() => {
-                Some(b.stop_hooks.len())
-            }
-            _ => None,
-        })
-}
 /// Work-only status lines ("N … still running") pushed as system rows.
 /// Never pushed in production; tests assert emptiness.
 pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
@@ -2363,3 +2350,4 @@ mod models;
 mod mcp;
 mod git_head;
 mod version_mismatch;
+mod hooks;

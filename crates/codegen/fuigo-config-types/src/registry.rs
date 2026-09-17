@@ -46,6 +46,8 @@ pub enum Feature {
     /// Send model-authored follow-ups to an owned active descendant.
     ActiveAgentMessages,
     RepoStatusInSystemPrompt,
+    /// The transparent `terminal` theme (rollout gate; hidden and unparseable while off).
+    TerminalTheme,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -226,6 +228,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "FUIGO_REPO_STATUS_IN_SYSTEM_PROMPT",
         default_enabled: true,
         remote: Some(|settings| settings.repo_status_in_system_prompt),
+    },
+    FeatureSpec {
+        id: Feature::TerminalTheme,
+        key: "terminal_theme",
+        path: "features.terminal_theme",
+        env: "FUIGO_TERMINAL_THEME",
+        // A rollout gate: off until asked for, so an upgrade never silently repaints a working terminal.
+        default_enabled: false,
+        // Fuigo has no remote settings host for this key; the gate is pin/env/config only.
+        remote: None,
     },
 ];
 

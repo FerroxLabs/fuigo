@@ -126,6 +126,7 @@ fn workspace_dashboard_renders_snapshot_member_without_delete_control() {
         Some(&snapshot),
         false,
         None,
+        None,
     );
 
     let content = buf_to_text(&buf);
@@ -185,6 +186,7 @@ fn render_dashboard_shows_roster_when_local_agents_empty() {
         None,
         false,
         None,
+        None,
     );
 
     let content = buf_to_text(&buf);
@@ -237,6 +239,7 @@ fn render_dashboard_hover_shows_delete_x_only_for_settled_rows() {
             false,
             None,
             false,
+            None,
             None,
         );
         buf_to_text(&buf)
@@ -2804,6 +2807,7 @@ fn render_dashboard_paints_full_area_background() {
         false,
         None,
         false,
+        None,
         None,
     );
 

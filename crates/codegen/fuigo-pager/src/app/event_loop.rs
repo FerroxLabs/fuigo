@@ -1994,7 +1994,7 @@ pub(crate) async fn run(
         }
         // Fetch billing early so the welcome screen can show a credit warning.
         if app.usage_visible {
-            let effs = vec![super::actions::Effect::FetchAppBilling];
+            let effs = vec![super::actions::Effect::FetchAppBilling { nonce: 0 }];
             if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                 return Ok(finish_run(&mut app));
             }
@@ -2178,6 +2178,15 @@ pub(crate) async fn run(
             // Otherwise minimal would authenticate but never create a session, stranding the user on the sign-in screen
             app.deferred_startup.new_session = true;
         }
+    }
+    // Already authenticated, trusted, and still on Welcome with nothing queued: prepare the session in the background
+    // so the first keystroke lands in a live composer. Gated startups reach the same call from `drain_startup_actions`.
+    if should_create_home_on_authenticated_startup(&app) {
+        let effs = dispatch::maybe_create_home_session(&mut app);
+        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+            return Ok(finish_run(&mut app));
+        }
+        presenter.request_presentation(&mut app, terminal, false);
     }
 
     // Startup intents are now fully classified; only an untouched welcome can nudge.
@@ -4429,9 +4438,16 @@ pub(crate) fn session_flags_for_effects(
     }
 }
 
+/// Whether the interactive startup should prepare the optimistic home session right away.
+pub(crate) fn should_create_home_on_authenticated_startup(app: &AppView) -> bool {
+    matches!(app.active_view, ActiveView::Welcome)
+        && app.session_startup_allowed()
+        && !app.is_access_blocked()
+}
+
 /// Dispatch `action`, re-process `event` through the updated view, return one combined effect list.
 /// Shared by the event-loop `ActionThenForward` arm and tests (batches; no effect barrier between).
-fn dispatch_then_forward(
+pub(crate) fn dispatch_then_forward(
     action: Action,
     event: &Event,
     arrived_at: std::time::Instant,
@@ -6557,6 +6573,40 @@ mod tests {
             app.active_view = view;
             assert!(finish_run(&mut app).exit_info.is_none());
         }
+    }
+
+    /// The welcome screen prepares a session in the background so the first keystroke lands in a
+    /// live composer. Removing the event-loop startup hook must fail this test.
+    #[test]
+    fn authenticated_startup_hook_creates_home() {
+        let mut app = crate::app::app_view::tests::test_app();
+        assert!(should_create_home_on_authenticated_startup(&app));
+        let effects = crate::app::dispatch::maybe_create_home_session(&mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, crate::app::actions::Effect::CreateSession { .. })),
+            "removing the event-loop startup hook must fail this test"
+        );
+        assert!(matches!(app.active_view, ActiveView::Welcome));
+    }
+
+    /// The husk is invisible: quitting from the welcome screen must not print a resume hint for a
+    /// session the user never used.
+    #[test]
+    fn finish_run_unused_home_session_has_no_exit_info() {
+        let mut app = crate::app::app_view::tests::test_app();
+        app.screen_mode = crate::app::ScreenMode::Fullscreen;
+        crate::app::dispatch::maybe_create_home_session(&mut app);
+        let home = app.home_session_agent.expect("home session");
+        app.agents.get_mut(&home).unwrap().session.session_id =
+            Some(acp::SessionId::new("unused-home"));
+        assert!(matches!(app.active_view, ActiveView::Welcome));
+        assert!(
+            finish_run(&mut app).exit_info.is_none(),
+            "quit from home must not hint an unused optimistic session"
+        );
+        assert!(app.active_session_id().is_none());
     }
 
     #[test]

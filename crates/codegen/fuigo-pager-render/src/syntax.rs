@@ -3,7 +3,7 @@
 //!
 //! ## Minimal / terminal-native lock
 //!
-//! While [`crate::theme::cache::terminal_native_locked`] is set, chrome uses [`Theme::terminal_default`](crate::theme::Theme::terminal_default).
+//! While [`crate::theme::cache::terminal_native_active`] holds (minimal mode's lock, or the `Terminal` kind), chrome uses the terminal-native palette ([`Theme::terminal_default`](crate::theme::Theme::terminal_default) / [`Theme::terminal`](crate::theme::Theme::terminal)).
 //! `current_kind()` is a nominal `FuigoNight` (so leftover kind-keyed paths still resolve).
 //! Syntect therefore loads the night `.tmTheme`.
 //! Its pastel RGB tokens collapse to **White** after naive ANSI-16 quantization, which is invisible on light terminal profiles.
@@ -42,9 +42,9 @@ pub fn syntect_to_ratatui_fg(style: syntect::highlighting::Style) -> Style {
     out
 }
 
-/// Under the terminal-native lock, uses [`polarity_safe_syntax_fg`]; otherwise quantizes via the normal theme color pipeline.
+/// While the terminal-native palette is active (minimal mode's lock, or the `Terminal` kind), uses [`polarity_safe_syntax_fg`]; otherwise quantizes via the normal theme color pipeline.
 pub fn syntect_rgb_to_fg(r: u8, g: u8, b: u8) -> Color {
-    if crate::theme::cache::terminal_native_locked() {
+    if crate::theme::cache::terminal_native_active() {
         polarity_safe_syntax_fg(r, g, b)
     } else {
         crate::theme::quantize(Color::Rgb(r, g, b))
@@ -130,6 +130,9 @@ pub fn get_syntect() -> &'static Syntect {
         ThemeKind::FuigoNight
         | ThemeKind::RosePineMoon
         | ThemeKind::OscuraMidnight
+        // Terminal remaps every token in `syntect_rgb_to_fg`, so the
+        // source palette only has to be a full one — polarity is irrelevant.
+        | ThemeKind::Terminal
         | ThemeKind::Auto => SYNTECT_FUIGONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/fuigo-night.tmTheme"))),
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
