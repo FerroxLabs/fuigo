@@ -5042,6 +5042,40 @@ mod tests {
     }
 
     #[test]
+    fn mcps_tab_loading_spinner_advances_with_tick() {
+        let frames = crate::glyphs::dot_spinner_frames();
+        let frame0 = frames.first().copied().unwrap_or("");
+        let frame2 = frames.get(2).copied().unwrap_or("");
+        assert_ne!(
+            frame0, frame2,
+            "dot spinner must change across an 8-tick stride (divisor 4)"
+        );
+
+        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        let area = Rect::new(0, 0, 100, 40);
+
+        let mut buf0 = Buffer::empty(area);
+        render_extensions_modal(&mut buf0, area, &mut state, None, false, 0);
+        let msg0 = format!("{frame0} Loading\u{2026}");
+        let msg2 = format!("{frame2} Loading\u{2026}");
+        assert_eq!(buffer_count(&buf0, &msg0), 1, "tick 0 must show {msg0:?}");
+        assert_eq!(
+            buffer_count(&buf0, &msg2),
+            0,
+            "tick 0 must not show {msg2:?}"
+        );
+
+        let mut buf2 = Buffer::empty(area);
+        render_extensions_modal(&mut buf2, area, &mut state, None, false, 8);
+        assert_eq!(buffer_count(&buf2, &msg2), 1, "tick 8 must show {msg2:?}");
+        assert_eq!(
+            buffer_count(&buf2, &msg0),
+            0,
+            "tick 8 must not show {msg0:?}"
+        );
+    }
+
+    #[test]
     fn workflows_reload_key_resolves_reload_skills() {
         // resolve_key's match is non-exhaustive; pin the Workflows arm.
         assert!(matches!(
