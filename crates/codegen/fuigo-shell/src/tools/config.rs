@@ -200,7 +200,11 @@ impl ShellToolsetConfig {
     pub fn new(base: Option<Self>, sampling_config: Option<SamplerConfig>) -> Self {
         let default_base = SamplerConfig {
             api_key: None,
-            base_url: "https://api.x.ai/v1".to_string(),
+            // Fuigo's inference default, not the upstream vendor's endpoint: this
+            // placeholder is never dialled (no key, and every production
+            // `SamplerConfig` is built in agent/config.rs), but a default must
+            // still not name a host the user never chose.
+            base_url: crate::agent::config::FUIGO_API_BASE_URL_DEFAULT.to_string(),
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,

@@ -25,7 +25,16 @@ use serde::Deserialize;
 
 use crate::auth::AuthManager;
 
-const FUIGO_WEB_URL: &str = "https://grok.com";
+/// Env vars that can name the product Skills catalog host, in precedence order.
+///
+/// There is **no compiled default**. Upstream fell back to the vendor's web
+/// origin; Fuigo runs no Skills catalog, so with none of these set the catalog
+/// is simply not available and [`SkillsError::NotConfigured`] says so.
+pub(crate) const SKILLS_BASE_URL_ENV_CHAIN: [&str; 3] = [
+    "FUIGO_SKILLS_BASE_URL",
+    "FUIGO_CONVERSATIONS_BASE_URL",
+    "FUIGO_CODE_WEB_URL",
+];
 
 /// Marker stored on SkillInfo.metadata / AvailableCommand._meta so clients can tell product Skills from Build disk discovery without name allowlists.
 pub const CHAT_PRODUCT_META_VALUE: &str = "chat";
@@ -268,6 +277,12 @@ fn product_skill_info(
 pub enum SkillsError {
     #[error("no Fuigo credentials")]
     NoAuth,
+    /// No catalog host is configured; the feature is unavailable rather than
+    /// pointed at a vendor. The message names the env var to set.
+    #[error(
+        "the product Skills catalog needs FUIGO_SKILLS_BASE_URL (or FUIGO_CODE_WEB_URL) to be configured; it is not available otherwise"
+    )]
+    NotConfigured,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("request blocked by egress policy: {0}")]
@@ -292,7 +307,10 @@ impl SkillsError {
         match self {
             SkillsError::Network(_) => true,
             SkillsError::Http { status } => *status >= 500,
-            SkillsError::NoAuth | SkillsError::Parse(_) | SkillsError::Policy(_) => false,
+            SkillsError::NoAuth
+            | SkillsError::NotConfigured
+            | SkillsError::Parse(_)
+            | SkillsError::Policy(_) => false,
         }
     }
 }
@@ -373,31 +391,30 @@ fn skills_auth_alt_candidates<'a>(
 /// Stateless transport for product Skills REST (fuigo-web `skillsApi`).
 pub struct SkillsClient {
     http: reqwest::Client,
-    base_url: String,
+    /// `None` when no env var in [`SKILLS_BASE_URL_ENV_CHAIN`] is set: every
+    /// request fails closed with [`SkillsError::NotConfigured`].
+    base_url: Option<String>,
     auth: Arc<AuthManager>,
+}
+
+/// First non-empty value among `keys`, in order; `None` when none is set.
+pub(crate) fn first_nonempty_env(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
 }
 
 impl SkillsClient {
     pub fn new(auth: Arc<AuthManager>) -> Self {
-        let base_url = std::env::var("FUIGO_SKILLS_BASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("FUIGO_CONVERSATIONS_BASE_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                std::env::var("FUIGO_CODE_WEB_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or_else(|| FUIGO_WEB_URL.to_string());
         Self {
             http: crate::http::shared_client(),
-            base_url,
+            base_url: first_nonempty_env(&SKILLS_BASE_URL_ENV_CHAIN),
             auth,
         }
+    }
+
+    /// The configured catalog host, or the fail-closed error every request returns without one.
+    fn base(&self) -> Result<&str, SkillsError> {
+        self.base_url.as_deref().ok_or(SkillsError::NotConfigured)
     }
 
     fn apply_auth_headers(
@@ -439,10 +456,12 @@ impl SkillsClient {
         Ok(auth)
     }
 
-    /// Credentials to try for grok.com product Skills REST.
+    /// Credentials to try for the product Skills REST host.
     ///
     /// Primary first.
-    /// When primary is OIDC on the default grok.com host, also try non-OIDC keys for the same user from this AuthManager's `auth.json`.
+    /// When primary is OIDC and a catalog host is configured, also try non-OIDC keys for the same user from this AuthManager's `auth.json`.
+    /// (Upstream keyed this on its own vendor host; there is no compiled default host any more, so the
+    /// recovery follows the configured one. The alt keys go to the same host the primary bearer already went to.)
     /// Team OIDC is often rejected with `oauth2-auth-forbidden`.
     ///
     /// Order / isolation (see [`skills_auth_alt_candidates`]):
@@ -460,7 +479,7 @@ impl SkillsClient {
         if primary.auth_mode != AuthMode::Oidc || primary.user_id.is_empty() {
             return out;
         }
-        if self.base_url != FUIGO_WEB_URL {
+        if self.base_url.is_none() {
             return out;
         }
         let Ok(store) = crate::auth::read_auth_json(self.auth.auth_json_path()) else {
@@ -485,7 +504,7 @@ impl SkillsClient {
         user_id: &str,
         email: Option<&str>,
     ) -> Result<ListBundledSkillsResponse, SkillsError> {
-        let url = format!("{}/rest/skills", self.base_url);
+        let url = format!("{}/rest/skills", self.base()?);
         let body = serde_json::json!({ "locale": locale });
         let builder = self
             .apply_auth_headers(self.http.post(&url).json(&body), key, user_id, email)
@@ -507,7 +526,7 @@ impl SkillsClient {
         user_id: &str,
         email: Option<&str>,
     ) -> Result<ListUserSkillsResponse, SkillsError> {
-        let url = format!("{}/rest/user-skills", self.base_url);
+        let url = format!("{}/rest/user-skills", self.base()?);
         let builder = self
             .apply_auth_headers(self.http.get(&url), key, user_id, email)
             .timeout(LIST_REQUEST_TIMEOUT);
@@ -704,14 +723,14 @@ impl SkillsClient {
     pub(crate) fn with_base_url(auth: Arc<AuthManager>, base_url: impl Into<String>) -> Self {
         Self {
             http: crate::http::shared_client(),
-            base_url: base_url.into(),
+            base_url: Some(base_url.into()),
             auth,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -813,8 +832,13 @@ mod tests {
         assert!(!SkillsError::NoAuth.is_retryable());
     }
 
-    fn test_auth_manager() -> Arc<AuthManager> {
+    /// A first-party (OIDC, relay-eligible) session; shared with the sibling REST clients' tests.
+    ///
+    /// Installs the test issuer so `is_fuigo_auth()` holds regardless of which other tests ran
+    /// first (the override is a first-write-wins `OnceLock`).
+    pub(crate) fn test_auth_manager() -> Arc<AuthManager> {
         use crate::auth::{AuthMode, FuigoAuth, FuigoComConfig, GROK_OAUTH2_ISSUER};
+        crate::auth::set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
         let dir = tempfile::tempdir().unwrap();
         let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());
         mgr.hot_swap(FuigoAuth {
@@ -1224,6 +1248,74 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "my-skill");
         assert_eq!(infos[0].description, "first");
+    }
+
+    // ===== No vendor host as a default (1.0.20, REM-1 / REM-3) =====
+
+    /// Row 3: with none of the catalog env vars set the client resolves NO host.
+    /// Upstream fell back to its vendor's web origin here.
+    /// (Inspects `Debug` output only, so it compiles against the pre-fix `String` too.)
+    #[test]
+    #[serial_test::serial]
+    fn skills_client_without_env_names_no_vendor_host() {
+        let _a = fuigo_test_support::EnvGuard::unset("FUIGO_SKILLS_BASE_URL");
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client = SkillsClient::new(test_auth_manager());
+        let rendered = format!("{:?}", client.base_url);
+        assert!(
+            !rendered.contains("grok.com"),
+            "skills base fell back to a vendor host: {rendered}"
+        );
+    }
+
+    /// Row 3, typed: unset means `None`, and the catalog fails closed with a message naming
+    /// the variable (not a DNS/egress refusal), non-retryable.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn skills_client_without_env_fails_closed_with_a_true_message() {
+        let _a = fuigo_test_support::EnvGuard::unset("FUIGO_SKILLS_BASE_URL");
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client = SkillsClient::new(test_auth_manager());
+        assert_eq!(client.base_url, None);
+        let err = client.try_list_catalog("en").await.expect_err("no host, no request");
+        let shown = err.to_string();
+        assert!(matches!(err, SkillsError::NotConfigured), "{shown}");
+        assert!(shown.contains("FUIGO_SKILLS_BASE_URL"), "{shown}");
+        assert!(!shown.contains("grok.com"), "{shown}");
+        assert!(!err.is_retryable());
+    }
+
+    /// Row 3, set: the env chain is honoured in its original precedence, verbatim.
+    #[test]
+    #[serial_test::serial]
+    fn skills_client_env_chain_precedence_is_unchanged() {
+        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        assert_eq!(
+            SkillsClient::new(test_auth_manager()).base_url.as_deref(),
+            Some("https://web.example.test")
+        );
+        let _conv = fuigo_test_support::EnvGuard::set(
+            "FUIGO_CONVERSATIONS_BASE_URL",
+            "https://conv.example.test",
+        );
+        assert_eq!(
+            SkillsClient::new(test_auth_manager()).base_url.as_deref(),
+            Some("https://conv.example.test")
+        );
+        let _skills =
+            fuigo_test_support::EnvGuard::set("FUIGO_SKILLS_BASE_URL", "https://skills.example.test");
+        assert_eq!(
+            SkillsClient::new(test_auth_manager()).base_url.as_deref(),
+            Some("https://skills.example.test")
+        );
+        let _empty = fuigo_test_support::EnvGuard::set("FUIGO_SKILLS_BASE_URL", "");
+        assert_eq!(
+            SkillsClient::new(test_auth_manager()).base_url.as_deref(),
+            Some("https://conv.example.test"),
+            "empty is skipped, as before"
+        );
     }
 }
 

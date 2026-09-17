@@ -421,6 +421,9 @@ async fn rename_chat_conversation(
             ConvError::NoOauth => crate::acp_error::invalid_request(
                 "chat session rename requires Ferrox Labs OAuth credentials",
             ),
+            not_configured @ ConvError::NotConfigured => {
+                crate::acp_error::invalid_request(not_configured.to_string())
+            }
             ConvError::Http { status: 404 } => crate::acp_error::invalid_request(format!(
                 "conversation not found: {conversation_id}"
             )),
@@ -513,6 +516,9 @@ async fn soft_delete_chat_conversation(agent: &MvpAgent, conversation_id: &str) 
             ConvError::NoOauth => crate::acp_error::invalid_request(
                 "chat session delete requires Ferrox Labs OAuth credentials",
             ),
+            not_configured @ ConvError::NotConfigured => {
+                crate::acp_error::invalid_request(not_configured.to_string())
+            }
             other => crate::acp_error::internal_error(format!(
                 "chat conversation soft-delete failed: {other}"
             )),

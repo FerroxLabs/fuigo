@@ -1285,8 +1285,12 @@ pub const HTTP_401_NEEDLE: &str = "(401)";
 pub enum RelaySyncStatus {
     /// Successfully connected to relay, session is now shareable
     Connected {
-        /// The URL where this session can be viewed
-        share_url: String,
+        /// The URL where this session can be viewed, when `FUIGO_CODE_WEB_URL`
+        /// is configured. Absent otherwise: no destination is invented, and
+        /// the field is omitted from the wire so clients that never read it
+        /// see the same notification they always did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        share_url: Option<String>,
     },
     /// Disconnected from relay (will auto-reconnect)
     Disconnected,
@@ -2763,5 +2767,55 @@ mod tests {
         assert!(serde_json::from_str::<SessionUpdate>(missing_prompt_id).is_err());
         let missing_stop_reason = r#"{"sessionUpdate": "turn_completed", "prompt_id": "p-1"}"#;
         assert!(serde_json::from_str::<SessionUpdate>(missing_stop_reason).is_err());
+    }
+
+    // ===== RelaySyncStatus wire contract =====
+
+    /// Connected with a configured origin: `share_url` is on the wire exactly as before.
+    /// (`rename_all = "camelCase"` on the enum renames the variants only; the field has always
+    /// been `share_url` on the wire.)
+    #[test]
+    fn relay_sync_connected_with_share_url_serializes_it() {
+        let status = RelaySyncStatus::Connected {
+            share_url: Some("https://share.example.test/build/s1".into()),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "connected",
+                "share_url": "https://share.example.test/build/s1"
+            })
+        );
+        let back: RelaySyncStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(back, status);
+    }
+
+    /// Connected with no origin configured: the field is absent, not `null` and not an invented host.
+    /// A client that never read `shareUrl` sees the same `{"status":"connected"}` it always did.
+    #[test]
+    fn relay_sync_connected_without_share_url_omits_the_field() {
+        let status = RelaySyncStatus::Connected { share_url: None };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json, serde_json::json!({ "status": "connected" }));
+        assert!(!json.to_string().contains("grok.com"));
+        let back: RelaySyncStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(back, status);
+    }
+
+    /// The pre-1.0.20 wire shape (always a string) still deserializes, so an older peer's
+    /// notification is not rejected by a newer client and vice versa.
+    #[test]
+    fn relay_sync_connected_accepts_legacy_string_share_url() {
+        let back: RelaySyncStatus = serde_json::from_str(
+            r#"{"status":"connected","share_url":"https://share.example.test/build/s1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            back,
+            RelaySyncStatus::Connected {
+                share_url: Some("https://share.example.test/build/s1".into())
+            }
+        );
     }
 }

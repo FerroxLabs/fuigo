@@ -8407,3 +8407,39 @@ async fn fork_inherits_path_virtualization() {
         .expect("fork must inherit mapping");
     assert_eq!(virt.real_root(), "/workspace/conv-abc");
 }
+// ===== Auxiliary-service base URL (FUIGO_CLI_CHAT_PROXY_BASE_URL) =====
+//
+// Pure-function tests: the resolver takes the already-read value, so no test here
+// touches the process environment.
+
+/// Unset: `None`. No compiled fallback, so nothing names a host the operator never chose.
+#[test]
+fn cli_chat_proxy_base_url_unset_is_none() {
+    assert_eq!(cli_chat_proxy_base_url_from(None), None);
+}
+
+/// Empty counts as unset, matching `fuigo-shell`'s empty `CLI_CHAT_PROXY_BASE_URL_DEFAULT`.
+#[test]
+fn cli_chat_proxy_base_url_empty_is_none() {
+    assert_eq!(cli_chat_proxy_base_url_from(Some(String::new())), None);
+}
+
+/// Set: the value passes through verbatim, exactly as the env override always did.
+#[test]
+fn cli_chat_proxy_base_url_set_passes_through() {
+    assert_eq!(
+        cli_chat_proxy_base_url_from(Some("https://proxy.example.test/v1".into())).as_deref(),
+        Some("https://proxy.example.test/v1")
+    );
+}
+
+/// The live resolver never names the upstream vendor whatever the environment holds
+/// (a test that sets the var to the vendor host would be the only way, and none does).
+#[test]
+fn cli_chat_proxy_base_url_never_names_the_vendor() {
+    let rendered = format!("{:?}", cli_chat_proxy_base_url());
+    assert!(
+        !rendered.contains("grok.com"),
+        "workspace proxy base invented a vendor host: {rendered}"
+    );
+}
