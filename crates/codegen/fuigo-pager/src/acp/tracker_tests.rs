@@ -4891,18 +4891,16 @@ fn execute_block_output(sb: &ScrollbackState) -> String {
         other => panic!("expected Execute block, got {other:?}"),
     }
 }
-/// The final `ToolCallUpdate`'s `BashOutput::output` REPLACES whatever the streaming chunks put in the block.
+/// `AcpUpdateTracker` in isolation: a merged completed update's `BashOutput::output` REPLACES whatever the streaming
+/// chunks put in the block.
 ///
-/// Measured because the committed reason for `bash_full_output_double_click_fold_pty` passing on `b156799` — that
-/// the streamed chunks "already held every line" and the tail "did not take it away on screen" — is only half the
-/// story: the completion path merges and calls `tool_call_to_block`, whose Execute arm rebuilds the block from
-/// `raw_output`'s `BashOutput::output`, and `replace_tool_block` assigns `entry.block` wholesale. This pins that
-/// the final update really does win, for both shapes, so the base-tree block did lose its first lines the moment
-/// the final update was applied. The PTY test can only be green on base because its `contains_text("L01")` samples
-/// the block in the window BEFORE that update lands (`wait_for_text("L06")` is already satisfied by the streamed
-/// buffer, so it returns without waiting for completion, and nothing re-samples afterwards). That makes the PTY
-/// test a regression guard, not proof of the port — see `bash_mode_block_survives_the_updates_jsonl_round_trip`
-/// for the surface the port actually fixes.
+/// This is all it proves. The completion path merges, `tool_call_to_block`'s Execute arm rebuilds the block from
+/// `raw_output`'s `BashOutput::output`, and `replace_tool_block` assigns `entry.block` wholesale — for both shapes.
+/// It does NOT describe the live pager: the round-3 audit's PTY probe, on a binary persisting base's
+/// `... (12 lines)` tail, saw `L01` still on screen after `L12`, at turn idle and 5 s and 8 s later, and the raw PTY
+/// byte stream never contained `(12 lines)`. The live pager never paints the final update's output, for reasons not
+/// yet explained, which is why `bash_full_output_double_click_fold_pty` passes on either shape and cannot detect
+/// this port. See `bash_mode_block_survives_the_updates_jsonl_round_trip` for the surface the port fixes.
 #[test]
 fn bash_mode_final_update_output_replaces_the_streamed_block() {
     use fuigo_tools::types::output::ToolOutput;
@@ -5013,12 +5011,14 @@ fn bash_mode_final_update_output_replaces_the_streamed_block() {
 }
 /// End to end for the surface upstream 1.0.25 actually fixes: a RELOADED session.
 ///
-/// Replay reads `updates.jsonl` line by line and hands the pager the same `SessionNotification`s the shell wrote.
-/// This round-trips both of a bash-mode turn's persisted lines through JSON text — the exact `params` payload of a
-/// persisted `session/update` line, byte-array `BashOutput::output` and all — and asserts the execute block the
-/// tracker rebuilds from them. Before the port the persisted `output` was the `... (N lines)` tail, so reopening a
-/// session showed the elision where the command's output had been; nothing in the suite joined the two halves
-/// (shell sends the full output / the block keeps what it is given) on a real persisted line.
+/// Round-trips both of a bash-mode turn's persisted lines through JSON text — the exact `params` payload of a
+/// persisted `session/update` line, byte-array `BashOutput::output` and all — then feeds the tracker the shape
+/// production replay produces: `fuigo-shell`'s `ReplayToolCollapser::push` (`session/storage/replay.rs`) holds the
+/// in-progress `ToolCall`, applies the completing `ToolCallUpdate` to it with `acp::ToolCall::update`, and forwards ONE
+/// completed `ToolCall`. The collapser is `pub(crate)` to `fuigo-shell`, so the merge is reproduced here with the same
+/// `acp::ToolCall::update` call. The un-collapsed two-line form (what a replay that misses the collapser would send)
+/// is asserted too. Before the port the persisted `output` was the `... (N lines)` tail, so reopening a session
+/// showed the elision where the command's output had been.
 ///
 /// Its shell-side twin is `bash_mode_rebuilt_chat_history_keeps_the_model_copy_bounded`, which takes the same
 /// persisted line to the MODEL's copy through `chat_rebuild`.
@@ -5070,25 +5070,45 @@ fn bash_mode_block_survives_the_updates_jsonl_round_trip() {
         is_replay: true,
         ..Default::default()
     };
-    let mut sb = ScrollbackState::new();
-    let mut tracker = AcpUpdateTracker::new();
-    for line in &persisted {
-        let notification: acp::SessionNotification =
-            serde_json::from_str(line).expect("replay parses the persisted line back");
-        tracker.handle_update(notification.update, &replay, &mut sb);
-    }
+    let parsed: Vec<acp::SessionUpdate> = persisted
+        .iter()
+        .map(|line| {
+            serde_json::from_str::<acp::SessionNotification>(line)
+                .expect("replay parses the persisted line back")
+                .update
+        })
+        .collect();
 
-    let shown = execute_block_output(&sb);
-    assert_eq!(
-        shown, full,
-        "a reloaded session shows the complete result, not the persisted tail"
-    );
-    assert!(
-        shown.contains("line 001"),
-        "first line survives reload: {shown:?}"
-    );
-    assert!(
-        !shown.contains("... ("),
-        "no elision marker in a reloaded bash-mode block: {shown:?}"
-    );
+    // What production replay forwards: the ToolCall with the completing update applied, as one completed ToolCall.
+    let collapsed = match (parsed[0].clone(), parsed[1].clone()) {
+        (acp::SessionUpdate::ToolCall(mut base), acp::SessionUpdate::ToolCallUpdate(update)) => {
+            base.update(update.fields);
+            assert!(matches!(base.status, acp::ToolCallStatus::Completed));
+            acp::SessionUpdate::ToolCall(base)
+        }
+        other => panic!("persisted lines are a ToolCall then a ToolCallUpdate, got {other:?}"),
+    };
+
+    for (label, updates) in [
+        (
+            "collapsed, as ReplayToolCollapser forwards it",
+            vec![collapsed],
+        ),
+        ("the two persisted lines, un-collapsed", parsed),
+    ] {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        for update in updates {
+            tracker.handle_update(update, &replay, &mut sb);
+        }
+        let shown = execute_block_output(&sb);
+        assert_eq!(
+            shown, full,
+            "{label}: a reloaded session shows the complete result, not the persisted tail"
+        );
+        assert!(
+            !shown.contains("... ("),
+            "{label}: no elision marker in a reloaded bash-mode block: {shown:?}"
+        );
+    }
 }

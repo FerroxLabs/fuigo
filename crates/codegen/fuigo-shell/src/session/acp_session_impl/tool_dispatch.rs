@@ -355,6 +355,9 @@ impl SessionActor {
         } = BashModeOutput::split(&output);
 
         let is_backgrounded = signal.as_deref() == Some("backgrounded");
+        // One status line for every copy the model reads: the live chat-history message below and the final
+        // update's `content`. Built once so the two cannot drift.
+        let status_line = BashModeOutput::status_line(exit_code);
 
         // Send final tool call update
         // For backgrounded commands, don't mark as completed/failed; let the background task do that
@@ -389,16 +392,23 @@ impl SessionActor {
                     tool_call_id,
                     acp::ToolCallUpdateFields::new()
                         .status(Some(final_status))
-                        // The MODEL's copy of this tool result, and the reason it is the bounded `history` half and
-                        // not `full`. `chat_rebuild::extract_tool_result_text` (session/storage/mod.rs) prefers
-                        // `content` and, when it is absent, falls back to `raw_output.to_string()` — the whole
-                        // `BashOutput` JSON, with `output` rendered as a decimal byte array. Every rebuild of
-                        // `chat_history.jsonl` from `updates.jsonl` takes that path (`remote::pull`,
-                        // `ensure_chat_history` after a crash or cache loss, and every session import, which drops
-                        // the chat cache on purpose), so without this the model's copy of one `! cmd` was the FULL
-                        // output: 965 B -> 3.93 MB for a 1 MiB command, and `line 001` back in the conversation.
-                        // Setting it keeps the rebuilt copy byte-identical to the live one this turn pushed into
-                        // chat history. Pinned by `bash_mode_rebuilt_chat_history_keeps_the_model_copy_bounded`.
+                        // The MODEL's copy of this tool result: the bounded `history` tail plus the same `[exit code: N]`
+                        // status line the live chat-history message ends with (`BashModeOutput::model_result`).
+                        // `chat_rebuild::extract_tool_result_text` (session/storage/mod.rs) prefers `content` and,
+                        // when it is absent, falls back to `raw_output.to_string()` — the whole `BashOutput` JSON,
+                        // with `output` rendered as a decimal byte array. Every rebuild of `chat_history.jsonl` from
+                        // `updates.jsonl` takes that path (`remote::pull`, `ensure_chat_history` after a crash or
+                        // cache loss, and every session import, which drops the chat cache on purpose), so without
+                        // this the model's copy of one `! cmd` was the FULL output: 3,933,172 B of rebuilt chat
+                        // history for a 1 MiB command, and `line 001` back in the conversation.
+                        //
+                        // What `content` carries is the live message's tail and status line, not the live message:
+                        // live pushes ONE user item, `I executed a terminal command: `<cmd>`` with the tail in a code
+                        // fence; a rebuild yields the persisted prompt chunk, an assistant tool call and this tool
+                        // result. The tail is bounded by LINES, not bytes, exactly as live: a single very long line
+                        // stays long on both paths (pre-existing, upstream-identical). Pinned by
+                        // `bash_mode_rebuilt_chat_history_keeps_the_model_copy_bounded` and
+                        // `bash_mode_rebuilt_chat_history_carries_the_exit_status`.
                         //
                         // Additive on the wire, verified rather than assumed: the streaming `BashOutputChunk`
                         // updates for this same tool call already carry `content`
@@ -409,7 +419,9 @@ impl SessionActor {
                         // parse (`fuigo-pager/src/acp/tracker.rs`) — and Murage's `tool_call_update` arm reads only
                         // `status` and `toolCallId` (`server/drivers/acp/core.ts`).
                         .content(Some(vec![acp::ToolCallContent::from(
-                            acp::ContentBlock::Text(acp::TextContent::new(history_output.clone())),
+                            acp::ContentBlock::Text(acp::TextContent::new(
+                                BashModeOutput::model_result(&history_output, &status_line),
+                            )),
                         )]))
                         .raw_output(serde_json::to_value(ToolsToolOutput::Bash(bash_output)).ok()),
                 )),
@@ -423,8 +435,8 @@ impl SessionActor {
 
         // Build a single user message for chat history that includes command, output, and exit code
         let user_message = format!(
-            "I executed a terminal command: `{}`\n\nOutput:\n```\n{}\n```\n\n[exit code: {}]",
-            command, history_output, exit_code
+            "I executed a terminal command: `{}`\n\nOutput:\n```\n{}\n```\n\n{}",
+            command, history_output, status_line
         );
 
         // Add to chat history as a user message only
@@ -461,22 +473,23 @@ impl SessionActor {
 /// buffer, and `tools/notification_bridge.rs` sends those **straight to the gateway without persisting them**, so
 /// the live execute block already showed every line on the base tree.
 ///
-/// The final update does NOT leave that alone, though — `fuigo-pager`'s
-/// `bash_mode_final_update_output_replaces_the_streamed_block` measures it: the completion path merges, rebuilds
-/// the block from `raw_output`'s `BashOutput::output` in `tool_call_to_block`'s Execute arm, and
-/// `replace_tool_block` assigns `entry.block` wholesale, so on base the streamed lines above the bound really did
-/// vanish from the block the moment completion was applied. `bash_full_output_double_click_fold_pty` is green on
-/// `b156799` all the same because its one discriminating assertion, `contains_text("L01")`, samples the block
-/// before that: the `wait_for_text("L06")` ahead of it is already satisfied by the streamed buffer (L06 is inside
-/// base's ten-line tail too) so it returns without waiting for completion, and nothing re-samples afterwards. That
-/// PTY test is a regression guard for this port, not evidence of it.
+/// What the live pager does with that block when the final update arrives is NOT established. Measured by the
+/// round-3 audit's PTY probe, on a binary that persisted base's `"... (12 lines)\nL03…L12"` tail as a completed update
+/// with no `content`: `L01` was still on screen right after `L12`, at turn idle, and 5 s and 8 s after that, and the
+/// raw PTY byte stream never once contained `(12 lines)`. So the live pager never painted the final update's output;
+/// this is not a sampling race. What IS proven is narrower: `AcpUpdateTracker` on its own replaces the block with
+/// the final update's output when it merges a completed update (`fuigo-pager`'s
+/// `bash_mode_final_update_output_replaces_the_streamed_block`). Why that replacement never reaches the live screen
+/// is unexplained. Consequence: `bash_full_output_double_click_fold_pty` is green on a base-shape binary and on this
+/// one, so it guards live rendering (streamed output, fold/expand, failing commands) and cannot detect this port.
 ///
 /// The final `ToolCallUpdate` is the one that IS persisted (`emit_notification_direct` -> `PersistenceMsg::Update`),
-/// and it is the only bash-mode output a reloaded session has: replay feeds the pager the initial `ToolCall` plus
-/// that final update, and `tool_call_to_block` builds the execute block from its `BashOutput::output`. On the base
-/// tree that was the ten-line tail, so reopening a session showed `... (N lines)` where the command's own output had
-/// been. That is what this fixes, and it is why the persisted cost changes so much (a 1 MiB command went from ~2 KB
-/// to ~3.9 MB of `updates.jsonl`; see `bash_mode_persisted_cost_of_a_full_size_output_is_measured`).
+/// and it is the only bash-mode output a reloaded session has: replay collapses the initial `ToolCall` and that final
+/// update into one completed `ToolCall` (`storage/replay.rs`, `ReplayToolCollapser::push`), and `tool_call_to_block`
+/// builds the execute block from its `BashOutput::output`. On the base tree that was the ten-line tail, so reopening a
+/// session showed `... (N lines)` where the command's own output had been. That is what this fixes, and it is why the
+/// persisted cost changes so much (a 1 MiB command went from ~2 KB to ~3.9 MB of `updates.jsonl`; see
+/// `bash_mode_persisted_cost_of_a_full_size_output_is_measured`).
 ///
 /// # The model-facing copy DID change, for one input class
 ///
@@ -500,6 +513,23 @@ pub(super) struct BashModeOutput {
 }
 
 impl BashModeOutput {
+    /// The status line the model is told a `! cmd` finished with.
+    ///
+    /// The single source for both model-facing copies — the live chat-history message and the final update's
+    /// `content` — so a rebuilt session and a live one cannot disagree on it. It is the exit code only, because that is
+    /// all the live message has ever carried: a timed-out, signalled or failed-to-start command reaches it as
+    /// `exit_code == -1` (`res.exit_code.unwrap_or(-1)`), and adding a signal/timeout suffix here would change the
+    /// live model copy too.
+    pub(super) fn status_line(exit_code: i32) -> String {
+        format!("[exit code: {exit_code}]")
+    }
+
+    /// The final update's `content`: `history` followed by `status_line`, separated the way the live message
+    /// separates its code fence from the status.
+    pub(super) fn model_result(history: &str, status_line: &str) -> String {
+        format!("{history}\n\n{status_line}")
+    }
+
     pub(super) fn split(output: &str) -> Self {
         let full = output.trim_end().to_string();
         let lines: Vec<&str> = full.lines().collect();
@@ -631,6 +661,8 @@ mod bash_mode_output_tests {
         combined_output: String,
         /// What the real runner reports when the command blew past `output_byte_limit`.
         truncated: bool,
+        /// The command's exit status.
+        exit_code: i32,
     }
 
     #[async_trait::async_trait]
@@ -644,7 +676,7 @@ mod bash_mode_output_tests {
         > {
             Ok(crate::terminal::runner::TerminalRunResult {
                 combined_output: self.combined_output.clone(),
-                exit_code: Some(0),
+                exit_code: Some(self.exit_code),
                 truncated: self.truncated,
                 signal: None,
                 timed_out: false,
@@ -668,7 +700,7 @@ mod bash_mode_output_tests {
 
     /// As [`run_bash_mode`], with the runner's `output_byte_limit` truncation flag under test control.
     async fn run_bash_mode_with(output: String, truncated: bool) -> (BashOutput, String) {
-        let run = run_bash_mode_capturing(output, truncated).await;
+        let run = run_bash_mode_capturing(output, truncated, 0).await;
         (run.bash, run.user_message)
     }
 
@@ -681,7 +713,11 @@ mod bash_mode_output_tests {
         notifications: Vec<acp::SessionNotification>,
     }
 
-    async fn run_bash_mode_capturing(output: String, truncated: bool) -> BashModeRun {
+    async fn run_bash_mode_capturing(
+        output: String,
+        truncated: bool,
+        exit_code: i32,
+    ) -> BashModeRun {
         let (gateway_tx, _gateway_rx) =
             tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
         let (persistence_tx, mut persistence_rx) =
@@ -714,6 +750,7 @@ mod bash_mode_output_tests {
             Arc::new(ScriptedTerminal {
                 combined_output: output,
                 truncated,
+                exit_code,
             }),
         )
         .await;
@@ -1213,7 +1250,7 @@ mod bash_mode_output_tests {
         local
             .run_until(async {
                 let raw = numbered_lines(25);
-                let run = run_bash_mode_capturing(raw, false).await;
+                let run = run_bash_mode_capturing(raw, false, 0).await;
                 let expected_tail = format!(
                     "... (25 lines)\n{}",
                     (16..=25)
@@ -1238,8 +1275,9 @@ mod bash_mode_output_tests {
                     "one bash-mode turn rebuilds to one tool result, got {tool_results:?}"
                 );
                 assert_eq!(
-                    tool_results[0], expected_tail,
-                    "the rebuilt model copy is the bounded tail, not the raw BashOutput JSON"
+                    tool_results[0],
+                    format!("{expected_tail}\n\n[exit code: 0]"),
+                    "the rebuilt model copy is the bounded tail and its status, not the raw BashOutput JSON"
                 );
 
                 let rebuilt: String = items.iter().map(|i| i.text_content()).collect();
@@ -1259,6 +1297,55 @@ mod bash_mode_output_tests {
             .await;
     }
 
+    /// A FAILED `! cmd` must still read as failed after `chat_history.jsonl` is rebuilt.
+    ///
+    /// The live message ends `[exit code: N]`; `chat_rebuild` ignores the update's `status`, so the rebuilt tool
+    /// result is the only place the model can learn the command failed. RED on `47dda32`, whose `content` was the bare
+    /// tail: the rebuilt copy of an exit-2 command had no status at all. GREEN here: the rebuilt copy ends with the
+    /// same status line as the live message, built by the same `BashModeOutput::status_line`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bash_mode_rebuilt_chat_history_carries_the_exit_status() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                for exit_code in [2, 0] {
+                    let run = run_bash_mode_capturing(numbered_lines(25), false, exit_code).await;
+                    let status = format!("[exit code: {exit_code}]");
+                    assert!(
+                        run.user_message.ends_with(&status),
+                        "exit {exit_code}: the live message is unchanged and ends with the status: {:?}",
+                        run.user_message
+                    );
+                    assert_eq!(run.bash.exit_code, exit_code);
+
+                    let (items, _bytes) = rebuild_chat_history_from(&run.notifications);
+                    let rebuilt = items
+                        .iter()
+                        .find_map(|item| match item {
+                            fuigo_sampling_types::ConversationItem::ToolResult(t) => {
+                                Some(t.content.as_ref().to_owned())
+                            }
+                            _ => None,
+                        })
+                        .expect("one rebuilt tool result");
+                    assert!(
+                        rebuilt.ends_with(&format!("\n\n{status}")),
+                        "exit {exit_code}: the rebuilt model copy must carry the same status line as the live \
+                         message, got {rebuilt:?}"
+                    );
+                    assert!(
+                        rebuilt.starts_with("... (25 lines)\nline 016\n"),
+                        "exit {exit_code}: still the bounded tail: {rebuilt:?}"
+                    );
+                    assert!(
+                        run.user_message.contains(rebuilt.split("\n\n[exit code:").next().unwrap_or("")),
+                        "exit {exit_code}: the rebuilt tail is the live message's tail"
+                    );
+                }
+            })
+            .await;
+    }
+
     /// The same rebuild for a command that saturates [`BASH_MODE_OUTPUT_BYTE_LIMIT`]: the model-facing cost of one
     /// `! cmd` must be set by the ten-line bound, not by what the command printed. Run with `--nocapture` to see
     /// the measured size.
@@ -1274,7 +1361,7 @@ mod bash_mode_output_tests {
                     BASH_MODE_OUTPUT_BYTE_LIMIT / "line of ordinary command output\n".len(),
                 );
                 let printed = raw.trim_end().len();
-                let run = run_bash_mode_capturing(raw, false).await;
+                let run = run_bash_mode_capturing(raw, false, 0).await;
                 let (_items, bytes) = rebuild_chat_history_from(&run.notifications);
                 println!(
                     "bash-mode rebuilt model copy: command printed {printed} bytes -> \
