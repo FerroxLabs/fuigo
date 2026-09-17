@@ -201,6 +201,8 @@ impl AgentView {
             deferred_text_press: None,
             persistent_text_selection: None,
             table_selection_geometry: None,
+            drag_table_geometry: None,
+            btw_selection_wrap_width: None,
             selection_created_at: None,
             last_drag_mouse: None,
             drag_autoscroll: None,

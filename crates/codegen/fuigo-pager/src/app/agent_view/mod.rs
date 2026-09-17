@@ -1125,9 +1125,12 @@ pub struct AgentView {
     /// completion, double-click, or triple-click. Cleared on next click
     /// elsewhere, Escape, or navigation.
     pub persistent_text_selection: Option<PersistentTextSelection>,
-    /// Table geometry backing a table-shaped drag / persistent selection,
-    /// keyed to that selection; ignored when the key doesn't match.
+    /// Table geometry for the held highlight. Not shared with an in-progress drag.
     pub table_selection_geometry: Option<TableSelectionGeometry>,
+    /// Table geometry for the active drag. A `/btw` drag must not steal the held slot.
+    pub drag_table_geometry: Option<TableSelectionGeometry>,
+    /// Wrap width the `/btw` selection was armed against. A mismatch invalidates it.
+    pub btw_selection_wrap_width: Option<u16>,
     /// Timestamp when the current persistent selection was created.
     /// Used for auto-dismissal after a configurable timeout.
     pub selection_created_at: Option<Instant>,
