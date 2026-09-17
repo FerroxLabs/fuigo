@@ -3200,6 +3200,9 @@ pub(crate) async fn run(
         }
 
         presenter.present_if_dirty(&mut app, terminal);
+        // Re-check after the paint: the dashboard's tick demand reads what the frame just painted, so a spinner
+        // that first appeared in this frame arms its next tick here rather than waiting for another event
+        schedule_tick(&mut animation_tick_at, &app, tick_interval);
     }
 
     flush_pending_stall(&mut stall_rollup);
@@ -3334,7 +3337,7 @@ fn after_task_complete_dispatch(
 }
 
 /// Schedule the next animation tick when demanded and none is pending.
-fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interval: Duration) {
+pub(crate) fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interval: Duration) {
     if tick_at.is_none() {
         let interval = match app.tick_demand() {
             crate::app::app_view::TickDemand::None => return,

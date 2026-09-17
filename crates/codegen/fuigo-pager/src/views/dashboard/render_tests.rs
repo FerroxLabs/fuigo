@@ -4331,3 +4331,243 @@ fn render_header_counts_top_level_rows_only() {
         "header must not count subagent state, got: {content:?}",
     );
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Repaint gating: a tick owes a redraw only when a painted spinner or blink changes frame (upstream 1.0.29 port)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Paint `states` as top-level rows in the wide layout at `tick`; returns every cell's (symbol, fg) and what was marked.
+fn paint_rows(states: &[RowState], tick: u64) -> (Vec<(String, Color)>, PaintedAnimations) {
+    let area = Rect::new(0, 0, 80, 3 + 3 * states.len() as u16);
+    let rows: Vec<DashboardRow> = states
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| header_test_row(i as u32 + 1, s, "row label"))
+        .collect();
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    state.spinner_tick = tick;
+    render_rows(&mut buf, area, &Theme::fuigonight(), &rows, &mut state);
+    let cells = buf
+        .content
+        .iter()
+        .map(|cell| (cell.symbol().to_owned(), cell.fg))
+        .collect();
+    (cells, state.painted_animations)
+}
+
+fn painted_row_cells(row_state: RowState, tick: u64) -> Vec<(String, Color)> {
+    paint_rows(&[row_state], tick).0
+}
+
+/// `RowState::animation()` is the single source of truth for "this row's paint moves between ticks".
+#[test]
+fn row_paint_changes_across_ticks_iff_state_is_animated() {
+    use strum::IntoEnumIterator as _;
+    let later = NEEDS_INPUT_BLINK_DIVISOR;
+    assert_ne!(
+        state_icon(RowState::Working, 0),
+        state_icon(RowState::Working, later),
+        "fixture: the tick pair must land on different spinner frames"
+    );
+    for row_state in RowState::iter() {
+        assert_eq!(
+            row_state.animation().is_some(),
+            painted_row_cells(row_state, 0) != painted_row_cells(row_state, later),
+            "{row_state:?}: animation() must match whether the painted row changes across ticks"
+        );
+    }
+}
+
+/// For every subset of animated row states on screen, `DashboardState::tick` reports `true` on exactly the ticks
+/// where a repaint of those rows would differ from the previous frame, and the per-cycle redraw count is the union
+/// of the two cadences (spinner every 4, blink every 10, shared boundaries counted once).
+#[test]
+fn dashboard_tick_reports_exactly_the_ticks_where_the_painted_rows_repaint() {
+    use strum::IntoEnumIterator as _;
+    let animated: Vec<RowState> = RowState::iter()
+        .filter(|s| s.animation().is_some())
+        .collect();
+    let cycle = SPINNER_DIVISOR * NEEDS_INPUT_BLINK_DIVISOR;
+    for mask in 0..(1u32 << animated.len()) {
+        let on_screen: Vec<RowState> = animated
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, &s)| s)
+            .collect();
+        let mut state = DashboardState::new();
+        let (mut previous_cells, painted) = paint_rows(&on_screen, state.spinner_tick);
+        state.painted_animations = painted;
+        let mut changes = 0;
+        for _ in 0..cycle {
+            let previous = state.spinner_tick;
+            let reported = state.tick();
+            let tick = state.spinner_tick;
+            let (cells, _) = paint_rows(&on_screen, tick);
+            let painted_changed = cells != previous_cells;
+            previous_cells = cells;
+            assert_eq!(
+                painted_changed, reported,
+                "{on_screen:?} on screen, tick {previous}->{tick}: DashboardState::tick must match whether a painted row repaints"
+            );
+            changes += u64::from(reported);
+        }
+        let expected = match (
+            on_screen.contains(&RowState::Working),
+            on_screen.contains(&RowState::NeedsInput),
+        ) {
+            (false, false) => 0,
+            (true, false) => cycle / SPINNER_DIVISOR,
+            (false, true) => cycle / NEEDS_INPUT_BLINK_DIVISOR,
+            (true, true) => {
+                let spinner = cycle / SPINNER_DIVISOR;
+                let blink = cycle / NEEDS_INPUT_BLINK_DIVISOR;
+                let (mut a, mut b) = (SPINNER_DIVISOR, NEEDS_INPUT_BLINK_DIVISOR);
+                while b != 0 {
+                    let r = a % b;
+                    a = b;
+                    b = r;
+                }
+                spinner + blink - a
+            }
+        };
+        assert_eq!(
+            expected, changes,
+            "{on_screen:?}: redraws per {cycle}-tick cycle"
+        );
+    }
+}
+
+#[test]
+fn dashboard_tick_wraps_the_counter() {
+    let mut state = DashboardState::new();
+    state.painted_animations.mark(Animation::Spinner);
+    state.spinner_tick = u64::MAX;
+    assert!(state.tick());
+    assert_eq!(0, state.spinner_tick);
+}
+
+/// A working row inside a collapsed section is never painted, so it marks nothing and owes no repaints.
+#[test]
+fn collapsed_working_rows_mark_no_animation() {
+    let rows = vec![
+        header_test_row(1, RowState::Working, "hidden worker"),
+        header_test_row(2, RowState::Idle, "visible idler"),
+    ];
+    let area = Rect::new(0, 0, 80, 12);
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_rows(&mut buf, area, &Theme::fuigonight(), &rows, &mut state);
+    assert!(
+        state.painted_animations.spinner,
+        "fixture: an expanded Working section paints its spinner"
+    );
+
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    state
+        .collapsed_sections
+        .insert(SectionKey::State(RowState::Working));
+    render_rows(&mut buf, area, &Theme::fuigonight(), &rows, &mut state);
+    assert_eq!(
+        PaintedAnimations::default(),
+        state.painted_animations,
+        "a collapsed Working section paints no spinner cell, so nothing animates"
+    );
+    assert!(
+        !state.tick(),
+        "and the next tick owes no repaint (spinner_tick={})",
+        state.spinner_tick
+    );
+}
+
+/// The NeedsInput blink is only an animation when the theme can dim `warning`; on a named-ANSI theme both phases paint
+/// the same colour, so marking it would repaint identical frames ten ticks apart.
+#[test]
+fn needs_input_blink_marks_only_when_the_theme_can_dim() {
+    let rows = vec![header_test_row(1, RowState::NeedsInput, "asks")];
+    let area = Rect::new(0, 0, 80, 6);
+
+    let truecolor = Theme::fuigonight();
+    assert!(
+        needs_input_blink_visible(&truecolor),
+        "fixture: RGB theme blinks"
+    );
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_rows(&mut buf, area, &truecolor, &rows, &mut state);
+    assert!(state.painted_animations.blink);
+    assert!(!state.painted_animations.spinner);
+
+    let ansi = Theme::terminal_default();
+    assert!(
+        !needs_input_blink_visible(&ansi),
+        "fixture: a named-ANSI warning cannot be blended, so the blink is invisible"
+    );
+    assert_eq!(
+        needs_input_bullet_color(0, &ansi),
+        needs_input_bullet_color(NEEDS_INPUT_BLINK_DIVISOR, &ansi),
+        "both blink phases resolve to the same colour on the ANSI theme"
+    );
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_rows(&mut buf, area, &ansi, &rows, &mut state);
+    assert_eq!(PaintedAnimations::default(), state.painted_animations);
+}
+
+/// The header's `working` chip paints the same spinner glyph as the rows; it marks the spinner only when the chip was
+/// actually painted (a zero count paints no chip).
+#[test]
+fn header_working_chip_marks_the_spinner() {
+    let theme = Theme::fuigonight();
+    let area = Rect::new(0, 0, 120, 1);
+
+    let rows = vec![header_test_row(1, RowState::Working, "w")];
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_header(&mut buf, area, &theme, &rows, &mut state, None);
+    assert!(
+        state.painted_animations.spinner,
+        "a painted working chip spins"
+    );
+
+    let rows = vec![
+        header_test_row(1, RowState::Idle, "i"),
+        header_test_row(2, RowState::Completed, "c"),
+    ];
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_header(&mut buf, area, &theme, &rows, &mut state, None);
+    assert_eq!(
+        PaintedAnimations::default(),
+        state.painted_animations,
+        "no working chip, nothing to animate"
+    );
+}
+
+/// Narrow layout: a Working row spins; NeedsInput is a static diamond there, so it marks nothing.
+#[test]
+fn narrow_rows_mark_only_the_spinner() {
+    let theme = Theme::fuigonight();
+    let area = Rect::new(0, 0, MIN_DASHBOARD_WIDTH - 1, 8);
+
+    let rows = vec![header_test_row(1, RowState::Working, "w")];
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_narrow_rows(&mut buf, area, &theme, &rows, &mut state);
+    assert!(state.painted_animations.spinner);
+    assert!(!state.painted_animations.blink);
+    let at0: Vec<String> = buf.content.iter().map(|c| c.symbol().to_owned()).collect();
+    let mut buf = Buffer::empty(area);
+    state.spinner_tick = SPINNER_DIVISOR;
+    render_narrow_rows(&mut buf, area, &theme, &rows, &mut state);
+    let at4: Vec<String> = buf.content.iter().map(|c| c.symbol().to_owned()).collect();
+    assert_ne!(at0, at4, "the narrow spinner glyph advances with the tick");
+
+    let rows = vec![header_test_row(1, RowState::NeedsInput, "asks")];
+    let mut buf = Buffer::empty(area);
+    let mut state = DashboardState::new();
+    render_narrow_rows(&mut buf, area, &theme, &rows, &mut state);
+    assert_eq!(PaintedAnimations::default(), state.painted_animations);
+}
