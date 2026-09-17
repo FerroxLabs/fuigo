@@ -5800,6 +5800,11 @@ impl AppView {
                 agent.btw_state,
                 Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
             ) && spinner_frame_tick;
+            needs_redraw |= agent
+                .extensions_modal
+                .as_ref()
+                .is_some_and(|m| m.needs_spinner_tick())
+                && spinner_frame_tick;
             needs_redraw |= matches!(
                 agent.active_modal.as_ref(),
                 Some(crate::views::modal::ActiveModal::SessionPicker {
@@ -6128,7 +6133,7 @@ impl AppView {
                     || agent
                         .extensions_modal
                         .as_ref()
-                        .is_some_and(|m| m.result_notice.is_some())
+                        .is_some_and(|m| m.result_notice.is_some() || m.needs_spinner_tick())
                     || agent.ephemeral_tip_needs_tick()
                     || agent.mode_switch_banner.is_some()
                     || agent.has_drag_autoscroll()

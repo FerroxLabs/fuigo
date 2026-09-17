@@ -1913,6 +1913,26 @@ impl ExtensionsModalState {
         false
     }
 
+    pub fn active_tab_is_loading(&self) -> bool {
+        match self.active_tab {
+            ExtensionsTab::Hooks => matches!(self.hooks_data, TabDataState::Loading),
+            ExtensionsTab::Plugins => matches!(self.plugins_data, TabDataState::Loading),
+            ExtensionsTab::Marketplace => matches!(self.marketplace_data, TabDataState::Loading),
+            ExtensionsTab::Skills => matches!(self.skills_data, TabDataState::Loading),
+            ExtensionsTab::Workflows => matches!(self.workflows_data, TabDataState::Loading),
+            ExtensionsTab::McpServers => matches!(self.mcps_data, TabDataState::Loading),
+        }
+    }
+
+    pub fn has_tab_wide_pending_overlay(&self) -> bool {
+        self.pending_action.is_some() && self.pending_entry_index.is_none()
+    }
+
+    /// A spinner that renders without demanding ticks parks on its first frame.
+    pub fn needs_spinner_tick(&self) -> bool {
+        self.active_tab_is_loading() || self.has_tab_wide_pending_overlay()
+    }
+
     /// Switch to a different tab and reset the per-tab transient UI state.
     ///
     /// Clears anything tied to the previous tab's data indices or modal flow, so the new tab opens in a clean browse view.
@@ -2643,14 +2663,7 @@ pub fn render_extensions_modal(
     };
 
     // Determine if this tab is loading.
-    let loading = match state.active_tab {
-        ExtensionsTab::Hooks => matches!(state.hooks_data, TabDataState::Loading),
-        ExtensionsTab::Plugins => matches!(state.plugins_data, TabDataState::Loading),
-        ExtensionsTab::Marketplace => matches!(state.marketplace_data, TabDataState::Loading),
-        ExtensionsTab::Skills => matches!(state.skills_data, TabDataState::Loading),
-        ExtensionsTab::Workflows => matches!(state.workflows_data, TabDataState::Loading),
-        ExtensionsTab::McpServers => matches!(state.mcps_data, TabDataState::Loading),
-    };
+    let loading = state.active_tab_is_loading();
 
     // Input mode hides the entry list (form overlay owns the content area).
     let in_input_mode = state.input.is_some() || state.mcp_setup.is_some();
@@ -3629,7 +3642,7 @@ pub fn render_extensions_modal(
             &non_selectable_clickable,
             Some(theme.bg_base),
             loading,
-            0,
+            tick,
             inner_x + inner_width - 1,
         );
         (content_hit.item_rects, content_hit.entry_indices)
