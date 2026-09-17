@@ -26,12 +26,20 @@ fn prompt_style(focus: WelcomePromptFocus, compact: bool, pad_left: u16, pad_rig
 /// Rows the welcome layout should reserve for the composer: measured with the style and inset
 /// [`render_prompt`] draws with, so the layout reserves the rows the draft will paint into.
 pub fn desired_prompt_height(
-    _prompt: &PromptWidget,
-    _content_width: u16,
-    _compact: bool,
-    _max_height: u16,
+    prompt: &PromptWidget,
+    content_width: u16,
+    compact: bool,
+    max_height: u16,
 ) -> u16 {
-    super::PROMPT_HEIGHT
+    let inset = prompt_inset(compact);
+    // Focus only tints, never changes the row count; both render sites draw with a 2-column chrome pad
+    let style = prompt_style(WelcomePromptFocus::Focused, compact, 2, 2);
+    prompt.desired_height(
+        content_width.saturating_sub(inset * 2),
+        &style,
+        true,
+        max_height,
+    )
 }
 
 /// Returns the cursor position and the post-flush output that carries terminal-overlay ownership.
