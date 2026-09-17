@@ -50,7 +50,7 @@ pub fn enabled() -> bool {
 }
 
 /// Terminal row-hover tint, matching the scrollback pane's blend.
-fn row_hover_bg(theme: &Theme) -> Color {
+pub(crate) fn row_hover_bg(theme: &Theme) -> Color {
     crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5).unwrap_or(theme.bg_hover)
 }
 
