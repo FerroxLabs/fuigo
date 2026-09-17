@@ -538,6 +538,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         // No caller awaits a wake: it is background work whose completion
         // reports through the usual background-completion notice.
         wake_request.run_in_background = true;
+        // DEVIATION from upstream (`coordinator/wake.rs`), deliberate: upstream
+        // clears `surface_completion` here because its `WakeOrigin` gives the
+        // wake another way to surface its result. Fuigo has no such path, so
+        // the inherited flag is the ONLY thing that lets the parent see the
+        // woken child's answer (`coordinator.rs` gates both the buffered
+        // completion and `should_surface` on it). Clearing it here would leave
+        // the sender with `Accepted` and then silence.
         wake_request.await_to_completion = false;
         wake_request.cancel_token = tokio_util::sync::CancellationToken::new();
         self.woken.insert(subagent_id.clone(), completed);
@@ -547,6 +554,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             parent_session_id,
             request,
             respond_to: Some(respond_to),
+            // No deadline, matching upstream `wake.rs`. The text is already
+            // committed as this incarnation's own prompt, so expiring the park
+            // would answer `NotAcceptedBeforeDeadline` to a sender whose
+            // message the child is still going to run. On the `Enqueue` branch
+            // below the reply therefore stays outstanding until a spawn slot
+            // frees (or the coordinator drops the park, which answers
+            // `ChannelClosed`); pinned by
+            // `wake_queued_at_the_spawn_limit_holds_the_record_and_never_expires`.
             deadline: None,
             initial_message_id: Some(message_id),
         });

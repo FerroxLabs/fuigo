@@ -229,7 +229,24 @@ fn wake_fixture_with_runs() -> (
     mpsc::UnboundedReceiver<AdmissionCall>,
     WakeFixture,
 ) {
-    let config = CoordinatorConfig::default();
+    wake_fixture_with_limits(CoordinatorConfig::default().limits)
+}
+
+/// A wake fixture whose spawn admission can be saturated, so the wake's
+/// `Enqueue` and `Reject` branches are reachable.
+fn wake_fixture_with_limits(
+    limits: crate::implementations::fuigo_build::task::admission::SubagentLimits,
+) -> (
+    WakeCoordinator,
+    crate::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
+    mpsc::UnboundedSender<AdmissionCall>,
+    mpsc::UnboundedReceiver<AdmissionCall>,
+    WakeFixture,
+) {
+    let config = CoordinatorConfig {
+        limits,
+        ..CoordinatorConfig::default()
+    };
     let (command_tx, command_rx) =
         SubagentCoordinatorReceiver::with_capacity(MAX_ACTIVE_MESSAGE_ADMISSIONS);
     let (admission_tx, admissions) = mpsc::unbounded_channel();
@@ -404,6 +421,94 @@ async fn woken_child_completion_replaces_the_displaced_record() {
             .count(),
         1
     );
+}
+
+/// A wake that arrives at a saturated spawn limit under
+/// `FUIGO_SUBAGENT_LIMIT_BEHAVIOR=fail` starts nothing, so the terminal record
+/// it displaced must go back exactly where it was. Only the ResumeSource
+/// lookup falls back to `woken`; if the restore is wrong, `get_task_output`
+/// and every completed lookup return not-found for that child forever.
+#[tokio::test]
+async fn wake_rejected_at_the_spawn_limit_restores_the_displaced_completion() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) =
+        wake_fixture_with_limits(
+            crate::implementations::fuigo_build::task::admission::SubagentLimits {
+                max_concurrent: 1,
+                behavior: crate::implementations::fuigo_build::task::admission::LimitBehavior::Fail,
+            },
+        );
+    insert_child(&mut coordinator, admission_tx.clone(), "child", "parent");
+    finish_child(&mut coordinator, "child");
+    // Saturate the parent's single slot so the wake cannot start.
+    insert_child(&mut coordinator, admission_tx, "other", "parent");
+    assert!(coordinator.completed.contains_key("child"));
+
+    let response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+
+    assert_eq!(
+        ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+        response_outcome(response).await
+    );
+    // Displaced record restored, and restored to the completed ORDER too.
+    assert!(coordinator.completed.contains_key("child"));
+    assert!(coordinator.completed_order.contains(&"child".to_owned()));
+    assert!(!coordinator.woken.contains_key("child"));
+    // Nothing was started or left parked.
+    assert!(!coordinator.pending.contains_key("child"));
+    assert!(!coordinator.queued.contains_id("child"));
+    assert!(coordinator.spawn_ready.is_empty());
+    // The restored record is reachable again as a resume source.
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "parent").await,
+        SubagentResumeLookup::Completed(source) if source.child_session_id == "child"
+    ));
+}
+
+/// A wake that arrives at a saturated spawn limit under the default `queue`
+/// behaviour is queued, not rejected: the record STAYS in `woken` (the queued
+/// incarnation will resume from it), the sender's reply stays outstanding, and
+/// the park carries no deadline, so nothing expires it while the wake waits
+/// for a slot. `deadline: None` is deliberate and matches upstream
+/// (`coordinator/wake.rs`): the message text has already been committed as the
+/// woken child's own prompt, so replying `NotAcceptedBeforeDeadline` would tell
+/// the sender its text was dropped when the child is still going to run it.
+#[tokio::test]
+async fn wake_queued_at_the_spawn_limit_holds_the_record_and_never_expires() {
+    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) =
+        wake_fixture_with_limits(
+            crate::implementations::fuigo_build::task::admission::SubagentLimits {
+                max_concurrent: 1,
+                behavior:
+                    crate::implementations::fuigo_build::task::admission::LimitBehavior::Queue,
+            },
+        );
+    insert_child(&mut coordinator, admission_tx.clone(), "child", "parent");
+    finish_child(&mut coordinator, "child");
+    insert_child(&mut coordinator, admission_tx, "other", "parent");
+
+    let mut response = begin_send(&mut coordinator, &command_tx, "child", "parent");
+
+    // Queued, not started and not rejected.
+    assert!(coordinator.queued.contains_id("child"));
+    assert!(!coordinator.pending.contains_key("child"));
+    // The displaced record stays aside until the queued incarnation finishes.
+    assert!(coordinator.woken.contains_key("child"));
+    assert!(!coordinator.completed.contains_key("child"));
+    assert!(!coordinator.completed_order.contains(&"child".to_owned()));
+    // It is still the resume source the queued incarnation will read.
+    assert!(matches!(
+        resume_lookup(&mut coordinator, "child", "parent").await,
+        SubagentResumeLookup::Completed(source) if source.child_session_id == "child"
+    ));
+    // The sender is still waiting, and no deadline can cut the wait short.
+    assert!(response.try_recv().is_err());
+    assert!(!coordinator.spawn_ready.is_empty());
+    assert!(coordinator.spawn_ready.deadlines().next().is_none());
+    coordinator.expire_spawn_ready_messages(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(86_400),
+    );
+    assert!(!coordinator.spawn_ready.is_empty());
+    assert!(response.try_recv().is_err());
 }
 
 fn fixture_with_capacity(
