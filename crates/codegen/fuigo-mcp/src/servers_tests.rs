@@ -2439,6 +2439,35 @@ fn no_deadline_means_no_clamp() {
     );
 }
 
+/// The retry window leaves the caller a margin that grows with its deadline: the slack between
+/// this client's own error and the caller's cancellation is exactly that margin, and it has to
+/// absorb the startup latency the client's clock does not see.
+#[test]
+fn the_retry_window_leaves_the_caller_a_proportional_margin() {
+    let url = "http://127.0.0.1:1/mcp";
+    let window = |deadline: u64, elapsed_secs: u64| {
+        fake_http_client_with_overrides(url, deadline_overrides(deadline))
+            .remaining_handshake_window(std::time::Duration::from_secs(elapsed_secs))
+            .expect("a deadline was configured")
+            .as_secs()
+    };
+    // Shipped bind deadline: margin 7, so a first attempt that failed fast leaves the retry more
+    // than the 20 s startup budget it would use anyway.
+    assert_eq!(window(30, 0), 23);
+    assert_eq!(window(30, 3), 20);
+    assert_eq!(window(30, 29), 0);
+    // Short deadlines keep the two-second floor.
+    assert_eq!(window(8, 0), 6);
+    assert_eq!(window(2, 0), 0);
+    for deadline in [2u64, 8, 12, 20, 30, 60] {
+        let margin = deadline - window(deadline, 0);
+        assert!(
+            margin >= 2 && margin <= deadline,
+            "{deadline}s -> margin {margin}s"
+        );
+    }
+}
+
 /// An OAuth-capable client, for the budget arithmetic. The manager only has to EXIST for
 /// [`McpClient::handshake_worst_case_secs`] to admit a refresh retry, so it is pointed at a closed
 /// port: construction must not touch the network.

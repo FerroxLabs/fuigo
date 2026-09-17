@@ -4166,12 +4166,29 @@ impl McpClient {
     }
 
     /// Head start a deadline-driven caller's retry window gives up so the CALLER can observe this
-    /// client's own error. The caller's deadline is absolute and started before we did — it
-    /// covers spawning the child / opening the connection as well as the handshake — so a retry
-    /// that ran to the deadline exactly would race the caller's cancellation and usually lose,
-    /// flattening a specific per-server error into the caller's generic timeout.
-    /// It is taken out of a RETRY only, never out of the first attempt's window.
-    const HANDSHAKE_DEADLINE_MARGIN_SECS: u64 = 1;
+    /// client's own error: [`Self::handshake_deadline_margin_secs`] never goes below this.
+    const MIN_HANDSHAKE_DEADLINE_MARGIN_SECS: u64 = 2;
+
+    /// How much of a caller's deadline a handshake RETRY leaves unused.
+    ///
+    /// The retry window is measured from this client's handshake start, but the caller's
+    /// deadline is absolute and started EARLIER — before the child was spawned / the client was
+    /// built / the task was even scheduled. A retry that hangs runs to exactly
+    /// `handshake start + deadline - margin`, so the margin is the entire slack between this
+    /// client's own error and the caller's generic timeout, and it has to cover that startup
+    /// latency. A fixed 1 s did not: under a loaded runtime (the fuigo-workspace lib at 16 test
+    /// threads) the latency alone exceeded it and the error arrived at 8.8 s against an 8 s
+    /// deadline, as the generic "MCP discovery timed out" the whole clamp exists to prevent.
+    ///
+    /// A quarter of the deadline (at least [`Self::MIN_HANDSHAKE_DEADLINE_MARGIN_SECS`]) is
+    /// cheap: it is taken out of a RETRY only, never out of the first attempt, and only bites
+    /// when the first attempt already burned most of the deadline. A fast-failing first attempt
+    /// (the GitHub 400-invalid-session case the fallback exists for) still gets its full
+    /// `startup_timeout_sec` retry at the shipped 30 s deadline: margin 7, so the window only
+    /// drops below the 20 s startup budget once the first attempt took more than 3 s.
+    fn handshake_deadline_margin_secs(deadline_secs: u64) -> u64 {
+        (deadline_secs / 4).max(Self::MIN_HANDSHAKE_DEADLINE_MARGIN_SECS)
+    }
 
     /// The window a handshake RETRY gets, given how much of one [`Self::ensure_initialized`] has
     /// already elapsed. `None` means "no deadline configured, run unbounded" (the ordinary config
@@ -4183,7 +4200,7 @@ impl McpClient {
     ) -> Option<std::time::Duration> {
         self.handshake_deadline_sec.map(|secs| {
             std::time::Duration::from_secs(
-                secs.saturating_sub(Self::HANDSHAKE_DEADLINE_MARGIN_SECS),
+                secs.saturating_sub(Self::handshake_deadline_margin_secs(secs)),
             )
             .saturating_sub(elapsed)
         })
