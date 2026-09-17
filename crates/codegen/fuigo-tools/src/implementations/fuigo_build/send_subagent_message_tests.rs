@@ -235,6 +235,59 @@ async fn delivery_interject_reaches_the_backend_as_interject() {
     );
 }
 
+/// The shipped description is a promise to the model, and Fuigo implements ONE
+/// delivery for all three classes (see `description_template`'s invariant).
+/// This pins the promise to the implementation: the golden text below is the
+/// exact string the model receives, and it may not claim a per-class
+/// mechanism this engine does not have.
+#[test]
+fn tool_description_promises_only_the_delivery_the_engine_implements() {
+    const SHIPPED: &str = "Send a follow-up message to a subagent owned by this session. An active subagent receives it as a message; an eligible completed subagent (not cancelled, not workflow-owned) resumes with the same identity and runs the text as its next turn, reporting like a background completion. `delivery` (`queue` by default, `steer`, `interject`) records how you mean the message and is named on its row in the transcript; it does not change how the message lands. Every class lands the same way here: an active subagent's message joins the turn it is running at that turn's next safe point, interrupting it if it is blocked waiting on background work, and starts a turn of its own if the subagent is idle. Do not pick a class expecting a different arrival order or a different priority.";
+
+    let ctx = fuigo_tool_runtime::ListToolsContext::new();
+    let shipped = fuigo_tool_runtime::Tool::description(&SendSubagentMessageTool, &ctx);
+    assert_eq!(shipped.description, SHIPPED);
+
+    // The one delivery the engine implements is stated, and stated as the one.
+    assert!(SHIPPED.contains("it does not change how the message lands"));
+    assert!(SHIPPED.contains("Every class lands the same way here"));
+    assert!(SHIPPED.contains("at that turn's next safe point"));
+    assert!(SHIPPED.contains("interrupting it if it is blocked waiting on background work"));
+
+    // Upstream's per-class promises, which this engine does not keep. Each of
+    // these is a claim that one class arrives differently from another; none
+    // may return without the engine that backs it.
+    for unkept in [
+        "ahead of pending steers",
+        "waits as a later turn",
+        "is urgent",
+        "at the earliest safe point",
+        "selects how the message lands",
+    ] {
+        assert!(
+            !SHIPPED.contains(unkept),
+            "tool description promises `{unkept}`, which the engine does not implement"
+        );
+    }
+
+    // The per-variant schema descriptions ship to the model too.
+    let schema = serde_json::to_value(schemars::schema_for!(SendSubagentMessageInput))
+        .expect("input schema serializes");
+    let schema_text = schema.to_string();
+    for unkept in [
+        "ahead of pending steers",
+        "Join the current turn",
+        "Wait as a later turn",
+        "Delivery operation",
+    ] {
+        assert!(
+            !schema_text.contains(unkept),
+            "delivery schema promises `{unkept}`, which the engine does not implement"
+        );
+    }
+    assert!(schema_text.contains("it does not change how the message lands"));
+}
+
 #[test]
 fn tool_capabilities_are_write_scoped() {
     let capabilities = fuigo_tool_runtime::Tool::capabilities(&SendSubagentMessageTool);

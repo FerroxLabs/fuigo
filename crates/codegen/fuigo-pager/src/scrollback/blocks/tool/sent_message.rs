@@ -42,7 +42,12 @@ impl SentMessagePresentation {
         self.title_for(None)
     }
 
-    /// The header verb names the mode an accepted send used; a failed or unconfirmed send names no mode.
+    /// The header verb names the class the SENDER chose on an accepted send; a
+    /// failed or unconfirmed send names no class. It is a record of intent,
+    /// not of a delivery difference: the engine lands `queue`, `steer` and
+    /// `interject` identically (see `send_subagent_message`'s
+    /// `description_template` invariant in `fuigo-tools`), and the row exists
+    /// so the scrollback shows what was asked for.
     pub(crate) fn title_for(&self, delivery: Option<SentMessageDelivery>) -> &'static str {
         match self {
             Self::Sending => "Sending message to subagent",
