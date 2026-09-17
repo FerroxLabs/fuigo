@@ -1401,6 +1401,7 @@ pub fn build_flat_option_lines(
             None => theme.bg_light,
         };
 
+        let before = all_lines.len();
         build_single_option_lines(
             &mut all_lines,
             i,
@@ -1415,6 +1416,21 @@ pub fn build_flat_option_lines(
             theme,
             is_cursor_item,
         );
+        // Bandless palette: `bg_visual` is `Reset`, so the cursor / hovered row carries reverse video instead
+        if embed.is_none() && theme.is_bandless() {
+            let overlay = if is_cursor_item && panel_focused {
+                Some(theme.selection_overlay())
+            } else if is_hovered_item {
+                Some(theme.hover_overlay())
+            } else {
+                None
+            };
+            if let Some(overlay) = overlay {
+                for line in &mut all_lines[before..] {
+                    line.style = line.style.patch(overlay);
+                }
+            }
+        }
     }
 
     // The freeform row is hidden in InputMode (the prompt widget below replaces it)

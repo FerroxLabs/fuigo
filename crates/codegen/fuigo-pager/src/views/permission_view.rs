@@ -674,6 +674,12 @@ pub fn render_permission_view(
             height: 1,
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
+        // Bandless palette: `bg_visual` is `Reset`, so the cursor / hovered row carries reverse video instead
+        if is_cursor && focused {
+            buf.set_style(row_rect, theme.selection_overlay());
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        }
         buf.set_line(content_x, y, &line, content_width);
         y += 1;
     }

@@ -953,6 +953,13 @@ pub fn render_picker_row(
         height: 1,
     };
     buf.set_style(row_rect, Style::default().bg(row_bg));
+    if embed.is_none() {
+        if hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        } else if row.selected {
+            buf.set_style(row_rect, theme.selection_overlay());
+        }
+    }
 
     // Left side: indent + cursor indicator + fold indicator + label.
     let indent_str = if row.indent > 0 {

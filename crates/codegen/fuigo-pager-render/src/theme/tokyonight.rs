@@ -42,7 +42,7 @@ pub mod palette {
 use palette::*;
 
 /// Theme for v3 pager rendering.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     // Backgrounds
     pub bg_base: Color,
@@ -255,16 +255,51 @@ impl Theme {
 
     /// Get a style with dim text (gray_dim, dimmest).
     ///
-    /// Same Reset-to-DIM rule as [`Self::muted`] for the terminal-native palette.
+    /// Same Reset-to-DIM rule as [`Self::muted`]: bandless palettes retarget `gray_dim` to bright black for decoration, so content stays on the polarity-safe DIM path and only direct `fg(gray_dim)` sites pick up the bright black.
     pub const fn dim(&self) -> Style {
-        match self.gray_dim {
-            Color::Reset => Style::new().add_modifier(Modifier::DIM),
-            c => Style::new().fg(c),
+        if self.is_bandless() || matches!(self.gray_dim, Color::Reset) {
+            Style::new().add_modifier(Modifier::DIM)
+        } else {
+            Style::new().fg(self.gray_dim)
         }
     }
 
     pub const fn primary(&self) -> Style {
         Style::new().fg(self.text_primary)
+    }
+
+    /// Whether this is the bandless terminal-native palette: every band slot is `Reset` so the terminal's own canvas shows through.
+    /// The canonical predicate for "reverse video / decoration fallback instead of a color band" — key every such branch off this, not off individual slots.
+    pub const fn is_bandless(&self) -> bool {
+        matches!(self.bg_visual, Color::Reset)
+    }
+
+    /// Bandless palette: both slots are `Reset` and composite to nothing, so reverse video keeps the cursor visible.
+    pub const fn block_cursor_over(&self, surface: Color) -> Style {
+        if self.is_bandless() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().fg(surface).bg(self.text_primary)
+        }
+    }
+
+    /// Patch over the already-rendered row. Bandless uses reverse video: a bright-black band can sit too close to default fg.
+    pub const fn selection_overlay(&self) -> Style {
+        if self.is_bandless() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().bg(self.bg_visual)
+        }
+    }
+
+    /// Hover analog of [`Self::selection_overlay`], keyed off `bg_hover`.
+    /// On the bandless palette hover and selection share reverse video (they shared the same band before); the cursor row stays distinguishable by its marker/bold.
+    pub const fn hover_overlay(&self) -> Style {
+        if self.is_bandless() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().bg(self.bg_hover)
+        }
     }
 
     pub const fn bold(&self) -> Style {
