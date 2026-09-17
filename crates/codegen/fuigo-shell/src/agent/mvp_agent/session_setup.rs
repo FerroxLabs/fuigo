@@ -5,6 +5,7 @@
 use super::reasoning_effort::{
     EffortTarget, NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
 };
+use super::sampler_prewarm::spawn_sampler_transport_prewarm;
 use super::*;
 use crate::agent::session_metrics::SessionStartKind;
 /// Refusals resume must give verbatim, so a test cannot mistake some other `invalid_params` for the guard it is pinning.
@@ -469,6 +470,7 @@ impl MvpAgent {
             &session_id,
             EffortTarget::SummaryClient,
         );
+        spawn_sampler_transport_prewarm(&session_sampling.base_url);
         let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
         let relay_sync = self.start_relay_sync(&session_id, &session_info);
         let model_id = match &session_initial_model {
@@ -641,6 +643,11 @@ impl MvpAgent {
                 }
             }
         }
+        self.prewarm_final_model_base_url(
+            &session_id,
+            &session_sampling.base_url,
+            origin_client.clone(),
+        );
         if let Some(requested) = disallowed_custom {
             let current = self.models_manager.current_model_id();
             let reason = format!(
@@ -897,6 +904,10 @@ impl MvpAgent {
             goal_mode_state: _persisted_goal_mode,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
+        let persisted_base_url = self
+            .resolve_sampling_config_for_model(&summary.current_model_id, origin_client.clone())
+            .base_url;
+        spawn_sampler_transport_prewarm(&persisted_base_url);
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
         self.set_turn_number(&session_id, summary.next_trace_turn);
@@ -1026,6 +1037,11 @@ impl MvpAgent {
                 },
             )
             .await?;
+            self.prewarm_final_model_base_url(
+                &session_id,
+                &persisted_base_url,
+                origin_client.clone(),
+            );
             drop(spawn_timer);
             true
         } else {
