@@ -2982,3 +2982,41 @@ async fn discover_mcp_servers_matches_synchronous_discovery() {
         serde_json::to_value(&expected).expect("serialize expected"),
     );
 }
+
+/// Labelling picker rows as local performs one sessions-tree walk for the whole list, never one per row.
+#[test]
+fn picker_relabels_remote_rows_with_one_batched_local_resolution() {
+    use std::cell::{Cell, RefCell};
+    let payload = serde_json::json!({
+        "sessions": [
+            { "sessionId": "r1", "cwd": "/p", "summary": "one", "source": "remote", "updatedAt": "2099-01-01T00:00:00Z" },
+            { "sessionId": "r2", "cwd": "/p", "summary": "two", "source": "remote", "updatedAt": "2099-01-01T00:00:00Z" },
+            { "sessionId": "r3", "cwd": "/p", "summary": "three", "source": "remote", "updatedAt": "2099-01-01T00:00:00Z" },
+            { "sessionId": "l1", "cwd": "/p", "summary": "four", "source": "local", "updatedAt": "2099-01-01T00:00:00Z" }
+        ]
+    });
+    let calls = Cell::new(0usize);
+    let seen: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let entries = parse_session_picker_entries_with(&payload, |ids| {
+        calls.set(calls.get() + 1);
+        seen.borrow_mut()
+            .extend(ids.iter().map(|id| (*id).to_owned()));
+        Ok(std::collections::HashSet::from(["r2".to_owned()]))
+    });
+    assert_eq!(
+        calls.get(),
+        1,
+        "the whole remote id list must be resolved against one storage view"
+    );
+    let mut seen = seen.into_inner();
+    seen.sort();
+    assert_eq!(seen, ["r1", "r2", "r3"], "only remote rows are candidates");
+    let sources: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e.id.as_str(), e.source.as_str()))
+        .collect();
+    assert_eq!(
+        sources,
+        [("r1", "remote"), ("r2", "local"), ("r3", "remote"), ("l1", "local")]
+    );
+}

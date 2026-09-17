@@ -706,6 +706,19 @@ pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope
 pub(super) fn parse_session_picker_entries(
     payload: &serde_json::Value,
 ) -> Vec<crate::app::app_view::SessionPickerEntry> {
+    parse_session_picker_entries_with(payload, |ids| {
+        fuigo_shell::session::resolve_local_session_ids_any_cwd(ids)
+    })
+}
+
+/// [`parse_session_picker_entries`] with an injectable local-session resolver.
+///
+/// `resolve_local` receives candidate ids and returns the subset persisted on disk; each call is a full
+/// `~/.fuigo/sessions` walk, so the relabel pass must hand it the whole list at once.
+pub(super) fn parse_session_picker_entries_with(
+    payload: &serde_json::Value,
+    resolve_local: impl Fn(&[&str]) -> std::io::Result<std::collections::HashSet<String>>,
+) -> Vec<crate::app::app_view::SessionPickerEntry> {
     use crate::app::app_view::SessionPickerEntry;
     let entries: Vec<serde_json::Value> = payload
         .get("sessions")
@@ -863,8 +876,7 @@ pub(super) fn parse_session_picker_entries(
                 }
             }
             if e.source == "remote"
-                && fuigo_shell::session::resolve_local_session_any_cwd(&e.id)
-                    .is_some()
+                && resolve_local(&[e.id.as_str()]).is_ok_and(|ids| ids.contains(&e.id))
             {
                 e.source = "local".to_string();
             }

@@ -595,6 +595,27 @@ pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
         .flatten()
 }
 
+/// Resolve a batch of candidate IDs against the local session tree, returning the subset that is persisted.
+pub fn resolve_local_session_ids_any_cwd<S: AsRef<str>>(
+    session_ids: &[S],
+) -> io::Result<std::collections::HashSet<String>> {
+    resolve_local_session_ids_any_cwd_in_root(session_ids, &fuigo_home().join("sessions"))
+        .map_err(io::Error::other)
+}
+
+fn resolve_local_session_ids_any_cwd_in_root<S: AsRef<str>>(
+    session_ids: &[S],
+    sessions_root: &Path,
+) -> RelocationResult<std::collections::HashSet<String>> {
+    let mut resolved = std::collections::HashSet::new();
+    for session_id in session_ids.iter().map(AsRef::as_ref) {
+        if resolve_local_session_any_cwd_in_root(session_id, sessions_root)?.is_some() {
+            resolved.insert(session_id.to_owned());
+        }
+    }
+    Ok(resolved)
+}
+
 pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
     resolve_local_session_any_cwd_in_root(session_id, &fuigo_home().join("sessions"))
         .map_err(io::Error::other)
