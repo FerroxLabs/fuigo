@@ -9,6 +9,7 @@ fn summary(
     ms: u64,
     tools: u32,
 ) -> SubagentCompletionSummary {
+    let output = format!("the answer for {id}");
     SubagentCompletionSummary {
         subagent_id: id.into(),
         subagent_type: typ.into(),
@@ -18,7 +19,8 @@ fn summary(
         duration_ms: ms,
         tool_calls: tools,
         turns: 1,
-        output: std::sync::Arc::from(format!("the answer for {id}").as_str()),
+        full_output_bytes: output.len(),
+        output: std::sync::Arc::from(output),
     }
 }
 
@@ -39,7 +41,13 @@ fn single_successful_completion_with_poll_tool() {
     assert!(result.contains("12.3s"));
     assert!(result.contains("5 tool calls"));
     assert!(result.contains("abc-123"));
-    assert!(result.contains("get_task_output"));
+    assert!(
+        result.contains(
+            "(12.3s, 5 tool calls)\n  subagent_id: abc-123\n  response:\nthe answer for abc-123\n"
+        ),
+        "{result}"
+    );
+    assert!(!result.contains("to see the full output"), "{result}");
 }
 
 #[test]
@@ -81,10 +89,19 @@ fn multiple_completions_batched_with_poll_tool() {
     ];
     let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
     assert!(result.starts_with("While you were idle, 3 background subagents completed:\n"));
-    // All three entries appear
-    assert!(result.contains("subagent_id: a."));
-    assert!(result.contains("subagent_id: b."));
-    assert!(result.contains("subagent_id: c."));
+    // All three entries appear, each with its own inlined output
+    assert!(
+        result.contains("subagent_id: a\n  response:\nthe answer for a\n"),
+        "{result}"
+    );
+    assert!(
+        result.contains("subagent_id: b\n  response:\nthe answer for b\n"),
+        "{result}"
+    );
+    assert!(
+        result.contains("subagent_id: c\n  response:\nthe answer for c\n"),
+        "{result}"
+    );
 }
 
 #[test]
