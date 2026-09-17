@@ -4859,7 +4859,8 @@ impl AppView {
                     })
             });
         let fps_frame_started = fps_overlay.as_ref().map(|_| std::time::Instant::now());
-        crate::render::draw::draw_frame(terminal, cursor, |f, link_spans| {
+        let terminal_ctx = crate::terminal::terminal_context();
+        crate::render::draw::draw_frame(terminal, cursor, terminal_ctx, |f, link_spans| {
             let full_area = f.area();
             let tracing_height = 0u16;
             #[allow(unused_variables)]
