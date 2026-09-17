@@ -561,6 +561,70 @@ mod hyperlink_tests {
         );
     }
 
+    /// `~~text~~` inside a table cell must render crossed out, on exactly the struck spans, composing with bold, link styling and inline code.
+    #[test]
+    fn strikethrough_inside_table_cell_is_crossed_out() {
+        use ratatui::style::Modifier;
+
+        let text = "\
+| Item | Status | Link | Code |
+|------|--------|------|------|
+| ~~old plan~~ leftover | **~~gone~~** keep | ~~[click](https://example.com)~~ | ~~`gone-code`~~ |
+";
+        let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
+
+        let span_named = |name: &str| {
+            out.lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .find(|s| s.content.as_ref() == name)
+                .unwrap_or_else(|| panic!("expected a span {name:?}"))
+        };
+
+        let old_plan = span_named("old plan");
+        assert!(
+            old_plan.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "struck cell text should be crossed out, got style={:?}",
+            old_plan.style,
+        );
+
+        let leftover = span_named(" leftover");
+        assert!(
+            !leftover.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "unstruck sibling in the same cell must not inherit strike, got style={:?}",
+            leftover.style,
+        );
+
+        let gone = span_named("gone");
+        assert!(
+            gone.style.add_modifier.contains(Modifier::CROSSED_OUT)
+                && gone.style.add_modifier.contains(Modifier::BOLD),
+            "struck bold cell text should keep both effects, got style={:?}",
+            gone.style,
+        );
+        let keep = span_named(" keep");
+        assert!(
+            !keep.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "text after a struck bold run must not stay struck, got style={:?}",
+            keep.style,
+        );
+
+        let click = span_named("click");
+        assert!(
+            click.style.add_modifier.contains(Modifier::CROSSED_OUT)
+                && click.style.add_modifier.contains(Modifier::BOLD),
+            "struck link text in a cell should keep strike and link_text styling, got style={:?}",
+            click.style,
+        );
+
+        let gone_code = span_named("gone-code");
+        assert!(
+            gone_code.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "struck inline code in a cell should stay crossed out after the code style replace, got style={:?}",
+            gone_code.style,
+        );
+    }
+
     /// Paragraph links must keep the `link_text` foreground color even when the `text` style sets its own foreground.
     /// Previously the parser pushed `ms.text` as a highlight after the link_text highlight.
     /// It did so whenever no `Heading`/`Emphasis`/`Strong`/`Strikethrough` ancestor was present.
