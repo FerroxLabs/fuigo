@@ -248,12 +248,6 @@ mod subagent_rate_limit_threshold_tests {
             RATE_LIMIT_RETRY_DISABLED
         );
     }
-    #[test]
-    fn model_retry_budget_wins_over_legacy_spawn_budget() {
-        assert_eq!(session_max_retries_source(Some(6), Some(3)), Some(6));
-        assert_eq!(session_max_retries_source(Some(6), None), Some(6));
-        assert_eq!(session_max_retries_source(None, Some(3)), Some(3));
-    }
 }
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///

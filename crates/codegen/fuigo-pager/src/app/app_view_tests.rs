@@ -6940,6 +6940,7 @@ fn paint_dashboard(app: &mut AppView) -> ratatui::buffer::Buffer {
         dashboard,
         agents,
         registry,
+        credit_balance,
         ..
     } = app;
     crate::views::dashboard::render_dashboard(
@@ -6954,6 +6955,7 @@ fn paint_dashboard(app: &mut AppView) -> ratatui::buffer::Buffer {
         None,
         false,
         None,
+        credit_balance.as_ref(),
     );
     buf
 }
