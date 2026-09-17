@@ -2158,7 +2158,7 @@ impl AgentView {
                 queue_focused,
                 layout_cfg,
                 Some(layout.scrollback),
-                self.session.state.is_turn_running(),
+                self.can_send_now(),
             );
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
@@ -2188,7 +2188,7 @@ impl AgentView {
                     queue_focused,
                     layout_cfg,
                     Some(layout.scrollback),
-                    self.session.state.is_turn_running(),
+                    self.can_send_now(),
                 );
             }
         }

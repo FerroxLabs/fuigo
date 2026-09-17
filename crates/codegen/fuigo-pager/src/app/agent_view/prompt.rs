@@ -546,7 +546,6 @@ impl AgentView {
                     {
                         if matches!(self.prompt_mode, PromptMode::Normal)
                             && self.prompt.text().trim().is_empty()
-                            && self.session.state.is_turn_running()
                             && let Some(outcome) = self.try_send_now_queued_from_prompt()
                         {
                             return outcome;
@@ -574,7 +573,6 @@ impl AgentView {
                     // That Enter must only insert the newline, not fire a queued follow-up
                     if matches!(self.prompt_mode, PromptMode::Normal)
                         && self.prompt.text().trim().is_empty()
-                        && self.session.state.is_turn_running()
                         && let Some(outcome) = self.try_send_now_queued_from_prompt()
                     {
                         return outcome;
@@ -597,9 +595,9 @@ impl AgentView {
                     // 2) Empty composer with a visible follow-up in the queue: same as bare Enter, send the top row now
                     // 3) Idle / nothing to send: promote to ToggleYolo when that chord matches (Apple Terminal Ctrl+O opens YOLO / free-tier CTA)
                     let text = self.prompt.text().trim().to_string();
-                    let turn_running = self.session.state.is_turn_running();
+                    let can_send_now = self.can_send_now();
                     if !text.is_empty() {
-                        if turn_running {
+                        if can_send_now {
                             // Paste-then-immediate-send: an image probe is still off-thread
                             // Stash (draft untouched) and re-issue on completion so the not-yet-attached chip isn't dropped
                             if self.paste_probe_in_flight > 0 {
@@ -612,9 +610,7 @@ impl AgentView {
                             self.note_draft_consumed();
                             return InputOutcome::Action(Action::SendPromptNow { text, images });
                         }
-                    } else if turn_running
-                        && let Some(outcome) = self.try_send_now_queued_from_prompt()
-                    {
+                    } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
                     }
                     if registry.matches_id(ActionId::ToggleYolo, key) {

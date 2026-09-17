@@ -903,7 +903,7 @@ impl QueuePane {
         focused: bool,
         layout_cfg: &LayoutConfig,
         overlay_area: Option<Rect>,
-        is_turn_running: bool,
+        can_send_now: bool,
     ) {
         // Detect a theme switch and refresh the list style
         // Its `selection_bg` (the focused-row highlight) is captured from the theme's `bg_highlight`
@@ -1029,11 +1029,18 @@ impl QueuePane {
                         .bind(Rect::new(cancel_x, screen_y, cancel_w, 1), entry.id);
                 }
 
+                let interject_label = "[Send now]";
+                let interject_w = interject_label.len() as u16;
+                let show_send_now = can_send_now && entry.capabilities.can_send_now();
+
                 // [edit] sits flush against [cancel] (no gap): a gap would let the queued message behind the row leak through the seam
                 // Unlike [Send now] it renders regardless of turn state; the keyboard `e` edit works either way
+                // Drop [edit] if [Send now] fits alone but not with [edit]: the time-sensitive button wins the slot.
                 let edit_label = "[edit]";
                 let edit_w = edit_label.len() as u16;
+                let send_now_fits_alone = show_send_now && fits(right, interject_w).is_some();
                 if entry.capabilities.can_edit()
+                    && (!send_now_fits_alone || fits(right, interject_w + edit_w).is_some())
                     && let Some(edit_x) = fits(right, edit_w)
                 {
                     right = edit_x;
@@ -1047,11 +1054,9 @@ impl QueuePane {
                         .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
                 }
 
-                if is_turn_running && entry.capabilities.can_send_now() {
+                if show_send_now {
                     // The compact [Send now] label still hit-tests as force-interject
                     // Leftmost in the chain, flush against [edit] for the same no-seam reason
-                    let interject_label = "[Send now]";
-                    let interject_w = interject_label.len() as u16;
                     if let Some(interject_x) = fits(right, interject_w) {
                         // Brighten the fg on hover (same hover color as the [Dashboard] button) so it reads as clickable
                         let interject_style = if self.send_now.is_hovered_for(entry.id) {
