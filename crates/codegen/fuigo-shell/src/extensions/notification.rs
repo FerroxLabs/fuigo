@@ -761,6 +761,21 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
+    /// Last-wins full list for this session's backgrounded tasks.
+    ///
+    /// Latest snapshot replaces the previous. `tasks: []` clears Running UI.
+    /// Membership is `is_backgrounded` and `owner_session_id` for this session
+    /// (`None` owner counts as this session). No stdout; use incrementals or
+    /// `get_task_output` for logs.
+    ///
+    /// `truncated` means the list was fitted to the 32 KiB session_notification
+    /// frame. This is still last-wins, not a page: consumers must not treat a
+    /// truncated snapshot as the complete set.
+    BackgroundTasks {
+        tasks: Vec<crate::extensions::background_task::BackgroundTaskRow>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+    },
     ScheduledTaskCreated {
         task_id: String,
         prompt: String,

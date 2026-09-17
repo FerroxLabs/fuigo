@@ -4753,6 +4753,7 @@ dependencies = [
  "async-openai",
  "async-stream",
  "axum",
+ "blake3",
  "chrono",
  "eventsource-stream",
  "fuigo-auth",

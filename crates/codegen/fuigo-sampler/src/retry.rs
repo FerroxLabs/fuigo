@@ -243,6 +243,12 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 retry_prefix, msg
             )
         }
+        SamplingError::MtlsConfiguration(msg) => {
+            format!(
+                "{}Invalid mTLS configuration: {}. Please check the model endpoint and certificate directory.",
+                retry_prefix, msg
+            )
+        }
 
         SamplingError::Http(e) => {
             let mut details = Vec::new();
@@ -355,6 +361,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             credential: *credential,
         },
         SamplingError::InvalidConfiguration(msg) => SamplingError::InvalidConfiguration(msg),
+        SamplingError::MtlsConfiguration(msg) => SamplingError::MtlsConfiguration(msg.clone()),
         SamplingError::Http(e) => SamplingError::EventStreamError(e.to_string()),
         SamplingError::Serialization(e) => SamplingError::serialization_message(e),
         SamplingError::Api {

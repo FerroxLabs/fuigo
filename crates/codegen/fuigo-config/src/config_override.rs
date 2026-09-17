@@ -175,6 +175,24 @@ pub fn apply_patches(
         for key in strip_keys {
             patch.remove(*key);
         }
+        let config_models = config.get("model").and_then(toml::Value::as_table);
+        if let Some(patch_models) = patch.get_mut("model").and_then(toml::Value::as_table_mut) {
+            for (id, patch_model) in patch_models {
+                let has_mtls_identity = config_models
+                    .and_then(|models| models.get(id))
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|model| model.contains_key("mtls_cert_dir"));
+                if let Some(patch_model) = patch_model.as_table_mut() {
+                    // A patch may tune the model, but it cannot select a local identity
+                    // or change the explicit destination to which that identity is bound.
+                    patch_model.remove("mtls_cert_dir");
+                    if has_mtls_identity {
+                        patch_model.remove("base_url");
+                        patch_model.remove("api_base_url");
+                    }
+                }
+            }
+        }
         for path in PATCH_STRIP_PATHS {
             strip_path(&mut patch, path);
         }
@@ -308,6 +326,72 @@ mod tests {
         patch.insert("ui".into(), toml::Value::String("oops".into()));
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
         assert_eq!(cfg["ui"]["theme"].as_str(), Some("kanagawa"));
+    }
+
+    fn at<'a>(cfg: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
+        let mut cur = cfg;
+        for key in path {
+            cur = cur.get(*key)?;
+        }
+        Some(cur)
+    }
+
+    /// F024: a project/remote patch can neither select a local mTLS identity nor retarget a model that has one.
+    #[test]
+    fn apply_patches_cannot_inject_or_retarget_mtls_identities() {
+        let mut cfg = toml::Value::Table(table(
+            "[model.secure]\n\
+             base_url = \"https://trusted.example\"\n\
+             mtls_cert_dir = \"/trusted/identity\"\n\
+             temperature = 0.1\n",
+        ));
+        let patch = table(
+            "[model.secure]\n\
+             base_url = \"https://retargeted.example\"\n\
+             api_base_url = \"https://retargeted-api.example\"\n\
+             mtls_cert_dir = \"/tmp/replacement\"\n\
+             temperature = 0.7\n\
+             [model.injected]\n\
+             base_url = \"https://injected.example\"\n\
+             api_base_url = \"https://injected-api.example\"\n\
+             mtls_cert_dir = \"/tmp/injected\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+
+        assert_eq!(
+            at(&cfg, &["model", "secure", "base_url"]).and_then(toml::Value::as_str),
+            Some("https://trusted.example")
+        );
+        assert_eq!(
+            at(&cfg, &["model", "secure", "mtls_cert_dir"]).and_then(toml::Value::as_str),
+            Some("/trusted/identity"),
+        );
+        assert!(
+            at(&cfg, &["model", "secure"])
+                .and_then(|m| m.get("api_base_url"))
+                .is_none(),
+            "patches must not add an alternate destination to a local mTLS identity: {cfg:?}"
+        );
+        assert_eq!(
+            at(&cfg, &["model", "secure", "temperature"]).and_then(toml::Value::as_float),
+            Some(0.7),
+            "unrelated model settings still apply"
+        );
+        assert!(
+            at(&cfg, &["model", "injected"])
+                .and_then(|m| m.get("mtls_cert_dir"))
+                .is_none(),
+            "patches must not select a local mTLS identity: {cfg:?}"
+        );
+        assert_eq!(
+            at(&cfg, &["model", "injected", "base_url"]).and_then(toml::Value::as_str),
+            Some("https://injected.example"),
+        );
+        assert_eq!(
+            at(&cfg, &["model", "injected", "api_base_url"]).and_then(toml::Value::as_str),
+            Some("https://injected-api.example"),
+            "ordinary model destinations remain patchable"
+        );
     }
 
     #[test]

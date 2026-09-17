@@ -173,9 +173,23 @@ impl RateLimitWaitBudget {
 }
 
 impl super::SessionActor {
-    pub(crate) fn rate_limit_wait_budget(&self) -> RateLimitWaitBudget {
+    pub(crate) fn rate_limit_wait_budget(
+        &self,
+        sampler_rate_limit_retry_threshold: Option<u32>,
+    ) -> RateLimitWaitBudget {
         if self.startup_hints.is_subagent {
-            RateLimitWaitBudget::for_subagent(self.rate_limit_waits)
+            let config = if let Some(rate_limit_retry_threshold) =
+                sampler_rate_limit_retry_threshold
+            {
+                tracing::info!(
+                    rate_limit_retry_threshold,
+                    "disabling the subagent rate-limit wait loop because the sampler owns 429 retries"
+                );
+                RateLimitWaitConfig::with_max_attempts(0)
+            } else {
+                self.rate_limit_waits
+            };
+            RateLimitWaitBudget::for_subagent(config)
         } else {
             RateLimitWaitBudget::for_main_session()
         }

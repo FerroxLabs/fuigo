@@ -443,6 +443,7 @@ mod tests {
     use crate::sampling::ApiBackend;
     use fuigo_sampling_types::{
         CompactionAtTokens, CompactionsRemaining, ReasoningEffort, ReasoningEffortOption,
+        ReasoningSummary,
     };
 
     fn parse_cfg(toml_str: &str) -> crate::agent::config::Config {
@@ -518,6 +519,46 @@ mod tests {
         assert!(model.reasoning_effort.is_none());
         assert!(cfg.config_warnings.iter().any(|w| {
             w.kind == ConfigWarningKind::InvalidValue && w.field() == Some("reasoning_effort")
+        }));
+    }
+
+    /// F055: `[model.<id>] reasoning_summary = "none"` parses and reaches the resolved `ModelInfo`.
+    #[test]
+    fn reasoning_summary_parses_and_reaches_the_resolved_model() {
+        let cfg = parse_cfg(
+            r#"
+            [model.bedrock]
+            model = "xai.grok-4.6"
+            base_url = "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+            api_backend = "responses"
+            env_key = "BEDROCK_TOKEN"
+            reasoning_summary = "none"
+            "#,
+        );
+        assert_eq!(
+            cfg.config_models.get("bedrock").unwrap().reasoning_summary,
+            Some(ReasoningSummary::None)
+        );
+        let resolved = crate::agent::config::resolve_model_list(&cfg, None);
+        assert_eq!(
+            resolved.get("bedrock").unwrap().info.reasoning_summary,
+            Some(ReasoningSummary::None)
+        );
+    }
+
+    #[test]
+    fn invalid_reasoning_summary_skips_field_keeps_model() {
+        let cfg = parse_cfg(
+            r#"
+            [model."grok-4.5"]
+            model = "grok-4.5"
+            reasoning_summary = "verbose"
+            "#,
+        );
+        let model = cfg.config_models.get("grok-4.5").unwrap();
+        assert!(model.reasoning_summary.is_none());
+        assert!(cfg.config_warnings.iter().any(|w| {
+            w.kind == ConfigWarningKind::InvalidValue && w.field() == Some("reasoning_summary")
         }));
     }
 
@@ -667,6 +708,7 @@ mod tests {
             model: Some("m".into()),
             model_family: None,
             base_url: Some("https://example.com".into()),
+            mtls_cert_dir: Some("/run/model-identity".into()),
             name: Some("Model M".into()),
             description: Some("desc".into()),
             api_key: Some("key".into()),
@@ -695,6 +737,7 @@ mod tests {
             agent_type: Some("agent".into()),
             inference_idle_timeout_secs: Some(60),
             max_retries: Some(3),
+            rate_limit_retry_threshold: Some(4),
             subagent_rate_limit_max_attempts: Some(8),
             hidden: Some(false),
             supported_in_api: Some(true),
@@ -713,6 +756,7 @@ mod tests {
             compaction_at_tokens: Some(CompactionAtTokens::Fixed(100_000)),
             show_model_fingerprint: Some(true),
             stream_tool_calls: Some(false),
+            reasoning_summary: Some(ReasoningSummary::None),
         }
     }
 

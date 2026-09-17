@@ -166,6 +166,9 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
         SamplingError::InvalidConfiguration(msg) => {
             acp::Error::invalid_params().data(terminal_error_data(msg.to_owned(), None, kind))
         }
+        SamplingError::MtlsConfiguration(msg) => {
+            acp::Error::invalid_params().data(terminal_error_data(msg.clone(), None, kind))
+        }
         SamplingError::Http(e) => acp::Error::internal_error().data(terminal_error_data(
             format!("http client init failed: {e}"),
             None,

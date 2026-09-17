@@ -83,6 +83,9 @@ impl MvpAgent {
             }
             Some(_) => {}
         }
+        if let Some(handle) = self.resident_handle(id) {
+            handle.persist_resume_status().await;
+        }
         if !self.hard_stop_resident(id, CancelTrigger::SessionClose) {
             return CloseOutcome::NotResident;
         }

@@ -393,7 +393,7 @@ async fn rate_limit_exhaustion_is_mirrored_as_a_thought() {
             )
             .await;
             let request = conversation_request(&actor).await;
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
 
             let outcome = tokio::time::timeout(
                 Duration::from_secs(60),

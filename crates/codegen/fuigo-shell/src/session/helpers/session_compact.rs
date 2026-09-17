@@ -149,6 +149,7 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
     let deterministic = match &err {
         SamplingError::Auth { .. }
         | SamplingError::InvalidConfiguration(_)
+        | SamplingError::MtlsConfiguration(_)
         | SamplingError::Serialization(_)
         | SamplingError::IdleTimeout { .. }
         | SamplingError::Cancelled => true,

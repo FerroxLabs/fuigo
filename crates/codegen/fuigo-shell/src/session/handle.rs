@@ -215,6 +215,18 @@ impl SessionHandle {
         }
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
+    /// Ask the actor to write `resume_status.json` before a close/unload; bounded so a busy actor cannot stall the caller.
+    pub(crate) async fn persist_resume_status(&self) {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::PersistResumeStatus { respond_to: tx })
+            .is_err()
+        {
+            return;
+        }
+        let _ = tokio::time::timeout(crate::session::resume_status::PERSIST_ACK_TIMEOUT, rx).await;
+    }
     pub(crate) async fn delete_scheduled_task(&self, task_id: &str) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
         if self

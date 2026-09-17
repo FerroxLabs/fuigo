@@ -15,6 +15,7 @@ fuigo-version = { workspace = true }
 # External
 async-openai = { workspace = true }
 async-stream = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 eventsource-stream = { workspace = true }
 futures-util = { workspace = true }

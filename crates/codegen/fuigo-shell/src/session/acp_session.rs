@@ -186,6 +186,8 @@ use turn_task::*;
 mod cancel;
 #[path = "acp_session_impl/reminders.rs"]
 mod reminders;
+#[path = "acp_session_impl/background_tasks.rs"]
+mod background_tasks;
 use reminders::*;
 pub use reminders::{CollectedTodoGateInput, TodoGateInput, evaluate_todo_gate};
 #[path = "acp_session_impl/laziness_classifier.rs"]
@@ -2045,6 +2047,9 @@ mod load_user_prompts_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/mcp_connecting_reminder_tests.rs"]
 mod mcp_connecting_reminder_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/resume_status_reminder_tests.rs"]
+mod resume_status_reminder_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/mcp_failed_reminder_tests.rs"]
 mod mcp_failed_reminder_tests;
