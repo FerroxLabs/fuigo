@@ -342,6 +342,29 @@ pub(super) fn dispatch_show_word_select_tip(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Gate + telemetry + show for one view. Tick path is the only caller.
+pub(in crate::app) fn present_export_copy_tip(
+    agent: &mut AgentView,
+    seen_counts: &mut std::collections::HashMap<&'static str, u32>,
+    gate: bool,
+) -> bool {
+    if !gate {
+        return false;
+    }
+    // Already on screen: that timer owns the slot (do not refresh TTL or re-count).
+    if agent.ephemeral_tip.current_key() == Some(crate::tips::export_copy::EXPORT_COPY_TIP_KEY) {
+        return false;
+    }
+    let shown = agent.show_ephemeral_tip(crate::tips::export_copy::export_copy_tip(), seen_counts);
+    if shown {
+        log_event(fuigo_telemetry::events::ContextualTip {
+            tip: fuigo_telemetry::events::ContextualTipKind::ExportCopy,
+            action: fuigo_telemetry::events::ContextualTipAction::Shown,
+        });
+    }
+    shown
+}
+
 /// Accept the word-select tip via its advertised chord.
 /// Flips `keep_text_selection` to `word_select` (cache, persist, and toast, the same path as the settings modal).
 /// Retires the tip so one impression maps to at most one acceptance.

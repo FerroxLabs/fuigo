@@ -62,7 +62,8 @@ use super::session::lifecycle::{
     clear_startup_actions, dispatch_accept_consent, dispatch_agent_type_mismatch_answered,
     dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
     dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
-    dispatch_trust_folder, open_delete_current_session_question, open_new_session_question,
+    dispatch_trust_folder, leave_welcome_for_session, open_delete_current_session_question,
+    open_new_session_question,
 };
 use super::session::load::{
     dispatch_cycle_session_source_filter, dispatch_load_session, dispatch_pick_content_session,
@@ -78,7 +79,8 @@ use super::settings::setters::{
     set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
     set_combine_queued_prompts, set_compact_mode, set_confirm_before_rewind,
     set_contextual_hint_image_input, set_contextual_hint_plan_mode, set_contextual_hint_send_now,
-    set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap, set_contextual_hint_undo,
+    set_contextual_hint_export_copy, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
+    set_contextual_hint_undo,
     set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
     set_display_refresh_auto_cadence, set_follow_up_behavior, set_fork_secondary_model,
     set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
@@ -198,6 +200,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects
         }
         Action::NewSession => dispatch_new_session(app),
+        Action::LeaveHome => leave_welcome_for_session(app),
         #[cfg(feature = "local-workspace")]
         Action::ConfirmWelcomeLocalWorkspaceAck => {
             match crate::views::welcome::workspace_mode::confirm_welcome_local_workspace_ack(
@@ -1098,6 +1101,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetContextualHintSmallScreen(v) => set_contextual_hint_small_screen(app, v),
         Action::SetContextualHintWordSelect(v) => set_contextual_hint_word_select(app, v),
         Action::SetContextualHintSshWrap(v) => set_contextual_hint_ssh_wrap(app, v),
+        Action::SetContextualHintExportCopy(v) => set_contextual_hint_export_copy(app, v),
         Action::SetTheme(v) => set_theme(app, v),
         Action::SetAutoDarkTheme(v) => set_auto_dark_theme(app, v),
         Action::SetAutoLightTheme(v) => set_auto_light_theme(app, v),

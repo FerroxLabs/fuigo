@@ -291,6 +291,7 @@ impl AgentView {
             toast: None,
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
+            export_copy_detector: Default::default(),
             last_word_select_probe: None,
             sticky_toast: None,
             mode_switch_banner: None,

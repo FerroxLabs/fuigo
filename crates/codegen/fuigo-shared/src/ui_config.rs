@@ -205,6 +205,9 @@ pub struct ContextualHints {
     /// SSH wrap session-load tip (recommend `fuigo wrap ssh` when the session runs over SSH without an OSC 52 sink).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_wrap: Option<bool>,
+    /// Export/copy tip after repeated scrollback drag-copies (suggests `/copy` and `/export`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_copy: Option<bool>,
 }
 
 impl ContextualHints {
@@ -218,6 +221,7 @@ impl ContextualHints {
             && self.small_screen.is_none()
             && self.word_select.is_none()
             && self.ssh_wrap.is_none()
+            && self.export_copy.is_none()
     }
 }
 

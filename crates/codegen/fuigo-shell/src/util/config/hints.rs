@@ -89,6 +89,7 @@ pub struct ResolvedContextualHints {
     pub small_screen: bool,
     pub word_select: bool,
     pub ssh_wrap: bool,
+    pub export_copy: bool,
 }
 
 impl Default for ResolvedContextualHints {
@@ -101,6 +102,7 @@ impl Default for ResolvedContextualHints {
             small_screen: true,
             word_select: true,
             ssh_wrap: true,
+            export_copy: true,
         }
     }
 }
@@ -128,6 +130,7 @@ pub fn resolve_contextual_hints(
         small_screen: resolve_tip(ui.small_screen, remote.and_then(|r| r.small_screen)),
         word_select: resolve_tip(ui.word_select, remote.and_then(|r| r.word_select)),
         ssh_wrap: resolve_tip(ui.ssh_wrap, remote.and_then(|r| r.ssh_wrap)),
+        export_copy: resolve_tip(ui.export_copy, remote.and_then(|r| r.export_copy)),
     }
 }
 
@@ -220,6 +223,7 @@ mod tests {
             small_screen: None,
             word_select,
             ssh_wrap: None,
+            export_copy: None,
         }
     }
 
@@ -297,6 +301,7 @@ mod tests {
             small_screen: Some(false),
             word_select: Some(false),
             ssh_wrap: Some(false),
+            export_copy: Some(false),
         };
         let r = remote(
             Some(false),
@@ -314,6 +319,7 @@ mod tests {
                 && resolved.small_screen
                 && resolved.word_select
                 && resolved.ssh_wrap
+                && resolved.export_copy
         );
         unsafe { std::env::remove_var(ENV_CONTEXTUAL_HINTS) };
     }
@@ -330,6 +336,7 @@ mod tests {
             small_screen: Some(true),
             word_select: Some(true),
             ssh_wrap: Some(true),
+            export_copy: Some(true),
         };
         let r = remote(Some(true), Some(true), Some(true), Some(true), Some(true));
         let resolved = resolve_contextual_hints(&ui, Some(&r));
@@ -341,6 +348,7 @@ mod tests {
                 && !resolved.small_screen
                 && !resolved.word_select
                 && !resolved.ssh_wrap
+                && !resolved.export_copy
         );
         unsafe { std::env::remove_var(ENV_CONTEXTUAL_HINTS) };
     }
