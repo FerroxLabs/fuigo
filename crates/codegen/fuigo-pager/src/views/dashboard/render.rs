@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr;
 
+use super::animation::{Animation, NEEDS_INPUT_BLINK_DIVISOR, PaintedAnimations, SPINNER_DIVISOR};
 use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
 use super::row::{DashboardRow, RowBadge, build_rows_with_roster, build_rows_with_workspace};
 use super::state::{
@@ -16,13 +17,6 @@ use crate::app::agent_view::AgentView;
 use crate::render::line_utils::{truncate_line, truncate_str};
 use crate::theme::Theme;
 use crate::util::format_time_ago;
-
-/// Show each spinner frame for this many animation ticks.
-/// The frames come from [`crate::glyphs::dot_spinner_frames`] so they degrade to an ASCII pulse on legacy Windows consoles.
-const SPINNER_DIVISOR: u64 = 4;
-/// How many ticks each phase of the `NeedsInput` bullet blink lasts.
-/// At the ~30 Hz dashboard tick this toggles roughly every 0.33 s, about a 1.5 Hz blink.
-const NEEDS_INPUT_BLINK_DIVISOR: u64 = 10;
 
 // Row markers use the filled (◆) / hollow (◇) diamonds from `crate::glyphs` (with CP437 fallbacks on legacy consoles)
 // The dashboard uses diamonds instead of circles so this view reads differently from sibling activity views, which use circles
@@ -108,6 +102,9 @@ pub fn render_dashboard(
     let theme = Theme::current();
     // `spinner_tick` is bumped in `AppView::tick()`, not here, so the spinner advances even when no redraw was triggered by other state changes
     state.last_area = area;
+    // Every painter below marks the cadence it actually put on screen; the tick gate reads this after the frame
+    // A row the frame never painted (filtered, collapsed, folded) leaves nothing marked, so it owes no repaints
+    state.painted_animations = PaintedAnimations::default();
 
     // Paint the full area with the theme's base background BEFORE any sub-renderer runs (mirrors `welcome::render` and `PromptWidget::draw`)
     // Cells no sub-renderer touches in a frame would keep the previous frame's paint, and the dashboard would look like it doesn't cover the panel
@@ -797,6 +794,10 @@ fn render_header(
     // Chips render right-aligned within `chip_area` so they sit immediately to the left of the `[+ New Agent]` button
     // Capture the per-chip rects so the left label's width budget stops short of the leftmost chip instead of painting over it
     let chip_rects = status.render(buf, chip_area);
+    // Mark the spinner from the painted chip, not the working count: a chip the bar had no room for animates nothing
+    if chip_rects.contains_key("working") {
+        state.painted_animations.mark(Animation::Spinner);
+    }
 
     // Paint the current location (git branch and cwd, with worktree label) on the left, mirroring the welcome top bar and the agent status bar
     // That way the dashboard shows WHERE a dispatched session will run
@@ -1989,6 +1990,14 @@ fn render_row(
     } else {
         state_color(row.state, theme)
     };
+    // A blink whose two phases resolve to the same colour (no truecolor blend) paints nothing that moves
+    match row.state.animation() {
+        Some(Animation::Spinner) => state.painted_animations.mark(Animation::Spinner),
+        Some(Animation::Blink) if needs_input_blink_visible(theme) => {
+            state.painted_animations.mark(Animation::Blink);
+        }
+        Some(Animation::Blink) | None => {}
+    }
     let icon_w = UnicodeWidthStr::width(icon) as u16;
     // Title-row paint cursor
     // There is no leading 1-col gap before the marker: it IS the leftmost cell, mirroring the wide-mode header which starts flush-left at col 0
@@ -2390,6 +2399,10 @@ fn render_narrow_rows(
             theme.bg_base
         };
 
+        // Both branches below paint the state icon; narrow NeedsInput is a static diamond, so only the spinner animates here
+        if row.state == RowState::Working {
+            state.painted_animations.mark(Animation::Spinner);
+        }
         if renaming && let Some(rn) = state.rename.as_ref() {
             // Mirror the wide layout: keep the marker and state icon chrome and swap only the label for `rename: {draft}`
             // The editing row then stays column-aligned with its neighbours
@@ -3524,9 +3537,17 @@ fn needs_input_bullet_color(tick: u64, theme: &Theme) -> Color {
     if bright {
         theme.warning
     } else {
-        crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
-            .unwrap_or(theme.warning)
+        needs_input_dim_color(theme).unwrap_or(theme.warning)
     }
+}
+
+fn needs_input_dim_color(theme: &Theme) -> Option<Color> {
+    crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
+}
+
+/// Whether the `NeedsInput` blink paints two distinct colours on this theme; when both phases fall back to `warning` there is nothing to animate.
+fn needs_input_blink_visible(theme: &Theme) -> bool {
+    needs_input_dim_color(theme).is_some_and(|dim| dim != theme.warning)
 }
 
 fn badge_color(badge: RowBadge, theme: &Theme) -> Color {

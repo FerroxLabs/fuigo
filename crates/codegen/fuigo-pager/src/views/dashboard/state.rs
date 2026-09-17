@@ -7,6 +7,7 @@ use std::time::Instant;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 
+use super::animation::PaintedAnimations;
 use super::peek::PeekPanelState;
 use super::row::DashboardRow;
 use crate::actions::ActionRegistry;
@@ -189,6 +190,7 @@ pub const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2
 ///
 /// See [`super::row::classify_top_level`] / [`super::row::classify_subagent`] for the mapping rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(test, derive(strum::EnumIter))]
 pub enum RowState {
     /// Pending permission OR pending ask_user_question (top-level only; subagents never enter this state in this version).
     NeedsInput,
@@ -460,9 +462,12 @@ pub struct DashboardState {
     /// Cleared on any focus change.
     pub delete_confirm: Option<(DashboardRowId, Instant)>,
     /// Tick counter for spinner animation.
-    /// The counter is bumped by [`crate::app::app_view::AppView::tick`] (NOT the renderer, which is read-only).
-    /// `SPINNER_DIVISOR` divides the index so the on-screen animation stays under 10 Hz at the ~30 Hz tick rate.
+    /// The counter is bumped by [`Self::tick`] from [`crate::app::app_view::AppView::tick`] (NOT the renderer, which only reads it).
+    /// [`super::animation::SPINNER_DIVISOR`] divides the index so the on-screen animation stays under 10 Hz at the ~30 Hz tick rate.
     pub spinner_tick: u64,
+    /// Which animated glyphs the last `render_dashboard` frame actually painted.
+    /// [`Self::tick`] reports a redraw only when one of these changes frame, and the app's tick gate parks when none is set.
+    pub(crate) painted_animations: PaintedAnimations,
     /// Last frame's row layout: hit areas keyed by row id.
     /// Used by mouse handling to map (col, row) to a row id without scanning the row list a second time.
     pub row_rects: Vec<(DashboardRowId, Rect)>,
@@ -1222,6 +1227,7 @@ impl DashboardState {
             error_toast: None,
             delete_confirm: None,
             spinner_tick: 0,
+            painted_animations: PaintedAnimations::default(),
             row_rects: Vec::new(),
             row_delete_rects: Vec::new(),
             hovered_delete: None,

@@ -10,12 +10,14 @@
 //! - [`layout`]: pure rect computation.
 //! - [`render`]: `Widget`-style rendering routine.
 //! - [`peek`]: peek panel state and rendering.
+//! - [`animation`]: the spinner / blink cadences and the tick gate that repaints only when a painted cadence changes.
 //!
 //! ## Lifetime
 //!
 //! Rows are rebuilt every render frame off `app.agents`; nothing is cached.
 //! The per-row sort key (state and last_change_at) is recomputed each frame; with single-digit agent counts in one pager process this is free.
 
+pub(crate) mod animation;
 pub mod layout;
 pub mod peek;
 pub mod peek_tail;
