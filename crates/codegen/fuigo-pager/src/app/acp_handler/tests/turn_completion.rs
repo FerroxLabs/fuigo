@@ -1140,26 +1140,10 @@
         );
     }
 
+    /// A wake turn ends without a marker: nothing lands in the real turn's scrollback.
     #[test]
-    fn wake_terminal_leaves_real_turn_stash_pending() {
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
+    fn wake_terminal_pushes_nothing() {
         let mut app = make_app_with_agent("sess-wake");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.pending_stop_hooks = Some(crate::app::agent_view::PendingStopHooks {
-                prompt_id: Some("pid-real".into()),
-                groups: vec![(
-                    "stop".to_string(),
-                    vec![HookRunEntry {
-                        name: "global/notify".into(),
-                        status: HookRunStatus::Success {
-                            elapsed: std::time::Duration::from_millis(12),
-                        },
-                        output: None,
-                    }],
-                )],
-            });
-        }
         let len_before = app.agents[&AgentId(0)].scrollback.len();
 
         let _ = handle_ext_notification(
@@ -1171,13 +1155,9 @@
         assert_eq!(
             agent.scrollback.len(),
             len_before,
-            "a wake terminal pushes nothing (no marker, no stash flush)"
+            "a wake terminal pushes nothing (no marker, no lifecycle block)"
         );
         assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-        assert!(
-            agent.pending_stop_hooks.is_some(),
-            "the stash stays pending for its own turn's marker"
-        );
     }
 
     #[test]
