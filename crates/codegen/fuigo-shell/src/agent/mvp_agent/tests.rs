@@ -1174,8 +1174,8 @@ fn make_test_handle(
         model_id: acp::ModelId::new(model),
         spawn_snapshot: crate::session::SpawnSnapshot {
             applied_tool_overrides: None,
-            scheduler_background_loops: true,
         },
+        scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: yolo,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
@@ -2536,7 +2536,7 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
     let sid = acp::SessionId::new("loop-mode-sess");
     let mut handle = make_test_handle("test-model", false, None);
     handle.info.id = sid.clone();
-    handle.spawn_snapshot.scheduler_background_loops = false;
+    handle.scheduler_background_loops = false;
     agent.insert_resident(&sid, handle);
     let model_state = agent.model_state(Some(&sid));
     let mut meta = serde_json::Map::new();
@@ -2545,6 +2545,80 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
         meta.get(crate::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY),
         Some(&serde_json::json!(false)),
         "session meta must carry the handle's pinned value"
+    );
+}
+/// U022's `SpawnSnapshot` half: "creating a new session returns faster; MCP tools and other startup
+/// work happen in the background."
+///
+/// The default-model `session/new` echo must come out of the spawn snapshot and must never touch the
+/// session actor, so a command channel that is OPEN but unserved — what a session whose actor is
+/// still running its MCP handshakes looks like — cannot hold the reply. A custom-model switch is the
+/// one path that may still round-trip, because the switch is what resolves an override after spawn.
+///
+/// Red on `b156799`, where the echo had only the actor round-trip. Red again on the mid-history shape
+/// where the guarded arm sat BELOW the catch-all `Some(handle)` arm: the default-model case fell
+/// through to the actor and the first half of this test hit its 500 ms bound instead of answering
+/// immediately.
+#[tokio::test(flavor = "current_thread")]
+async fn default_model_session_new_echo_reads_the_spawn_snapshot_without_waiting_for_the_actor() {
+    fn overrides(domain: &str) -> fuigo_sampling_types::ToolOverrides {
+        fuigo_sampling_types::ToolOverrides {
+            x_search: None,
+            web_search: Some(fuigo_sampling_types::WebSearchOptions {
+                allowed_domains: Some(vec![domain.to_owned()]),
+                excluded_domains: None,
+            }),
+        }
+    }
+    let sid = acp::SessionId::new("spawn-snapshot-echo");
+    let from_snapshot = overrides("from-the-spawn-snapshot.example");
+    let from_actor = overrides("from-the-actor.example");
+    let (cmd_tx, mut cmd_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info.id = sid.clone();
+    handle.cmd_tx = cmd_tx;
+    handle.spawn_snapshot.applied_tool_overrides = Some(from_snapshot.clone());
+
+    let echo = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        crate::agent::mvp_agent::session_setup::new_session_tool_overrides_echo(
+            Some(&handle),
+            &sid,
+            true,
+        ),
+    )
+    .await
+    .expect("the default-model echo must not wait on a session actor that is still starting up");
+    assert_eq!(
+        echo,
+        Some(from_snapshot),
+        "the default-model echo is the value the spawn pinned"
+    );
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "the default-model echo must not send the actor a single command"
+    );
+
+    let call = crate::agent::mvp_agent::session_setup::new_session_tool_overrides_echo(
+        Some(&handle),
+        &sid,
+        false,
+    );
+    let serve = async {
+        match cmd_rx.recv().await {
+            Some(crate::session::SessionCommand::GetToolOverrides { respond_to }) => {
+                let _ = respond_to.send(Some(from_actor.clone()));
+            }
+            Some(_) => panic!("the custom-model echo must ask for the tool overrides"),
+            None => panic!("the custom-model echo must ask the actor at all"),
+        }
+    };
+    let (custom_echo, ()) = tokio::join!(call, serve);
+    assert_eq!(
+        custom_echo,
+        Some(from_actor),
+        "a custom-model switch still round-trips to the actor, exactly as upstream does"
     );
 }
 fn build_agent_with_auth(auth: crate::auth::FuigoAuth) -> MvpAgent {
