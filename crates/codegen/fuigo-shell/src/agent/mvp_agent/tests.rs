@@ -7515,6 +7515,44 @@ fn user_message_echo_session_meta_outranks_the_client_that_started_the_process()
     assert!(!wanted(Some(acp::Meta::new()), says_nothing()));
     assert!(!wanted(None, says_nothing()));
 }
+/// U086's one non-additive wire change, pinned against the client that actually drives Fuigo.
+///
+/// Murage's `initialize` sends `clientCapabilities.{fs, elicitation}` plus, when the engine gates
+/// folders, `_meta["fuigo/folderTrust"]` and nothing else (murage `server/drivers/acp/core.ts`,
+/// `request("initialize", …)`). It therefore never opts in, and it must not: its `session/update`
+/// handler switches on `agent_message_chunk`, `agent_thought_chunk`, `tool_call` and
+/// `tool_call_update` only, so `user_message_chunk` was already dropped on the floor. Losing the
+/// live echo costs its transcript nothing. If this ever flips to `true` by accident, a Murage room
+/// starts re-rendering every prompt the user already sees.
+#[test]
+fn murage_shaped_client_never_opts_into_the_live_user_message_echo() {
+    let folder_trust_only = || {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "fuigo/folderTrust".to_string(),
+            serde_json::json!({ "interactive": true }),
+        );
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+            acp::ClientCapabilities::new()
+                .fs(acp::FileSystemCapabilities::new())
+                .meta(meta),
+        )
+    };
+    let no_meta_at_all = || {
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1)
+            .client_capabilities(acp::ClientCapabilities::new().fs(acp::FileSystemCapabilities::new()))
+    };
+    for init in [folder_trust_only(), no_meta_at_all()] {
+        assert!(
+            !MvpAgent::resolve_user_message_echo_capability(None, &init),
+            "a client that never asks for the echo must not be sent one"
+        );
+        assert!(
+            !MvpAgent::resolve_user_message_echo_capability(Some(&acp::Meta::new()), &init),
+            "an empty session `_meta` must not opt a client in either"
+        );
+    }
+}
 
 // Synthetic ACP requests use catalog entries and an actor command channel, never a provider.
 #[tokio::test]
