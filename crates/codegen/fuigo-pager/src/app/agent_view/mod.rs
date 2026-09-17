@@ -34,18 +34,16 @@
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
-//!         within ESC_CANCEL_REWIND_GRACE of an Esc-fired cancel) →
+//!         within ESC_CANCEL_REWIND_GRACE of a mid-turn Esc) →
 //!         ArmPending RewindShowPicker (2×, silent)
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
-//!         open history search / post-cancel grace, or empty + no messages) →
+//!         open history search / mid-turn Esc grace, or empty + no messages) →
 //!         Changed (swallow Esc; not FocusScrollback)
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!
-//! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
-//! (scrollback nav); everything else, and all of it with respect to
-//! `[ui].simple_mode` (prompt editor), is mode-independent. Tab remains
-//! leave-prompt in both modes.
+//! No Esc-policy branch depends on `[ui].vim_mode` (scrollback nav) or
+//! `[ui].simple_mode` (prompt editor). Tab remains leave-prompt in both modes.
 //!
 //! ## Future: data/view split
 //!
@@ -1587,10 +1585,10 @@ pub struct AgentView {
     /// Cleared on any non-`d` key press, after 500ms expiry, or once
     /// `try_handle_esc_policy` consumes the Esc. `pub(crate)` for policy tests.
     pub(crate) esc_pressed_at: Option<std::time::Instant>,
-    /// Post-cancel grace deadline: while `now` is before it, the Esc policy
-    /// holds the idle rewind ARM so Esc-mashing past a cancel cannot
+    /// Mid-turn Esc grace deadline: while `now` is before it, the Esc policy
+    /// holds the idle rewind ARM so Esc-mashing past a turn's end cannot
     /// silently arm the rewind picker. Set (`now + ESC_CANCEL_REWIND_GRACE`)
-    /// by `suppress_rewind_arm` on every Esc-fired cancel, consumed and
+    /// by `suppress_rewind_arm` on every mid-turn Esc, consumed and
     /// retired-on-expiry by `rewind_arm_suppressed`. `pub(crate)` for policy
     /// tests.
     pub(crate) rewind_suppress_deadline: Option<std::time::Instant>,
