@@ -135,6 +135,19 @@ fn set_text_preserves_cursor_clamped_across_grow_and_shrink() {
 }
 
 #[test]
+fn restore_elements_skips_out_of_bounds_ranges() {
+    let mut textarea = ta_with("short");
+    textarea.restore_elements([(0..5, ElementKind(1), None), (0..6, ElementKind(1), None)]);
+
+    let ranges: Vec<_> = textarea
+        .elements()
+        .iter()
+        .map(|element| element.range.clone())
+        .collect();
+    assert_eq!(ranges, vec![0..5]);
+}
+
+#[test]
 fn set_text_restores_zero_length_element_metadata_through_history() {
     let mut textarea = TextArea::new();
     let id = textarea.insert_element("", ElementKind(7), None);

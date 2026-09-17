@@ -2340,6 +2340,44 @@
 
     // ── set_images: identity-based pairing ───────────────────────────
 
+    /// A rewind/skill-injection restore can hand back a paste chip whose captured range no longer fits the
+    /// (shorter) buffer. The stale range must be dropped, and every element-text read must stay fallible so
+    /// the cursor sitting where the chip used to be never indexes past the buffer.
+    #[test]
+    fn stale_restored_paste_chip_never_panics_element_reads() {
+        use crate::app::agent::ChipElement;
+
+        let mut pw = PromptWidget::new();
+        pw.handle_paste("line1\nline2\nline3\nline4");
+        let captured: Vec<ChipElement> = pw
+            .textarea
+            .elements()
+            .iter()
+            .map(|e| ChipElement {
+                range: e.range.clone(),
+                kind: e.kind,
+                display: e.display.clone(),
+            })
+            .collect();
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].range.end > 3);
+
+        pw.set_text("abc");
+        pw.restore_chip_elements(&captured);
+        pw.set_cursor(3);
+
+        // On a textarea that keeps the stale range these reads index past the buffer and panic.
+        assert_eq!(pw.paste_element_at_cursor(), None);
+        assert_eq!(pw.paste_element_for_preview(), None);
+        assert_eq!(pw.file_ref_element_at_cursor(), None);
+        assert_eq!(pw.handle_paste("line1\nline2\nline3\nline4"), PromptEvent::Edited);
+        assert_eq!(
+            pw.textarea.elements().len(),
+            1,
+            "only the fresh chip exists: a chip range past the buffer end is not restored"
+        );
+    }
+
     /// Two restored chips with identical placeholder byte length must get distinct `element_id`s after `set_images`.
     /// A naive `find()`-by-byte-length match would collapse both chips onto the same `element_id`.
     /// The next `sync_images_with_textarea` would then drop one entry as a "duplicate element_id" warn.
