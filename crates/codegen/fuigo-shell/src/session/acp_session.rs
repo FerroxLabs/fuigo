@@ -2046,6 +2046,9 @@ mod load_user_prompts_tests;
 #[path = "acp_session_tests/mcp_connecting_reminder_tests.rs"]
 mod mcp_connecting_reminder_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/resume_status_reminder_tests.rs"]
+mod resume_status_reminder_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/mcp_failed_reminder_tests.rs"]
 mod mcp_failed_reminder_tests;
 #[cfg(test)]

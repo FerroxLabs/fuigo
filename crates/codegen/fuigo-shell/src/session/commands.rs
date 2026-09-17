@@ -863,6 +863,11 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+    /// Write `resume_status.json` (live loops/tasks/subagents/workflows/goal) before a close or unload
+    /// that does not go through `Shutdown`; the ack means the write finished, not that anything was live.
+    PersistResumeStatus {
+        respond_to: oneshot::Sender<()>,
+    },
 }
 #[cfg(test)]
 mod cancellation_category_meta_tests {
