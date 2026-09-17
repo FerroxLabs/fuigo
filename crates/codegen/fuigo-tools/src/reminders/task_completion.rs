@@ -406,25 +406,58 @@ pub async fn resolve_task_output_tool_name(bridge: &ToolBridge) -> Option<String
 pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
     bridge.tool_for_kind(ToolKind::Read).await
 }
+pub const SCHEDULER_DELETE_REGISTRY_ID: &str = "scheduler_delete";
 /// Resolve the active toolset's scheduled-task deletion tool name.
 pub async fn resolve_scheduler_delete_tool_name(bridge: &ToolBridge) -> Option<String> {
-    bridge.tool_for_registry_id("scheduler_delete")
+    bridge.tool_for_registry_id(SCHEDULER_DELETE_REGISTRY_ID)
 }
-fn append_loop_remediation_hint(
+/// Resolve the active toolset's scheduled-task creation tool name (also the
+/// update path: `scheduler_create(new_prompt, interval, task_id)`).
+pub async fn resolve_scheduler_create_tool_name(bridge: &ToolBridge) -> Option<String> {
+    bridge.tool_for_registry_id(fuigo_tools_api::slash_commands::SCHEDULER_CREATE_TOOL_NAME)
+}
+/// Footer every scheduled-task wakeup ends with: check the child output and
+/// fix problems, then delete or update the schedule. Each line is dropped when
+/// its tool names are not resolvable.
+pub(crate) fn scheduled_wakeup_footer(
+    schedule_id: &str,
+    tools: super::ScheduledWakeupTools<'_>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(child) = tools.child {
+        parts.push(format!(
+            "Check the subagent output using {}(\"{}\"). If there are issues, proactively debug and fix them, do not just report it to the user.",
+            child.name, child.id,
+        ));
+    }
+    if let Some(schedule) = tools.schedule {
+        parts.push(format!(
+            "If this schedule is no longer relevant, run {}(\"{schedule_id}\"). If it is outdated, you can update it with {}(new_prompt, interval, \"{schedule_id}\").",
+            schedule.delete, schedule.create,
+        ));
+    }
+    parts.join("\n")
+}
+fn loop_task_id(c: &SubagentCompletionSummary) -> Option<&str> {
+    c.loop_task_id
+        .as_deref()
+        .filter(|task_id| !task_id.is_empty())
+}
+fn append_scheduled_wakeup_footer(
     out: &mut String,
     completion: &SubagentCompletionSummary,
+    tools: super::ScheduledWakeupTools<'_>,
     prefix: &str,
 ) {
-    if completion
-        .loop_task_id
-        .as_deref()
-        .is_some_and(|task_id| !task_id.is_empty())
-    {
-        out.push_str(prefix);
-        out.push_str(
-            "Read through the subagent output. Fix reported issues with monitored jobs, and kill or restart jobs with fatal errors.",
-        );
+    let Some(task_id) = loop_task_id(completion) else {
+        return;
+    };
+    let footer = scheduled_wakeup_footer(task_id, tools);
+    if footer.is_empty() {
+        return;
     }
+    out.push_str(prefix);
+    out.push_str(&footer);
 }
 /// Format a model-facing message from a [`SubagentCompletionSummary`] for
 /// the next-tool-call reminder surface.
@@ -441,6 +474,7 @@ pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,
     scheduler_delete_name: Option<&str>,
+    scheduler_create_name: Option<&str>,
 ) -> String {
     let status = if c.success {
         "successfully"
@@ -469,32 +503,16 @@ pub fn format_subagent_completion(
         task_output_name,
         None,
     );
-    append_scheduler_cleanup_hint(&mut out, c, scheduler_delete_name, "\n");
-    append_loop_remediation_hint(&mut out, c, "\n\n");
-    out
-}
-fn append_scheduler_cleanup_hint(
-    out: &mut String,
-    completion: &SubagentCompletionSummary,
-    scheduler_delete_name: Option<&str>,
-    prefix: &str,
-) {
-    let Some(task_id) = completion
-        .loop_task_id
-        .as_deref()
-        .filter(|task_id| !task_id.is_empty())
-    else {
-        return;
-    };
-    let Some(delete_name) = scheduler_delete_name else {
-        return;
-    };
-    out.push_str(prefix);
-    out.push_str(
-        &format!(
-        "If the monitored work is complete, call `{delete_name}(\"{task_id}\")` to stop the monitor."
-    ),
+    append_scheduled_wakeup_footer(
+        &mut out,
+        c,
+        super::ScheduledWakeupTools {
+            child: super::child_poll(task_output_name, Some(c.subagent_id.as_str())),
+            schedule: super::schedule_tool_names(scheduler_delete_name, scheduler_create_name),
+        },
+        "\n\n",
     );
+    out
 }
 /// Format buffered between-turn subagent completions into a system-reminder
 /// string. When `task_output_name` is `None` each subagent's full output is
@@ -503,6 +521,7 @@ pub fn format_between_turn_completions(
     completions: &[SubagentCompletionSummary],
     task_output_name: Option<&str>,
     scheduler_delete_name: Option<&str>,
+    scheduler_create_name: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
     let n = completions.len();
@@ -531,8 +550,15 @@ pub fn format_between_turn_completions(
             task_output_name,
             None,
         );
-        append_scheduler_cleanup_hint(&mut buf, c, scheduler_delete_name, "\n  ");
-        append_loop_remediation_hint(&mut buf, c, "\n\n");
+        append_scheduled_wakeup_footer(
+            &mut buf,
+            c,
+            super::ScheduledWakeupTools {
+                child: super::child_poll(task_output_name, Some(c.subagent_id.as_str())),
+                schedule: super::schedule_tool_names(scheduler_delete_name, scheduler_create_name),
+            },
+            "\n\n",
+        );
         buf.push('\n');
     }
     buf
@@ -549,10 +575,12 @@ pub async fn format_between_turn_completion_reminder(
 ) -> String {
     let task_output_name = resolve_task_output_tool_name(bridge).await;
     let scheduler_delete_name = resolve_scheduler_delete_tool_name(bridge).await;
+    let scheduler_create_name = resolve_scheduler_create_tool_name(bridge).await;
     format_between_turn_completions(
         completions,
         task_output_name.as_deref(),
         scheduler_delete_name.as_deref(),
+        scheduler_create_name.as_deref(),
     )
 }
 /// Format between-turn bash task completions into a system-reminder string.
@@ -894,6 +922,9 @@ impl Reminder for TaskCompletionReminder {
                 let scheduler_delete_name: Option<String> = res
                     .get::<crate::types::resources::NativeToolClientNames>()
                     .and_then(|names| names.0.get("scheduler_delete").cloned());
+                let scheduler_create_name: Option<String> = res
+                    .get::<crate::types::resources::NativeToolClientNames>()
+                    .and_then(|names| names.0.get("scheduler_create").cloned());
                 let state = res.get_or_default::<State<ReportedTaskCompletions>>();
                 for c in &completions {
                     if state.reported.insert(c.subagent_id.clone()) && !goal_loop_active {
@@ -901,6 +932,7 @@ impl Reminder for TaskCompletionReminder {
                             c,
                             task_output_name.as_deref(),
                             scheduler_delete_name.as_deref(),
+                            scheduler_create_name.as_deref(),
                         ));
                     }
                 }
@@ -2021,7 +2053,7 @@ mod tests {
     #[test]
     fn format_subagent_completion_success_with_poll_tool() {
         let c = make_subagent_completion("sub-abc", true);
-        let msg = format_subagent_completion(&c, Some("get_task_output"), None);
+        let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
         assert!(msg.contains("sub-abc"));
         assert!(msg.contains("successfully"));
         assert!(msg.contains("general-purpose"));
@@ -2039,35 +2071,85 @@ mod tests {
             &c,
             Some("get_task_output"),
             Some("renamed_scheduler_delete"),
+            Some("renamed_scheduler_create"),
         );
         assert_eq!(
             msg,
             "Background subagent \"sub-loop\" (general-purpose: \"test task\") completed successfully.\n\
              Duration: 5.0s | Tool calls: 3 | Turns: 2\n\
              Use get_task_output(\"sub-loop\") to see the full output.\n\
-             If the monitored work is complete, call `renamed_scheduler_delete(\"loop-123\")` to stop the monitor.\n\n\
-             Read through the subagent output. Fix reported issues with monitored jobs, and kill or restart jobs with fatal errors."
+             \n\
+             Check the subagent output using get_task_output(\"sub-loop\"). If there are issues, proactively debug and fix them, do not just report it to the user.\n\
+             If this schedule is no longer relevant, run renamed_scheduler_delete(\"loop-123\"). If it is outdated, you can update it with renamed_scheduler_create(new_prompt, interval, \"loop-123\")."
+        );
+    }
+    #[test]
+    fn format_scheduler_loop_completion_includes_update_instruction() {
+        let mut c = make_subagent_completion("sub-loop", true);
+        c.loop_task_id = Some("loop-123".into());
+        let msg = format_subagent_completion(
+            &c,
+            Some("get_task_output"),
+            Some("renamed_scheduler_delete"),
+            Some("renamed_scheduler_create"),
+        );
+        assert!(
+            msg.contains("Check the subagent output using get_task_output(\"sub-loop\"). If there are issues, proactively debug and fix them, do not just report it to the user."),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("If this schedule is no longer relevant, run renamed_scheduler_delete(\"loop-123\"). If it is outdated, you can update it with renamed_scheduler_create(new_prompt, interval, \"loop-123\")."),
+            "{msg}"
         );
     }
     #[test]
     fn cleanup_instruction_requires_nonempty_id_and_delete_tool() {
-        for loop_task_id in [None, Some(String::new()), Some("loop-123".into())] {
+        for loop_task_id in [None, Some(String::new())] {
             let mut c = make_subagent_completion("sub-loop", true);
             c.loop_task_id = loop_task_id;
-            let msg = format_subagent_completion(&c, Some("get_task_output"), None);
-            assert!(!msg.contains("to stop the monitor"));
+            let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
+            assert!(!msg.contains("no longer relevant"), "{msg}");
+            assert!(!msg.contains("Check the subagent output"), "{msg}");
         }
+        let mut c = make_subagent_completion("sub-loop", true);
+        c.loop_task_id = Some("loop-123".into());
+        let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
+        assert!(msg.contains("Check the subagent output using get_task_output(\"sub-loop\")"));
+        assert!(!msg.contains("no longer relevant"), "{msg}");
+        let partial =
+            format_subagent_completion(&c, Some("get_task_output"), Some("scheduler_delete"), None);
+        assert!(!partial.contains("no longer relevant"), "{partial}");
+        assert!(!partial.contains("outdated"), "{partial}");
+        let both = format_subagent_completion(
+            &c,
+            Some("get_task_output"),
+            Some("scheduler_delete"),
+            Some("scheduler_create"),
+        );
+        assert!(both.contains(
+            "If this schedule is no longer relevant, run scheduler_delete(\"loop-123\"). If it is outdated, you can update it with scheduler_create(new_prompt, interval, \"loop-123\")."
+        ));
+        let no_poll = format_subagent_completion(
+            &c,
+            None,
+            Some("scheduler_delete"),
+            Some("scheduler_create"),
+        );
+        assert!(!no_poll.contains("get_task_output"), "{no_poll}");
+        assert!(no_poll.contains(
+            "If this schedule is no longer relevant, run scheduler_delete(\"loop-123\")."
+        ));
     }
     #[test]
     fn format_subagent_completion_failure() {
         let c = make_subagent_completion("sub-fail", false);
-        let msg = format_subagent_completion(&c, Some("get_task_output"), None);
+        let msg = format_subagent_completion(&c, Some("get_task_output"), None, None);
         assert!(msg.contains("with failure"));
     }
     #[test]
     fn format_subagent_completion_inlines_output_when_no_poll_tool() {
         let c = make_subagent_completion("sub-abc", true);
-        let msg = format_subagent_completion(&c, None, None);
+        let msg = format_subagent_completion(&c, None, None, None);
         assert!(msg.contains("sub-abc"));
         assert!(msg.contains("successfully"));
         assert!(
@@ -2188,7 +2270,7 @@ mod tests {
         let mut c = make_subagent_completion("sub-large", true);
         let large_output = "y".repeat(MAX_INLINE_COMPLETION_BYTES * 5);
         c.output = std::sync::Arc::from(large_output.as_str());
-        let msg = format_subagent_completion(&c, None, None);
+        let msg = format_subagent_completion(&c, None, None, None);
         assert!(
             msg.contains(&large_output),
             "subagent inline output must be preserved verbatim, got len={}",
@@ -2205,7 +2287,7 @@ mod tests {
         let mut c = make_subagent_completion("sub-batch", true);
         let large_output = "z".repeat(MAX_INLINE_COMPLETION_BYTES * 3);
         c.output = std::sync::Arc::from(large_output.as_str());
-        let msg = format_between_turn_completions(&[c], None, None);
+        let msg = format_between_turn_completions(&[c], None, None, None);
         assert!(
             msg.contains(&large_output),
             "between-turn subagent inline output must be preserved verbatim"

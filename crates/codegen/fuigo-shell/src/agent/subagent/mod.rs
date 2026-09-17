@@ -300,6 +300,8 @@ pub(crate) struct SubagentSpawnContext {
     pub task_output_tool_name: String,
     /// Resolved name of the scheduled-task deletion tool in the parent's toolset.
     pub scheduler_delete_tool_name: Option<String>,
+    /// Resolved name of the scheduled-task creation tool in the parent's toolset.
+    pub scheduler_create_tool_name: Option<String>,
     /// Whether auto-wake is enabled.
     /// When `false`, subagent completions are not injected as synthetic prompts.
     pub auto_wake_enabled: bool,
@@ -465,6 +467,7 @@ pub(crate) struct ShellCompletionData {
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: String,
     scheduler_delete_tool_name: Option<String>,
+    scheduler_create_tool_name: Option<String>,
     synthetic_trace_tx:
         Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
@@ -480,6 +483,7 @@ impl ShellCompletionData {
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
             task_output_tool_name: ctx.task_output_tool_name.clone(),
             scheduler_delete_tool_name: ctx.scheduler_delete_tool_name.clone(),
+            scheduler_create_tool_name: ctx.scheduler_create_tool_name.clone(),
             synthetic_trace_tx: ctx.synthetic_trace_tx.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
             telemetry_tokens: 0,

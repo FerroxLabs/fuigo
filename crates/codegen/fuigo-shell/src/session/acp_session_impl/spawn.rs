@@ -1186,12 +1186,18 @@ pub(crate) async fn spawn_session_actor(
             agent.tool_bridge(),
         )
         .await;
+    let resolved_scheduler_create =
+        fuigo_tools::reminders::task_completion::resolve_scheduler_create_tool_name(
+            agent.tool_bridge(),
+        )
+        .await;
     let _ = task_output_tool_name.set(resolved_task_output.clone());
     let _ = read_tool_name.set(resolved_read);
     tool_context.task_output_tool_name = resolved_task_output.unwrap_or_else(|| {
         fuigo_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string()
     });
     tool_context.scheduler_delete_tool_name = resolved_scheduler_delete;
+    tool_context.scheduler_create_tool_name = resolved_scheduler_create;
     let scheduler_handle_for_handle = {
         let toolset = agent.tool_bridge().toolset();
         let res = toolset.resources.lock().await;
