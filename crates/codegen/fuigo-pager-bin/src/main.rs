@@ -1396,6 +1396,7 @@ async fn run_agent_command(
             fs_read: false,
             fs_write: false,
             status_line: false,
+            user_message_echo: false,
         };
         // Bind this bridge to its parent before the leader connect, not after:
         // a cold leader spawn takes seconds, and a client that dies inside that

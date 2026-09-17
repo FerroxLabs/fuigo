@@ -163,6 +163,11 @@ pub struct ClientCapabilities {
     /// The flag it sets is per session, so other subscribers of a shared session receive the payload too.
     #[serde(default)]
     pub status_line: bool,
+
+    /// Whether this client wants live `user_message_chunk` during a prompt (`fuigo/userMessageEcho`).
+    /// When true, the leader injects `clientUserMessageEcho: true` so the answer travels with the session.
+    #[serde(default)]
+    pub user_message_echo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

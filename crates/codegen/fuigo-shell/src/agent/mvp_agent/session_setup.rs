@@ -732,6 +732,7 @@ impl MvpAgent {
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
         self.attach_status_line(&session_id, arguments.meta.as_ref(), init);
+        self.attach_user_message_echo(&session_id, arguments.meta.as_ref(), init);
         #[cfg(all(feature = "local-workspace", unix))]
         local_ws_reap_guard.disarm();
         log_session_started(
@@ -963,6 +964,7 @@ impl MvpAgent {
             )
             .await?;
         self.attach_status_line(&session_id, request_meta.as_ref(), init);
+        self.attach_user_message_echo(&session_id, request_meta.as_ref(), init);
         let ClientCaps {
             code_nav: client_code_nav_enabled,
             terminal: client_terminal,
