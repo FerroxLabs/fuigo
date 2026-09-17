@@ -1665,7 +1665,7 @@ impl AgentView {
         self.hit_context.rect = areas.get("context").copied();
         self.hit_credits.rect = areas.get("credits").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
-        let short = crate::util::abbreviate_path(&self.session.cwd.to_string_lossy()).into_owned();
+        let short = crate::util::display_location_path(&self.session.cwd);
         let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
         let mut parts: Vec<Span> = Vec::new();
@@ -1714,16 +1714,6 @@ impl AgentView {
             cwd_style
         };
         parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
-            ));
-        }
         let cwd_line = Line::from(parts);
         let max_cwd_width = areas
             .values()
