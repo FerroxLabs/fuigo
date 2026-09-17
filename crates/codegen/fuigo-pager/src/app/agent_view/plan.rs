@@ -170,7 +170,35 @@ impl AgentView {
         self.line_viewer = Some(viewer);
         self.casual_commenting_range = Some(0..1);
     }
+    /// Same gate the queued-row editor applies before Enter (`queue_edit.rs`), so dispatch parity holds:
+    /// raw text, registry-known, dispatchable, args complete.
+    fn is_freeform_builtin_slash_command(&self) -> bool {
+        crate::slash::is_complete_builtin_invocation(
+            self.prompt.text(),
+            self.prompt.slash_controller.registry(),
+        )
+    }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
+        if self.is_freeform_builtin_slash_command()
+            && let Some(pav) = self.plan_approval_view.as_mut()
+        {
+            let msg = match pav.focus {
+                PlanApprovalFocus::Commenting => {
+                    "The comment in progress is a slash command: finish or discard it before approving."
+                }
+                PlanApprovalFocus::Preview | PlanApprovalFocus::Prompt => {
+                    pav.focus = PlanApprovalFocus::Prompt;
+                    "Run the slash command in the notes with Enter, or clear it, before approving."
+                }
+            };
+            if crate::app::minimal_mode_active() {
+                self.scrollback
+                    .push_block(crate::scrollback::RenderBlock::system(msg));
+            } else {
+                self.show_toast(msg);
+            }
+            return InputOutcome::Changed;
+        }
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
@@ -428,6 +456,23 @@ impl AgentView {
                     .as_ref()
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Prompt);
                 if prompt_focused {
+                    if self.is_freeform_builtin_slash_command() {
+                        let text = self.prompt.text().to_owned();
+                        if let Some(pav) = self.plan_approval_view.as_mut() {
+                            let consumed_text = pav.stashed_prompt.text.trim() == text.trim();
+                            let consumed_images = self.prompt.images.iter().any(|live| {
+                                pav.stashed_prompt
+                                    .images
+                                    .iter()
+                                    .any(|stashed| Self::same_image_payload(stashed, live))
+                            });
+                            if consumed_text || consumed_images {
+                                pav.stashed_prompt =
+                                    crate::views::prompt_widget::StashedPrompt::default();
+                            }
+                        }
+                        return InputOutcome::Action(Action::SendPrompt(text));
+                    }
                     if freeform_text.trim().is_empty() && !has_comments {
                         self.show_toast("Type revision notes, or press a to approve.");
                         return InputOutcome::Changed;
