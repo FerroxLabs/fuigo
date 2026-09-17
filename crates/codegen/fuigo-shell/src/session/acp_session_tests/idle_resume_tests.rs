@@ -115,7 +115,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     reasoning_effort: None,
                     stream_tool_calls: None,
                     mtls_cert_dir: None,
-                    max_retries: None,
                     rate_limit_retry_threshold: None,
                     reasoning_summary: None,
                 },

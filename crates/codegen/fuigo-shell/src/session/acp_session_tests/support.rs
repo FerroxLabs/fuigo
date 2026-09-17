@@ -253,7 +253,6 @@ pub(crate) async fn create_test_actor_with_terminal(
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,
-            max_retries: None,
             rate_limit_retry_threshold: None,
             reasoning_summary: None,
         },

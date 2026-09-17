@@ -2333,7 +2333,6 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             reasoning_effort: None,
             stream_tool_calls: None,
             mtls_cert_dir: None,
-            max_retries: None,
             rate_limit_retry_threshold: None,
             reasoning_summary: None,
         },
