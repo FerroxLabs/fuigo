@@ -733,6 +733,103 @@ fn tick_demand_fast_while_wake_turn_streams() {
 }
 /// The welcome screen shimmer only advances ~12fps, so a resting welcome screen must demand Slow ticks, not a 30fps loop.
 /// The deep-search spinner upgrades it to Fast while loading.
+fn running_bg_task(task_id: &str, is_monitor: bool) -> crate::app::agent::BgTaskState {
+    crate::app::agent::BgTaskState {
+        task_id: task_id.into(),
+        tool_call_id: "c1".into(),
+        command: "sleep 5".into(),
+        description: None,
+        cwd: "/tmp".into(),
+        output_file: "/tmp/out".into(),
+        status: crate::app::agent::BgTaskStatus::Running,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: None,
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id: None,
+        is_monitor,
+        restored_from_replay: false,
+    }
+}
+fn scheduled_loop(task_id: &str) -> crate::app::agent::ScheduledTaskInfo {
+    crate::app::agent::ScheduledTaskInfo {
+        task_id: task_id.into(),
+        prompt: "check the feed".into(),
+        human_schedule: "every 30 minutes".into(),
+        created_at: std::time::Instant::now(),
+        next_fire_at: None,
+        tag: "loop".into(),
+        last_subagent_id: None,
+    }
+}
+/// The dashboard paints a `Working` spinner for background work on a turn-idle agent; the tick demand must
+/// keep up with it, or the spinner freezes on its first frame.
+#[test]
+fn tick_demand_dashboard_fast_while_background_work_runs() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    assert!(
+        app.agents
+            .get(&id)
+            .is_some_and(|agent| agent.session.state.is_idle())
+    );
+    assert_eq!(app.tick_demand(), TickDemand::None, "idle dashboard parks");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), running_bg_task("m1", true));
+    assert_eq!(
+        app.tick_demand(),
+        TickDemand::Fast,
+        "a running monitor keeps the Working spinner ticking"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .get_mut("m1")
+        .unwrap()
+        .status = crate::app::agent::BgTaskStatus::Done;
+    assert_eq!(
+        app.tick_demand(),
+        TickDemand::None,
+        "a finished task lingers in bg_tasks for history but must not metronome"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("t1".to_owned(), running_bg_task("t1", false));
+    assert_eq!(
+        app.tick_demand(),
+        TickDemand::Fast,
+        "a running background command keeps the spinner ticking"
+    );
+    app.agents.get_mut(&id).unwrap().session.bg_tasks.clear();
+    assert_eq!(app.tick_demand(), TickDemand::None);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .scheduled_tasks
+        .insert("l1".to_owned(), scheduled_loop("l1"));
+    assert_eq!(
+        app.tick_demand(),
+        TickDemand::Fast,
+        "an active /loop keeps the spinner ticking"
+    );
+}
 #[test]
 fn tick_demand_welcome_is_slow_unless_loading() {
     let mut app = test_app();
