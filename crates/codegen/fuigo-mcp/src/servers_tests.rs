@@ -1,4 +1,5 @@
 use super::*;
+use rmcp::ServiceExt;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -1664,6 +1665,8 @@ enum CallToolBehavior {
 #[derive(Clone)]
 struct FakeMcpHandles {
     inits: Arc<AtomicUsize>,
+    /// `server/discover` probes received.
+    discovers: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     init_version: Arc<parking_lot::Mutex<Option<String>>>,
     init_user_agents: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -1671,6 +1674,8 @@ struct FakeMcpHandles {
     init_capabilities: Arc<parking_lot::Mutex<Option<serde_json::Value>>>,
     /// Raw `tools/call` request bodies, for asserting MRTR retry wire shapes.
     call_bodies: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+    /// `MCP-Protocol-Version` header of each `tools/call`, parallel to `call_bodies`.
+    call_version_headers: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
 }
 
 fn header_values(
@@ -1684,9 +1689,31 @@ fn header_values(
         .collect()
 }
 
+/// How the fake reacts to the SEP-2575 `server/discover` probe.
+#[derive(Clone, Copy, Default)]
+enum DiscoverBehavior {
+    /// JSON-RPC method-not-found — the typical legacy SDK reaction.
+    #[default]
+    MethodNotFound,
+    /// A modern server: discover succeeds with 2026-07-28.
+    Modern,
+    /// Legacy middleware that 500s the probe with a non-JSON body — one of the
+    /// malformed shapes that must still fall back to `initialize`.
+    NonJsonServerError,
+}
+
+#[derive(Clone, Default)]
+struct FakeMcpOptions {
+    discover: DiscoverBehavior,
+    /// When set, `initialize` is rejected with an "Unauthorized" JSON-RPC
+    /// error, for asserting that fallback errors keep their auth classification.
+    init_unauthorized: bool,
+}
+
 #[derive(Clone)]
 struct FakeMcpState {
     behavior: CallToolBehavior,
+    options: FakeMcpOptions,
     handles: FakeMcpHandles,
 }
 
@@ -1722,6 +1749,16 @@ async fn fake_handle_post(
                 .init_user_agents
                 .lock()
                 .extend(header_values(&headers, axum::http::header::USER_AGENT));
+            if state.options.init_unauthorized {
+                return axum::Json(err(-32001, "Unauthorized: token expired".to_string()))
+                    .into_response();
+            }
+            // A SEP-2575 session-less server has no `initialize` at all: the request reaches
+            // JSON-RPC dispatch and gets method-not-found, exactly like a legacy server's
+            // reaction to `server/discover`.
+            if matches!(state.options.discover, DiscoverBehavior::Modern) {
+                return axum::Json(err(-32601, "Method not found".to_string())).into_response();
+            }
             let result = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id.clone(),
@@ -1733,6 +1770,36 @@ async fn fake_handle_post(
             });
             ([("mcp-session-id", "fake-session")], axum::Json(result)).into_response()
         }
+        Some("server/discover") => {
+            state.handles.discovers.fetch_add(1, Ordering::Relaxed);
+            match state.options.discover {
+                DiscoverBehavior::Modern => axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "result": {
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {"tools": {}},
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                        "_meta": {
+                            "io.modelcontextprotocol/serverInfo": {"name": "fake", "version": "0.0.0"}
+                        },
+                    },
+                }))
+                .into_response(),
+                // A legacy server: the SEP-2575 probe reaches JSON-RPC dispatch
+                // and gets method-not-found.
+                DiscoverBehavior::MethodNotFound => {
+                    axum::Json(err(-32601, "Method not found".to_string())).into_response()
+                }
+                DiscoverBehavior::NonJsonServerError => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "middleware exploded",
+                )
+                    .into_response(),
+            }
+        }
         Some("tools/list") => axum::Json(serde_json::json!({
             "jsonrpc": "2.0",
             "id": id.clone(),
@@ -1742,6 +1809,14 @@ async fn fake_handle_post(
         Some("tools/call") => {
             let n = state.handles.calls.fetch_add(1, Ordering::Relaxed);
             state.handles.call_bodies.lock().push(req.clone());
+            state
+                .handles
+                .call_version_headers
+                .lock()
+                .push(header_values(
+                    &headers,
+                    axum::http::header::HeaderName::from_static("mcp-protocol-version"),
+                ));
             let input_required = |result: serde_json::Value| {
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -1879,13 +1954,35 @@ async fn spawn_test_http_server(app: axum::Router) -> String {
 }
 
 async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) {
+    spawn_fake_mcp_with(behavior, FakeMcpOptions::default()).await
+}
+
+/// A SEP-2575 modern server: `server/discover` succeeds and `initialize` is
+/// never expected on the wire.
+async fn spawn_fake_mcp_modern(behavior: CallToolBehavior) -> (String, FakeMcpHandles) {
+    spawn_fake_mcp_with(
+        behavior,
+        FakeMcpOptions {
+            discover: DiscoverBehavior::Modern,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn spawn_fake_mcp_with(
+    behavior: CallToolBehavior,
+    options: FakeMcpOptions,
+) -> (String, FakeMcpHandles) {
     let handles = FakeMcpHandles {
         inits: Arc::new(AtomicUsize::new(0)),
+        discovers: Arc::new(AtomicUsize::new(0)),
         calls: Arc::new(AtomicUsize::new(0)),
         init_version: Arc::new(parking_lot::Mutex::new(None)),
         init_user_agents: Arc::new(parking_lot::Mutex::new(Vec::new())),
         init_capabilities: Arc::new(parking_lot::Mutex::new(None)),
         call_bodies: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        call_version_headers: Arc::new(parking_lot::Mutex::new(Vec::new())),
     };
     let app = axum::Router::new()
         .route(
@@ -1894,9 +1991,33 @@ async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) 
         )
         .with_state(FakeMcpState {
             behavior,
+            options,
             handles: handles.clone(),
         });
     (spawn_test_http_server(app).await, handles)
+}
+
+/// A client whose startup budget exceeds the `server/discover` probe timeout,
+/// so the handshake runs the probe phase before any legacy fallback.
+fn fake_http_client_probing(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
+    fake_http_client_with_startup(
+        url,
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS + 5,
+        tool_timeout_sec,
+    )
+}
+
+fn fake_http_client_with_startup(
+    url: &str,
+    startup_timeout_sec: u64,
+    tool_timeout_sec: u64,
+) -> Arc<McpClient> {
+    let overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(startup_timeout_sec),
+        tool_timeout_sec: Some(tool_timeout_sec),
+        ..Default::default()
+    };
+    fake_http_client_with_overrides(url, overrides)
 }
 
 fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
@@ -1905,6 +2026,13 @@ fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
         tool_timeout_sec: Some(tool_timeout_sec),
         ..Default::default()
     };
+    fake_http_client_with_overrides(url, overrides)
+}
+
+fn fake_http_client_with_overrides(
+    url: &str,
+    overrides: McpClientTimeoutOverrides,
+) -> Arc<McpClient> {
     Arc::new(McpClient::new_http(
         "fake".to_string(),
         HttpConfig {
@@ -2074,6 +2202,209 @@ async fn http_handshake_initialises_once_when_the_server_speaks_the_requested_ve
     assert_eq!(
         handles.init_version.lock().as_deref(),
         Some(REQUESTED_PROTOCOL_VERSION.as_str())
+    );
+}
+
+// ── SEP-2575 `server/discover` probe phase ───────────────────────────────────
+
+/// The probe phase shrinks to the startup budget instead of being skipped: a short budget
+/// still negotiates modern servers, it just gives `server/discover` less time.
+#[test]
+fn probe_timeout_tracks_short_startup_budgets() {
+    let url = "http://127.0.0.1:1/mcp";
+    assert_eq!(
+        fake_http_client_with_startup(url, 5, 5).probe_timeout_secs(),
+        5
+    );
+    assert_eq!(
+        fake_http_client_with_startup(url, McpClient::DISCOVER_PROBE_TIMEOUT_SECS, 5)
+            .probe_timeout_secs(),
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+    assert_eq!(
+        fake_http_client_with_startup(url, McpClient::DISCOVER_PROBE_TIMEOUT_SECS + 5, 5)
+            .probe_timeout_secs(),
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+}
+
+/// Waiters parked on an in-flight handshake must budget for both phases: the
+/// holder can legitimately take probe + startup, so a `startup_timeout_sec`-only
+/// wait would time out concurrent first tool calls.
+#[test]
+fn handshake_budget_covers_the_probe_phase() {
+    let url = "http://127.0.0.1:1/mcp";
+    assert_eq!(
+        fake_http_client_with_startup(url, 5, 5).handshake_budget_secs(),
+        10
+    );
+    let long = McpClient::DISCOVER_PROBE_TIMEOUT_SECS + 5;
+    assert_eq!(
+        fake_http_client_with_startup(url, long, 5).handshake_budget_secs(),
+        long + McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+}
+
+/// Wire-level counterpart: a 5s-startup client (the desktop bind path's size class) still
+/// probes `server/discover`, so a modern server is negotiated without any `initialize`.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_startup_budget_still_negotiates_modern_servers() {
+    let (url, handles) = spawn_fake_mcp_modern(CallToolBehavior::HangThenOk { hang_ms: 0 }).await;
+    let client = fake_http_client(&url, 5);
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        0,
+        "a short-budget client must still reach the modern session"
+    );
+}
+
+/// A short-budget client against a legacy server probes once, then runs the legacy
+/// `initialize`. Fuigo's legacy phase names `REQUESTED_PROTOCOL_VERSION` first (with the
+/// `FALLBACK_PROTOCOL_VERSION` retry of `ensure_initialized` behind it); the stock fake
+/// accepts the requested version, so exactly one `initialize` reaches the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_startup_budget_probes_then_falls_back_to_initialize() {
+    let (url, handles) = spawn_fake_mcp(CallToolBehavior::AlwaysError { code: -32603 }).await;
+    let client = fake_http_client(&url, 5);
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.init_version.lock().as_deref(),
+        Some(REQUESTED_PROTOCOL_VERSION.as_str()),
+        "the legacy initialize must name the requested protocolVersion"
+    );
+}
+
+/// A legacy server whose middleware reacts to the probe with a malformed shape
+/// (non-JSON 500) must still handshake: the probe fails on its own transport and
+/// the legacy `initialize` runs on a fresh one.
+#[tokio::test(flavor = "multi_thread")]
+async fn junk_discover_response_still_handshakes_via_initialize() {
+    let (url, handles) = spawn_fake_mcp_with(
+        CallToolBehavior::AlwaysError { code: -32603 },
+        FakeMcpOptions {
+            discover: DiscoverBehavior::NonJsonServerError,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_probing(&url, 5);
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        1,
+        "a malformed probe reaction must still reach the initialize fallback"
+    );
+}
+
+/// When the legacy `initialize` itself fails, its error must surface directly
+/// — with its auth classification intact — rather than being hidden behind a
+/// generic probe-then-fallback wrapper. Under Fuigo's legacy phase the rejection
+/// is seen twice (requested version, then the `FALLBACK_PROTOCOL_VERSION` retry)
+/// and the probe is not repeated for the version retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_fallback_surfaces_the_initialize_error_for_classification() {
+    let (url, handles) = spawn_fake_mcp_with(
+        CallToolBehavior::AlwaysError { code: -32603 },
+        FakeMcpOptions {
+            init_unauthorized: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_probing(&url, 5);
+
+    let err = client
+        .ensure_initialized()
+        .await
+        .expect_err("initialize is rejected");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 2);
+    assert!(
+        err.is_auth_rejection(),
+        "the initialize rejection must keep its auth classification: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Unauthorized"),
+        "the initialize error text must surface to the user: {msg}"
+    );
+}
+
+/// A SEP-2575 modern server: `server/discover` negotiates 2026-07-28, no `initialize` is
+/// sent, and every request carries the client context in per-request `_meta`.
+#[tokio::test(flavor = "multi_thread")]
+async fn handshake_negotiates_modern_discover_without_initialize() {
+    let (url, handles) = spawn_fake_mcp_modern(CallToolBehavior::HangThenOk { hang_ms: 0 }).await;
+    let client = fake_http_client_probing(&url, 5);
+    client.set_elicitation_tx(Some(crate::elicitation::ElicitationInbox::new()));
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(
+        handles.discovers.load(Ordering::Relaxed),
+        1,
+        "startup must negotiate via server/discover"
+    );
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        0,
+        "a modern server must never receive initialize"
+    );
+
+    let tool = fake_echo_tool();
+    let ew = fuigo_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = tool
+        .try_call_tool(
+            &client,
+            &serde_json::json!({}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tools/call succeeds over the modern session");
+    assert!(!out.is_error.unwrap_or(false));
+    let bodies = handles.call_bodies.lock().clone();
+    assert!(!bodies.is_empty(), "tools/call must reach the server");
+    assert_eq!(
+        bodies
+            .first()
+            .and_then(|b| b.get("params"))
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+            .and_then(|v| v.as_str()),
+        Some("2026-07-28"),
+        "modern-era requests must carry the negotiated protocolVersion in _meta: {:?}",
+        bodies.first()
+    );
+    assert!(
+        bodies
+            .first()
+            .and_then(|body| body.pointer(
+                "/params/_meta/io.modelcontextprotocol~1clientCapabilities/elicitation/form"
+            ))
+            .is_some_and(serde_json::Value::is_object),
+        "modern-era requests carry the elicitation capability rmcp stamps: {:?}",
+        bodies.first()
+    );
+    assert_eq!(
+        handles.call_version_headers.lock().first(),
+        Some(&vec!["2026-07-28".to_owned()]),
+        "the header must name the negotiated modern version"
     );
 }
 
