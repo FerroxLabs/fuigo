@@ -947,8 +947,14 @@ async fn rate_limit_429_zero_retry_after_uses_backoff() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn stale_persist_does_not_clobber_newer_token() {
+    // A DISABLED provider bumps the process-global `skipped_disabled` counter at construction,
+    // so this test must hold the metrics lock like every other test that builds one. Without it,
+    // it races `disabled_flag_does_not_refresh_or_spawn`, which asserts that counter moved by
+    // exactly one (observed as `left: 2, right: 1` once unrelated slow tests shifted scheduling).
+    let _metrics = lock_metrics();
     let dir = tempfile::tempdir().unwrap();
     let auth_path = write_auth_json(dir.path());
     let mut params = provider_params("https://auth.example.com".into(), None);
