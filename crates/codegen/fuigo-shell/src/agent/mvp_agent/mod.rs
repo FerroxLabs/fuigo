@@ -1482,6 +1482,7 @@ mod session_lifecycle;
 mod agent_ops;
 mod acp_agent;
 pub(crate) mod reasoning_effort;
+mod sampler_prewarm;
 mod session_setup;
 mod subagent_spawn;
 use session_registry::SessionRegistry;
