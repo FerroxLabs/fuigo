@@ -17,7 +17,7 @@ use fuigo_sampling_types::SamplingError;
 const RECAP_PERSIST_MAX_CHARS: usize = 240;
 
 /// What the model is told about a `/btw` side question. Shared with other backends that answer one
-pub const SIDE_QUESTION_INSTRUCTION: &str = "This is a side question from the user. \
+pub(crate) const SIDE_QUESTION_INSTRUCTION: &str = "This is a side question from the user. \
          You must answer this question directly in a single response.\n\n\
          IMPORTANT CONTEXT:\n\
          - You are a separate, lightweight agent spawned to answer this one question\n\
