@@ -392,7 +392,7 @@ impl AgentView {
                         activity: None,
                         meta: crate::views::dock::fmt_elapsed(elapsed),
                         killable: !t.pending_kill,
-                        openable: false,
+                        openable: true,
                         spinning: true,
                     },
                 )
@@ -425,7 +425,7 @@ impl AgentView {
                         activity: None,
                         meta: crate::views::dock::fmt_elapsed(elapsed),
                         killable: !t.pending_kill,
-                        openable: false,
+                        openable: true,
                         spinning: true,
                     },
                 )
@@ -448,7 +448,14 @@ impl AgentView {
                         crate::views::scheduled_next::next_suffix(s, now)
                     ),
                     killable: true,
-                    openable: false,
+                    // A loop row opens the subagent its last run spawned, so it
+                    // is only openable while that child still has a view.
+                    openable: s.last_subagent_id.as_deref().is_some_and(|sid| {
+                        self.subagent_sessions.iter().any(|(child, info)| {
+                            info.subagent_id.as_ref() == sid
+                                && self.subagent_views.contains_key(child)
+                        })
+                    }),
                     spinning: false,
                 },
             )
@@ -643,6 +650,43 @@ impl AgentView {
     pub(crate) fn reconcile_dock_before_paint(&mut self) {
         if self.dock_on {
             self.clamp_dock_overflow();
+        }
+    }
+
+    /// What Enter does on the selected dock item, for the footer: fold a
+    /// header, reveal a `show N more` row, open an openable row, or nothing.
+    pub(crate) fn dock_enter_label(&self) -> Option<&'static str> {
+        use crate::views::dock::{DockItem, Section};
+        match self.dock_items().get(self.dock_cursor) {
+            Some(DockItem::Header(sec)) => Some(if self.is_dock_section_expanded(*sec) {
+                "collapse"
+            } else {
+                "expand"
+            }),
+            Some(DockItem::RevealRemaining(_)) => Some("show all"),
+            Some(DockItem::Row(section, i)) => {
+                let openable = match section {
+                    Section::Workflows => self
+                        .dock_workflow_rows()
+                        .get(*i)
+                        .is_some_and(|(_, row)| row.openable),
+                    Section::Subagents => self
+                        .dock_subagent_rows()
+                        .get(*i)
+                        .is_some_and(|(_, _, row)| row.openable),
+                    Section::Tasks => self
+                        .dock_task_rows()
+                        .get(*i)
+                        .is_some_and(|(_, row)| row.openable),
+                    Section::Watchers => self
+                        .dock_watcher_rows()
+                        .get(*i)
+                        .is_some_and(|(_, row)| row.openable),
+                    Section::Queued => true,
+                };
+                openable.then_some("open")
+            }
+            None => None,
         }
     }
 
@@ -844,12 +888,70 @@ impl AgentView {
                 }
                 InputOutcome::Changed
             }
-            // Fuigo has no background-task viewer, so Tasks/Watchers/Queued rows
-            // have nothing to open.
-            DockItem::Row(Section::Tasks | Section::Watchers | Section::Queued, _) => {
-                InputOutcome::Unchanged
-            }
+            // Tasks and Monitor rows open the background-task output viewer (the
+            // same `BlockViewerPane::for_bg_task` the tasks pane opens); a Loop row
+            // opens the subagent its last run spawned. Queued rows have no viewer.
+            DockItem::Row(Section::Tasks, i) => self
+                .dock_task_rows()
+                .get(i)
+                .map(|(id, _)| id.clone())
+                .map_or(InputOutcome::Unchanged, |id| self.open_bg_task_viewer(&id)),
+            DockItem::Row(Section::Watchers, i) => match self.dock_watcher_rows().get(i) {
+                Some((DockWatcherId::Monitor(id), _)) => {
+                    let id = id.clone();
+                    self.open_bg_task_viewer(&id)
+                }
+                Some((DockWatcherId::Loop(id), _)) => {
+                    let id = id.clone();
+                    self.open_linked_scheduled_subagent(&id)
+                }
+                None => InputOutcome::Unchanged,
+            },
+            DockItem::Row(Section::Queued, _) => InputOutcome::Unchanged,
         }
+    }
+
+    /// Open a background task's output viewer, as the tasks pane does.
+    fn open_bg_task_viewer(&mut self, task_id: &str) -> InputOutcome {
+        let Some(task) = self.session.bg_tasks.get(task_id) else {
+            return InputOutcome::Unchanged;
+        };
+        // A task can lack a scrollback anchor (it finished before its block was
+        // pushed); the viewer renders from the task's own stdout, so open it on
+        // the sentinel anchor rather than dead-clicking the row.
+        let entry_id = task
+            .scrollback_entry_id
+            .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
+        let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
+        self.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
+            entry_id,
+            task_id,
+            &task.stdout,
+            is_running,
+        ));
+        self.set_active_pane(AgentPane::Scrollback, true);
+        InputOutcome::Changed
+    }
+
+    /// Open the subagent a scheduled loop's last run spawned, if it still has a
+    /// view.
+    fn open_linked_scheduled_subagent(&mut self, task_id: &str) -> InputOutcome {
+        let Some(child_sid) = self
+            .session
+            .scheduled_tasks
+            .get(task_id)
+            .and_then(|info| info.last_subagent_id.as_deref())
+            .and_then(|sid| {
+                self.subagent_sessions.iter().find_map(|(child, info)| {
+                    (info.subagent_id.as_ref() == sid).then_some(child.clone())
+                })
+            })
+            .filter(|child| self.subagent_views.contains_key(child))
+        else {
+            return InputOutcome::Unchanged;
+        };
+        self.open_subagent_fullscreen(child_sid);
+        InputOutcome::Changed
     }
 
     /// Dock-focused key handling (experimental `FUIGO_DOCK_V2`).
