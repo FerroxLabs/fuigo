@@ -935,6 +935,7 @@ fn contextual_tip_maps_every_tip_and_action() {
         (K::SshWrap, A::Shown, "ssh_wrap", "shown"),
         (K::SshWrap, A::Accepted, "ssh_wrap", "accepted"),
         (K::ExportCopy, A::Shown, "export_copy", "shown"),
+        (K::ExportCopy, A::Accepted, "export_copy", "accepted"),
     ];
     for (tip, action, tip_label, action_label) in cases {
         let stream = build(gates_off());

@@ -6228,6 +6228,40 @@ mod tests {
         }
     }
 
+    /// The welcome screen prepares a session in the background so the first keystroke lands in a
+    /// live composer. Removing the event-loop startup hook must fail this test.
+    #[test]
+    fn authenticated_startup_hook_creates_home() {
+        let mut app = crate::app::app_view::tests::test_app();
+        assert!(should_create_home_on_authenticated_startup(&app));
+        let effects = crate::app::dispatch::maybe_create_home_session(&mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, crate::app::actions::Effect::CreateSession { .. })),
+            "removing the event-loop startup hook must fail this test"
+        );
+        assert!(matches!(app.active_view, ActiveView::Welcome));
+    }
+
+    /// The husk is invisible: quitting from the welcome screen must not print a resume hint for a
+    /// session the user never used.
+    #[test]
+    fn finish_run_unused_home_session_has_no_exit_info() {
+        let mut app = crate::app::app_view::tests::test_app();
+        app.screen_mode = crate::app::ScreenMode::Fullscreen;
+        crate::app::dispatch::maybe_create_home_session(&mut app);
+        let home = app.home_session_agent.expect("home session");
+        app.agents.get_mut(&home).unwrap().session.session_id =
+            Some(acp::SessionId::new("unused-home"));
+        assert!(matches!(app.active_view, ActiveView::Welcome));
+        assert!(
+            finish_run(&mut app).exit_info.is_none(),
+            "quit from home must not hint an unused optimistic session"
+        );
+        assert!(app.active_session_id().is_none());
+    }
+
     #[test]
     fn plugin_cta_marketplace_from_managed_layer() {
         let layers = fuigo_config::ConfigLayers {
