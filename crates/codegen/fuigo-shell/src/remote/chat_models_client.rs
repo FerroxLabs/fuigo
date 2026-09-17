@@ -8,7 +8,15 @@ use serde::Deserialize;
 
 use crate::auth::AuthManager;
 
-const FUIGO_WEB_URL: &str = "https://grok.com";
+/// Env vars that can name the chat-models host, in precedence order.
+///
+/// No compiled default (upstream: the vendor's web origin). With none set the
+/// chat model catalog is not available and [`ChatModelsError::NotConfigured`] says so.
+pub(crate) const MODES_BASE_URL_ENV_CHAIN: [&str; 3] = [
+    "FUIGO_MODES_BASE_URL",
+    "FUIGO_CONVERSATIONS_BASE_URL",
+    "FUIGO_CODE_WEB_URL",
+];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +70,11 @@ pub struct ListModesResponse {
 pub enum ChatModelsError {
     #[error("no Fuigo credentials")]
     NoAuth,
+    /// No chat-models host is configured; the catalog is unavailable rather than pointed at a vendor.
+    #[error(
+        "the chat model catalog needs FUIGO_MODES_BASE_URL (or FUIGO_CODE_WEB_URL) to be configured; it is not available otherwise"
+    )]
+    NotConfigured,
     #[error("request timed out")]
     Timeout,
     #[error("network error: {0}")]
@@ -86,31 +99,24 @@ impl From<fuigo_extra_ca::dispatch::DispatchError> for ChatModelsError {
 /// Stateless transport for `POST /rest/modes`; caching lives in [`crate::agent::chat_modes::ChatModesManager`].
 pub struct ChatModelsClient {
     http: reqwest::Client,
-    base_url: String,
+    /// `None` when no env var in [`MODES_BASE_URL_ENV_CHAIN`] is set: every
+    /// request fails closed with [`ChatModelsError::NotConfigured`].
+    base_url: Option<String>,
     auth: Arc<AuthManager>,
 }
 
 impl ChatModelsClient {
     pub fn new(auth: Arc<AuthManager>) -> Self {
-        let base_url = std::env::var("FUIGO_MODES_BASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("FUIGO_CONVERSATIONS_BASE_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                std::env::var("FUIGO_CODE_WEB_URL")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or_else(|| FUIGO_WEB_URL.to_string());
         Self {
             http: crate::http::shared_client(),
-            base_url,
+            base_url: super::skills_client::first_nonempty_env(&MODES_BASE_URL_ENV_CHAIN),
             auth,
         }
+    }
+
+    /// The configured host, or the fail-closed error every request returns without one.
+    fn base(&self) -> Result<&str, ChatModelsError> {
+        self.base_url.as_deref().ok_or(ChatModelsError::NotConfigured)
     }
 
     /// Gated only on a valid grok.com bearer, not `is_fuigo_auth()` like workspaces/conversations.
@@ -124,8 +130,9 @@ impl ChatModelsClient {
             .auth()
             .await
             .map_err(|_| ChatModelsError::NoAuth)?;
+        let base = self.base()?;
 
-        let url = format!("{}/rest/modes", self.base_url);
+        let url = format!("{}/rest/modes", base);
         let body = serde_json::json!({ "locale": locale });
         let mut builder = self
             .http
@@ -213,6 +220,57 @@ mod tests {
         // With no availability field on the wire, the mode is not selectable
         assert!(!m.is_available());
         assert!(resp.default_mode_id.is_empty());
+    }
+
+    // ===== No vendor host as a default (1.0.20, REM-1 / REM-3) =====
+
+    /// Row 4: with none of the env vars set the client resolves NO host.
+    /// Upstream fell back to its vendor's web origin here.
+    /// (Inspects `Debug` output only, so it compiles against the pre-fix `String` too.)
+    #[test]
+    #[serial_test::serial]
+    fn chat_models_client_without_env_names_no_vendor_host() {
+        let _a = fuigo_test_support::EnvGuard::unset("FUIGO_MODES_BASE_URL");
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client =
+            ChatModelsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        let rendered = format!("{:?}", client.base_url);
+        assert!(
+            !rendered.contains("grok.com"),
+            "chat models base fell back to a vendor host: {rendered}"
+        );
+    }
+
+    /// Row 4, typed: unset means `None` and `list_modes` fails closed naming the variable.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn chat_models_client_without_env_fails_closed_with_a_true_message() {
+        let _a = fuigo_test_support::EnvGuard::unset("FUIGO_MODES_BASE_URL");
+        let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CONVERSATIONS_BASE_URL");
+        let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_WEB_URL");
+        let client =
+            ChatModelsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        assert_eq!(client.base_url, None);
+        let err = client.list_modes("en").await.expect_err("no host, no request");
+        let shown = err.to_string();
+        assert!(matches!(err, ChatModelsError::NotConfigured), "{shown}");
+        assert!(shown.contains("FUIGO_MODES_BASE_URL"), "{shown}");
+        assert!(!shown.contains("grok.com"), "{shown}");
+    }
+
+    /// Row 4, set: precedence `FUIGO_MODES_BASE_URL` > `FUIGO_CONVERSATIONS_BASE_URL` > `FUIGO_CODE_WEB_URL`, verbatim.
+    #[test]
+    #[serial_test::serial]
+    fn chat_models_client_env_chain_precedence_is_unchanged() {
+        let am = crate::remote::skills_client::tests::test_auth_manager;
+        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        assert_eq!(ChatModelsClient::new(am()).base_url.as_deref(), Some("https://web.example.test"));
+        let _conv =
+            fuigo_test_support::EnvGuard::set("FUIGO_CONVERSATIONS_BASE_URL", "https://conv.example.test");
+        assert_eq!(ChatModelsClient::new(am()).base_url.as_deref(), Some("https://conv.example.test"));
+        let _modes = fuigo_test_support::EnvGuard::set("FUIGO_MODES_BASE_URL", "https://modes.example.test");
+        assert_eq!(ChatModelsClient::new(am()).base_url.as_deref(), Some("https://modes.example.test"));
     }
 }
 

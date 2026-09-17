@@ -1,4 +1,5 @@
 //! PTY: Esc mirror of `auto_wake_cancel_preserves_queued_user_prompt` (see that file's header for the failure chain).
+//! Since 1.0.20 a mid-turn Esc never cancels: the scenario asserts the cancel-key hint first, then cancels with that key.
 //! It also waits for the [stop] control while the pane is idle; that control only renders with wake-turn cancel support.
 #[allow(unused_imports)]
 use super::common::*;

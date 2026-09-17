@@ -109,7 +109,11 @@ pub(crate) fn test_app() -> AppView {
         scroll_state: MouseScrollState::default(),
         scroll_config: ScrollConfig::default(),
         appearance: AppearanceConfig::default(),
-        notification_service: NotificationService::new(Default::default()),
+        notification_service: NotificationService::new(
+            Default::default(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        ),
+        escape_writer: crate::render::draw::EscapeWriter::disconnected(),
         pending_notification_escapes: None,
         deferred_notification: None,
         tracing_rx: None,
@@ -149,6 +153,7 @@ pub(crate) fn test_app() -> AppView {
         contextual_hints: Default::default(),
         remote_contextual_hints: None,
         tip_seen_counts: Default::default(),
+        export_copy_slash_used: false,
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
         ssh_wrap_tip_evaluated: false,
@@ -213,6 +218,8 @@ pub(crate) fn test_app() -> AppView {
         command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_prompt_focused: false,
         welcome_tip_typing_dismissed: false,
+        home_session_agent: None,
+        optimistic_home_husk: None,
         welcome_menu_index: None,
         welcome_menu_rects: Vec::new(),
         welcome_show_changelog_action: false,
@@ -733,6 +740,107 @@ fn tick_demand_fast_while_wake_turn_streams() {
 }
 /// The welcome screen shimmer only advances ~12fps, so a resting welcome screen must demand Slow ticks, not a 30fps loop.
 /// The deep-search spinner upgrades it to Fast while loading.
+fn running_bg_task(task_id: &str, is_monitor: bool) -> crate::app::agent::BgTaskState {
+    crate::app::agent::BgTaskState {
+        task_id: task_id.into(),
+        tool_call_id: "c1".into(),
+        command: "sleep 5".into(),
+        description: None,
+        cwd: "/tmp".into(),
+        output_file: "/tmp/out".into(),
+        status: crate::app::agent::BgTaskStatus::Running,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: None,
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id: None,
+        is_monitor,
+        restored_from_replay: false,
+    }
+}
+fn scheduled_loop(task_id: &str) -> crate::app::agent::ScheduledTaskInfo {
+    crate::app::agent::ScheduledTaskInfo {
+        task_id: task_id.into(),
+        prompt: "check the feed".into(),
+        human_schedule: "every 30 minutes".into(),
+        created_at: std::time::Instant::now(),
+        next_fire_at: None,
+        tag: "loop".into(),
+        last_subagent_id: None,
+    }
+}
+/// The dashboard paints a `Working` spinner for background work on a turn-idle agent; the tick demand must
+/// keep up with it, or the spinner freezes on its first frame.
+#[test]
+fn tick_demand_dashboard_fast_while_background_work_runs() {
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    assert!(
+        app.agents
+            .get(&id)
+            .is_some_and(|agent| agent.session.state.is_idle())
+    );
+    assert_eq!(
+        painted_tick_demand(&mut app),
+        TickDemand::None,
+        "idle dashboard parks"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), running_bg_task("m1", true));
+    assert_eq!(
+        painted_tick_demand(&mut app),
+        TickDemand::Fast,
+        "a running monitor keeps the Working spinner ticking"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .get_mut("m1")
+        .unwrap()
+        .status = crate::app::agent::BgTaskStatus::Done;
+    assert_eq!(
+        painted_tick_demand(&mut app),
+        TickDemand::None,
+        "a finished task lingers in bg_tasks for history but must not metronome"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("t1".to_owned(), running_bg_task("t1", false));
+    assert_eq!(
+        painted_tick_demand(&mut app),
+        TickDemand::Fast,
+        "a running background command keeps the spinner ticking"
+    );
+    app.agents.get_mut(&id).unwrap().session.bg_tasks.clear();
+    assert_eq!(painted_tick_demand(&mut app), TickDemand::None);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .scheduled_tasks
+        .insert("l1".to_owned(), scheduled_loop("l1"));
+    assert_eq!(
+        painted_tick_demand(&mut app),
+        TickDemand::Fast,
+        "an active /loop keeps the spinner ticking"
+    );
+}
 #[test]
 fn tick_demand_welcome_is_slow_unless_loading() {
     let mut app = test_app();
@@ -1257,6 +1365,49 @@ fn needs_animation_gates_btw_loading_spinner() {
         error: "boom".into(),
     });
     assert!(!app.needs_animation());
+}
+#[test]
+fn needs_animation_gates_extensions_modal_loading_spinner() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+    use crate::views::turn_status::SPINNER_DIVISOR;
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    assert!(!app.needs_animation(), "idle agent must not request ticks");
+    app.agents.get_mut(&id).unwrap().extensions_modal =
+        Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+    assert!(
+        app.needs_animation(),
+        "/mcps Loading must keep ticks alive so the picker spinner can advance"
+    );
+    let saw_redraw = (0..SPINNER_DIVISOR).any(|_| app.tick());
+    assert!(
+        saw_redraw,
+        "Loading must redraw at spinner cadence while idle"
+    );
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap()
+        .mcps_data = TabDataState::Loaded(Vec::new());
+    assert!(
+        !app.needs_animation(),
+        "loaded /mcps list must not metronome"
+    );
+    let modal = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .extensions_modal
+        .as_mut()
+        .unwrap();
+    modal.pending_action = Some("Installing…".into());
+    modal.pending_entry_index = None;
+    assert!(
+        app.needs_animation(),
+        "tab-wide pending overlay spinner must keep ticks alive"
+    );
 }
 #[test]
 fn needs_animation_gates_pending_acp_command_sync() {
@@ -3023,26 +3174,62 @@ fn ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn() {
     );
 }
 #[test]
-fn esc_from_prompt_pane_running_turn_cancels_in_non_vim_mode() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "1× Esc while running must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
+/// Mid-turn Esc is swallowed at the app level too: no `CancelTurn`, no armed double-press, no trigger stamp, draft intact, and a toast naming Ctrl+C.
+/// Covers both panes, vim on and off, and the minimal screen mode (which used to Esc-cancel regardless of vim).
+/// Replaces the pre-1.0.20 `esc_from_*_cancels_*` tests, which pinned the removed Esc-cancels-turn behaviour.
+fn esc_mid_turn_hints_ctrl_c_instead_of_cancelling() {
+    for (vim_mode, minimal, pane) in [
+        (false, false, crate::views::agent::ActivePane::Prompt),
+        (true, false, crate::views::agent::ActivePane::Prompt),
+        (true, true, crate::views::agent::ActivePane::Prompt),
+        (false, false, crate::views::agent::ActivePane::Scrollback),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.active_pane = pane;
+        agent.vim_mode = vim_mode;
+        if minimal {
+            agent
+                .prompt
+                .set_screen_mode(crate::app::ScreenMode::Minimal);
+        }
+        agent.prompt.textarea.set_text("draft while streaming");
+        let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        let ctx = format!("vim={vim_mode} minimal={minimal} pane={pane:?}");
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "{ctx}: mid-turn Esc must swallow, got {outcome:?}"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "{ctx}: must not arm idle clear"
+        );
+        assert!(
+            app.agents[&id].cancel_trigger_hint.is_none(),
+            "{ctx}: no cancel trigger"
+        );
+        assert!(app.agents[&id].session.state.is_turn_running(), "{ctx}");
+        assert_eq!(
+            "draft while streaming",
+            app.agents[&id].prompt.textarea.text(),
+            "{ctx}: the draft is preserved"
+        );
+        if minimal {
+            assert!(app.agents[&id].toast.is_none(), "{ctx}");
+        } else {
+            assert_eq!(
+                Some("Press Ctrl+c to cancel the turn"),
+                app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str()),
+                "{ctx}: the toast names the cancel key"
+            );
+        }
+    }
 }
 #[test]
-fn esc_from_prompt_pane_running_compact_cancels_in_non_vim_mode() {
+/// A manual `/compact` in flight (CommandRunning) and a streaming wake turn (pane state Idle) get the same hint, not a cancel.
+fn esc_during_compact_or_wake_turn_hints_instead_of_cancelling() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
@@ -3051,70 +3238,45 @@ fn esc_from_prompt_pane_running_compact_cancels_in_non_vim_mode() {
         started_at: std::time::Instant::now(),
     };
     agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "1× Esc while /compact runs must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(
-        app.pending_action.is_none(),
-        "must not arm idle clear/rewind"
-    );
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
-}
-#[test]
-fn esc_from_prompt_pane_running_compact_vim_mode_is_swallowed() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::CommandRunning {
-        command: crate::app::agent::AgentCommand::Compact,
-        started_at: std::time::Instant::now(),
-    };
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = true;
-    agent.prompt.textarea.set_text("draft while compacting");
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
-        "1× Esc while /compact runs must swallow in vim mode, got {outcome:?}"
+        "Esc while /compact runs must swallow, got {outcome:?}"
     );
-    assert!(app.pending_action.is_none());
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
-    assert_eq!(
-        app.agents[&id].prompt.textarea.text(),
-        "draft while compacting",
-        "vim mid-compact Esc must not clear the draft or arm idle clear"
-    );
     assert!(app.agents[&id].session.state.is_compact_running());
-}
-#[test]
-fn esc_cancels_running_wake_turn_while_pane_is_idle() {
+    assert_eq!(
+        Some("Press Ctrl+c to cancel the turn"),
+        app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str())
+    );
+
     let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
         prompt_id: "task-completed-bg1".into(),
         cancel_sent: false,
     });
     agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "Esc during a wake turn must cancel, got {outcome:?}"
+        matches!(outcome, InputOutcome::Changed),
+        "Esc during a wake turn must swallow, got {outcome:?}"
     );
     assert!(
         app.pending_action.is_none(),
         "must not arm idle clear/rewind"
     );
+    assert!(app.agents[&id].cancel_trigger_hint.is_none());
+    assert!(
+        app.agents[&id]
+            .running_wake_turn
+            .as_ref()
+            .is_some_and(|wake| !wake.cancel_sent),
+        "the wake turn keeps streaming"
+    );
     assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
+        Some("Press Ctrl+c to cancel the turn"),
+        app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str())
     );
 }
 #[test]
@@ -3133,118 +3295,6 @@ fn streaming_wake_turn_counts_as_running_for_minimal_commit() {
     assert!(!crate::minimal_api::is_turn_or_wake_running(agent));
     agent.session.state = AgentState::TurnRunning;
     assert!(crate::minimal_api::is_turn_or_wake_running(agent));
-}
-#[test]
-fn esc_from_prompt_pane_running_turn_with_draft_cancels_preserving_draft() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = false;
-    agent.prompt.textarea.set_text("draft while streaming");
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "mid-turn Esc with draft must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none(), "must not arm idle clear");
-    assert_eq!(
-        app.agents[&id].prompt.textarea.text(),
-        "draft while streaming",
-        "Esc cancel must preserve the draft (not clear it like Ctrl+C)"
-    );
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
-}
-#[test]
-fn esc_from_scrollback_pane_running_turn_cancels_in_non_vim_mode() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
-    agent.vim_mode = false;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "1× Esc from scrollback while running must cancel in non-vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
-}
-#[test]
-fn esc_from_prompt_pane_running_turn_vim_mode_is_swallowed() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = true;
-    agent.prompt.textarea.set_text("draft while streaming");
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "1× Esc while running must swallow in vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert!(app.agents[&id].cancel_trigger_hint.is_none());
-    assert_eq!(
-        app.agents[&id].prompt.textarea.text(),
-        "draft while streaming",
-        "vim mid-turn Esc must not clear the draft or arm idle clear"
-    );
-    assert!(app.agents[&id].session.state.is_turn_running());
-}
-#[test]
-fn esc_from_scrollback_pane_running_turn_vim_mode_is_swallowed() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Scrollback;
-    agent.vim_mode = true;
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Changed),
-        "1× Esc from scrollback while running must swallow in vim mode, got {outcome:?}"
-    );
-    assert!(app.pending_action.is_none());
-    assert!(app.agents[&id].cancel_trigger_hint.is_none());
-    assert!(app.agents[&id].session.state.is_turn_running());
-}
-#[test]
-fn esc_cancels_turn_gate_truth_table() {
-    assert!(crate::app::esc_cancels_turn(true, true));
-    assert!(crate::app::esc_cancels_turn(true, false));
-    assert!(crate::app::esc_cancels_turn(false, false));
-    assert!(!crate::app::esc_cancels_turn(false, true));
-}
-#[test]
-fn esc_running_turn_minimal_screen_mode_cancels_even_with_vim_on() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.state = AgentState::TurnRunning;
-    agent.active_pane = crate::views::agent::ActivePane::Prompt;
-    agent.vim_mode = true;
-    agent
-        .prompt
-        .set_screen_mode(crate::app::ScreenMode::Minimal);
-    let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "minimal mode must Esc-cancel even with vim scrollback nav on, got {outcome:?}"
-    );
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
 }
 #[test]
 fn esc_owned_before_agent_covers_app_level_owners() {
@@ -3288,23 +3338,22 @@ fn esc_owned_before_agent_covers_app_level_owners() {
     assert!(!app.esc_owned_before_agent());
 }
 #[test]
-fn esc_while_cancelling_retries_cancel() {
+/// While "Cancelling…" Esc is swallowed silently: it neither re-sends the cancel nor hints at Ctrl+C (which escalates toward quit in this state).
+/// Replaces `esc_while_cancelling_retries_cancel`, which pinned the removed Esc-cancels-turn behaviour.
+fn esc_while_cancelling_is_swallowed() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     let agent = app.agents.get_mut(&id).unwrap();
     agent.session.state = AgentState::TurnCancelling;
     agent.active_pane = crate::views::agent::ActivePane::Scrollback;
-    agent.vim_mode = true;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "Esc while cancelling must retry CancelTurn, got {outcome:?}"
+        matches!(outcome, InputOutcome::Changed),
+        "Esc while cancelling must swallow, got {outcome:?}"
     );
     assert!(app.pending_action.is_none());
-    assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
-    );
+    assert!(app.agents[&id].cancel_trigger_hint.is_none());
+    assert!(app.agents[&id].toast.is_none());
 }
 #[test]
 fn esc_cancel_grace_holds_rewind_arm_then_expires() {
@@ -3320,17 +3369,20 @@ fn esc_cancel_grace_holds_rewind_arm_then_expires() {
             "earlier",
         ));
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+    assert!(
+        matches!(outcome, InputOutcome::Changed),
+        "mid-turn Esc hints instead of cancelling, got {outcome:?}"
+    );
     assert!(app.agents[&id].rewind_suppress_deadline.is_some());
     app.agents.get_mut(&id).unwrap().session.state = AgentState::Idle;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
         matches!(outcome, InputOutcome::Changed),
-        "Esc within the post-cancel grace must swallow, got {outcome:?}"
+        "Esc within the mid-turn grace must swallow, got {outcome:?}"
     );
     assert!(
         app.pending_action.is_none(),
-        "post-cancel Esc must not arm the rewind picker"
+        "Esc right after the turn ends must not arm the rewind picker"
     );
     app.agents.get_mut(&id).unwrap().rewind_suppress_deadline = Some(std::time::Instant::now());
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -4070,7 +4122,7 @@ fn welcome_done_n_starts_session() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
     assert!(matches!(
         outcome,
-        InputOutcome::ActionThenForward(Action::NewSession)
+        InputOutcome::ActionThenForward(Action::LeaveHome)
     ));
 }
 #[test]
@@ -4092,7 +4144,7 @@ fn welcome_ctrl_v_creates_normal_session() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::CONTROL));
     assert!(matches!(
         outcome,
-        InputOutcome::ActionThenForward(Action::NewSession)
+        InputOutcome::ActionThenForward(Action::LeaveHome)
     ));
 }
 #[test]
@@ -4103,7 +4155,7 @@ fn welcome_cmd_v_creates_normal_session() {
     let outcome = app.handle_input(&key_event(KeyCode::Char('v'), KeyModifiers::SUPER));
     assert!(matches!(
         outcome,
-        InputOutcome::ActionThenForward(Action::NewSession)
+        InputOutcome::ActionThenForward(Action::LeaveHome)
     ));
 }
 #[test]
@@ -4603,8 +4655,8 @@ fn welcome_d_starts_session_when_no_warnings() {
     app.startup_warnings = vec![];
     let outcome = app.handle_input(&key_event(KeyCode::Char('d'), KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::ActionThenForward(Action::NewSession)),
-        "Expected NewSession when no warnings, got {outcome:?}"
+        matches!(outcome, InputOutcome::ActionThenForward(Action::LeaveHome)),
+        "Expected LeaveHome when no warnings, got {outcome:?}"
     );
 }
 #[test]
@@ -4614,8 +4666,8 @@ fn welcome_other_char_starts_session_even_with_warnings() {
     app.startup_warnings = vec![make_test_warning()];
     let outcome = app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::ActionThenForward(Action::NewSession)),
-        "Expected NewSession for 'a' even with warnings, got {outcome:?}"
+        matches!(outcome, InputOutcome::ActionThenForward(Action::LeaveHome)),
+        "Expected LeaveHome for 'a' even with warnings, got {outcome:?}"
     );
 }
 #[test]
@@ -5379,9 +5431,9 @@ fn overlay_esc_running_turn_scrollback_swallows_not_backout() {
     );
     assert!(app.agents[&id].cancel_trigger_hint.is_none());
 }
-/// Overlay in non-vim mode: mid-turn Esc CANCELS (matching full-screen), and still must not detach to the dashboard.
+/// Overlay in non-vim mode: mid-turn Esc hints at Ctrl+C (matching full-screen), and still must not detach to the dashboard.
 #[test]
-fn overlay_esc_running_turn_non_vim_cancels_not_backout() {
+fn overlay_esc_running_turn_non_vim_hints_not_backout() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     app.active_view = ActiveView::Agent(id);
@@ -5395,12 +5447,17 @@ fn overlay_esc_running_turn_non_vim_cancels_not_backout() {
     agent.vim_mode = false;
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "running-turn overlay Esc must cancel in non-vim mode, got {outcome:?}",
+        matches!(outcome, InputOutcome::Changed),
+        "running-turn overlay Esc must swallow with a hint, not detach/cancel, got {outcome:?}",
+    );
+    assert!(
+        app.agents[&id].cancel_trigger_hint.is_none(),
+        "Esc never becomes a cancel trigger",
     );
     assert_eq!(
-        app.agents[&id].cancel_trigger_hint,
-        Some(crate::app::actions::CancelTrigger::Esc)
+        Some("Press Ctrl+c to cancel the turn"),
+        app.agents[&id].toast.as_ref().map(|(msg, _)| msg.as_str()),
+        "the overlay's mid-turn Esc must show the cancel-key hint",
     );
 }
 #[test]
@@ -5425,9 +5482,9 @@ fn overlay_esc_wake_turn_scrollback_does_not_backout() {
         "vim-mode wake Esc must swallow, not detach, got {outcome:?}",
     );
 }
-/// Overlay while TurnCancelling: Esc retries cancel (does not detach).
+/// Overlay while TurnCancelling: Esc is swallowed with no hint (neither re-sends the cancel nor detaches).
 #[test]
-fn overlay_esc_cancelling_scrollback_retries_cancel_not_backout() {
+fn overlay_esc_cancelling_scrollback_is_swallowed_not_backout() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     app.active_view = ActiveView::Agent(id);
@@ -5441,13 +5498,14 @@ fn overlay_esc_cancelling_scrollback_retries_cancel_not_backout() {
     assert!(agent.is_bare_scrollback() && agent.no_input_overlay_pending());
     let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-        "cancelling overlay Esc must retry CancelTurn, got {outcome:?}",
+        matches!(outcome, InputOutcome::Changed),
+        "cancelling overlay Esc must swallow, not re-cancel or detach, got {outcome:?}",
     );
     assert!(
-        !matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
-        "Esc must not detach while cancelling",
+        app.agents[&id].cancel_trigger_hint.is_none(),
+        "Esc never becomes a cancel trigger",
     );
+    assert!(app.agents[&id].toast.is_none(), "no hint while cancelling");
 }
 /// Counterpart to the back-out: a NON-EMPTY draft Esc in an overlay must pass through to the agent's policy (arms "press again to clear").
 /// It must never back out, so the user doesn't lose a draft by reaching for the dashboard.
@@ -6872,4 +6930,225 @@ fn access_gate_screen_leaves_g_unbound() {
         app.handle_input(&key_event(KeyCode::Char('l'), KeyModifiers::CONTROL)),
         InputOutcome::Action(Action::Logout)
     ));
+}
+// ---------------------------------------------------------------------------------------------------------------------
+// Dashboard repaint gating: a tick requests a redraw exactly when the painted frame would change
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Paint the dashboard exactly as `AppView::draw` does (same `render_dashboard` call, same inputs) into a fresh buffer.
+/// Two consecutive paints that compare equal are what the terminal's cell diff would turn into zero bytes on the wire.
+fn paint_dashboard(app: &mut AppView) -> ratatui::buffer::Buffer {
+    let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let AppView {
+        dashboard,
+        agents,
+        registry,
+        credit_balance,
+        ..
+    } = app;
+    crate::views::dashboard::render_dashboard(
+        &mut buf,
+        area,
+        dashboard.as_mut().expect("dashboard state"),
+        agents,
+        registry,
+        None,
+        &[],
+        false,
+        None,
+        false,
+        None,
+        credit_balance.as_ref(),
+    );
+    buf
+}
+fn dashboard_test_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
+    crate::app::agent::BgTaskState {
+        task_id: task_id.into(),
+        tool_call_id: String::new(),
+        command: "sleep 99".into(),
+        description: None,
+        cwd: String::new(),
+        output_file: String::new(),
+        status: crate::app::agent::BgTaskStatus::Running,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: None,
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id: None,
+        is_monitor: true,
+        restored_from_replay: false,
+    }
+}
+/// One full spinner (4-tick) × blink (10-tick) cycle, twice over. Written as a literal so the measurement compiles
+/// on a tree without the dashboard animation module; the cadence constants themselves are pinned in
+/// `views::dashboard::render_tests`.
+const DASHBOARD_TICK_CYCLE: u64 = 40;
+/// Tick the dashboard through a full cycle. Every tick must request a redraw iff the frame that follows differs
+/// from the one before it. Returns how many frames actually changed.
+fn tick_a_full_cycle(app: &mut AppView) -> u64 {
+    let mut previous = paint_dashboard(app);
+    let mut frames = 0;
+    for _ in 0..DASHBOARD_TICK_CYCLE {
+        let before = app.dashboard.as_ref().unwrap().spinner_tick;
+        let requested = app.tick();
+        let tick = app.dashboard.as_ref().unwrap().spinner_tick;
+        assert_eq!(before + 1, tick, "every tick advances the spinner counter");
+        let frame = paint_dashboard(app);
+        let changed = frame != previous;
+        assert_eq!(
+            changed, requested,
+            "tick {tick}: redraw requested iff the painted dashboard changed"
+        );
+        previous = frame;
+        frames += u64::from(changed);
+    }
+    frames
+}
+fn painted_tick_demand(app: &mut AppView) -> TickDemand {
+    let _ = paint_dashboard(app);
+    app.tick_demand()
+}
+/// A visible Working row repaints once per spinner frame and never in between.
+#[test]
+fn dashboard_tick_requests_a_redraw_exactly_when_the_frame_changes() {
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    let frames = tick_a_full_cycle(&mut app);
+    assert!(
+        frames > 0 && frames < DASHBOARD_TICK_CYCLE,
+        "the spinner must advance during the cycle, but not on every tick (got {frames} of {DASHBOARD_TICK_CYCLE})"
+    );
+}
+/// A Working row hidden by the filter paints no spinner: no tick may request a redraw and no frame may change.
+#[test]
+fn dashboard_tick_requests_no_redraw_when_nothing_animated_is_painted() {
+    use crate::views::dashboard::Filter;
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    app.dashboard.as_mut().unwrap().filter = Filter::Substring("no-such-row".to_owned());
+    assert_eq!(
+        0,
+        tick_a_full_cycle(&mut app),
+        "a hidden Working row paints no spinner and owes no frames"
+    );
+}
+/// A NeedsInput row blinks once per blink phase while visible; collapsed away it paints no blinking cell.
+#[test]
+fn collapsed_needs_input_row_paints_no_blink() {
+    use crate::views::dashboard::{RowState, SectionKey};
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .permission_queue
+        .push_back(crate::app::agent_view::test_fixtures::make_followup_permission_state());
+    let frames = tick_a_full_cycle(&mut app);
+    assert!(
+        frames > 0 && frames < DASHBOARD_TICK_CYCLE,
+        "a visible NeedsInput row repaints once per blink phase, not per tick (got {frames})"
+    );
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .collapsed_sections
+        .insert(SectionKey::State(RowState::NeedsInput));
+    assert_eq!(
+        0,
+        tick_a_full_cycle(&mut app),
+        "a collapsed NeedsInput row has no blinking cell on screen"
+    );
+    assert_eq!(
+        TickDemand::None,
+        app.tick_demand(),
+        "and the tick gate parks: nothing painted animates"
+    );
+}
+/// The dashboard's tick demand follows what the last frame painted, not which agents are busy.
+#[test]
+fn tick_demand_dashboard_parks_when_filter_hides_the_working_row() {
+    use crate::views::dashboard::Filter;
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    assert_eq!(TickDemand::Fast, painted_tick_demand(&mut app));
+    app.dashboard.as_mut().unwrap().filter = Filter::Substring("no-such-row".to_owned());
+    assert_eq!(
+        TickDemand::None,
+        painted_tick_demand(&mut app),
+        "a hidden Working row paints no spinner, so it owes no frames"
+    );
+    app.dashboard.as_mut().unwrap().filter = Filter::None;
+    assert_eq!(
+        TickDemand::Fast,
+        painted_tick_demand(&mut app),
+        "clearing the filter brings the spinner (and the demand) back"
+    );
+}
+/// The demand is read from the last paint, so the event loop's post-paint `schedule_tick` is what arms the first
+/// spinner tick: before the frame the gate still reflects the idle dashboard that was painted last.
+#[test]
+fn first_spinner_frame_arms_the_tick_only_after_the_paint() {
+    use crate::app::event_loop::schedule_tick;
+    let _theme = crate::theme::cache::pin_theme();
+    let mut app = test_app_with_agent();
+    let id = super::super::agent::AgentId(0);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+    let _ = paint_dashboard(&mut app);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .bg_tasks
+        .insert("m1".to_owned(), dashboard_test_bg_task("m1"));
+    let interval = std::time::Duration::from_millis(33);
+    let mut tick_at = None;
+    schedule_tick(&mut tick_at, &app, interval);
+    assert!(
+        tick_at.is_none(),
+        "before the frame, the demand still reflects the idle dashboard that was last painted"
+    );
+    let _ = paint_dashboard(&mut app);
+    schedule_tick(&mut tick_at, &app, interval);
+    assert!(
+        tick_at.is_some(),
+        "the loop-bottom re-check after the paint must arm the spinner's next tick"
+    );
 }

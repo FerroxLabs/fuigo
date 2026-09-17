@@ -800,6 +800,17 @@ impl AgentSession {
     pub fn is_auto(&self) -> bool {
         self.auto_mode
     }
+    /// Per-session on purpose: the global `current_ui` mirror tracks the active tab, so a peeked or background agent may differ.
+    pub fn permission_label(&self) -> crate::app::actions::PermissionLabel {
+        use crate::app::actions::PermissionLabel;
+        if self.yolo_mode {
+            PermissionLabel::AlwaysApprove
+        } else if self.auto_mode {
+            PermissionLabel::Auto
+        } else {
+            PermissionLabel::Ask
+        }
+    }
     /// Test-only setter for `yolo_mode` (the field is private; production toggles it via the permission-mode facade).
     /// Available to sibling crates' test builds through the test-only helpers.
     #[cfg(any(test, feature = "test-support"))]
@@ -1838,5 +1849,25 @@ mod tests {
         assert_eq!(tombstone.description.as_deref(), Some("say hi"));
         assert_eq!(tombstone.stdout, "demoted output");
         assert_eq!(tombstone.stdout_line_count, 1);
+    }
+    #[test]
+    fn permission_label_yolo_wins_over_auto() {
+        use crate::app::actions::PermissionLabel;
+        let mut session = test_session();
+        let cases = [
+            (false, false, PermissionLabel::Ask),
+            (false, true, PermissionLabel::Auto),
+            (true, false, PermissionLabel::AlwaysApprove),
+            (true, true, PermissionLabel::AlwaysApprove),
+        ];
+        for (yolo, auto, expected) in cases {
+            session.yolo_mode = yolo;
+            session.auto_mode = auto;
+            assert_eq!(
+                session.permission_label(),
+                expected,
+                "yolo={yolo} auto={auto} must label as {expected:?}"
+            );
+        }
     }
 }

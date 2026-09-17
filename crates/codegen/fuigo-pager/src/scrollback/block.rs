@@ -816,6 +816,11 @@ impl RenderBlock {
         matches!(self, RenderBlock::AgentMessage(_))
     }
 
+    /// A session event that closes a turn (`Worked for …`, cancelled, failed); see [`SessionEvent::is_turn_terminal`].
+    pub fn is_turn_terminal_marker(&self) -> bool {
+        matches!(self, RenderBlock::SessionEvent(b) if b.event.is_turn_terminal())
+    }
+
     /// Check if this block is a plan mode tool call (enter or exit).
     ///
     /// Exact-matches the canonical tool-name set rather than substring-matching the human title.
@@ -1377,7 +1382,7 @@ mod searchable_text_tests {
     use super::*;
     use crate::scrollback::blocks::SearchLineMatch;
     use crate::scrollback::blocks::tool::memory_search::{MemoryResult, MemorySearchToolCallBlock};
-    use crate::scrollback::blocks::tool::{LifecycleEventBlock, WebSearchToolCallBlock};
+    use crate::scrollback::blocks::tool::WebSearchToolCallBlock;
     use fuigo_shell::session::ContextInfo;
     use std::time::Duration;
 
@@ -1526,17 +1531,6 @@ mod searchable_text_tests {
         assert!(text.contains("global"), "got: {text:?}");
         assert!(text.contains("MEMORY.md"), "got: {text:?}");
         assert!(text.contains("use graphite for PRs"), "got: {text:?}");
-    }
-
-    #[test]
-    fn lifecycle_indexes_event_name() {
-        let block = RenderBlock::ToolCall(ToolCallBlock::Lifecycle(LifecycleEventBlock::new(
-            "user_prompt_submit",
-        )));
-        assert_eq!(
-            block.searchable_text().as_deref(),
-            Some("user_prompt_submit")
-        );
     }
 
     #[test]

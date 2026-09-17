@@ -353,6 +353,9 @@ impl MvpAgent {
             scheduler_delete_tool_name: parent_handle
                 .as_ref()
                 .and_then(|h| h.tool_context.scheduler_delete_tool_name.clone()),
+            scheduler_create_tool_name: parent_handle
+                .as_ref()
+                .and_then(|h| h.tool_context.scheduler_create_tool_name.clone()),
             auto_wake_enabled: self
                 .cfg
                 .borrow()

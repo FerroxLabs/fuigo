@@ -163,12 +163,19 @@ fn scan_verb_runs(
     (spans, claimed)
 }
 
+/// Whether a groupable entry may join a dense (non-verb) run. A turn-terminal marker closes the turn and never
+/// joins, even after a stop-hook batch collapses it. Otherwise expand/collapse and "N more" would walk across the
+/// turn and key off the previous header. `collapsed_only` is Mode B (collapsed entries only).
+pub(super) fn can_join_dense_run(entry: &ScrollbackEntry, collapsed_only: bool) -> bool {
+    entry.block.is_groupable()
+        && !entry.block.is_turn_terminal_marker()
+        && (!collapsed_only || entry.display_mode == DisplayMode::Collapsed)
+}
+
 /// Collapsed and groupable entries may join a truncation run.
 /// Hidden thinking is excluded so tools elect their own "N more" header.
 fn participates_in_truncation(entry: &ScrollbackEntry, show_thinking: bool) -> bool {
-    entry.block.is_groupable()
-        && entry.display_mode == DisplayMode::Collapsed
-        && !entry.is_hidden_thinking(show_thinking)
+    can_join_dense_run(entry, /*collapsed_only=*/ true) && !entry.is_hidden_thinking(show_thinking)
 }
 
 /// Find consecutive runs of collapsed, groupable entries longer than `max_visible + 1`.

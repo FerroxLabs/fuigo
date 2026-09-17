@@ -4552,6 +4552,69 @@ fn replay_malformed_skill_token_ranges_degrade_to_plain() {
         other => panic!("expected UserPrompt, got {:?}", other),
     }
 }
+/// A persisted interjection chunk as the shell writes it: the model-facing frame as text,
+/// the typed text in `displayText`, and the `interjection` chunk flag (wire literals pinned here).
+fn interjection_user_message(typed: &str) -> acp::SessionUpdate {
+    let mut chunk_meta = serde_json::Map::new();
+    chunk_meta.insert("modelId".into(), serde_json::json!("test-model"));
+    chunk_meta.insert("interjection".into(), serde_json::Value::Bool(true));
+    let mut text_meta = serde_json::Map::new();
+    text_meta.insert("displayText".into(), serde_json::json!(typed));
+    let framed = format!(
+        "The user sent a message while you were working:\n<user_query>\n{typed}\n</user_query>\nMake sure to complete any unfinished tasks from previous turns."
+    );
+    acp::SessionUpdate::UserMessageChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(framed).meta(Some(text_meta)),
+        ))
+        .meta(Some(chunk_meta)),
+    )
+}
+#[test]
+fn replay_interjection_chunk_renders_as_interjection_block() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(
+        interjection_user_message("ok run the stop for me"),
+        &replay,
+        &mut sb
+    ));
+    assert_eq!(sb.len(), 1);
+    match &sb.get(0).unwrap().block {
+        RenderBlock::UserPrompt(block) => {
+            assert_eq!(block.text, "ok run the stop for me");
+            assert!(
+                block.is_interjection,
+                "replayed interjection keeps interjection bookkeeping"
+            );
+            assert_eq!(
+                block.prompt_index, None,
+                "the shell never numbers interjections"
+            );
+            assert!(!block.is_cron && !block.is_bash);
+        }
+        other => panic!("expected UserPrompt, got {:?}", other),
+    }
+}
+/// A `/skill` sent mid-turn stays a plain interjection row, as live, not a skill prompt.
+#[test]
+fn replay_interjection_flag_outranks_slash_skill_fallback() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    assert!(tracker.handle_update(interjection_user_message("/commit now"), &meta(), &mut sb));
+    match &sb.get(0).unwrap().block {
+        RenderBlock::UserPrompt(block) => {
+            assert_eq!(block.text, "/commit now");
+            assert!(block.is_interjection);
+            assert!(block.skill_token_ranges.is_empty());
+        }
+        other => panic!("expected UserPrompt, got {:?}", other),
+    }
+}
 #[test]
 fn call_mcp_tool_coerced_to_use_tool_renders_block() {
     let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("mcp1")), "grafana__search")
@@ -4755,4 +4818,360 @@ fn retry_status_mirror_chunk_is_not_rendered_and_keeps_retry_activity() {
     assert_eq!(tracker.activity(), Some(retrying), "retry indicator kept");
     assert!(tracker.handle_update(agent_chunk("Hello"), &meta(), &mut sb));
     assert_eq!(sb.len(), 1, "an untagged chunk still renders");
+}
+/// Bash mode (`! cmd`): whatever `BashOutput.output` the shell sends is the execute block's output, byte for byte.
+///
+/// Upstream 1.0.25 ("Bash command output shown in the pager is now the complete result instead of a truncated tail")
+/// was a shell-side fix: the shell used to send only a `... (N lines)` + last-10 tail as `output`. The pager never
+/// bounded it — this pins that the block keeps every line it is given, well past that old 10-line bound, so the
+/// full result reaches `DisplayMode::Expanded`.
+#[test]
+fn bash_mode_execute_block_keeps_every_output_line_it_is_given() {
+    use fuigo_tools::types::output::{BashOutput, ToolOutput};
+    let full: String = (1..=40)
+        .map(|i| format!("line {i:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bash = BashOutput {
+        output: full.as_bytes().to_vec(),
+        output_for_prompt: format!(
+            "... (40 lines)\n{}",
+            full.lines().skip(30).collect::<Vec<_>>().join("\n")
+        ),
+        exit_code: 0,
+        command: "seq-dump".to_string(),
+        truncated: false,
+        signal: None,
+        timed_out: false,
+        description: None,
+        current_dir: "/tmp".to_string(),
+        output_file: String::new(),
+        total_bytes: full.len(),
+        output_delta: None,
+        was_bare_echo: false,
+    };
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(
+                acp::ToolCallId::new(Arc::from("bash-mode-1")),
+                "Execute `seq-dump`".to_string(),
+            )
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::InProgress)
+            .content(vec![])
+            .locations(vec![])
+            .raw_input(Some(serde_json::json!({
+                "command": "seq-dump",
+                "description": "seq-dump",
+                "is_background": false
+            })))
+            .meta(
+                serde_json::json!({ "bash_mode": true })
+                    .as_object()
+                    .cloned(),
+            ),
+        ),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("bash-mode-1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok()),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    let entry = sb.get(0).expect("execute entry");
+    match &entry.block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert!(exec.bash_mode, "bash-mode marker carried onto the block");
+            assert_eq!(
+                exec.output.as_deref(),
+                Some(full.as_str()),
+                "the block holds all 40 lines, not the output_for_prompt tail"
+            );
+            assert_eq!(exec.copy_text(), full, "copy text is the complete result");
+            assert!(exec.is_success());
+        }
+        other => panic!("expected Execute block, got {other:?}"),
+    }
+}
+
+/// Build the bash-mode tool call the shell opens a `! cmd` turn with.
+fn bash_mode_tool_call(id: &str, command: &str) -> acp::ToolCall {
+    acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from(id)),
+        format!("Execute `{command}`"),
+    )
+    .kind(acp::ToolKind::Execute)
+    .status(acp::ToolCallStatus::InProgress)
+    .content(vec![])
+    .locations(vec![])
+    .raw_input(Some(serde_json::json!({
+        "command": command,
+        "description": command,
+        "is_background": false
+    })))
+    .meta(
+        serde_json::json!({ "bash_mode": true })
+            .as_object()
+            .cloned(),
+    )
+}
+/// A `BashOutput` carrying `output`, with the other fields at the shape bash mode sends.
+fn bash_mode_output(
+    command: &str,
+    output: &str,
+    for_prompt: &str,
+) -> fuigo_tools::types::output::BashOutput {
+    fuigo_tools::types::output::BashOutput {
+        output: output.as_bytes().to_vec(),
+        output_for_prompt: for_prompt.to_string(),
+        exit_code: 0,
+        command: command.to_string(),
+        truncated: false,
+        signal: None,
+        timed_out: false,
+        description: None,
+        current_dir: "/tmp".to_string(),
+        output_file: String::new(),
+        total_bytes: output.len(),
+        output_delta: None,
+        was_bare_echo: false,
+    }
+}
+fn execute_block_output(sb: &ScrollbackState) -> String {
+    match &sb.get(0).expect("execute entry").block {
+        RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) => {
+            assert!(exec.bash_mode, "bash-mode marker carried onto the block");
+            exec.output.clone().unwrap_or_default()
+        }
+        other => panic!("expected Execute block, got {other:?}"),
+    }
+}
+/// `AcpUpdateTracker` in isolation: a merged completed update's `BashOutput::output` REPLACES whatever the streaming
+/// chunks put in the block.
+///
+/// This is all it proves. The completion path merges, `tool_call_to_block`'s Execute arm rebuilds the block from
+/// `raw_output`'s `BashOutput::output`, and `replace_tool_block` assigns `entry.block` wholesale — for both shapes.
+/// It does NOT describe the live pager: the round-3 audit's PTY probe, on a binary persisting base's
+/// `... (12 lines)` tail, saw `L01` still on screen after `L12`, at turn idle and 5 s and 8 s later, and the raw PTY
+/// byte stream never contained `(12 lines)`. The live pager never paints the final update's output, for reasons not
+/// yet explained, which is why `bash_full_output_double_click_fold_pty` passes on either shape and cannot detect
+/// this port. See `bash_mode_block_survives_the_updates_jsonl_round_trip` for the surface the port fixes.
+#[test]
+fn bash_mode_final_update_output_replaces_the_streamed_block() {
+    use fuigo_tools::types::output::ToolOutput;
+    let full: String = (1..=12)
+        .map(|i| format!("L{i:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base_tail = format!(
+        "... (12 lines)\n{}",
+        full.lines().skip(2).collect::<Vec<_>>().join("\n")
+    );
+
+    for (label, final_output, expected) in [
+        (
+            "b156799 shape: the ten-line tail",
+            base_tail.as_str(),
+            base_tail.as_str(),
+        ),
+        (
+            "1.0.20 shape: the complete result",
+            full.as_str(),
+            full.as_str(),
+        ),
+    ] {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCall(bash_mode_tool_call("bash-mode-1", "seq-dump")),
+            &meta(),
+            &mut sb,
+        );
+        // One streaming chunk, in the shape `tools/notification_bridge.rs` sends: the whole accumulated buffer in
+        // `output` (no delta), plus a `content` text block. Not persisted — gateway only.
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("bash-mode-1")),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::InProgress))
+                    .content(Some(vec![acp::ToolCallContent::from(
+                        acp::ContentBlock::Text(acp::TextContent::new(full.clone())),
+                    )]))
+                    .raw_output(
+                        serde_json::to_value(ToolOutput::Bash(bash_mode_output(
+                            "seq-dump", &full, &full,
+                        )))
+                        .ok(),
+                    ),
+            )),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(
+            execute_block_output(&sb),
+            full,
+            "{label}: the streamed chunk shows every line while the command runs"
+        );
+
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("bash-mode-1")),
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::Completed))
+                    .raw_output(
+                        serde_json::to_value(ToolOutput::Bash(bash_mode_output(
+                            "seq-dump",
+                            final_output,
+                            &base_tail,
+                        )))
+                        .ok(),
+                    ),
+            )),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(
+            execute_block_output(&sb),
+            expected,
+            "{label}: the final update's output is what the block holds after completion"
+        );
+    }
+
+    // Spelled out: on the base shape the first two lines are gone from the block once completion is applied.
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCall(bash_mode_tool_call("bash-mode-2", "seq-dump")),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("bash-mode-2")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .raw_output(
+                    serde_json::to_value(ToolOutput::Bash(bash_mode_output(
+                        "seq-dump", &base_tail, &base_tail,
+                    )))
+                    .ok(),
+                ),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    let shown = execute_block_output(&sb);
+    assert!(!shown.contains("L01"), "base's tail drops L01: {shown:?}");
+    assert!(shown.starts_with("... (12 lines)"), "{shown:?}");
+}
+/// End to end for the surface upstream 1.0.25 actually fixes: a RELOADED session.
+///
+/// Round-trips both of a bash-mode turn's persisted lines through JSON text — the exact `params` payload of a
+/// persisted `session/update` line, byte-array `BashOutput::output` and all — then feeds the tracker the shape
+/// production replay produces: `fuigo-shell`'s `ReplayToolCollapser::push` (`session/storage/replay.rs`) holds the
+/// in-progress `ToolCall`, applies the completing `ToolCallUpdate` to it with `acp::ToolCall::update`, and forwards ONE
+/// completed `ToolCall`. The collapser is `pub(crate)` to `fuigo-shell`, so the merge is reproduced here with the same
+/// `acp::ToolCall::update` call. The un-collapsed two-line form (what a replay that misses the collapser would send)
+/// is asserted too. Before the port the persisted `output` was the `... (N lines)` tail, so reopening a session
+/// showed the elision where the command's output had been.
+///
+/// Its shell-side twin is `bash_mode_rebuilt_chat_history_keeps_the_model_copy_bounded`, which takes the same
+/// persisted line to the MODEL's copy through `chat_rebuild`.
+#[test]
+fn bash_mode_block_survives_the_updates_jsonl_round_trip() {
+    use fuigo_tools::types::output::ToolOutput;
+    let full: String = (1..=25)
+        .map(|i| format!("line {i:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tail = format!(
+        "... (25 lines)\n{}",
+        full.lines().skip(15).collect::<Vec<_>>().join("\n")
+    );
+
+    // Line 1 and line 2 of `updates.jsonl`, as JSON text.
+    let opened = acp::SessionNotification::new(
+        acp::SessionId::new("reloaded"),
+        acp::SessionUpdate::ToolCall(bash_mode_tool_call("bash-mode-1", "seq-dump")),
+    );
+    let finished = acp::SessionNotification::new(
+        acp::SessionId::new("reloaded"),
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("bash-mode-1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .content(Some(vec![acp::ToolCallContent::from(
+                    acp::ContentBlock::Text(acp::TextContent::new(tail.clone())),
+                )]))
+                .raw_output(
+                    serde_json::to_value(ToolOutput::Bash(bash_mode_output(
+                        "seq-dump", &full, &tail,
+                    )))
+                    .ok(),
+                ),
+        )),
+    );
+    let persisted: Vec<String> = [&opened, &finished]
+        .iter()
+        .map(|n| serde_json::to_string(n).expect("persist a session/update params payload"))
+        .collect();
+    assert!(
+        persisted[1].contains("108,105,110"),
+        "the persisted line carries `output` as a decimal byte array: {}",
+        &persisted[1][..persisted[1].len().min(200)]
+    );
+
+    let replay = NotificationMeta {
+        is_replay: true,
+        ..Default::default()
+    };
+    let parsed: Vec<acp::SessionUpdate> = persisted
+        .iter()
+        .map(|line| {
+            serde_json::from_str::<acp::SessionNotification>(line)
+                .expect("replay parses the persisted line back")
+                .update
+        })
+        .collect();
+
+    // What production replay forwards: the ToolCall with the completing update applied, as one completed ToolCall.
+    let collapsed = match (parsed[0].clone(), parsed[1].clone()) {
+        (acp::SessionUpdate::ToolCall(mut base), acp::SessionUpdate::ToolCallUpdate(update)) => {
+            base.update(update.fields);
+            assert!(matches!(base.status, acp::ToolCallStatus::Completed));
+            acp::SessionUpdate::ToolCall(base)
+        }
+        other => panic!("persisted lines are a ToolCall then a ToolCallUpdate, got {other:?}"),
+    };
+
+    for (label, updates) in [
+        (
+            "collapsed, as ReplayToolCollapser forwards it",
+            vec![collapsed],
+        ),
+        ("the two persisted lines, un-collapsed", parsed),
+    ] {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        for update in updates {
+            tracker.handle_update(update, &replay, &mut sb);
+        }
+        let shown = execute_block_output(&sb);
+        assert_eq!(
+            shown, full,
+            "{label}: a reloaded session shows the complete result, not the persisted tail"
+        );
+        assert!(
+            !shown.contains("... ("),
+            "{label}: no elision marker in a reloaded bash-mode block: {shown:?}"
+        );
+    }
 }

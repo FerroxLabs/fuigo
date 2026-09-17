@@ -1378,6 +1378,59 @@ fn inject_capabilities_adds_status_line_when_it_is_the_only_capability() {
 }
 
 #[test]
+fn inject_capabilities_omits_user_message_echo_when_false() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        yolo_mode: true,
+        user_message_echo: false,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert!(
+        json["params"]["_meta"]
+            .get(crate::session::CLIENT_USER_MESSAGE_ECHO_META)
+            .is_none(),
+        "fuigo agent (echo false) must not inject clientUserMessageEcho=false over initialize"
+    );
+}
+
+#[test]
+fn inject_capabilities_adds_user_message_echo_when_it_is_the_only_capability() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        user_message_echo: true,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert_eq!(
+        json["params"]["_meta"][crate::session::CLIENT_USER_MESSAGE_ECHO_META],
+        true,
+        "a pager that states nothing else must still get live user-message echo, \
+         not the process-wide initialize default"
+    );
+}
+
+#[test]
 fn inject_capabilities_preserves_existing_meta() {
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"foo":"bar"}}}}}}"#,

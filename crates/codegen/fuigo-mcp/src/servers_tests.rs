@@ -1,4 +1,5 @@
 use super::*;
+use rmcp::ServiceExt;
 use std::path::PathBuf;
 
 #[tokio::test]
@@ -1384,6 +1385,11 @@ fn into_registration_validates_qualified_name() {
         .expect("should register");
     assert_eq!(registration.name, "linear__list_issues");
 
+    let digit_tool = make_mcp_tool("auth", "2fa_enable")
+        .into_registration()
+        .expect("digit-leading tool segments are catalog-valid");
+    assert_eq!(digit_tool.name, "auth__2fa_enable");
+
     for (server, tool) in [
         ("server__part", "tool"),
         ("server", "tool__part"),
@@ -1392,32 +1398,27 @@ fn into_registration_validates_qualified_name() {
         ("foo_", "_bar"),
         ("", "tool"),
         ("server", ""),
+        ("123", "lookup"),
+        ("server:scope", "tool"),
     ] {
         assert!(
-            make_mcp_tool(server, tool).into_registration().is_none(),
+            make_mcp_tool(server, tool).into_registration().is_err(),
             "unexpectedly registered {server:?} and {tool:?}"
         );
     }
 }
 
 #[test]
-fn into_registration_preserves_provider_name_policy() {
-    for qualified in ["123__lookup", "server:scope__tool"] {
-        assert!(parse_mcp_qualified_name(qualified).is_some());
-        let (server, tool) = qualified.split_once("__").unwrap();
-        assert!(make_mcp_tool(server, tool).into_registration().is_none());
-    }
-
-    let server_61 = format!("a{}", "b".repeat(60));
+fn into_registration_admits_qualified_names_longer_than_provider_64() {
     let server_62 = format!("a{}", "b".repeat(61));
-    let valid_64 = format!("{server_61}__b");
-    let invalid_65 = format!("{server_62}__b");
-    assert_eq!(valid_64.len(), 64);
-    assert_eq!(invalid_65.len(), 65);
-    assert!(parse_mcp_qualified_name(&valid_64).is_some());
-    assert!(parse_mcp_qualified_name(&invalid_65).is_some());
-    assert!(make_mcp_tool(&server_61, "b").into_registration().is_some());
-    assert!(make_mcp_tool(&server_62, "b").into_registration().is_none());
+    let qualified = format!("{server_62}__b");
+    assert_eq!(qualified.len(), 65);
+    assert!(parse_mcp_qualified_name(&qualified).is_some());
+    assert!(validate_tool_name(&qualified).is_err());
+    let registration = make_mcp_tool(&server_62, "b")
+        .into_registration()
+        .expect("qualified catalog keys may exceed the 64-char provider budget");
+    assert_eq!(registration.name, qualified);
 }
 
 #[test]
@@ -1664,6 +1665,8 @@ enum CallToolBehavior {
 #[derive(Clone)]
 struct FakeMcpHandles {
     inits: Arc<AtomicUsize>,
+    /// `server/discover` probes received.
+    discovers: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     init_version: Arc<parking_lot::Mutex<Option<String>>>,
     init_user_agents: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -1671,6 +1674,8 @@ struct FakeMcpHandles {
     init_capabilities: Arc<parking_lot::Mutex<Option<serde_json::Value>>>,
     /// Raw `tools/call` request bodies, for asserting MRTR retry wire shapes.
     call_bodies: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+    /// `MCP-Protocol-Version` header of each `tools/call`, parallel to `call_bodies`.
+    call_version_headers: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
 }
 
 fn header_values(
@@ -1684,9 +1689,43 @@ fn header_values(
         .collect()
 }
 
+/// How the fake reacts to the SEP-2575 `server/discover` probe.
+#[derive(Clone, Copy, Default)]
+enum DiscoverBehavior {
+    /// JSON-RPC method-not-found — the typical legacy SDK reaction.
+    #[default]
+    MethodNotFound,
+    /// A modern server: discover succeeds with 2026-07-28.
+    Modern,
+    /// Legacy middleware that 500s the probe with a non-JSON body — one of the
+    /// malformed shapes that must still fall back to `initialize`.
+    NonJsonServerError,
+    /// A server that ACCEPTS `server/discover` and never answers it, so the probe
+    /// phase burns its whole [`McpClient::probe_timeout_secs`] before the legacy fallback.
+    Swallow,
+}
+
+#[derive(Clone, Default)]
+struct FakeMcpOptions {
+    discover: DiscoverBehavior,
+    /// When set, `initialize` is rejected with an "Unauthorized" JSON-RPC
+    /// error, for asserting that fallback errors keep their auth classification.
+    init_unauthorized: bool,
+    /// Delay before every `initialize` reply. Lets a legacy phase fail just SHORT of
+    /// `startup_timeout_sec`, which is what fires the protocol-version fallback retry
+    /// (`serve_legacy` maps a pre-window failure to `HandshakeFailed`, not `Timeout`).
+    init_delay_ms: u64,
+    /// `initialize` requests from this 0-based index on are accepted and never answered,
+    /// so that phase burns its whole `startup_timeout_sec`.
+    init_hang_from: Option<usize>,
+    /// Accept `tools/list` and never answer it: the post-handshake round-trip stalls.
+    list_hang: bool,
+}
+
 #[derive(Clone)]
 struct FakeMcpState {
     behavior: CallToolBehavior,
+    options: FakeMcpOptions,
     handles: FakeMcpHandles,
 }
 
@@ -1713,7 +1752,7 @@ async fn fake_handle_post(
     };
     match req["method"].as_str() {
         Some("initialize") => {
-            state.handles.inits.fetch_add(1, Ordering::Relaxed);
+            let init_n = state.handles.inits.fetch_add(1, Ordering::Relaxed);
             *state.handles.init_version.lock() =
                 req["params"]["protocolVersion"].as_str().map(str::to_owned);
             *state.handles.init_capabilities.lock() = Some(req["params"]["capabilities"].clone());
@@ -1722,6 +1761,29 @@ async fn fake_handle_post(
                 .init_user_agents
                 .lock()
                 .extend(header_values(&headers, axum::http::header::USER_AGENT));
+            if state
+                .options
+                .init_hang_from
+                .is_some_and(|from| init_n >= from)
+            {
+                std::future::pending::<()>().await;
+            }
+            if state.options.init_delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    state.options.init_delay_ms,
+                ))
+                .await;
+            }
+            if state.options.init_unauthorized {
+                return axum::Json(err(-32001, "Unauthorized: token expired".to_string()))
+                    .into_response();
+            }
+            // A SEP-2575 session-less server has no `initialize` at all: the request reaches
+            // JSON-RPC dispatch and gets method-not-found, exactly like a legacy server's
+            // reaction to `server/discover`.
+            if matches!(state.options.discover, DiscoverBehavior::Modern) {
+                return axum::Json(err(-32601, "Method not found".to_string())).into_response();
+            }
             let result = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id.clone(),
@@ -1733,6 +1795,44 @@ async fn fake_handle_post(
             });
             ([("mcp-session-id", "fake-session")], axum::Json(result)).into_response()
         }
+        Some("server/discover") => {
+            state.handles.discovers.fetch_add(1, Ordering::Relaxed);
+            match state.options.discover {
+                DiscoverBehavior::Modern => axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "result": {
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {"tools": {}},
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                        "_meta": {
+                            "io.modelcontextprotocol/serverInfo": {"name": "fake", "version": "0.0.0"}
+                        },
+                    },
+                }))
+                .into_response(),
+                // A legacy server: the SEP-2575 probe reaches JSON-RPC dispatch
+                // and gets method-not-found.
+                DiscoverBehavior::MethodNotFound => {
+                    axum::Json(err(-32601, "Method not found".to_string())).into_response()
+                }
+                DiscoverBehavior::Swallow => {
+                    std::future::pending::<()>().await;
+                    unreachable!("`std::future::pending` never resolves")
+                }
+                DiscoverBehavior::NonJsonServerError => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "middleware exploded",
+                )
+                    .into_response(),
+            }
+        }
+        Some("tools/list") if state.options.list_hang => {
+            std::future::pending::<()>().await;
+            unreachable!("`std::future::pending` never resolves")
+        }
         Some("tools/list") => axum::Json(serde_json::json!({
             "jsonrpc": "2.0",
             "id": id.clone(),
@@ -1742,6 +1842,14 @@ async fn fake_handle_post(
         Some("tools/call") => {
             let n = state.handles.calls.fetch_add(1, Ordering::Relaxed);
             state.handles.call_bodies.lock().push(req.clone());
+            state
+                .handles
+                .call_version_headers
+                .lock()
+                .push(header_values(
+                    &headers,
+                    axum::http::header::HeaderName::from_static("mcp-protocol-version"),
+                ));
             let input_required = |result: serde_json::Value| {
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -1879,13 +1987,35 @@ async fn spawn_test_http_server(app: axum::Router) -> String {
 }
 
 async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) {
+    spawn_fake_mcp_with(behavior, FakeMcpOptions::default()).await
+}
+
+/// A SEP-2575 modern server: `server/discover` succeeds and `initialize` is
+/// never expected on the wire.
+async fn spawn_fake_mcp_modern(behavior: CallToolBehavior) -> (String, FakeMcpHandles) {
+    spawn_fake_mcp_with(
+        behavior,
+        FakeMcpOptions {
+            discover: DiscoverBehavior::Modern,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn spawn_fake_mcp_with(
+    behavior: CallToolBehavior,
+    options: FakeMcpOptions,
+) -> (String, FakeMcpHandles) {
     let handles = FakeMcpHandles {
         inits: Arc::new(AtomicUsize::new(0)),
+        discovers: Arc::new(AtomicUsize::new(0)),
         calls: Arc::new(AtomicUsize::new(0)),
         init_version: Arc::new(parking_lot::Mutex::new(None)),
         init_user_agents: Arc::new(parking_lot::Mutex::new(Vec::new())),
         init_capabilities: Arc::new(parking_lot::Mutex::new(None)),
         call_bodies: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        call_version_headers: Arc::new(parking_lot::Mutex::new(Vec::new())),
     };
     let app = axum::Router::new()
         .route(
@@ -1894,9 +2024,33 @@ async fn spawn_fake_mcp(behavior: CallToolBehavior) -> (String, FakeMcpHandles) 
         )
         .with_state(FakeMcpState {
             behavior,
+            options,
             handles: handles.clone(),
         });
     (spawn_test_http_server(app).await, handles)
+}
+
+/// A client whose startup budget exceeds the `server/discover` probe timeout,
+/// so the handshake runs the probe phase before any legacy fallback.
+fn fake_http_client_probing(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
+    fake_http_client_with_startup(
+        url,
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS + 5,
+        tool_timeout_sec,
+    )
+}
+
+fn fake_http_client_with_startup(
+    url: &str,
+    startup_timeout_sec: u64,
+    tool_timeout_sec: u64,
+) -> Arc<McpClient> {
+    let overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(startup_timeout_sec),
+        tool_timeout_sec: Some(tool_timeout_sec),
+        ..Default::default()
+    };
+    fake_http_client_with_overrides(url, overrides)
 }
 
 fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
@@ -1905,6 +2059,13 @@ fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
         tool_timeout_sec: Some(tool_timeout_sec),
         ..Default::default()
     };
+    fake_http_client_with_overrides(url, overrides)
+}
+
+fn fake_http_client_with_overrides(
+    url: &str,
+    overrides: McpClientTimeoutOverrides,
+) -> Arc<McpClient> {
     Arc::new(McpClient::new_http(
         "fake".to_string(),
         HttpConfig {
@@ -2074,6 +2235,719 @@ async fn http_handshake_initialises_once_when_the_server_speaks_the_requested_ve
     assert_eq!(
         handles.init_version.lock().as_deref(),
         Some(REQUESTED_PROTOCOL_VERSION.as_str())
+    );
+}
+
+// ── SEP-2575 `server/discover` probe phase ───────────────────────────────────
+
+/// The probe phase shrinks to the startup budget instead of being skipped: a short budget
+/// still negotiates modern servers, it just gives `server/discover` less time.
+#[test]
+fn probe_timeout_tracks_short_startup_budgets() {
+    let url = "http://127.0.0.1:1/mcp";
+    assert_eq!(
+        fake_http_client_with_startup(url, 5, 5).probe_timeout_secs(),
+        5
+    );
+    assert_eq!(
+        fake_http_client_with_startup(url, McpClient::DISCOVER_PROBE_TIMEOUT_SECS, 5)
+            .probe_timeout_secs(),
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+    assert_eq!(
+        fake_http_client_with_startup(url, McpClient::DISCOVER_PROBE_TIMEOUT_SECS + 5, 5)
+            .probe_timeout_secs(),
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+}
+
+/// Waiters parked on an in-flight handshake must budget for both phases: the
+/// holder can legitimately take probe + startup, so a `startup_timeout_sec`-only
+/// wait would time out concurrent first tool calls.
+#[test]
+fn handshake_budget_covers_the_probe_phase() {
+    let url = "http://127.0.0.1:1/mcp";
+    assert_eq!(
+        fake_http_client_with_startup(url, 5, 5).handshake_budget_secs(),
+        10
+    );
+    let long = McpClient::DISCOVER_PROBE_TIMEOUT_SECS + 5;
+    assert_eq!(
+        fake_http_client_with_startup(url, long, 5).handshake_budget_secs(),
+        long + McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+}
+
+/// A deadline-sized client on the transport of the caller's choosing. Deadline-driven callers
+/// hand the client the DEADLINE, not a startup budget: only the client knows which handshake
+/// phases its transport runs.
+fn deadline_overrides(deadline_secs: u64) -> McpClientTimeoutOverrides {
+    McpClientTimeoutOverrides {
+        handshake_deadline_sec: Some(deadline_secs),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    }
+}
+
+/// A real stdio client. `sleep` never reads its stdin, so the legacy `initialize` can only end at
+/// its own window — the shape of a hung stdio server, and the one transport that runs no probe.
+#[cfg(unix)]
+async fn fake_stdio_client_with_overrides(overrides: McpClientTimeoutOverrides) -> Arc<McpClient> {
+    let mut cmd = Command::new("sleep");
+    cmd.arg("120").kill_on_drop(true);
+    fuigo_tools::util::detach_command(&mut cmd);
+    let (transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        None,
+        "stdio-srv".to_string(),
+        fuigo_session_events::EventWriter::noop(),
+    )
+    .await
+    .expect("spawn stdio test child");
+    Arc::new(McpClient::new_stdio(
+        "stdio-srv".to_string(),
+        transport,
+        Some(&overrides),
+        None,
+    ))
+}
+
+/// A real ACP client: in-process bridge, so it probes but has no server-side session to fall back
+/// for. The invoker never answers; none of these tests drive a handshake through it.
+fn fake_acp_client_with_overrides(overrides: McpClientTimeoutOverrides) -> Arc<McpClient> {
+    use crate::acp_transport::AcpReverseInvoker;
+
+    struct NeverInvoker;
+    #[async_trait::async_trait]
+    impl AcpReverseInvoker for NeverInvoker {
+        async fn invoke(
+            &self,
+            _server_id: &str,
+            _message: serde_json::Value,
+            _timeout: std::time::Duration,
+        ) -> Result<serde_json::Value, String> {
+            std::future::pending().await
+        }
+    }
+
+    Arc::new(McpClient::new_acp(
+        "acp-srv".to_string(),
+        "srv_0".to_string(),
+        Arc::new(NeverInvoker),
+        Some(&overrides),
+        None,
+    ))
+}
+
+/// The probing half of the deadline split, unchanged from upstream: a transport that runs
+/// `server/discover` must keep that window OUT of its legacy phase, or a swallowed probe burns
+/// the entire deadline in phase 1 and the `initialize` never runs.
+#[test]
+fn max_startup_within_deadline_fits_the_probe_phase() {
+    let probe = McpClient::DISCOVER_PROBE_TIMEOUT_SECS;
+    // Room for a full probe plus the legacy window: probe + startup == deadline.
+    assert_eq!(McpClient::max_startup_within_deadline(30), 30 - probe);
+    assert_eq!(McpClient::max_startup_within_deadline(2 * probe), probe);
+    // Shorter deadlines split evenly: the probe timeout tracks the startup budget.
+    assert_eq!(
+        McpClient::max_startup_within_deadline(2 * probe - 1),
+        probe - 1
+    );
+    assert_eq!(McpClient::max_startup_within_deadline(10), 5);
+    assert_eq!(McpClient::max_startup_within_deadline(6), 3);
+}
+
+/// The invariant the `drive_server_starts` comment actually claims: a hung handshake fails with
+/// THIS SERVER's error before the shared deadline has to cancel it — on every transport.
+///
+/// That needs two things a transport-blind startup budget cannot give:
+/// - stdio keeps the WHOLE deadline for its `initialize`. It runs no probe
+///   (`try_handshake` sends it straight to `serve_legacy`), so reserving a probe window costs a
+///   cold-start `npx`/`uvx` server ten seconds of a phase it never runs.
+/// - the worst case, not one attempt, is what fits. `handshake_budget_secs() <= deadline` was
+///   the quantity the old test pinned, and it is not the quantity that matters: plain HTTP adds
+///   a protocol-version fallback on top, for `2 * deadline - probe` against a `deadline`-long
+///   drive. `ensure_initialized` bounds its retries by the deadline's remainder, which is what
+///   makes the worst case fit without shrinking anyone's first attempt.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_handshake_deadline_bounds_the_worst_case_on_every_transport() {
+    let url = "http://127.0.0.1:1/mcp";
+    for deadline in [0u64, 1, 2, 3, 6, 10, 12, 19, 20, 30, 45, 60] {
+        let floor = deadline.max(McpClient::MIN_HANDSHAKE_DEADLINE_SECS);
+        let stdio = fake_stdio_client_with_overrides(deadline_overrides(deadline)).await;
+        let acp = fake_acp_client_with_overrides(deadline_overrides(deadline));
+        let http = fake_http_client_with_overrides(url, deadline_overrides(deadline));
+        let oauth = fake_http_auth_client_with_deadline(url, deadline).await;
+        for (label, client) in [
+            ("stdio", &stdio),
+            ("acp", &acp),
+            ("http", &http),
+            ("oauth", &oauth),
+        ] {
+            assert!(
+                client.handshake_worst_case_secs() <= floor,
+                "{label} at a {deadline}s deadline: worst case {}s exceeds it",
+                client.handshake_worst_case_secs(),
+            );
+        }
+        // Stdio keeps the whole deadline (capped by the configured default, as every transport
+        // is): no probe phase means no reservation for one.
+        assert_eq!(
+            stdio.startup_timeout_sec(),
+            DEFAULT_STARTUP_TIMEOUT_SECS.min(deadline.max(1)),
+            "stdio at a {deadline}s deadline must keep its whole `initialize` window",
+        );
+        assert_eq!(stdio.probe_phase_secs(), 0);
+        // The probing transports split the deadline, exactly as upstream does.
+        assert_eq!(
+            acp.startup_timeout_sec(),
+            DEFAULT_STARTUP_TIMEOUT_SECS.min(McpClient::max_startup_within_deadline(deadline)),
+        );
+        assert_eq!(http.startup_timeout_sec(), acp.startup_timeout_sec());
+    }
+
+    // The concrete case the bind path ships: a 30 s discovery deadline.
+    let stdio = fake_stdio_client_with_overrides(deadline_overrides(30)).await;
+    assert_eq!(stdio.startup_timeout_sec(), 30, "v1.0.19 parity for stdio");
+    assert!(
+        stdio.startup_timeout_sec() > McpClient::max_startup_within_deadline(30),
+        "a transport-blind budget would hand stdio {}s",
+        McpClient::max_startup_within_deadline(30),
+    );
+    let http = fake_http_client_with_overrides("http://127.0.0.1:1/mcp", deadline_overrides(30));
+    assert_eq!(http.startup_timeout_sec(), 20);
+    // Unclamped, plain HTTP's worst case here is probe 10 + startup 20 + the fallback's second
+    // startup 20 = 50 s against a 30 s deadline. The deadline clamp is what brings it back.
+    assert_eq!(
+        http.handshake_budget_secs() + http.version_fallback_secs(),
+        50
+    );
+    assert_eq!(http.handshake_worst_case_secs(), 30);
+}
+
+/// Without a deadline (the ordinary config path) nothing is clamped: retries keep running on
+/// their own phase timeouts, exactly as they did before deadline-driven callers existed.
+#[test]
+fn no_deadline_means_no_clamp() {
+    let http = fake_http_client_with_startup("http://127.0.0.1:1/mcp", 30, 5);
+    assert_eq!(http.handshake_deadline_sec, None);
+    assert_eq!(http.handshake_worst_case_secs(), 70);
+    assert_eq!(
+        http.remaining_handshake_window(std::time::Duration::ZERO),
+        None,
+    );
+}
+
+/// The retry window leaves the caller a margin that grows with its deadline: the slack between
+/// this client's own error and the caller's cancellation is exactly that margin, and it has to
+/// absorb the startup latency the client's clock does not see.
+#[test]
+fn the_retry_window_leaves_the_caller_a_proportional_margin() {
+    let url = "http://127.0.0.1:1/mcp";
+    let window = |deadline: u64, elapsed_secs: u64| {
+        fake_http_client_with_overrides(url, deadline_overrides(deadline))
+            .remaining_handshake_window(std::time::Duration::from_secs(elapsed_secs))
+            .expect("a deadline was configured")
+            .as_secs()
+    };
+    // Shipped bind deadline: margin 7, so a first attempt that failed fast leaves the retry more
+    // than the 20 s startup budget it would use anyway.
+    assert_eq!(window(30, 0), 23);
+    assert_eq!(window(30, 3), 20);
+    assert_eq!(window(30, 29), 0);
+    // Short deadlines keep the two-second floor.
+    assert_eq!(window(8, 0), 6);
+    assert_eq!(window(2, 0), 0);
+    for deadline in [2u64, 8, 12, 20, 30, 60] {
+        let margin = deadline - window(deadline, 0);
+        assert!(
+            margin >= 2 && margin <= deadline,
+            "{deadline}s -> margin {margin}s"
+        );
+    }
+}
+
+/// An OAuth-capable client, for the budget arithmetic. The manager only has to EXIST for
+/// [`McpClient::handshake_worst_case_secs`] to admit a refresh retry, so it is pointed at a closed
+/// port: construction must not touch the network.
+async fn fake_http_auth_client_with_startup(url: &str, startup_timeout_sec: u64) -> Arc<McpClient> {
+    let overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(startup_timeout_sec),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    };
+    fake_http_auth_client_with_overrides(url, overrides).await
+}
+
+/// The OAuth client of [`fake_http_auth_client_with_startup`], sized from a caller deadline.
+async fn fake_http_auth_client_with_deadline(url: &str, deadline_secs: u64) -> Arc<McpClient> {
+    fake_http_auth_client_with_overrides(url, deadline_overrides(deadline_secs)).await
+}
+
+async fn fake_http_auth_client_with_overrides(
+    url: &str,
+    overrides: McpClientTimeoutOverrides,
+) -> Arc<McpClient> {
+    let manager = crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
+        .await
+        .expect("loopback auth manager");
+    Arc::new(McpClient::new_http_auth(
+        "fake".to_string(),
+        HttpConfig {
+            url: url.to_string(),
+            headers: vec![],
+            local_agent_endpoint: false,
+        },
+        Arc::new(tokio::sync::Mutex::new(manager)),
+        crate::credentials::ObservedAccessToken::default(),
+        None,
+        Some(&overrides),
+        None,
+    ))
+}
+
+/// The worst case a handshake waiter has to sit through is NOT one `try_handshake`.
+///
+/// One `ensure_initialized` attempt runs the `server/discover` probe, the legacy `initialize`, and
+/// — whenever that legacy phase fails before its window closes — the protocol-version fallback's
+/// second legacy `initialize`: probe + 2 * startup, 10 + 30 + 30 = 70 s at the defaults.
+/// (`serve_legacy` returns `HandshakeFailed`, not `Timeout`, for everything short of the window, so
+/// the `!Timeout` gate on that retry does not suppress it.) An OAuth-capable client can then
+/// refresh its token and run a further full handshake.
+#[cfg(unix)]
+#[tokio::test]
+async fn handshake_worst_case_covers_the_fallback_and_the_oauth_refresh_retry() {
+    let url = "http://127.0.0.1:1/mcp";
+    // Plain HTTP at the 30 s default: probe 10 + startup 30 + the fallback's second startup 30.
+    let http = fake_http_client_with_startup(url, 30, 5);
+    assert_eq!(http.handshake_budget_secs(), 40);
+    assert_eq!(http.version_fallback_secs(), 30);
+    assert_eq!(http.handshake_worst_case_secs(), 70);
+
+    // A REAL stdio client, not `McpClient::stub` — the stub holds a `PendingTransport::Http`, so
+    // `restorable_http_transport` hands it a fallback retry and it is the wrong stand-in for a
+    // transport that has none. Stdio runs no probe either: its budget is the startup window flat.
+    let stdio_overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(30),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    };
+    let stdio = fake_stdio_client_with_overrides(stdio_overrides.clone()).await;
+    assert_eq!(stdio.probe_phase_secs(), 0);
+    assert_eq!(stdio.handshake_budget_secs(), 30);
+    assert_eq!(stdio.version_fallback_secs(), 0);
+    assert_eq!(stdio.handshake_worst_case_secs(), 30);
+
+    // ACP probes (the bridge is rebuildable) but holds no server-side session, so no fallback.
+    let acp = fake_acp_client_with_overrides(stdio_overrides);
+    assert_eq!(
+        acp.probe_phase_secs(),
+        McpClient::DISCOVER_PROBE_TIMEOUT_SECS
+    );
+    assert_eq!(acp.handshake_budget_secs(), 40);
+    assert_eq!(acp.version_fallback_secs(), 0);
+    assert_eq!(acp.handshake_worst_case_secs(), 40);
+
+    // OAuth: a failed attempt (70), the refresh interlude (15), and a full retry. The retry runs
+    // after the fallback block, so it is one `handshake_budget_secs()` (40), not another 70.
+    let oauth = fake_http_auth_client_with_startup(url, 30).await;
+    assert_eq!(
+        oauth.handshake_worst_case_secs(),
+        70 + McpClient::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS + 40,
+    );
+    assert_eq!(oauth.handshake_worst_case_secs(), 125);
+    // Every handshake waiter must clear the non-OAuth 70 s bound the comment at the fallback gate
+    // records; the OAuth arm clears it with room for the second attempt.
+    assert!(oauth.handshake_worst_case_secs() >= 70);
+    assert!(http.handshake_worst_case_secs() >= 70);
+}
+
+/// The fallback's GATE and the budget that has to cover it must read the same fact.
+///
+/// `restorable_http_transport` decides whether the protocol-version retry can fire;
+/// `version_fallback_secs` decides whether every waiter parked on the handshake budgets for it.
+/// A client that budgets "no fallback" while its retry fires under-sizes every one of those
+/// waiters — the round-1 failure, one level out. Both now read `transport_kind`, so the pair
+/// cannot drift; this walks every `PendingTransport` shape the crate builds and pins that.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_fallback_gate_and_its_budget_read_the_same_transport_fact() {
+    use crate::acp_transport::AcpReverseInvoker;
+
+    struct NeverInvoker;
+    #[async_trait::async_trait]
+    impl AcpReverseInvoker for NeverInvoker {
+        async fn invoke(
+            &self,
+            _server_id: &str,
+            _message: serde_json::Value,
+            _timeout: std::time::Duration,
+        ) -> Result<serde_json::Value, String> {
+            std::future::pending().await
+        }
+    }
+
+    let http_config = HttpConfig {
+        url: "http://127.0.0.1:1/mcp".to_string(),
+        headers: vec![],
+        local_agent_endpoint: false,
+    };
+    let auth_manager = Arc::new(tokio::sync::Mutex::new(
+        crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
+            .await
+            .expect("loopback auth manager"),
+    ));
+    let mut cmd = Command::new("sleep");
+    cmd.arg("120").kill_on_drop(true);
+    fuigo_tools::util::detach_command(&mut cmd);
+    let (stdio_transport, _stderr) = SafeTokioChildProcess::spawn(
+        cmd,
+        None,
+        "stdio-srv".to_string(),
+        fuigo_session_events::EventWriter::noop(),
+    )
+    .await
+    .expect("spawn stdio test child");
+
+    let shapes = [
+        ("stdio", PendingTransport::Stdio(Box::new(stdio_transport))),
+        (
+            "acp",
+            PendingTransport::Acp {
+                server_id: "srv_0".to_string(),
+                invoker: Arc::new(NeverInvoker),
+            },
+        ),
+        ("http", PendingTransport::Http(http_config.clone())),
+        (
+            "http-auth",
+            PendingTransport::HttpAuth {
+                config: http_config,
+                auth_manager,
+            },
+        ),
+    ];
+    // Every shape is built with `http_config: None` ON PURPOSE. That is not a contrived client:
+    // it is exactly the shape `McpClient::stub` hands out — a `PendingTransport::Http` with no
+    // `http_config` — and any future constructor can do the same. Under a budget keyed on
+    // `http_config` the two HTTP shapes report "no fallback" while `restorable_http_transport`
+    // hands their retry a fresh transport, and every waiter parked on them is under-sized.
+    let overrides = McpClientTimeoutOverrides {
+        startup_timeout_sec: Some(30),
+        tool_timeout_sec: Some(5),
+        ..Default::default()
+    };
+    for (label, pending) in shapes {
+        let can_retry = restorable_http_transport(&pending).is_some();
+        let client = McpClient::new_with_transport(
+            label.to_string(),
+            pending,
+            Some(&overrides),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            can_retry,
+            client.version_fallback_secs() > 0,
+            "{label}: the fallback GATE says the retry can{} fire, but the fallback BUDGET \
+             allows {}s for it",
+            if can_retry { "" } else { "not" },
+            client.version_fallback_secs(),
+        );
+    }
+
+    // The client-level consequence, on real clients: stdio and ACP provably cannot fire the
+    // retry and budget zero for it.
+    let stdio = fake_stdio_client_with_overrides(overrides.clone()).await;
+    let acp = fake_acp_client_with_overrides(overrides);
+    for (label, client) in [("stdio", &stdio), ("acp", &acp)] {
+        assert_eq!(client.version_fallback_secs(), 0, "{label}");
+        assert!(
+            client
+                .reconnect
+                .as_ref()
+                .and_then(restorable_http_transport)
+                .is_none(),
+            "{label}: no rebuildable HTTP transport, so the retry cannot fire",
+        );
+    }
+}
+
+/// Regression (U110): a waiter parked on `init_done` must budget for the holder's whole
+/// `ensure_initialized`, not for one `handshake_budget_secs()`.
+///
+/// The fake swallows `server/discover` (burning the whole probe phase), then rejects the first
+/// `initialize` just SHORT of the startup window — a `HandshakeFailed`, which fires the
+/// protocol-version fallback — and hangs the second one until its window expires. That is a
+/// legitimate 6 + 4 + 6 = 16 s handshake inside a 12 s `handshake_budget_secs()`. A park sized on
+/// one budget releases the waiter with the "init still in progress" wedge error at 13 s, while the
+/// holder is still working.
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_waiter_survives_the_protocol_version_fallback_retry() {
+    let (url, handles) = spawn_fake_mcp_with(
+        CallToolBehavior::HangThenOk { hang_ms: 0 },
+        FakeMcpOptions {
+            discover: DiscoverBehavior::Swallow,
+            init_unauthorized: true,
+            init_delay_ms: 4_000,
+            init_hang_from: Some(1),
+            list_hang: false,
+        },
+    )
+    .await;
+    let client = fake_http_client_with_startup(&url, 6, 5);
+    // probe 6 + startup 6. The fake's handshake legitimately runs past this.
+    assert_eq!(client.handshake_budget_secs(), 12);
+
+    let holder_client = Arc::clone(&client);
+    let holder = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let err = holder_client
+            .ensure_initialized()
+            .await
+            .expect_err("the fake never completes a handshake");
+        (err, started.elapsed())
+    });
+    // The holder is 6 s into the swallowed probe by now, so it owns the slot.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let waiter_client = Arc::clone(&client);
+    let waiter = tokio::spawn(async move { waiter_client.ensure_initialized().await });
+
+    let (holder_err, holder_elapsed) = holder.await.expect("holder task");
+    assert!(
+        matches!(holder_err, McpError::Timeout { .. }),
+        "the fallback phase hangs its whole window: {holder_err}"
+    );
+    // Premise: the holder legitimately outlasts one `handshake_budget_secs()`.
+    assert!(
+        holder_elapsed > std::time::Duration::from_secs(client.handshake_budget_secs()),
+        "holder finished in {holder_elapsed:?}, inside one handshake budget - the fake did not \
+         exercise the fallback retry"
+    );
+    // Both `initialize` attempts reached the wire: the rejection and the fallback.
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 2);
+    // The waiter must still be parked. A park of `handshake_budget_secs() + 1` expired ~2.5 s ago.
+    assert!(
+        !waiter.is_finished(),
+        "parked waiter was released before the holder published: its park does not cover the \
+         holder's worst case"
+    );
+    waiter.abort();
+    // The park that kept it: probe 6 + startup 6 + the fallback's second startup 6.
+    assert_eq!(client.handshake_worst_case_secs(), 18);
+    assert!(
+        holder_elapsed <= std::time::Duration::from_secs(client.handshake_worst_case_secs()),
+        "holder took {holder_elapsed:?}, past handshake_worst_case_secs"
+    );
+}
+
+/// The bound on "handshake + the first `tools/list`" belongs to the client, not to its callers.
+///
+/// `ensure_initialized` bounds each handshake phase, but the post-handshake `tools/list` is
+/// otherwise unbounded: a server that connects and then stalls on it holds the caller forever.
+/// Callers cannot size that window themselves — only the client knows whether a probe phase, a
+/// protocol-version fallback or an OAuth refresh retry are in play.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_registrations_are_bounded_when_tools_list_stalls() {
+    let (url, _handles) = spawn_fake_mcp_with(
+        CallToolBehavior::HangThenOk { hang_ms: 0 },
+        FakeMcpOptions {
+            list_hang: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_with_startup(&url, 1, 1);
+    let mcp_state = Arc::new(Mutex::new(McpState::new(vec![])));
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.get_tool_registrations(mcp_state),
+    )
+    .await
+    .expect("`get_tool_registrations` must bound itself, not hang on a stalled `tools/list`");
+    // `McpToolRegistration` is not `Debug`, so unwrap the `Err` by hand.
+    let Err(err) = outcome else {
+        panic!("the fake never answers `tools/list`; registrations must not succeed");
+    };
+
+    assert!(matches!(err, McpError::Timeout { .. }), "{err}");
+    // The bound it applied: (probe 1 + startup 1 + the fallback's second startup 1) plus a
+    // `max(startup, DISCOVER_PROBE_TIMEOUT_SECS)` list window.
+    let expected = client.handshake_worst_case_secs() + McpClient::DISCOVER_PROBE_TIMEOUT_SECS;
+    assert_eq!(expected, 13);
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(expected),
+        "cut off after {:?}, short of the handshake worst case plus the list window",
+        started.elapsed()
+    );
+}
+
+/// Wire-level counterpart: a 5s-startup client (the desktop bind path's size class) still
+/// probes `server/discover`, so a modern server is negotiated without any `initialize`.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_startup_budget_still_negotiates_modern_servers() {
+    let (url, handles) = spawn_fake_mcp_modern(CallToolBehavior::HangThenOk { hang_ms: 0 }).await;
+    let client = fake_http_client(&url, 5);
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        0,
+        "a short-budget client must still reach the modern session"
+    );
+}
+
+/// A short-budget client against a legacy server probes once, then runs the legacy
+/// `initialize`. Fuigo's legacy phase names `REQUESTED_PROTOCOL_VERSION` first (with the
+/// `FALLBACK_PROTOCOL_VERSION` retry of `ensure_initialized` behind it); the stock fake
+/// accepts the requested version, so exactly one `initialize` reaches the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_startup_budget_probes_then_falls_back_to_initialize() {
+    let (url, handles) = spawn_fake_mcp(CallToolBehavior::AlwaysError { code: -32603 }).await;
+    let client = fake_http_client(&url, 5);
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.init_version.lock().as_deref(),
+        Some(REQUESTED_PROTOCOL_VERSION.as_str()),
+        "the legacy initialize must name the requested protocolVersion"
+    );
+}
+
+/// A legacy server whose middleware reacts to the probe with a malformed shape
+/// (non-JSON 500) must still handshake: the probe fails on its own transport and
+/// the legacy `initialize` runs on a fresh one.
+#[tokio::test(flavor = "multi_thread")]
+async fn junk_discover_response_still_handshakes_via_initialize() {
+    let (url, handles) = spawn_fake_mcp_with(
+        CallToolBehavior::AlwaysError { code: -32603 },
+        FakeMcpOptions {
+            discover: DiscoverBehavior::NonJsonServerError,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_probing(&url, 5);
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        1,
+        "a malformed probe reaction must still reach the initialize fallback"
+    );
+}
+
+/// When the legacy `initialize` itself fails, its error must surface directly
+/// — with its auth classification intact — rather than being hidden behind a
+/// generic probe-then-fallback wrapper. Under Fuigo's legacy phase the rejection
+/// is seen twice (requested version, then the `FALLBACK_PROTOCOL_VERSION` retry)
+/// and the probe is not repeated for the version retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_fallback_surfaces_the_initialize_error_for_classification() {
+    let (url, handles) = spawn_fake_mcp_with(
+        CallToolBehavior::AlwaysError { code: -32603 },
+        FakeMcpOptions {
+            init_unauthorized: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_probing(&url, 5);
+
+    let err = client
+        .ensure_initialized()
+        .await
+        .expect_err("initialize is rejected");
+
+    assert_eq!(handles.discovers.load(Ordering::Relaxed), 1);
+    assert_eq!(handles.inits.load(Ordering::Relaxed), 2);
+    assert!(
+        err.is_auth_rejection(),
+        "the initialize rejection must keep its auth classification: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Unauthorized"),
+        "the initialize error text must surface to the user: {msg}"
+    );
+}
+
+/// A SEP-2575 modern server: `server/discover` negotiates 2026-07-28, no `initialize` is
+/// sent, and every request carries the client context in per-request `_meta`.
+#[tokio::test(flavor = "multi_thread")]
+async fn handshake_negotiates_modern_discover_without_initialize() {
+    let (url, handles) = spawn_fake_mcp_modern(CallToolBehavior::HangThenOk { hang_ms: 0 }).await;
+    let client = fake_http_client_probing(&url, 5);
+    client.set_elicitation_tx(Some(crate::elicitation::ElicitationInbox::new()));
+
+    client.ensure_initialized().await.expect("handshake");
+
+    assert_eq!(
+        handles.discovers.load(Ordering::Relaxed),
+        1,
+        "startup must negotiate via server/discover"
+    );
+    assert_eq!(
+        handles.inits.load(Ordering::Relaxed),
+        0,
+        "a modern server must never receive initialize"
+    );
+
+    let tool = fake_echo_tool();
+    let ew = fuigo_session_events::EventWriter::noop();
+    let mut reconnect = false;
+    let mut is_timeout = false;
+    let out = tool
+        .try_call_tool(
+            &client,
+            &serde_json::json!({}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
+        .await
+        .expect("tools/call succeeds over the modern session");
+    assert!(!out.is_error.unwrap_or(false));
+    let bodies = handles.call_bodies.lock().clone();
+    assert!(!bodies.is_empty(), "tools/call must reach the server");
+    assert_eq!(
+        bodies
+            .first()
+            .and_then(|b| b.get("params"))
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+            .and_then(|v| v.as_str()),
+        Some("2026-07-28"),
+        "modern-era requests must carry the negotiated protocolVersion in _meta: {:?}",
+        bodies.first()
+    );
+    assert!(
+        bodies
+            .first()
+            .and_then(|body| body.pointer(
+                "/params/_meta/io.modelcontextprotocol~1clientCapabilities/elicitation/form"
+            ))
+            .is_some_and(serde_json::Value::is_object),
+        "modern-era requests carry the elicitation capability rmcp stamps: {:?}",
+        bodies.first()
+    );
+    assert_eq!(
+        handles.call_version_headers.lock().first(),
+        Some(&vec!["2026-07-28".to_owned()]),
+        "the header must name the negotiated modern version"
     );
 }
 
@@ -4260,6 +5134,46 @@ fn transient_connectivity_classification() {
     );
 }
 
+/// A connect-phase probe failure means the server was never reached; a legacy
+/// retry against the same endpoint would only double the time-to-error, so the
+/// probe surfaces the failure instead of returning a legacy verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_connect_failure_surfaces_instead_of_legacy_fallback() {
+    // A port that just stopped listening: connection refused at connect phase.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    drop(listener);
+
+    let client = fake_http_client_probing(&url, 5);
+    let config = HttpConfig {
+        url: url.clone(),
+        headers: vec![],
+        local_agent_endpoint: false,
+    };
+    let http_client = McpClient::build_http_client(
+        &config,
+        "fake",
+        crate::mcp_http_client::WarnBudget::default(),
+    )
+    .expect("client builds");
+    let transport = StreamableHttpClientTransport::with_client(
+        http_client,
+        StreamableHttpClientTransportConfig::with_uri(url.as_str()),
+    );
+
+    let err = match client.probe_modern(transport).await {
+        Err(err) => err,
+        Ok(ProbeVerdict::Modern(_)) => panic!("no server is listening"),
+        Ok(ProbeVerdict::Legacy { probe_error }) => {
+            panic!("connect failures must not become a legacy verdict: {probe_error}")
+        }
+    };
+    assert!(
+        err.is_connect_failure(),
+        "the surfaced error must classify as a connect failure: {err}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_connect_handshake_classifies_connect_phase() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4302,56 +5216,16 @@ async fn grok_agent_id_header_rejects_invalid_session_id() {
     assert!(error.to_string().contains("invalid X-Grok-Agent-ID value"));
 }
 
-mod tool_name_length_projection {
+mod tool_name_admission {
     use super::*;
 
     const SERVER: &str = "io-github-taylorwilsdon-google-workspace-mcp";
 
+    /// A reverse-DNS server plus a descriptive tool name (79 chars qualified) is admitted
+    /// verbatim: the registry key, the `Tool::id` and the registration name all agree on the
+    /// full `server__tool` key, and nothing is shortened.
     #[test]
-    fn identity_for_a_name_that_fits() {
-        assert_eq!(
-            project_qualified_tool_name("browser", "navigate").as_deref(),
-            Some("browser__navigate")
-        );
-        let exactly_64 = "x".repeat(MAX_TOOL_NAME_LEN - SERVER.len() - 2);
-        let full = project_qualified_tool_name(SERVER, &exactly_64).unwrap();
-        assert_eq!(full.len(), MAX_TOOL_NAME_LEN);
-        assert_eq!(full, format!("{SERVER}__{exactly_64}"));
-    }
-
-    #[test]
-    fn shortens_the_tool_segment_to_the_provider_limit_and_keeps_the_server() {
-        let name =
-            project_qualified_tool_name(SERVER, "batch_modify_gmail_message_labels").unwrap();
-        assert!(name.len() <= MAX_TOOL_NAME_LEN, "{name}");
-        // 44-char server + `__` + 7-char digest leaves an 11-char stem.
-        assert_eq!(name, format!("{SERVER}__batch_modif-580aef"));
-        assert_eq!(name.len(), MAX_TOOL_NAME_LEN);
-        assert!(validate_tool_name(&name).is_ok(), "{name}");
-        let (_id, server, _tool) =
-            parse_mcp_qualified_name(&name).expect("still parses as server__tool");
-        assert_eq!(server, SERVER);
-    }
-
-    #[test]
-    fn siblings_sharing_a_long_prefix_stay_distinct_and_stable() {
-        let a = project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v1").unwrap();
-        let b = project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v2").unwrap();
-        assert_ne!(a, b);
-        assert_eq!(
-            a,
-            project_qualified_tool_name(SERVER, "get_gmail_messages_content_batch_v1").unwrap()
-        );
-    }
-
-    #[test]
-    fn refuses_when_the_server_leaves_no_room() {
-        let huge_server = "s".repeat(60);
-        assert_eq!(project_qualified_tool_name(&huge_server, "tool"), None);
-    }
-
-    #[test]
-    fn registration_and_tool_id_agree_on_the_projected_name() {
+    fn registration_and_tool_id_agree_on_the_qualified_name() {
         let tool = McpTool::new(
             "batch_modify_gmail_message_labels".to_string(),
             "desc".to_string(),
@@ -4360,13 +5234,19 @@ mod tool_name_length_projection {
             serde_json::json!({"type": "object"}),
             None,
         );
-        let projected = tool.qualified_name().unwrap();
+        let qualified = format!("{SERVER}__batch_modify_gmail_message_labels");
+        assert_eq!(qualified.len(), 79);
+        assert!(validate_tool_name(&qualified).is_err());
         let erased = McpErasedTool { tool: tool.clone() };
-        assert_eq!(fuigo_tool_runtime::Tool::id(&erased).as_str(), projected);
+        assert_eq!(fuigo_tool_runtime::Tool::id(&erased).as_str(), qualified);
         let registration = tool
             .into_registration()
-            .expect("registers under the projected name");
-        assert_eq!(registration.name, projected);
+            .expect("registers under the full qualified name");
+        assert_eq!(registration.name, qualified);
+        let (_id, server, name) =
+            parse_mcp_qualified_name(&registration.name).expect("parses as server__tool");
+        assert_eq!(server, SERVER);
+        assert_eq!(name, "batch_modify_gmail_message_labels");
     }
 }
 

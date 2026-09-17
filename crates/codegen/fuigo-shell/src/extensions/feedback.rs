@@ -1,27 +1,26 @@
 //! `fuigo/feedback`, `fuigo/feedback/dismiss`, `fuigo/btw`, and `fuigo/review/*` extension handlers.
 //!
 //! - `feedback` and `feedback/dismiss`: persist user ratings and text locally and forward to cli-chat-proxy.
-//! - `btw`: dispatch a side question to the active session via `SessionCommand::SideQuestion` and return the answer.
+//! - `btw`: routed to [`super::btw`] (side question with optional attached images).
 //! - `review/comment` and `review/comment/delete`: record inline code review events to cloud storage.
 use super::{ExtResult, parse_params};
 use crate::agent::MvpAgent;
 use crate::session::persistence::{LocalFeedbackEntry, UserFeedbackEntry};
 use crate::session::{
     ClientFeedbackInput, CommentDeleteRequest, CommentDeleteResponse, CommentRequest,
-    CommentResponse, FeedbackRequestDismiss, FeedbackResponse, SessionCommand, SideQuestionError,
+    CommentResponse, FeedbackRequestDismiss, FeedbackResponse, SessionCommand,
 };
 use crate::upload::gcs::WithAuth as _;
 use agent_client_protocol as acp;
 use fuigo_file_utils::gcs::upload_bytes;
 use fuigo_telemetry::id::agent_id;
 use std::sync::Arc;
-use tokio::sync::oneshot;
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "fuigo/btw" => {
             tracing::info!("handling /btw side question");
-            handle_btw(agent, args).await
+            super::btw::handle_btw(agent, args).await
         }
         "fuigo/feedback" | "fuigo/feedback/dismiss" => {
             tracing::info!("handling user feedback");
@@ -33,53 +32,6 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             handle_review(agent, args).await
         }
         _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
-    }
-}
-/// Handle `fuigo/btw`, a side question that doesn't interrupt the current turn.
-async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct BtwRequest {
-        session_id: String,
-        question: String,
-    }
-    let req: BtwRequest = parse_params(args)?;
-    let sid: acp::SessionId = req.session_id.clone().into();
-    let session_handle = agent.resident_handle(&sid);
-    let Some(session) = session_handle else {
-        return Err(crate::acp_error::invalid_params(format!(
-            "session not found: {}",
-            req.session_id
-        )));
-    };
-    let (tx, rx) = oneshot::channel();
-    let _ = session.cmd_tx.send(SessionCommand::SideQuestion {
-        question: req.question,
-        respond_to: tx,
-    });
-    let result = rx
-        .await
-        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?;
-    match result {
-        Ok(answer) => super::to_ext_response(Ok(serde_json::json!({
-            "answer": answer,
-        }))),
-        Err(e) => Err(side_question_error_to_acp(e)),
-    }
-}
-
-/// The `fuigo/btw` error reply for a failed side question; typed like every shell error, a cancel is request-cancelled (`-32800`).
-fn side_question_error_to_acp(err: SideQuestionError) -> acp::Error {
-    match err {
-        SideQuestionError::Sampling(e) => crate::sampling::error::map_sampling_err_to_acp(e),
-        e @ SideQuestionError::PrepareClient(_) => crate::acp_error::internal_error(e.to_string()),
-        e @ SideQuestionError::EmptyResponse => crate::acp_error::typed(
-            acp::Error::internal_error(),
-            crate::acp_error::AcpErrorKind::Sampling(
-                fuigo_sampler::SamplingErrorKind::EmptyResponse,
-            ),
-            e.to_string(),
-        ),
     }
 }
 async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -525,38 +477,3 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A /btw whose side call was cancelled answers JSON-RPC request-cancelled with `error_kind: cancelled`, never an auth error.
-    #[test]
-    fn cancelled_btw_is_request_cancelled_not_auth() {
-        let err = side_question_error_to_acp(SideQuestionError::Sampling(
-            fuigo_sampler::events::request_cancelled_error(),
-        ));
-        assert_eq!(i32::from(err.code), -32800, "{err:?}");
-        assert_eq!(
-            crate::sampling::error::error_kind_str_from_error(&err),
-            Some("cancelled")
-        );
-    }
-
-    /// The non-sampling side-question failures reach the client as typed objects too.
-    #[test]
-    fn non_sampling_btw_failures_carry_typed_data() {
-        for (err, kind) in [
-            (
-                SideQuestionError::PrepareClient("no model configured".into()),
-                "internal",
-            ),
-            (SideQuestionError::EmptyResponse, "empty_response"),
-        ] {
-            let text = err.to_string();
-            let acp_err = side_question_error_to_acp(err);
-            let data = acp_err.data.clone().unwrap_or_default();
-            assert_eq!(data["message"], text.as_str(), "{acp_err:?}");
-            assert_eq!(data["error_kind"], kind, "{acp_err:?}");
-        }
-    }
-}

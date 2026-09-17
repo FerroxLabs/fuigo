@@ -747,11 +747,21 @@ impl BlockContent for ExecuteToolCallBlock {
         let theme = Theme::current();
         let header_style = ctx.appearance.scrollback.blocks.execute.header_style;
 
-        let mut lines: Vec<Line<'static>> = self
-            .header_lines(&theme, header_style, false, true)
-            .into_iter()
-            .map(|(line, _)| line)
-            .collect();
+        // `header_lines` flattens `\n` to spaces, which smashes multi-line commands into one run-on row in the block viewer
+        // The viewer draws no bullet, so `ctx.width` (not `content_width()`) is the row width
+        let mut header_rows = Vec::new();
+        self.push_header_lines(
+            &mut header_rows,
+            &theme,
+            header_style,
+            /*muted_command*/ false,
+            ctx.width as usize,
+            /*extra_indent*/ 0,
+            /*truncate_to_width*/ false,
+            /*include_command*/ true,
+        );
+        let mut lines: Vec<Line<'static>> =
+            header_rows.into_iter().map(|row| row.content).collect();
 
         if self.output.is_none()
             && let Some(error) = &self.error
@@ -1016,5 +1026,34 @@ mod tests {
     fn test_with_output() {
         let block = ExecuteToolCallBlock::new("echo test").with_output("plain text output");
         assert_eq!(block.output, Some("plain text output".to_string()));
+    }
+
+    #[test]
+    fn preamble_multiline_command_keeps_separate_lines() {
+        // Regression: the block viewer preamble flattened `\n` to spaces, smashing multi-line commands into one row
+        let block = ExecuteToolCallBlock::new("export FUIGO_ROOT=/tmp\ncd /tmp\necho start");
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.execute.header_style = ExecuteHeaderStyle::Shell;
+        let ctx = BlockContext {
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            width: 120,
+            raw: false,
+            max_lines: None,
+            appearance,
+            is_selected: false,
+            cwd: None,
+        };
+        let plain: Vec<String> = block
+            .preamble(&ctx)
+            .expect("execute preamble is always present")
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(
+            plain,
+            vec!["$ export FUIGO_ROOT=/tmp", "  cd /tmp", "  echo start"]
+        );
     }
 }

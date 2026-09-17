@@ -216,6 +216,7 @@ fn wedged_child_handle() -> (
         status_line_enabled: std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(false),
         ),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -234,6 +235,9 @@ fn wedged_child_handle() -> (
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new("test-model"),
+        spawn_snapshot: crate::session::SpawnSnapshot {
+            applied_tool_overrides: None,
+        },
         scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: false,
@@ -807,6 +811,7 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: Some("renamed_scheduler_delete"),
+        scheduler_create_tool_name: Some("renamed_scheduler_create"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -821,9 +826,14 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
                     _ => None,
                 })
                 .collect::<String>();
-            assert!(prompt.contains("renamed_scheduler_delete"));
-            assert!(prompt.contains("loop-123"));
-            assert!(prompt.contains("to stop the monitor"));
+            assert!(prompt.contains(
+                "Check the subagent output using get_command_or_subagent_output(\"sa-1\")"
+            ));
+            assert!(prompt.contains("renamed_scheduler_delete(\"loop-123\")"));
+            assert!(prompt.contains(
+                "renamed_scheduler_create(new_prompt, interval, \"loop-123\")"
+            ));
+            assert!(!prompt.contains("update it with scheduler_create("));
         }
         _ => panic!("expected SessionCommand::Prompt"),
     }
@@ -847,6 +857,7 @@ fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: Some("scheduler_delete"),
+        scheduler_create_tool_name: Some("scheduler_create"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -863,7 +874,8 @@ fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
         })
         .collect::<String>();
     assert!(!prompt.contains("scheduler_delete"));
-    assert!(!prompt.contains("to stop the monitor"));
+    assert!(!prompt.contains("no longer relevant"));
+    assert!(!prompt.contains("Check the subagent output"));
 }
 #[test]
 fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
@@ -883,6 +895,7 @@ fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(true),
     });
@@ -910,6 +923,7 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         synthetic_trace_tx: &Some(trace_tx),
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -1597,6 +1611,72 @@ async fn bootstrap_no_fork_is_new() {
         BootstrapInitialContext::ResumeAbort(m) => panic!("unexpected abort: {m}"),
     }
 }
+/// A woken child (`resume_from` == its own id) continues its own session dir
+/// in place: no copy, the transcript on disk is the conversation, untouched.
+#[tokio::test]
+async fn bootstrap_same_session_resume_reads_transcript_in_place_without_copying() {
+    use fuigo_sampling_types::conversation::ConversationItem;
+    let mut req = bootstrap_test_request(false);
+    req.id = "child-boot-wake".into();
+    req.resume_from = Some("child-boot-wake".into());
+    let ctx = ctx_with_toggle(HashMap::new());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let chat_file = dir
+        .path()
+        .join(crate::session::storage::CHAT_HISTORY_FILE);
+    let mut chat = String::new();
+    for item in [
+        ConversationItem::system("sys"),
+        ConversationItem::user("first turn"),
+        ConversationItem::assistant("done"),
+    ] {
+        chat.push_str(&serde_json::to_string(&item).expect("serialize item"));
+        chat.push('\n');
+    }
+    std::fs::write(&chat_file, &chat).expect("write chat history");
+    let child = SessionInfo {
+        id: acp::SessionId::new("child-boot-wake"),
+        cwd: "/tmp".into(),
+    };
+    let source = ResumeSourceData {
+        subagent_id: "child-boot-wake".into(),
+        subagent_type: "general-purpose".into(),
+        persona: None,
+        model_id: Some("m".into()),
+        child_cwd: "/tmp".into(),
+        worktree_path: None,
+        snapshot_ref: None,
+        child_session_id: "child-boot-wake".into(),
+    };
+    let out = bootstrap_initial_context(
+        &req,
+        Some(&source),
+        &ctx,
+        &child,
+        dir.path(),
+        "m",
+        super::resume_window::ResumeWindowPolicy {
+            context_window: 128_000,
+            auto_compact_threshold_percent: 85,
+        },
+    )
+    .await;
+    match out {
+        BootstrapInitialContext::Ready(ic) => {
+            assert_eq!(ic.source, InitialContextSource::Resumed);
+            assert!(ic.copy_error.is_none());
+            assert_eq!(ic.conversation.len(), 3, "{:?}", ic.conversation);
+            assert!(matches!(ic.conversation[1], ConversationItem::User(_)));
+        }
+        BootstrapInitialContext::ResumeAbort(m) => panic!("in-place resume must not abort: {m}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&chat_file).expect("chat history still readable"),
+        chat,
+        "the session's own transcript must not be rewritten"
+    );
+}
+
 #[tokio::test]
 async fn bootstrap_fork_without_parent_fails_open() {
     let req = bootstrap_test_request(true);
@@ -2351,11 +2431,14 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             stream_tool_calls: None,
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
             variants: Vec::new(),
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         },
         api_key: None,
         env_key: None,
         auth_provider: None,
         api_base_url: None,
+        mtls_cert_dir: None,
     }
 }
 fn byok_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
@@ -2568,6 +2651,7 @@ fn test_sampling_config(model_slug: &str) -> fuigo_sampling_types::SamplingConfi
         max_completion_tokens: None,
         temperature: None,
         top_p: None,
+        max_retries: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -2575,6 +2659,9 @@ fn test_sampling_config(model_slug: &str) -> fuigo_sampling_types::SamplingConfi
         context_window: NonZeroU64::new(256_000).expect("non-zero context window"),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     }
 }
 fn spawn_test_parent_chat_state(model_slug: &str) -> fuigo_chat_state::ChatStateHandle {

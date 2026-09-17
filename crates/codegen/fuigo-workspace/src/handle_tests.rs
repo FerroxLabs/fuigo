@@ -1,4 +1,5 @@
 use super::*;
+use crate::LockedTestEnv;
 use crate::capability::CapabilityMode;
 use crate::config::{
     AgentSessionConfig, BindMcpConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig,
@@ -2159,8 +2160,14 @@ fn spawn_test_queue(home: &std::path::Path) -> Arc<fuigo_file_utils::queue::Uplo
 /// It must never use the real `$FUIGO_WORKSPACE_HOME` and must NOT configure an upload queue.
 /// The legacy inline-upload path stays inert (no storage config).
 /// This pins the flag-off defaults so uploads never start implicitly and `new` stays runtime-light (no queue worker spawned).
+///
+/// `resolve_workspace_home()` below READS `$FUIGO_WORKSPACE_HOME` / `$FUIGO_HOME`, which the
+/// `FUIGO_HOME` fixtures in `worktree`, `trust` and `identity_tests` set for the length of their
+/// own guard, so this takes `ENV_TEST_LOCK` too: without it the read can land inside one of those
+/// windows (a data race with their `set_var`, and a comparison against a home no test here chose).
 #[tokio::test]
 async fn new_defaults_to_ephemeral_home_and_inert_legacy_upload() {
+    let _env = LockedTestEnv::lock();
     let handle = make_handle();
     let shared = handle.shared();
     let home = shared.workspace_home();
@@ -3951,6 +3958,20 @@ struct BindMcpTestState {
     /// When set, `tools/list` returns this many tools (`tool_000`, ...)
     /// instead of the single default.
     tool_count: Option<usize>,
+    /// When set, `server/discover` never answers, so the probe phase can only
+    /// end at its own timeout — the shape of a server that swallows methods it
+    /// does not know.
+    swallow_discover: bool,
+    /// How many `initialize` requests have reached the wire so far.
+    inits: Arc<std::sync::atomic::AtomicUsize>,
+    /// When set, `initialize` waits this long and then rejects. A rejection
+    /// SHORT of the startup window is a `HandshakeFailed`, not a `Timeout`, so
+    /// it is what fires the protocol-version fallback.
+    init_reject_after_ms: Option<u64>,
+    /// When set, the `initialize` with this zero-based index and every one
+    /// after it never answers — the shape of a server that accepts the
+    /// connection and then stalls.
+    init_hang_from: Option<usize>,
 }
 async fn bind_mcp_post(
     axum::extract::State(state): axum::extract::State<BindMcpTestState>,
@@ -3965,19 +3986,35 @@ async fn bind_mcp_post(
     }
     let id = request["id"].clone();
     match request["method"].as_str() {
-        Some("initialize") => (
-            [("mcp-session-id", "local-test-session")],
-            axum::Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": request["params"]["protocolVersion"].clone(),
-                    "capabilities": {},
-                    "serverInfo": {"name": "local-test", "version": "1"}
-                }
-            })),
-        )
-            .into_response(),
+        Some("server/discover") if state.swallow_discover => {
+            std::future::pending::<()>().await;
+            unreachable!("a swallowed probe never answers")
+        }
+        Some("initialize") => {
+            let attempt = state
+                .inits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if state.init_hang_from.is_some_and(|from| attempt >= from) {
+                std::future::pending::<()>().await;
+            }
+            if let Some(delay_ms) = state.init_reject_after_ms {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            (
+                [("mcp-session-id", "local-test-session")],
+                axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": request["params"]["protocolVersion"].clone(),
+                        "capabilities": {},
+                        "serverInfo": {"name": "local-test", "version": "1"}
+                    }
+                })),
+            )
+                .into_response()
+        }
         Some("tools/list") => {
             if state.hang_tools_list {
                 std::future::pending::<()>().await;
@@ -6266,6 +6303,236 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
     );
     server_task.abort();
 }
+/// The per-server startup watchdog must hold the WHOLE handshake, not just the
+/// legacy phase: `probe_timeout_secs` tracks the startup budget, so sizing the
+/// override to the raw discovery deadline lets a server that swallows
+/// `server/discover` burn the entire deadline in phase 1 — the legacy
+/// `initialize` never runs and a perfectly healthy legacy server is reported as
+/// a generic discovery timeout. Handing the client the deadline (which then
+/// applies `startup_within_deadline` for the transport it holds) leaves both
+/// phases a window inside the deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        swallow_discover: true,
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    // Six seconds: the probe phase can only end at its timeout, which tracks the
+    // startup budget, so an un-split budget spends every second of the deadline
+    // probing.
+    let discovery_timeout = std::time::Duration::from_secs(6);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("swallows-discover", url);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                discovery_timeout,
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    let outcome = rx.recv().await.expect("the drive must report the server");
+    match outcome {
+        Ok(started) => assert_eq!(started.name, "swallows-discover"),
+        Err(failure) => panic!(
+            "a legacy server that swallows the probe must still finish its handshake inside the \
+             discovery deadline, but it failed: {}",
+            failure.error
+        ),
+    }
+    drive.await.unwrap().expect("the drive must finish");
+    server_task.abort();
+}
+/// Regression: a STDIO bind server must keep the WHOLE discovery deadline for its `initialize`.
+///
+/// `try_handshake` sends stdio straight to `serve_legacy`: it runs no `server/discover` probe at
+/// all. Reserving `DISCOVER_PROBE_TIMEOUT_SECS` out of its budget therefore buys nothing and
+/// costs ten seconds of a phase it never runs. The class that pays is the cold-start `npx`/`uvx`
+/// server whose first `initialize` fetches a package and needs 20-30 s: at v1.0.19 the bind path
+/// set `startup_timeout_sec = ceil(discovery_timeout)` and it connected. There is no operator
+/// remedy either — the bind path's `McpClientTimeoutOverrides` outrank everything fuigo-shell
+/// resolves — so the deadline has to be split by the client, which knows the transport.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
+    // Eight seconds, kept short so this test does not distort the rest of the lib suite's
+    // scheduling. A transport-blind budget still halves stdio's window: deadlines under
+    // `2 * DISCOVER_PROBE_TIMEOUT_SECS` split evenly, so stdio is handed 4 s of `initialize`
+    // against the 8 s v1.0.19 gave it.
+    let discovery_timeout = std::time::Duration::from_secs(8);
+    let blind_budget =
+        fuigo_mcp::servers::McpClient::max_startup_within_deadline(discovery_timeout.as_secs());
+    assert_eq!(blind_budget, 4, "premise: the probe reservation is visible");
+
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    // `sleep` never reads its stdin, so the legacy `initialize` can only end at its own window —
+    // the timing shape of a server still installing itself.
+    let server = agent_client_protocol::McpServer::Stdio(
+        agent_client_protocol::McpServerStdio::new(
+            "slow-to-initialize",
+            std::path::PathBuf::from("sleep"),
+        )
+        .args(vec!["120".to_owned()]),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let started = std::time::Instant::now();
+    let drive = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                discovery_timeout,
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    let outcome = rx.recv().await.expect("the drive must report the server");
+    let elapsed = started.elapsed();
+    eprintln!(
+        "ROUND5-TIMING a_stdio_bind_server_keeps_the_whole_discovery_deadline elapsed={elapsed:?}"
+    );
+    assert!(
+        outcome.is_err(),
+        "a server that never answers `initialize` cannot start"
+    );
+    assert!(
+        elapsed >= discovery_timeout - std::time::Duration::from_secs(2),
+        "the stdio server's `initialize` was cut off after {elapsed:?}: it was handed the \
+         PROBING split of the deadline ({blind_budget}s) — a reservation for a phase stdio \
+         never runs — instead of the whole {discovery_timeout:?} deadline",
+    );
+    drive.await.unwrap().expect("the drive must finish");
+}
+/// A bind server that fails and then stalls must surface ITS OWN error, inside the deadline.
+///
+/// This is what the per-server sizing is for, and the quantity it has to fit is the whole
+/// `ensure_initialized` worst case, not one attempt: a plain-HTTP server that fails its first
+/// `initialize` short of the window gets a protocol-version fallback on a fresh transport: at
+/// the shipped 30 s deadline that is probe 10 + startup 20 + a second startup 20 = 50 s against
+/// a 30 s drive. The drive then cancels mid-retry and every such server is reported as the
+/// generic
+/// "MCP discovery timed out after …" — precisely the failure the sizing exists to prevent.
+/// The fix is not to shrink the first attempt (that regresses the same class as the stdio case
+/// above) but to bound the RETRY by the deadline's remainder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() {
+    // 20 s deadline: probing transports get startup 10, probe 10, and the retry keeps a 5 s
+    // margin. The fake burns the probe phase (10 s), rejects `initialize` #0 at 3 s — a
+    // `HandshakeFailed`, which is what fires the fallback — and hangs `initialize` #1 forever.
+    //   clamped:   retry window 20 - 5 - 13 = 2 s, so the server's own timeout lands at ~15 s
+    //              after ITS handshake started: 5 s of slack for startup latency under load.
+    //   unclamped: the retry gets its full 10 s startup budget, runs to ~23 s, and the drive's
+    //              20 s deadline cancels it — the generic error, 3 s past the deadline.
+    // The deadline and the fake's delays are scaled together; an 8 s version of this test left
+    // ~1 s of slack and failed under a 16-thread lib run.
+    let discovery_timeout = std::time::Duration::from_secs(20);
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        swallow_discover: true,
+        init_reject_after_ms: Some(3_000),
+        init_hang_from: Some(1),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let session = handle.session("main").unwrap();
+    {
+        let mut binding = session.mcp_binding.lock().await;
+        let _ = binding.join();
+        session
+            .mcp_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
+    let started = std::time::Instant::now();
+    let drive = {
+        let session = Arc::clone(&session);
+        let server = configured_test_mcp("stalls-after-a-rejection", url);
+        tokio::spawn(async move {
+            let scope = crate::mcp::begin_mcp_drive(&session).await?;
+            crate::mcp::drive_server_starts(
+                &session,
+                "main",
+                vec![server],
+                discovery_timeout,
+                &std::collections::HashSet::new(),
+                fuigo_session_events::EventWriter::noop(),
+                tx,
+                scope,
+            )
+            .await
+        })
+    };
+    let outcome = rx.recv().await.expect("the drive must report the server");
+    let elapsed = started.elapsed();
+    eprintln!(
+        "ROUND5-TIMING a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline \
+         elapsed={elapsed:?}"
+    );
+    let Err(failure) = outcome else {
+        panic!("the fake never completes a handshake; the server must not start");
+    };
+    assert!(
+        !failure.error.contains("MCP discovery timed out after"),
+        "after {elapsed:?} the drive's deadline cancelled the handshake and flattened this \
+         server's error into the generic discovery timeout: {}",
+        failure.error,
+    );
+    // No wall-clock bound here: the test's clock starts before the drive task is even scheduled,
+    // so `elapsed` over-counts by the startup latency the product cannot see. What the product
+    // guarantees is the ORDER — its own error before the drive's cancellation — and the message
+    // check above is exactly that.
+    drive.await.unwrap().expect("the drive must finish");
+    server_task.abort();
+}
 /// The other half of the `mcp_epoch` life fence: a hub `session.unbind`
 /// snapshots the epoch when the frame arrives and runs its teardown on a
 /// spawned task — if a reconnect bind enrols a NEW life before that task
@@ -8406,4 +8673,141 @@ async fn fork_inherits_path_virtualization() {
         .path_virtualization()
         .expect("fork must inherit mapping");
     assert_eq!(virt.real_root(), "/workspace/conv-abc");
+}
+// ===== Auxiliary-service base URL (FUIGO_CLI_CHAT_PROXY_BASE_URL) =====
+//
+// Pure-function tests: the resolver takes the already-read value, so no test here
+// touches the process environment.
+
+/// Unset: `None`. No compiled fallback, so nothing names a host the operator never chose.
+#[test]
+fn cli_chat_proxy_base_url_unset_is_none() {
+    assert_eq!(cli_chat_proxy_base_url_from(None), None);
+}
+
+/// Empty counts as unset, matching `fuigo-shell`'s empty `CLI_CHAT_PROXY_BASE_URL_DEFAULT`.
+#[test]
+fn cli_chat_proxy_base_url_empty_is_none() {
+    assert_eq!(cli_chat_proxy_base_url_from(Some(String::new())), None);
+}
+
+/// Set: the value passes through verbatim, exactly as the env override always did.
+#[test]
+fn cli_chat_proxy_base_url_set_passes_through() {
+    assert_eq!(
+        cli_chat_proxy_base_url_from(Some("https://proxy.example.test/v1".into())).as_deref(),
+        Some("https://proxy.example.test/v1")
+    );
+}
+
+/// The live resolver never names the upstream vendor whatever the environment holds.
+/// This one READS the process environment (the resolver calls `std::env::var`), so it takes
+/// `ENV_TEST_LOCK` like every writer in this file: the `auxiliary_service_wiring_*` tests below
+/// set `CLI_CHAT_PROXY_BASE_URL_ENV` for the length of their own guard, and `--test-threads > 1`
+/// would otherwise let this read land inside that window — a data race with their `set_var`, and
+/// an assertion about a value no caller of this test ever chose.
+#[test]
+fn cli_chat_proxy_base_url_never_names_the_vendor() {
+    let _env = LockedTestEnv::lock();
+    let rendered = format!("{:?}", cli_chat_proxy_base_url());
+    assert!(
+        !rendered.contains("grok.com"),
+        "workspace proxy base invented a vendor host: {rendered}"
+    );
+}
+
+// ===== The decision itself: `auxiliary_service_wiring` (handle.rs) =====
+//
+// The resolver tests above only cover the string. These cover what
+// `connect_local_workspace` actually DOES with it: which tool configs the session-context
+// factory hands out, and whether data collection is forced off. Env is mutated under the
+// crate-wide `ENV_TEST_LOCK` with `TestEnvGuard` restore, like every other env test here.
+
+fn wiring_test_auth() -> fuigo_computer_hub_sdk::SharedAuthProvider {
+    Arc::new(fuigo_computer_hub_sdk::AuthCredential::bearer("test-token"))
+}
+
+/// The tool configs the factory would give a real session, as `(image, video, web_search)`
+/// debug strings. `Disabled` / default variants are what an unconfigured workspace must show.
+fn wiring_tool_configs(wiring: &AuxiliaryServiceWiring) -> (String, String, String) {
+    use crate::config::SessionContextFactory as _;
+    let backend: Arc<dyn fuigo_tools::computer::types::TerminalBackend> =
+        Arc::new(fuigo_tools::computer::local::LocalTerminalBackend::new());
+    let ctx = wiring.factory.build_session_context(
+        "wiring-test-session",
+        std::path::PathBuf::from("/tmp"),
+        Arc::new(std::collections::HashMap::new()),
+        backend,
+    );
+    (
+        format!("{:?}", ctx.image_gen_config),
+        format!("{:?}", ctx.video_gen_config),
+        format!("{:?}", ctx.web_search_config),
+    )
+}
+
+/// UNSET: image/video/web-search come out disabled and data collection is forced off —
+/// even with `FUIGO_WORKSPACE_DATA_COLLECTION_DISABLED=false` explicitly opting in, because
+/// with no auxiliary service there is nowhere to upload to. Upstream instead dialled its
+/// vendor's `cli-chat-proxy` host and left all three enabled.
+// `LocalTerminalBackend::new()` registers with the tokio reactor, so this needs a runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn auxiliary_service_wiring_without_the_env_disables_gen_tools_and_collection() {
+    let _env = LockedTestEnv::lock()
+        .set_str(WORKSPACE_DATA_COLLECTION_DISABLED_ENV, "false")
+        .unset(CLI_CHAT_PROXY_BASE_URL_ENV);
+    let wiring = auxiliary_service_wiring(&wiring_test_auth());
+    assert_eq!(wiring.api_base_url, None);
+    assert!(
+        wiring.data_collection_disabled,
+        "no auxiliary service => collection forced off even though the env var opted in"
+    );
+    let (image, video, web) = wiring_tool_configs(&wiring);
+    assert!(image.starts_with("Disabled"), "image_gen: {image}");
+    assert!(video.starts_with("Disabled"), "video_gen: {video}");
+    assert!(web.starts_with("Disabled"), "web_search: {web}");
+    for rendered in [&image, &video, &web] {
+        assert!(
+            !rendered.contains("grok.com"),
+            "unconfigured workspace named a vendor host: {rendered}"
+        );
+    }
+}
+
+/// SET: the three tools are enabled against exactly the configured base, and the
+/// data-collection env var is honoured again (`false` => collection on).
+// `LocalTerminalBackend::new()` registers with the tokio reactor, so this needs a runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn auxiliary_service_wiring_with_the_env_enables_gen_tools_at_that_base() {
+    let _env = LockedTestEnv::lock()
+        .set_str(CLI_CHAT_PROXY_BASE_URL_ENV, "https://proxy.example.test/v1")
+        .set_str(WORKSPACE_DATA_COLLECTION_DISABLED_ENV, "false");
+    let wiring = auxiliary_service_wiring(&wiring_test_auth());
+    assert_eq!(
+        wiring.api_base_url.as_deref(),
+        Some("https://proxy.example.test/v1")
+    );
+    assert!(
+        !wiring.data_collection_disabled,
+        "with a proxy configured the env var decides, as before"
+    );
+    let (image, video, web) = wiring_tool_configs(&wiring);
+    for rendered in [&image, &video, &web] {
+        assert!(rendered.starts_with("Enabled"), "{rendered}");
+        assert!(
+            rendered.contains("https://proxy.example.test/v1"),
+            "must use exactly the configured base: {rendered}"
+        );
+    }
+}
+
+/// SET, with collection left at its default: still disabled, so the only thing the unset
+/// case changes is that the env var stops being able to turn it back on.
+#[test]
+fn auxiliary_service_wiring_default_collection_stays_disabled_with_a_proxy() {
+    let _env = LockedTestEnv::lock()
+        .set_str(CLI_CHAT_PROXY_BASE_URL_ENV, "https://proxy.example.test/v1")
+        .unset(WORKSPACE_DATA_COLLECTION_DISABLED_ENV);
+    let wiring = auxiliary_service_wiring(&wiring_test_auth());
+    assert!(wiring.data_collection_disabled);
 }

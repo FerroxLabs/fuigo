@@ -14,7 +14,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::StatefulWidget;
 
 use super::layout::WrapMode;
@@ -366,7 +366,12 @@ impl<T: ListItem> ListPane<'_, T> {
                     width: area.width,
                     height: rows_to_render,
                 };
-                buf.set_style(sel_area, Style::default().bg(bg));
+                // Bandless palette (`Reset` band slots): the selection carries reverse video instead of a colour band
+                if matches!(bg, ratatui::style::Color::Reset) {
+                    buf.set_style(sel_area, Style::default().add_modifier(Modifier::REVERSED));
+                } else {
+                    buf.set_style(sel_area, Style::default().bg(bg));
+                }
             }
 
             // --- Post-pass 2: Match highlight overlay ---

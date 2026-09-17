@@ -1,10 +1,13 @@
 pub mod auth;
+pub mod background_task;
 pub(crate) mod auth_gate;
 pub mod billing;
+pub(crate) mod btw;
 pub mod bundle;
 pub(crate) mod chat_conversation_history;
 pub mod code_nav;
 pub mod consent;
+pub(crate) mod content;
 pub mod debug;
 pub mod feedback;
 pub mod fs;

@@ -4,7 +4,7 @@ use super::*;
 use crate::app::dispatch::{recap_unavailable_toast, scrollback_has_user_messages};
 
 fn send_minimal_btw(app: &mut AppView, question: &str) -> uuid::Uuid {
-    match dispatch(Action::SendBtw(question.into()), app).as_slice() {
+    match dispatch(Action::SendBtw { question: question.into(), images: Vec::new() }, app).as_slice() {
         [
             Effect::SendBtw {
                 minimal_request_id: Some(id),
@@ -368,7 +368,7 @@ fn minimal_btw_requests_stay_independent_across_two_agents() {
 fn fullscreen_btw_response_after_dismiss_keeps_existing_behavior() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let effects = dispatch(Action::SendBtw("side question".into()), &mut app);
+    let effects = dispatch(Action::SendBtw { question: "side question".into(), images: Vec::new() }, &mut app);
     assert!(matches!(
         effects.as_slice(),
         [Effect::SendBtw {
@@ -401,13 +401,13 @@ fn btw_no_session_feedback_is_mode_specific() {
     let mut minimal = test_app_with_agent();
     minimal.screen_mode = crate::app::ScreenMode::Minimal;
     minimal.agents.get_mut(&id).unwrap().session.session_id = None;
-    assert!(dispatch(Action::SendBtw("q".into()), &mut minimal).is_empty());
+    assert!(dispatch(Action::SendBtw { question: "q".into(), images: Vec::new() }, &mut minimal).is_empty());
     assert!(minimal.agents[&id].toast.is_none());
     assert!(last_system_text(&minimal, id).contains("No active session"));
 
     let mut fullscreen = test_app_with_agent();
     fullscreen.agents.get_mut(&id).unwrap().session.session_id = None;
-    assert!(dispatch(Action::SendBtw("q".into()), &mut fullscreen).is_empty());
+    assert!(dispatch(Action::SendBtw { question: "q".into(), images: Vec::new() }, &mut fullscreen).is_empty());
     assert_eq!(
         fullscreen.agents[&id]
             .toast
@@ -1674,6 +1674,62 @@ fn test_pasted_png() -> crate::prompt_images::PastedImage {
         ],
         mime_type: "image/png".to_string(),
     })
+}
+
+/// `/btw` composed alongside a pasted image: the chip is drained into the action and travels as
+/// `fuigo/btw` content blocks (text + image), so the side question can see the picture.
+#[test]
+fn inline_btw_carries_composer_images_as_content_blocks() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
+        agent.prompt.set_text("/btw what is this ");
+        let end = agent.prompt.text().len();
+        agent.prompt.set_cursor(end);
+        agent.prompt.insert_image(test_pasted_png()).expect("chip");
+    }
+    let composed = app.agents[&id].prompt.text().to_string();
+    assert!(composed.contains("[Image #1]"));
+
+    let effects = dispatch(Action::SendPrompt(composed), &mut app);
+    let [Effect::SendBtw { blocks, question, .. }] = effects.as_slice() else {
+        panic!("expected a single SendBtw effect, got {effects:?}");
+    };
+    assert!(question.contains("what is this"));
+    let blocks = blocks.as_ref().expect("an image-bearing /btw sends content blocks");
+    assert!(
+        blocks
+            .iter()
+            .any(|block| matches!(block, agent_client_protocol::ContentBlock::Image(_))),
+        "the composer image must ride along as an image block: {blocks:?}"
+    );
+    assert!(
+        matches!(blocks.first(), Some(agent_client_protocol::ContentBlock::Text(t)) if t.text.contains("what is this")),
+        "the text block carries the question: {blocks:?}"
+    );
+    assert!(
+        app.agents[&id].prompt.images.is_empty(),
+        "the composer chips are consumed by the side question"
+    );
+}
+
+/// A text-only `/btw` keeps the legacy text-only wire (no `content`).
+#[test]
+fn text_only_btw_sends_no_content_blocks() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SendBtw {
+            question: "plain".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendBtw { blocks: None, .. }]
+    ));
 }
 
 /// Full TUI inline `/feedback <text>` composed alongside a pasted image.

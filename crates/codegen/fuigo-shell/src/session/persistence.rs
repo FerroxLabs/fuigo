@@ -398,7 +398,23 @@ pub use fuigo_shared::session::session_dir;
 type RelocationResult<T> = crate::session::storage::relocation::Result<T>;
 type SummaryReader = fn(&Path) -> RelocationResult<Summary>;
 
+// Test-only count of `storage_view` loads on this thread, so a batch API can pin "one view per
+// call" rather than merely "the right answer". Thread-local because the suite runs tests in
+// parallel and each test body owns its own thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STORAGE_VIEW_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only reader for [`STORAGE_VIEW_LOADS`].
+#[cfg(test)]
+pub(crate) fn storage_view_loads() -> usize {
+    STORAGE_VIEW_LOADS.with(std::cell::Cell::get)
+}
+
 fn storage_view(sessions_root: &Path) -> RelocationResult<RelocationView> {
+    #[cfg(test)]
+    STORAGE_VIEW_LOADS.with(|n| n.set(n.get() + 1));
     RelocationView::load_for_sessions_root(sessions_root)
 }
 
@@ -595,6 +611,31 @@ pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
         .flatten()
 }
 
+/// Resolve a batch of candidate IDs against one point-in-time storage view.
+/// Loading [`RelocationView`] walks the local session tree, so callers that need to classify a list must use this API rather than calling [`resolve_local_session_any_cwd`] once per entry.
+pub fn resolve_local_session_ids_any_cwd<S: AsRef<str>>(
+    session_ids: &[S],
+) -> io::Result<std::collections::HashSet<String>> {
+    resolve_local_session_ids_any_cwd_in_root(session_ids, &fuigo_home().join("sessions"))
+        .map_err(io::Error::other)
+}
+
+fn resolve_local_session_ids_any_cwd_in_root<S: AsRef<str>>(
+    session_ids: &[S],
+    sessions_root: &Path,
+) -> RelocationResult<std::collections::HashSet<String>> {
+    let view = storage_view(sessions_root)?;
+    Ok(session_ids
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|session_id| {
+            view.find_persisted_session_dir(session_id)
+                .is_ok_and(|path| path.is_some())
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
 pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
     resolve_local_session_any_cwd_in_root(session_id, &fuigo_home().join("sessions"))
         .map_err(io::Error::other)
@@ -765,7 +806,8 @@ fn most_recent_local_summary_for_cwd_in_view(
             }
             Err(error) => return Err(error),
         };
-        if summary.is_hidden() || !selection.admits(&summary) {
+        if summary.is_hidden() || summary.is_unused_optimistic_husk() || !selection.admits(&summary)
+        {
             continue;
         }
         if best.as_ref().is_none_or(|current| {
@@ -1171,6 +1213,22 @@ impl Summary {
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
             .unwrap_or(&self.session_summary)
+    }
+
+    /// Unused TUI-open husk: untitled, 0 messages, and no fork provenance.
+    /// Worktree stamps do not exempt. `session_kind == "fork"` or
+    /// `parent_session_id` / `forked_at` do (worktree forks keep kind `worktree`).
+    pub fn is_unused_optimistic_husk(&self) -> bool {
+        if matches!(self.session_kind.as_deref(), Some("fork"))
+            || self
+                .parent_session_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+            || self.forked_at.is_some()
+        {
+            return false;
+        }
+        self.num_messages == 0 && self.display_title().trim().is_empty()
     }
 
     /// [`Self::display_title`] as an `Option`, `None` when blank.

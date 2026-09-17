@@ -21,7 +21,7 @@ use crate::views::agent::AgentViewLayoutParams;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
-use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle};
+use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle, mode_flags};
 use crate::views::question_view::{QUESTION_VIEW_HPAD, feedback_input};
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 use crate::views::{agent, turn_status};
@@ -377,7 +377,7 @@ impl AgentView {
     }
     /// Shared "normal pane" hints: the flag computation, `build_hints`, and the queue hint.
     /// Single source of truth for the two former duplicated blocks in `current_shortcut_hints` and `draw`.
-    fn normal_pane_hints(
+    pub(super) fn normal_pane_hints(
         &self,
         registry: &ActionRegistry,
         esc_owned_before_agent: bool,
@@ -460,6 +460,13 @@ impl AgentView {
                 .is_some();
         let selected_can_kill = if self.active_pane == ActivePane::Catalog {
             false
+        } else if self.active_pane == ActivePane::Dock {
+            // Only a row whose `x` would actually dispatch: not a header, a
+            // `show N more` row, or a row already being killed.
+            self.dock_items()
+                .get(self.dock_cursor)
+                .copied()
+                .is_some_and(|item| self.dock_stop_action(item).is_some())
         } else if self.active_pane == ActivePane::Tasks {
             self.tasks
                 .selected_task_id()
@@ -495,7 +502,11 @@ impl AgentView {
             registry,
             is_editing,
             fold_label,
-            self.scrollback.selected_group_header_fold_label(),
+            if self.active_pane == ActivePane::Dock {
+                self.dock_enter_label()
+            } else {
+                self.scrollback.selected_group_header_fold_label()
+            },
             thinking_label,
             if self.active_pane == ActivePane::Tasks {
                 self.tasks.show_done()
@@ -512,7 +523,6 @@ impl AgentView {
             self.is_subagent_view,
             (self.session.state.is_turn_running() || self.wake_turn_active())
                 && !self.renders_parked(),
-            self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,
             selected_is_agent_message,
@@ -956,6 +966,10 @@ impl AgentView {
             self.hit_announcement_cta.clear();
             self.hit_upgrade_cta.clear();
             self.privacy_banner.clear_hits();
+            // A takeover frame paints no dock, so it must still spend the
+            // pending reveal: a flag that survives the child view would have
+            // `dock_max_rows()` budget the raised ask on the way back.
+            self.take_dock_row_request();
             return self.draw_subagent_fullscreen(
                 &child_sid.clone(),
                 area,
@@ -1314,6 +1328,8 @@ impl AgentView {
         let dock_on = crate::views::dock::enabled()
             && !viewer_open
             && area.height > agent::SHORT_TERMINAL_ROWS;
+        self.dock_on = dock_on;
+        self.reconcile_dock_before_paint();
         let tasks_height = if viewer_open || dock_on {
             0
         } else {
@@ -1346,18 +1362,22 @@ impl AgentView {
             self.queue.desired_height()
         };
         let drain_blocked = self.drain_blocked();
-        let turn_status_drain_blocked = if dock_on { false } else { drain_blocked };
+        let dock_covers_cues = self.dock_covers_idle_cues(dock_on);
+        let turn_status_drain_blocked = if dock_covers_cues {
+            false
+        } else {
+            drain_blocked
+        };
         let watchers = self.watchers();
         let parked = self.renders_parked();
-        let turn_status_watchers = if dock_on {
-            crate::views::turn_status::Watchers {
-                workflows: watchers.workflows,
-                ..Default::default()
-            }
+        // The dock now carries a Workflows section of its own, so it covers the
+        // workflow cue too -- but only while it is actually painted.
+        let turn_status_watchers = if dock_covers_cues {
+            crate::views::turn_status::Watchers::default()
         } else {
             watchers
         };
-        let turn_status_parked = if dock_on { false } else { parked };
+        let turn_status_parked = if dock_covers_cues { false } else { parked };
         let wake_display_state = self.wake_display_state();
         let display_state = wake_display_state.unwrap_or(&self.session.state);
         let send_now_gap = self.send_now_awaiting_current() && display_state.is_idle();
@@ -1396,41 +1416,15 @@ impl AgentView {
             _ => 1,
         };
         let follow_ups_height = u16::from(self.follow_ups.is_some());
-        let mut dock_data = dock_on.then(|| crate::views::dock::DockData {
-            subagents: self
-                .dock_subagent_rows()
-                .into_iter()
-                .map(|(_, _, row)| row)
-                .collect(),
-            tasks: self
-                .dock_task_rows()
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect(),
-            watchers: self
-                .dock_watcher_rows()
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect(),
-            queued: self.visible_held_queue_len(),
-            subagents_expanded: self.dock_subagents_expanded,
-            tasks_expanded: self.dock_tasks_expanded,
-            watchers_expanded: self.dock_watchers_expanded,
-            focused: self.active_pane == ActivePane::Dock,
-            cursor: 0,
-            queue_body_rows: self.queue.desired_height(),
-        });
-        if let Some(data) = &mut dock_data {
-            let max = crate::views::dock::visible_items(data)
-                .len()
-                .saturating_sub(1);
-            self.dock_cursor = self.dock_cursor.min(max);
-            data.cursor = self.dock_cursor;
-        }
+        let mut dock_data = (dock_on && !self.dock_hidden).then(|| self.dock_snapshot());
         let dock_height = dock_data
             .as_ref()
             .map_or(0, crate::views::dock::desired_height);
+        self.take_dock_row_request();
         self.dock_shown = dock_height > 0;
+        if !self.dock_shown && self.active_pane == ActivePane::Dock {
+            self.active_pane = ActivePane::Scrollback;
+        }
         let timeline_width = crate::views::timeline::rail_width(
             appearance.show_timeline,
             self.is_subagent_view,
@@ -1539,7 +1533,23 @@ impl AgentView {
             self.timeline_hover = None;
             self.timeline_hover_preview = None;
         }
+        if let Some(data) = &mut dock_data {
+            if layout.dock.height > 0 {
+                data.max_rows =
+                    crate::views::dock::MaxRows::new(data.max_rows.get().min(layout.dock.height));
+            }
+            self.sync_dock_hover_from_pointer(layout.dock);
+            data.hovered = self.dock_hovered;
+            let (col, row) = self.last_mouse_pos;
+            data.stop_hovered = crate::views::dock::hovered_stop_button_rect(layout.dock, data)
+                .is_some_and(|hit| hit.rect.contains((col, row).into()));
+        }
+        // Cleared unconditionally: a frame that paints no dock (Ctrl+G hidden,
+        // or a terminal too short for one) must not leave the previous frame's
+        // kill rect and `DockKillId` live in the field.
+        self.dock_stop_button = None;
         if let Some(dock) = &dock_data {
+            self.cache_dock_stop_at(layout.dock, dock);
             let body = crate::views::dock::queue_body_rect(layout.dock, dock);
             if body.height > 0 {
                 layout.queue = body;
@@ -1665,7 +1675,7 @@ impl AgentView {
         self.hit_context.rect = areas.get("context").copied();
         self.hit_credits.rect = areas.get("credits").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
-        let short = crate::util::abbreviate_path(&self.session.cwd.to_string_lossy()).into_owned();
+        let short = crate::util::display_location_path(&self.session.cwd);
         let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         use unicode_width::UnicodeWidthStr;
         let mut parts: Vec<Span> = Vec::new();
@@ -1714,16 +1724,6 @@ impl AgentView {
             cwd_style
         };
         parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
-            ));
-        }
         let cwd_line = Line::from(parts);
         let max_cwd_width = areas
             .values()
@@ -1926,7 +1926,7 @@ impl AgentView {
                 render_active_selection_overlay(
                     &self.last_scrollback_selection_model,
                     drag,
-                    self.table_geometry_for_selection(drag.anchor.entry_idx, drag.anchor.range_id),
+                    self.drag_table_geometry_for(drag.anchor.entry_idx, drag.anchor.range_id),
                     buf,
                 );
             } else if let Some(ref block_drag) = self.block_drag_selection {
@@ -1941,14 +1941,6 @@ impl AgentView {
                     buf,
                 );
             }
-            agent::render_hook_hover_popup(
-                buf,
-                layout.scrollback,
-                &self.scrollback,
-                self.hovered_entry,
-                self.last_mouse_pos,
-                &theme,
-            );
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
             if !any_drag_active
@@ -2158,7 +2150,7 @@ impl AgentView {
                 queue_focused,
                 layout_cfg,
                 Some(layout.scrollback),
-                self.session.state.is_turn_running(),
+                self.can_send_now(),
             );
             let close_rect = agent::render_todo_chrome_with_close_label(
                 buf,
@@ -2188,7 +2180,7 @@ impl AgentView {
                     queue_focused,
                     layout_cfg,
                     Some(layout.scrollback),
-                    self.session.state.is_turn_running(),
+                    self.can_send_now(),
                 );
             }
         }
@@ -2220,14 +2212,33 @@ impl AgentView {
             let total_links = self.visible_link_map.len();
             self.paint_link_highlights(buf, link_active_style, sb_n..total_links);
             self.reclamp_drag_head_post_render(true);
+            if let Some(width) = self
+                .last_btw_selection_model
+                .visible_block_content_width(BTW_OVERLAY_ENTRY_IDX)
+                && self
+                    .btw_selection_wrap_width
+                    .is_some_and(|armed| armed != width)
+            {
+                self.clear_btw_owned_selection();
+            }
             if let Some(ref drag) = self.drag_selection
                 && drag.anchor.entry_idx == BTW_OVERLAY_ENTRY_IDX
             {
-                render_active_selection_overlay(&self.last_btw_selection_model, drag, None, buf);
+                render_active_selection_overlay(
+                    &self.last_btw_selection_model,
+                    drag,
+                    self.drag_table_geometry_for(drag.anchor.entry_idx, drag.anchor.range_id),
+                    buf,
+                );
             } else if let Some(ref sel) = self.persistent_text_selection
                 && sel.entry_idx == BTW_OVERLAY_ENTRY_IDX
             {
-                render_persistent_selection_overlay(&self.last_btw_selection_model, sel, None, buf);
+                render_persistent_selection_overlay(
+                    &self.last_btw_selection_model,
+                    sel,
+                    self.table_geometry_for_selection(sel.entry_idx, sel.range_id),
+                    buf,
+                );
             }
         } else {
             self.hit_btw_close.clear();
@@ -2545,12 +2556,11 @@ impl AgentView {
         let editing_label;
         let commenting_label;
         let theme = Theme::current();
-        let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
         let approval_is_commenting = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        if effective_plan || casual_commenting {
+        let plan_label: Option<&str> = if effective_plan || casual_commenting {
             let commenting_range: Option<&std::ops::Range<usize>> = if approval_is_commenting {
                 self.plan_approval_view
                     .as_ref()
@@ -2560,7 +2570,7 @@ impl AgentView {
             } else {
                 None
             };
-            let plan_label: &str = if approval_is_commenting || casual_commenting {
+            Some(if approval_is_commenting || casual_commenting {
                 commenting_label = match commenting_range {
                     Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
                     Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
@@ -2571,27 +2581,13 @@ impl AgentView {
                 "plan approval"
             } else {
                 "plan"
-            };
-            mode_flags_vec.push(PromptFlag {
-                text: plan_label,
-                color: Some(theme.accent_plan),
-                bold: false,
-            });
-        }
-        if self.session.is_yolo() && !effective_plan {
-            mode_flags_vec.push(PromptFlag {
-                text: "always-approve",
-                color: None,
-                bold: false,
-            });
-        }
-        if self.auto_flag_visible(effective_plan) {
-            mode_flags_vec.push(PromptFlag {
-                text: "auto",
-                color: Some(theme.accent_system),
-                bold: false,
-            });
-        }
+            })
+        } else {
+            None
+        };
+        // Plan and permission are independent axes: entering plan mode never hides the permission flag
+        let mode_flags_vec: Vec<PromptFlag> =
+            mode_flags(plan_label, self.session.permission_label(), &theme);
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
         let warning = self.credit_balance.as_ref().and_then(|bal| {
@@ -3172,7 +3168,9 @@ impl AgentView {
                         panel_area,
                         Style::default().fg(theme.text_primary).bg(theme.bg_light),
                     );
-                    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+                    let border_style = Style::default()
+                        .fg(theme.panel_border_fg())
+                        .bg(theme.bg_base);
                     let border_line = Line::styled("─".repeat(panel_width as usize), border_style);
                     buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
                     buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);
@@ -3314,7 +3312,9 @@ impl AgentView {
                     panel_area,
                     Style::default().fg(theme.text_primary).bg(theme.bg_light),
                 );
-                let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+                let border_style = Style::default()
+                    .fg(theme.panel_border_fg())
+                    .bg(theme.bg_base);
                 let border_line =
                     Line::styled("\u{2500}".repeat(panel_width as usize), border_style);
                 buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
@@ -3476,6 +3476,19 @@ impl AgentView {
                                 cell.set_style(st);
                             }
                             col += cw;
+                        }
+                        // Bandless palette: `bg_visual`/`bg_hover` are `Reset`, so the painted
+                        // `row_bg` is no cue at all; reverse video carries it. No-op on RGB themes.
+                        let row_rect = Rect {
+                            x: items_x,
+                            y: row_y,
+                            width: fill_width,
+                            height: 1,
+                        };
+                        if is_selected {
+                            buf.set_style(row_rect, theme.selection_overlay());
+                        } else if is_hovered {
+                            buf.set_style(row_rect, theme.hover_overlay());
                         }
                     }
                     if needs_scrollbar {

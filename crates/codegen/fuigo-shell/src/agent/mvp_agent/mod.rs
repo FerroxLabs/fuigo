@@ -787,6 +787,8 @@ pub struct MvpAgent {
     storage_mode: std::cell::Cell<StorageMode>,
     /// External-OTEL emission gate; see [`crate::agent::otel_gate`].
     otel_gate: crate::agent::otel_gate::OtelGate,
+    /// Single-flight post-auth settings fetch per credential identity; see [`settings_manager`].
+    settings_manager: settings_manager::SettingsManager,
     /// Default YOLO mode: when true, sessions start with auto-approve enabled.
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
@@ -1482,7 +1484,9 @@ mod session_lifecycle;
 mod agent_ops;
 mod acp_agent;
 pub(crate) mod reasoning_effort;
+mod sampler_prewarm;
 mod session_setup;
+mod settings_manager;
 mod subagent_spawn;
 use session_registry::SessionRegistry;
 pub(crate) use session_lifecycle::RegistrySnapshot;
@@ -2136,7 +2140,7 @@ impl MvpAgent {
             let _ = tx.send(crate::session::SessionCommand::RefreshSkillBaseline);
         }
     }
-    pub(super) fn refresh_skill_baseline_for_all_sessions(&self) {
+    pub(crate) fn refresh_skill_baseline_for_all_sessions(&self) {
         let senders = self.resident_cmd_txs();
         Self::broadcast_refresh_skill_baseline(senders);
     }

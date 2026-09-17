@@ -49,6 +49,13 @@ fn display_user_fuigo_path_for(home: &Path, relative: impl AsRef<Path>) -> Strin
     format!("{prefix}/{}", rel.display())
 }
 
+/// Location-chrome path: [`abbreviate_path`] then last-two-component shortening.
+/// Clipboard and other callers keep [`abbreviate_path`].
+pub fn display_location_path(path: impl AsRef<Path>) -> String {
+    let lossy = path.as_ref().to_string_lossy();
+    crate::location_path::shorten_location_path(&abbreviate_path(&lossy)).into_owned()
+}
+
 /// Abbreviate an absolute path for display: prefer [`fuigo_home()`], then `$HOME`.
 pub fn abbreviate_path(path: &str) -> Cow<'_, str> {
     let path_buf = Path::new(path);

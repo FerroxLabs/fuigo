@@ -6,6 +6,8 @@
 use super::side_call::{AuxCall, log_prompt_cache_usage};
 use super::*;
 
+use agent_client_protocol as acp;
+
 use crate::session::SideQuestionError;
 use fuigo_sampling_types::SamplingError;
 
@@ -13,6 +15,60 @@ use fuigo_sampling_types::SamplingError;
 /// The full recap can be long and rides every row of the session-list response.
 /// Listing cards only show a short preview, so bound what goes on the wire.
 const RECAP_PERSIST_MAX_CHARS: usize = 240;
+
+/// What the model is told about a `/btw` side question. Shared with other backends that answer one
+pub(crate) const SIDE_QUESTION_INSTRUCTION: &str = "This is a side question from the user. \
+         You must answer this question directly in a single response.\n\n\
+         IMPORTANT CONTEXT:\n\
+         - You are a separate, lightweight agent spawned to answer this one question\n\
+         - The main agent is NOT interrupted - it continues working independently in the background\n\
+         - You share the conversation context but are a completely separate instance\n\
+         - Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\n\
+         CRITICAL CONSTRAINTS:\n\
+         - Do NOT call any tools, respond with plain text only\n\
+         - A tool call cannot help you: nothing runs on the user's machine and you get no turn in which to read a result\n\
+         - This is a one-off response - there will be no follow-up turns\n\
+         - You can ONLY provide information based on the conversation context and any images attached to this side question\n\
+         - NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n\
+         - If you don't know the answer, say so - do not offer to look it up or investigate\n\n\
+         Simply answer the question with the information you have.";
+
+/// The `/btw` user turn. Images attached to this call are inlined on the item;
+/// the parent conversation is left unchanged.
+fn side_question_instruction(tag: &str, question: &str) -> String {
+    format!("<{tag}>{SIDE_QUESTION_INSTRUCTION}</{tag}>\n\n{question}")
+}
+
+fn side_question_item(body: String, images: &[acp::ImageContent]) -> ConversationItem {
+    let mut item = ConversationItem::user(body);
+    for image in images {
+        item.add_image(super::prompt_build::pick_user_image_url(image));
+    }
+    item
+}
+
+#[cfg(test)]
+mod side_question_item_tests {
+    use super::*;
+
+    #[test]
+    fn attached_images_are_inlined_on_the_side_question_item() {
+        let image = acp::ImageContent::new("aGVsbG8=", "image/png");
+        let item = side_question_item("what is this".into(), std::slice::from_ref(&image));
+        let ConversationItem::User(user) = item else {
+            panic!("side question must be a user item");
+        };
+        assert!(
+            user.content.iter().any(|part| matches!(
+                part,
+                fuigo_sampling_types::ContentPart::Image { url }
+                    if url.as_ref() == "data:image/png;base64,aGVsbG8="
+            )),
+            "the model call must see the attached image, got {:?}",
+            user.content
+        );
+    }
+}
 
 /// Retry policy for the one-shot `/btw` model call: 3 attempts total (1 try, then 2 retries) with jittered backoff from 500ms to 1s.
 /// Deliberately short, nothing like the sampler actor's budget: a fleet-wide capacity event must not multiply side questions into a retry storm.
@@ -44,6 +100,7 @@ impl SessionActor {
     pub(super) async fn handle_side_question(
         &self,
         question: &str,
+        images: Vec<acp::ImageContent>,
     ) -> Result<String, SideQuestionError> {
         let btw_session_id = format!("btw-{}", uuid::Uuid::new_v4());
         let parent_session_id = self.session_info.id.to_string();
@@ -69,7 +126,7 @@ impl SessionActor {
         crate::session::helpers::session_recap::pop_trailing_tool_run(&mut items);
 
         let (instruction, tool_specs, hosted_tools) =
-            self.side_question_prompt_and_tools(question).await;
+            self.side_question_prompt_and_tools(question, images).await;
         items.push(instruction);
 
         let model = sampling_config.map(|c| c.model).unwrap_or_default();
@@ -140,34 +197,47 @@ impl SessionActor {
         }
     }
 
+    /// Normalize in memory and inline survivors. Cursor cannot inline images; say so
+    /// instead of transcribing through the parent-session asset writer.
+    async fn prepare_side_question_images(
+        &self,
+        body: &mut String,
+        images: Vec<acp::ImageContent>,
+        is_cursor: bool,
+    ) -> Vec<acp::ImageContent> {
+        if images.is_empty() {
+            return images;
+        }
+        let images = self
+            .normalize_images_with_notices(body, images, is_cursor)
+            .await;
+        if is_cursor && !images.is_empty() {
+            body.push_str(
+                "\n\nThe user attached image(s) to this side question. This session cannot inline them, and they were not saved to the session.",
+            );
+            return Vec::new();
+        }
+        images
+    }
+
     /// The `/btw` instruction and tools. Tools ship unchanged so the cached prefix matches; only the prompt keeps the model from calling them.
     async fn side_question_prompt_and_tools(
         &self,
         question: &str,
+        images: Vec<acp::ImageContent>,
     ) -> (
         ConversationItem,
         Vec<ToolSpec>,
         Vec<fuigo_sampling_types::HostedTool>,
     ) {
         let tag = self.reminder_wrapper_tag();
-        let instruction = ConversationItem::user(format!(
-            "<{tag}>This is a side question from the user. \
-             You must answer this question directly in a single response.\n\n\
-             IMPORTANT CONTEXT:\n\
-             - You are a separate, lightweight agent spawned to answer this one question\n\
-             - The main agent is NOT interrupted - it continues working independently in the background\n\
-             - You share the conversation context but are a completely separate instance\n\
-             - Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\n\
-             CRITICAL CONSTRAINTS:\n\
-             - Do NOT call any tools, respond with plain text only\n\
-             - A tool call cannot help you: nothing runs on the user's machine and you get no turn in which to read a result\n\
-             - This is a one-off response - there will be no follow-up turns\n\
-             - You can ONLY provide information based on what you already know from the conversation context\n\
-             - NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n\
-             - If you don't know the answer, say so - do not offer to look it up or investigate\n\n\
-             Simply answer the question with the information you have.</{tag}>\n\n\
-             {question}"
-        ));
+        let mut body = side_question_instruction(tag, question);
+        // In-memory only. Do not use the interjection pipeline: its cursor path
+        // writes image assets into the parent session.
+        let images = self
+            .prepare_side_question_images(&mut body, images, self.is_cursor_harness())
+            .await;
+        let instruction = side_question_item(body, &images);
         // Same tools as the main turn: they serialize into the cached prefix, and a side question must not search past the active cutoff.
         let tool_specs = self.side_call_tool_specs().await;
         (instruction, tool_specs, self.hosted_tools_for_turn())

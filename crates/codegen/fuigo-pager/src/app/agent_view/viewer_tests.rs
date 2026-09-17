@@ -516,3 +516,227 @@ fn wheel_on_border_column_scrolls_plan() {
         "wheel-up on the border column must scroll up ({off} -> {off_after})"
     );
 }
+
+// ── Block viewer: Enter quotes the selection into the composer ─────────────
+
+fn enter_key() -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, KeyModifiers::NONE)
+}
+
+fn agent_with_markdown_viewer(text: &str) -> AgentView {
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::agent_message(text));
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("just pushed");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(id, entry)
+            .expect("markdown viewer")
+    };
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent
+}
+
+fn agent_with_running_markdown_viewer(text: &str) -> AgentView {
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::agent_message(text));
+    agent
+        .scrollback
+        .get_by_id_mut(id)
+        .expect("just pushed")
+        .is_running = true;
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("just pushed");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(id, entry)
+            .expect("markdown viewer")
+    };
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent
+}
+
+#[test]
+fn block_viewer_enter_quotes_current_line_and_closes() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(agent.block_viewer.is_none());
+    assert_eq!(agent.active_pane, crate::app::agent_view::AgentPane::Prompt);
+    assert_eq!(agent.prompt.text(), "> hello world\n\n");
+}
+
+#[test]
+fn block_viewer_enter_starts_quote_on_its_own_line() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("draft");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(agent.prompt.text(), "draft\n> hello world\n\n");
+}
+
+#[test]
+fn block_viewer_enter_delimit_uses_selection_start() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("prefix\nmore");
+    agent.prompt.textarea.set_selection(3, 7);
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(agent.prompt.text(), "pre\n> hello world\n\nmore");
+}
+
+#[test]
+fn block_viewer_enter_quotes_last_line_while_following() {
+    let mut agent = agent_with_running_markdown_viewer("hello\n\nworld");
+    assert!(agent.block_viewer.as_ref().unwrap().list_state.follow_mode);
+    assert_eq!(
+        agent
+            .block_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .selected_index(),
+        None
+    );
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(agent.block_viewer.is_none());
+    let text = agent.prompt.text();
+    assert!(
+        text.contains("> world"),
+        "follow-mode Enter should quote the last line, got {text:?}"
+    );
+}
+
+#[test]
+fn block_viewer_enter_pastes_chip_for_four_lines() {
+    use crate::views::block_viewer::{TextDrag, TextEndpoint};
+    use crate::views::prompt_widget::KIND_PASTE;
+
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::block_viewer::BlockViewerPane::for_plain_text("t", "one\ntwo\nthree\nfour");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    // `for_plain_text` prepends a title row and a blank row, so the body starts at item 2.
+    viewer.text_drag = Some(TextDrag {
+        anchor: TextEndpoint {
+            item_idx: 2,
+            col: 0,
+        },
+        head: TextEndpoint {
+            item_idx: 5,
+            col: 3,
+        },
+        active: false,
+    });
+    agent.block_viewer = Some(viewer);
+
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.block_viewer.is_none());
+    assert!(
+        agent
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == KIND_PASTE),
+        "4-line quote should become a paste chip"
+    );
+    let text = agent.prompt.text();
+    assert!(text.contains("> one"));
+    assert!(text.contains("> four"));
+    assert!(
+        text.ends_with("\n\n"),
+        "quote should end with a blank line, got {text:?}"
+    );
+}
+
+#[test]
+fn block_viewer_search_enter_does_not_quote() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.handle_block_viewer_key(&crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('/'),
+        KeyModifiers::NONE,
+    ));
+    assert!(
+        agent
+            .block_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_mode()
+            .is_some()
+    );
+    agent.handle_block_viewer_key(&crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('h'),
+        KeyModifiers::NONE,
+    ));
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(
+        agent.block_viewer.is_some(),
+        "search-bar Enter must keep the viewer open"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "search-bar Enter must not quote into the prompt"
+    );
+}
+
+#[test]
+fn block_viewer_enter_on_empty_selection_keeps_viewer_open() {
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::block_viewer::BlockViewerPane::for_plain_text("t", "hello\n\nworld");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    // Body item 3 is the blank line between "hello" and "world" (items 0-1 are the title rows).
+    viewer.select_body_line_for_test(3);
+    agent.block_viewer = Some(viewer);
+
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(
+        agent.block_viewer.is_some(),
+        "Enter with nothing to quote must keep the viewer open"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "Enter with nothing to quote must not insert into the prompt"
+    );
+}
+
+#[test]
+fn block_viewer_enter_from_fullscreen_child_quotes_into_parent() {
+    let mut child = agent_with_markdown_viewer("hello world");
+    child.prompt.set_text("child-draft");
+    let mut parent = make_agent();
+    parent.prompt.set_text("parent-draft");
+    parent.prompt.set_cursor(parent.prompt.text().len());
+    parent.insert_subagent_view("child-sid".into(), Box::new(child));
+    parent.open_subagent_fullscreen("child-sid".into());
+    let registry = ActionRegistry::defaults();
+    let outcome = parent.handle_input(&Event::Key(enter_key()), &registry);
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(parent.active_subagent.is_none());
+    assert_eq!(parent.prompt.text(), "parent-draft\n> hello world\n\n");
+    assert_eq!(
+        parent.active_pane,
+        crate::app::agent_view::AgentPane::Prompt
+    );
+    if let Some(child) = parent.subagent_views.get("child-sid") {
+        assert!(child.block_viewer.is_none());
+        assert_eq!(child.prompt.text(), "child-draft");
+    }
+}

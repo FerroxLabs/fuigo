@@ -70,6 +70,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -96,6 +99,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     max_completion_tokens: None,
                     temperature: None,
                     top_p: None,
+                    max_retries: None,
                     api_backend: Default::default(),
                     extra_headers: Default::default(),
                     query_params: Default::default(),
@@ -103,6 +107,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
+                    mtls_cert_dir: None,
+                    rate_limit_retry_threshold: None,
+                    reasoning_summary: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -142,6 +149,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx: persistence.tx.clone(),
                     disk_full: persistence.subscribe_disk_full(),
+                    client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -496,6 +504,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     subscription: None,
                     subscription_resolver: None,
                     header_injector: None,
+                    mtls_cert_dir: None,
+                    rate_limit_retry_threshold: None,
+                    reasoning_summary: None,
                 })
                 .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -525,6 +536,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     max_completion_tokens: None,
                     temperature: None,
                     top_p: None,
+                    max_retries: None,
                     api_backend: Default::default(),
                     extra_headers: Default::default(),
                     query_params: Default::default(),
@@ -532,6 +544,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
+                    mtls_cert_dir: None,
+                    rate_limit_retry_threshold: None,
+                    reasoning_summary: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -632,6 +647,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -663,6 +681,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     max_completion_tokens: None,
                     temperature: None,
                     top_p: None,
+                    max_retries: None,
                     api_backend: Default::default(),
                     extra_headers: Default::default(),
                     query_params: Default::default(),
@@ -670,6 +689,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
                     reasoning_effort: None,
                     stream_tool_calls: None,
+                    mtls_cert_dir: None,
+                    rate_limit_retry_threshold: None,
+                    reasoning_summary: None,
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -726,6 +748,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx: persistence.tx.clone(),
                     disk_full: persistence.subscribe_disk_full(),
+                    client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -1028,6 +1051,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx,
                     disk_full: crate::session::notifications::idle_disk_full_rx(),
+                    client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,
@@ -2505,6 +2529,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             };
             let (sampler_event_tx, _sampler_event_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_sampler::SamplingEvent>();
@@ -2574,6 +2601,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx,
                     disk_full: crate::session::notifications::idle_disk_full_rx(),
+                    client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: PermissionHandle::allow_all(),
                 tool_context,

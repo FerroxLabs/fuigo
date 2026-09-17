@@ -397,12 +397,52 @@ async fn notify_session_title(agent: &MvpAgent, session_id: acp::SessionId, titl
     agent.notify_session_info_update(&session_id, title);
 }
 
+/// `conversations/update` failure -> ACP error.
+///
+/// `NotConfigured` is a deployment fact the user can act on (set the variable), not a server
+/// fault, so it is `invalid_request` carrying the error's own text — the same treatment
+/// `NoOauth` gets, and the same as [`soft_delete_conversation_error`]. Everything else is an
+/// `internal_error`. Pinned by `conversation_error_mapping_tests`.
+fn rename_conversation_error(e: crate::remote::ConvError, conversation_id: &str) -> acp::Error {
+    use crate::remote::ConvError;
+    match e {
+        ConvError::NoOauth => crate::acp_error::invalid_request(
+            "chat session rename requires Ferrox Labs OAuth credentials",
+        ),
+        not_configured @ ConvError::NotConfigured => {
+            crate::acp_error::invalid_request(not_configured.to_string())
+        }
+        ConvError::Http { status: 404 } => crate::acp_error::invalid_request(format!(
+            "conversation not found: {conversation_id}"
+        )),
+        other => {
+            crate::acp_error::internal_error(format!("chat conversation rename failed: {other}"))
+        }
+    }
+}
+
+/// `conversations/soft-delete` failure -> ACP error. See [`rename_conversation_error`].
+fn soft_delete_conversation_error(e: crate::remote::ConvError) -> acp::Error {
+    use crate::remote::ConvError;
+    match e {
+        ConvError::NoOauth => crate::acp_error::invalid_request(
+            "chat session delete requires Ferrox Labs OAuth credentials",
+        ),
+        not_configured @ ConvError::NotConfigured => {
+            crate::acp_error::invalid_request(not_configured.to_string())
+        }
+        other => crate::acp_error::internal_error(format!(
+            "chat conversation soft-delete failed: {other}"
+        )),
+    }
+}
+
 async fn rename_chat_conversation(
     agent: &MvpAgent,
     conversation_id: &str,
     title: &str,
 ) -> ExtResult {
-    use crate::remote::{ConvError, UpdateConversationBody};
+    use crate::remote::UpdateConversationBody;
 
     let Some(client) = agent.conversations_client() else {
         return Err(crate::acp_error::invalid_request(
@@ -417,17 +457,7 @@ async fn rename_chat_conversation(
     client
         .update_conversation(conversation_id, &body)
         .await
-        .map_err(|e| match e {
-            ConvError::NoOauth => crate::acp_error::invalid_request(
-                "chat session rename requires Ferrox Labs OAuth credentials",
-            ),
-            ConvError::Http { status: 404 } => crate::acp_error::invalid_request(format!(
-                "conversation not found: {conversation_id}"
-            )),
-            other => crate::acp_error::internal_error(format!(
-                "chat conversation rename failed: {other}"
-            )),
-        })?;
+        .map_err(|e| rename_conversation_error(e, conversation_id))?;
 
     // If this conversation is open live, notify clients of the new title.
     let session_id = acp::SessionId::new(Arc::from(conversation_id));
@@ -498,8 +528,6 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 }
 
 async fn soft_delete_chat_conversation(agent: &MvpAgent, conversation_id: &str) -> ExtResult {
-    use crate::remote::ConvError;
-
     let Some(client) = agent.conversations_client() else {
         return Err(crate::acp_error::invalid_request(
             "chat session delete requires the conversations lane (OIDC + chat feature)",
@@ -509,14 +537,7 @@ async fn soft_delete_chat_conversation(agent: &MvpAgent, conversation_id: &str) 
     client
         .soft_delete_conversation(conversation_id)
         .await
-        .map_err(|e| match e {
-            ConvError::NoOauth => crate::acp_error::invalid_request(
-                "chat session delete requires Ferrox Labs OAuth credentials",
-            ),
-            other => crate::acp_error::internal_error(format!(
-                "chat conversation soft-delete failed: {other}"
-            )),
-        })?;
+        .map_err(soft_delete_conversation_error)?;
 
     let session_id = acp::SessionId::new(Arc::from(conversation_id));
     if agent.is_resident(&session_id) {
@@ -1092,5 +1113,62 @@ mod sanitize_rename_title_tests {
         let v = serde_json::to_value(&n).unwrap();
         assert_eq!(v["_meta"][TITLE_IS_MANUAL_META_KEY], true);
         assert_eq!(v["update"]["session_summary"], "raw & title");
+    }
+}
+
+/// The conversations-lane error mapping, pinned per variant.
+///
+/// `NotConfigured` in particular: a deployment that never set the variable must get an
+/// actionable `-32600` naming it, not a `-32603` that reads like a server fault.
+#[cfg(test)]
+mod conversation_error_mapping_tests {
+    use super::*;
+    use crate::remote::ConvError;
+
+    /// `-32600 invalid request`.
+    const INVALID_REQUEST: i32 = -32600;
+    /// `-32603 internal error`.
+    const INTERNAL_ERROR: i32 = -32603;
+
+    fn shown(err: &acp::Error) -> String {
+        format!("{err:?}")
+    }
+
+    #[test]
+    fn rename_not_configured_is_an_actionable_invalid_request() {
+        let err = rename_conversation_error(ConvError::NotConfigured, "conv-1");
+        assert_eq!(i32::from(err.code), INVALID_REQUEST, "{}", shown(&err));
+        let text = shown(&err);
+        assert!(text.contains("FUIGO_CONVERSATIONS_BASE_URL"), "{text}");
+        assert!(!text.contains("grok.com"), "{text}");
+    }
+
+    #[test]
+    fn soft_delete_not_configured_is_an_actionable_invalid_request() {
+        let err = soft_delete_conversation_error(ConvError::NotConfigured);
+        assert_eq!(i32::from(err.code), INVALID_REQUEST, "{}", shown(&err));
+        let text = shown(&err);
+        assert!(text.contains("FUIGO_CONVERSATIONS_BASE_URL"), "{text}");
+        assert!(!text.contains("grok.com"), "{text}");
+    }
+
+    /// The other variants keep their existing codes, so adding the arm changed nothing else.
+    #[test]
+    fn the_other_conversation_errors_are_unchanged() {
+        let no_oauth = rename_conversation_error(ConvError::NoOauth, "conv-1");
+        assert_eq!(i32::from(no_oauth.code), INVALID_REQUEST);
+        let not_found = rename_conversation_error(ConvError::Http { status: 404 }, "conv-1");
+        assert_eq!(i32::from(not_found.code), INVALID_REQUEST);
+        assert!(shown(&not_found).contains("conv-1"));
+        let server = rename_conversation_error(ConvError::Http { status: 500 }, "conv-1");
+        assert_eq!(i32::from(server.code), INTERNAL_ERROR);
+        assert_eq!(
+            i32::from(soft_delete_conversation_error(ConvError::NoOauth).code),
+            INVALID_REQUEST
+        );
+        assert_eq!(
+            i32::from(soft_delete_conversation_error(ConvError::Http { status: 500 }).code),
+            INTERNAL_ERROR
+        );
     }
 }

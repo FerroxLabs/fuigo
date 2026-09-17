@@ -12,7 +12,8 @@ pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, compact_error, is_disk_full_error,
+    EffectMeta, RestoreProgressMsg, SessionFlags, acp_error_user_text, acp_send_bounded,
+    compact_error, is_disk_full_error, parse_worktree_restore_payload,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
 #[cfg(feature = "local-workspace")]
@@ -47,6 +48,39 @@ fn apply_permission_mode_override(
     meta.insert("yoloMode".into(), serde_json::Value::Bool(mode.is_always_approve()));
     meta.insert("autoMode".into(), serde_json::Value::Bool(mode.is_auto()));
 }
+/// MCP discovery reads and parses several config sources (global and project, from `cwd` up to the repository root),
+/// so it runs on the blocking pool rather than the UI thread or a tokio worker.
+/// Session-open paths have no resolved per-vendor compat in scope; the default (all-on) preserves existing behavior.
+pub(crate) async fn discover_mcp_servers(cwd: PathBuf) -> Vec<acp::McpServer> {
+    discover_mcp_servers_with(cwd, |cwd| {
+        fuigo_shell::util::config::load_mcp_servers(
+            cwd,
+            &fuigo_tools::types::compat::CompatConfig::default(),
+        )
+    })
+    .await
+}
+
+/// [`discover_mcp_servers`] with an injectable loader (tests observe where the loader runs).
+pub(crate) async fn discover_mcp_servers_with<F>(cwd: PathBuf, load: F) -> Vec<acp::McpServer>
+where
+    F: FnOnce(&Path) -> Vec<acp::McpServer> + Send + 'static,
+{
+    let started = std::time::Instant::now();
+    let servers = tokio::task::spawn_blocking(move || load(&cwd))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "mcp server discovery task failed");
+            Vec::new()
+        });
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        server_count = servers.len(),
+        "mcp server discovery"
+    );
+    servers
+}
+
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,
@@ -73,6 +107,8 @@ pub(crate) fn execute(
             crate::app::signal_handler::set_current_session_id(None);
             unregister_active_session_best_effort(&session_id);
         }
+        // Handled by `process_effects` on the event-loop thread (it owns the escape writer).
+        Effect::ResetMouseReporting => {}
         Effect::Quit => {
             ulog::info("pager quit", None, None);
             return (true, meta);
@@ -157,12 +193,6 @@ pub(crate) fn execute(
             chat_kind,
         } => {
             let tx = acp_tx.clone();
-            let compat = fuigo_tools::types::compat::CompatConfig::default();
-            let mcp_servers = fuigo_shell::util::config::load_mcp_servers(
-                &session_cwd,
-                &compat,
-            );
-            let mcp_count = mcp_servers.len();
             #[allow(unused_mut)]
             let mut meta = session_flags.to_meta();
             apply_permission_mode_override(&mut meta, permission_mode_override);
@@ -194,6 +224,8 @@ pub(crate) fn execute(
                             };
                         }
                     }
+                    let mcp_servers = discover_mcp_servers(session_cwd.clone()).await;
+                    let mcp_count = mcp_servers.len();
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
                     ulog::info(
                         "session.create.start",
@@ -286,220 +318,55 @@ pub(crate) fn execute(
                 ?git_ref,
                 "CreateWorktreeSession: restore_code, load_session_id, git_ref"
             );
+            let spec = crate::app::worktree_session::WorktreeSpec { label, git_ref };
             tasks
                 .spawn(async move {
+                    use crate::app::worktree_session::{
+                        create_worktree, new_worktree_id, resume_session_into_worktree,
+                    };
                     if let Some(sid) = load_session_id {
                         let local_miss = resume_local_miss
                             .as_deref()
                             .filter(|t| *t == sid);
-                        let resume_started = std::time::Instant::now();
-                        let wt_type = fuigo_shell::util::config::worktree_type();
-                        let copy_mode = if git_ref.is_some() {
-                            "clean"
-                        } else {
-                            "dirty"
-                        };
-                        let mut payload = serde_json::json!({
-                        "sessionId": sid,
-                        "sourceCwd": cwd.to_string_lossy(),
-                        "copyMode": copy_mode,
-                        "worktreeType": wt_type,
-                    });
-                        if let Some(rc) = restore_code {
-                            payload["restoreCode"] = serde_json::Value::Bool(rc);
-                        }
-                        if let Some(ref r) = git_ref {
-                            payload["gitRef"] = serde_json::Value::String(r.clone());
-                        }
-                        let ext_req = acp::ExtRequest::new(
-                            "fuigo/git/worktree/resume_session",
-                            serde_json::value::to_raw_value(&payload)
-                                .expect("serialize resume params")
-                                .into(),
-                        );
                         let _phase = startup::phase_scope(StartupPhase::SessionCreate);
-                        let ext_resp = match helpers::acp_send_bounded(
-                                ext_req,
-                                &tx,
-                                "Worktree session resume",
-                            )
-                            .await
+                        return match resume_session_into_worktree(
+                            &tx,
+                            &cwd,
+                            &spec,
+                            &sid,
+                            restore_code,
+                            local_miss,
+                        )
+                        .await
                         {
-                            Ok(resp) => {
-                                tracing::info!(
-                                session_id = %sid,
-                                elapsed_ms = resume_started.elapsed().as_millis() as u64,
-                                "worktree resume_session: ACP call completed"
-                            );
-                                resp
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                session_id = %sid,
-                                elapsed_ms = resume_started.elapsed().as_millis() as u64,
-                                error = %acp_error_text(&e),
-                                "worktree resume_session: ACP call failed"
-                            );
-                                return TaskResult::WorktreeSessionFailed {
-                                    agent_id,
-                                    error: worktree_resume_failure_message(
-                                        local_miss,
-                                        &acp_error_user_text(&e),
-                                    ),
-                                };
-                            }
-                        };
-                        let resp_value: serde_json::Value = match serde_json::from_str(
-                            ext_resp.0.get(),
-                        ) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                return TaskResult::WorktreeSessionFailed {
-                                    agent_id,
-                                    error: worktree_resume_failure_message(
-                                        local_miss,
-                                        &sanitize_user_error(&e.to_string()),
-                                    ),
-                                };
-                            }
-                        };
-                        if let Some(err) = resp_value
-                            .get("error")
-                            .filter(|v| !v.is_null())
-                        {
-                            let msg = err
-                                .as_str()
-                                .map(String::from)
-                                .unwrap_or_else(|| err.to_string());
-                            return TaskResult::WorktreeSessionFailed {
+                            Ok(resumed) => TaskResult::WorktreeForked {
                                 agent_id,
-                                error: worktree_resume_failure_message(
-                                    local_miss,
-                                    &sanitize_user_error(&msg),
-                                ),
-                            };
-                        }
-                        let result_obj = resp_value.get("result").unwrap_or(&resp_value);
-                        let new_session_id = result_obj
-                            .get("sessionId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&sid);
-                        let wt_path = result_obj
-                            .get("worktreePath")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| cwd.clone());
-                        let eff_cwd = result_obj
-                            .get("effectiveCwd")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| wt_path.clone());
-                        let (code_restored, restore_summary, restore_degree) = parse_worktree_restore_payload(
-                            result_obj,
-                        );
-                        return TaskResult::WorktreeForked {
-                            agent_id,
-                            session_id: acp::SessionId::new(new_session_id),
-                            worktree_path: wt_path,
-                            session_cwd: eff_cwd,
-                            code_restored,
-                            restore_summary,
-                            restore_degree,
-                            resume_session_id: Some(sid),
+                                session_id: acp::SessionId::new(resumed.session_id),
+                                worktree_path: resumed.worktree_root,
+                                session_cwd: resumed.session_cwd,
+                                code_restored: resumed.code_restored,
+                                restore_summary: resumed.restore_summary,
+                                restore_degree: resumed.restore_degree,
+                                resume_session_id: Some(sid),
+                            },
+                            Err(e) => TaskResult::WorktreeSessionFailed {
+                                agent_id,
+                                error: e.0,
+                            },
                         };
                     }
-                    let worktree_id = preferred_session_id
-                        .clone()
-                        .unwrap_or_else(|| {
-                            format!("pager-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
-                        });
-                    let copy_mode = if git_ref.is_some() { "clean" } else { "dirty" };
-                    let mut params = serde_json::json!({
-                    "sourceWorktreePath": cwd.to_string_lossy(),
-                    "newSessionId": worktree_id,
-                    "copyMode": copy_mode,
-                });
-                    if let Some(ref lbl) = label {
-                        params["label"] = serde_json::Value::String(lbl.clone());
-                    }
-                    if let Some(ref r) = git_ref {
-                        params["gitRef"] = serde_json::Value::String(r.clone());
-                    }
-                    let ext_req = acp::ExtRequest::new(
-                        "fuigo/git/worktree/create_from_worktree_sync",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize worktree params")
-                            .into(),
-                    );
-                    let ext_resp = match acp_send(ext_req, &tx).await {
-                        Ok(resp) => resp,
+                    let worktree_id = new_worktree_id(preferred_session_id.as_deref());
+                    let created = match create_worktree(&tx, &cwd, &spec, &worktree_id).await {
+                        Ok(created) => created,
                         Err(e) => {
                             return TaskResult::WorktreeSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't create worktree: {}", acp_error_text(&e)),
-                                ),
+                                error: e.0,
                             };
                         }
                     };
-                    let resp_value: serde_json::Value = match serde_json::from_str(
-                        ext_resp.0.get(),
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return TaskResult::WorktreeSessionFailed {
-                                agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't create worktree: {e}"),
-                                ),
-                            };
-                        }
-                    };
-                    if let Some(err) = resp_value.get("error") {
-                        let msg = err
-                            .as_str()
-                            .map(String::from)
-                            .unwrap_or_else(|| err.to_string());
-                        return TaskResult::WorktreeSessionFailed {
-                            agent_id,
-                            error: sanitize_user_error(
-                                &format!("couldn't create worktree: {msg}"),
-                            ),
-                        };
-                    }
-                    let result_obj = resp_value.get("result").unwrap_or(&resp_value);
-                    let worktree_root = match result_obj
-                        .get("worktreePath")
-                        .and_then(|v| v.as_str())
-                    {
-                        Some(p) => PathBuf::from(p),
-                        None => {
-                            return TaskResult::WorktreeSessionFailed {
-                                agent_id,
-                                error: sanitize_user_error(
-                                    "couldn't create worktree: response missing worktreePath",
-                                ),
-                            };
-                        }
-                    };
-                    let session_cwd = if let Some(git_root) = result_obj
-                        .get("sourceGitRoot")
-                        .and_then(|v| v.as_str())
-                    {
-                        let cwd_str = cwd.to_string_lossy();
-                        if let Some(relative) = cwd_str.strip_prefix(git_root) {
-                            let relative = relative.trim_start_matches('/');
-                            if relative.is_empty() {
-                                worktree_root.clone()
-                            } else {
-                                worktree_root.join(relative)
-                            }
-                        } else {
-                            worktree_root.clone()
-                        }
-                    } else {
-                        worktree_root.clone()
-                    };
+                    let worktree_root = created.worktree_root;
+                    let session_cwd = created.session_cwd;
                     if let Some(ref sid) = preferred_session_id {
                         let session_cwd_str = session_cwd.to_string_lossy();
                         if let Err(e) = crate::app::session_startup::ensure_session_id_available(
@@ -512,10 +379,7 @@ pub(crate) fn execute(
                             };
                         }
                     }
-                    let mcp_servers = fuigo_shell::util::config::load_mcp_servers(
-                        &session_cwd,
-                        &fuigo_tools::types::compat::CompatConfig::default(),
-                    );
+                    let mcp_servers = discover_mcp_servers(session_cwd.clone()).await;
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
                     let result = helpers::acp_send_bounded(
                             acp::NewSessionRequest::new(session_cwd.clone())
@@ -561,19 +425,10 @@ pub(crate) fn execute(
                     .insert("fuigo/restore_code".into(), serde_json::Value::Bool(rc));
             }
             let cwd = session_cwd.unwrap_or_else(|| cwd.to_path_buf());
-            let mcp_started = std::time::Instant::now();
-            let mcp_servers = fuigo_shell::util::config::load_mcp_servers(
-                &cwd,
-                &fuigo_tools::types::compat::CompatConfig::default(),
-            );
-            tracing::info!(
-                elapsed_ms = mcp_started.elapsed().as_millis() as u64,
-                server_count = mcp_servers.len(),
-                "load_session: mcp server discovery"
-            );
             let acp_session_id = acp::SessionId::new(session_id);
             tasks
                 .spawn(async move {
+                    let mcp_servers = discover_mcp_servers(cwd.clone()).await;
                     let _phase = startup::phase_scope(StartupPhase::SessionCreate);
                     ulog::info("session.load.start", Some(&acp_session_id.0), None);
                     let load_started = std::time::Instant::now();
@@ -1107,17 +962,10 @@ pub(crate) fn execute(
                                         } else {
                                             "Restore complete"
                                         };
-                                        if elapsed_secs >= 60 {
-                                            Some(
-                                                format!(
-                                        "{status} ({}m{:02}s).",
-                                        elapsed_secs / 60,
-                                        elapsed_secs % 60
-                                    ),
-                                            )
-                                        } else {
-                                            Some(format!("{status} ({elapsed_secs}s)."))
-                                        }
+                                        Some(format!(
+                                            "{status} ({}).",
+                                            crate::views::dock::fmt_elapsed(elapsed_secs)
+                                        ))
                                     }
                                     _ => None,
                                 };
@@ -1664,13 +1512,23 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::Compact { agent_id, session_id } => {
+        Effect::Compact {
+            agent_id,
+            session_id,
+            user_context,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                });
+                    let mut params = serde_json::Map::new();
+                    params.insert(
+                        "sessionId".into(),
+                        serde_json::Value::String(session_id.0.to_string()),
+                    );
+                    if let Some(ctx) = user_context {
+                        params.insert("userContext".into(), serde_json::Value::String(ctx));
+                    }
+                    let params = serde_json::Value::Object(params);
                     let req = acp::ExtRequest::new(
                         "fuigo/compact_conversation",
                         serde_json::value::to_raw_value(&params)
@@ -3868,19 +3726,15 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
+        Effect::SendBtw { agent_id, session_id, question, blocks, minimal_request_id } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
+                    let params = build_btw_params(&session_id, &question, blocks.as_deref());
                     let request = acp::ExtRequest::new(
                         "fuigo/btw",
-                        serde_json::value::to_raw_value(
-                                &serde_json::json!({
-                        "sessionId": session_id.0.to_string(),
-                        "question": question,
-                    }),
-                            )
+                        serde_json::value::to_raw_value(&params)
                             .expect("serialize btw params")
                             .into(),
                     );
@@ -4534,7 +4388,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchAppBilling => {
+        Effect::FetchAppBilling { nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -4545,47 +4399,44 @@ pub(crate) fn execute(
                             .expect("serialize billing params")
                             .into(),
                     );
-                    match acp_send(req, &tx).await {
-                        Ok(resp) => {
-                            let wrapper: serde_json::Value = serde_json::from_str(
-                                    resp.0.get(),
-                                )
-                                .unwrap_or_default();
-                            let result = wrapper.get("result").unwrap_or(&wrapper);
-                            match serde_json::from_value::<
-                                BillingConfigResponse,
-                            >(result.clone()) {
-                                Ok(billing) => {
-                                    let balance = billing
-                                        .config
-                                        .map(|c| crate::views::credit_bar::CreditBalance {
-                                            period_end_display: None,
-                                            ..credit_balance_from_config(c)
-                                        });
-                                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
-                                        fetch_auto_topup_info(&tx).await
-                                    } else {
-                                        crate::views::credit_bar::AutoTopupFetch::Cleared
-                                    };
-                                    TaskResult::AppBillingFetched {
-                                        balance,
-                                        autotopup,
-                                    }
-                                }
-                                Err(_) => {
-                                    TaskResult::AppBillingFetched {
-                                        balance: None,
-                                        autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                                    }
-                                }
-                            }
+                    let resp = match acp_send(req, &tx).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            return TaskResult::AppBillingError {
+                                error: sanitize_user_error(&format!("{e}")),
+                                nonce,
+                            };
                         }
-                        Err(_) => {
-                            TaskResult::AppBillingFetched {
-                                balance: None,
-                                autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
-                            }
+                    };
+                    let wrapper: serde_json::Value = serde_json::from_str(resp.0.get())
+                        .unwrap_or_default();
+                    let result = wrapper.get("result").unwrap_or(&wrapper);
+                    let billing = match serde_json::from_value::<
+                        BillingConfigResponse,
+                    >(result.clone()) {
+                        Ok(billing) => billing,
+                        Err(e) => {
+                            return TaskResult::AppBillingError {
+                                error: format!("Parse error: {e}"),
+                                nonce,
+                            };
                         }
+                    };
+                    let balance = billing
+                        .config
+                        .map(|c| crate::views::credit_bar::CreditBalance {
+                            period_end_display: None,
+                            ..credit_balance_from_config(c)
+                        });
+                    let autotopup = if has_prepaid_credits(balance.as_ref()) {
+                        fetch_auto_topup_info(&tx).await
+                    } else {
+                        crate::views::credit_bar::AutoTopupFetch::Cleared
+                    };
+                    TaskResult::AppBillingFetched {
+                        balance,
+                        autotopup,
+                        nonce,
                     }
                 });
         }
@@ -4985,6 +4836,23 @@ pub(crate) fn rewind_execute_params(
         "force": true,
         "mode": REWIND_MODE_WIRE,
     })
+}
+/// Build the `fuigo/btw` params.
+/// `content` is omitted when `None` so a text-only side question stays byte-identical on the wire.
+fn build_btw_params(
+    session_id: &acp::SessionId,
+    question: &str,
+    blocks: Option<&[acp::ContentBlock]>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "sessionId": session_id.0.to_string(),
+        "question": question,
+    });
+    if let Some(blocks) = blocks {
+        params["content"] = serde_json::to_value(blocks)
+            .expect("serialize btw content");
+    }
+    params
 }
 /// Build the `fuigo/interject` params.
 /// The optional structured `content` (text and images) is omitted ENTIRELY when `None` so the legacy wire shape stays byte-identical.

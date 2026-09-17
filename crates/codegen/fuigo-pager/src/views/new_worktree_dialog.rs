@@ -132,7 +132,7 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
     if input_width > 0 {
         let cursor_x = inner_x + prefix_w + viewport.cursor_display_column as u16;
         if let Some(cell) = buf.cell_mut((cursor_x, dialog.y + 2)) {
-            cell.set_style(Style::default().fg(theme.bg_dark).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_dark));
         }
     }
 

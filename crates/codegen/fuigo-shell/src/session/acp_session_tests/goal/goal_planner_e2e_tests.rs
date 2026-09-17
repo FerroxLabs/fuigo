@@ -3,7 +3,9 @@
 
 use super::support::*;
 use super::*;
-use fuigo_tools::implementations::fuigo_build::task::types::{SubagentEvent, SubagentResult};
+use fuigo_tools::implementations::fuigo_build::task::types::{
+    SubagentCancelTarget, SubagentEvent, SubagentResult,
+};
 use serial_test::serial;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
@@ -1217,6 +1219,155 @@ async fn lifecycle_resume_with_plan_does_not_re_fire_planner() {
             assert_eq!(
                 actor.goal_tracker.lock().status(),
                 Some(crate::session::goal_tracker::GoalStatus::Active),
+            );
+        })
+        .await;
+}
+
+#[derive(Debug, PartialEq)]
+enum FakeEvent {
+    CancelParentSession,
+    OpenAdmission,
+    Spawn { latched: bool },
+}
+
+fn spawn_latching_planner_coordinator() -> (
+    tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
+    StdArc<std::sync::Mutex<Vec<FakeEvent>>>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+    let log: StdArc<std::sync::Mutex<Vec<FakeEvent>>> =
+        StdArc::new(std::sync::Mutex::new(Vec::new()));
+    let log_task = StdArc::clone(&log);
+    tokio::task::spawn_local(async move {
+        let mut latched = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                SubagentEvent::Cancel(req)
+                    if matches!(req.target, SubagentCancelTarget::ParentSession) =>
+                {
+                    latched = true;
+                    log_task
+                        .lock()
+                        .unwrap()
+                        .push(FakeEvent::CancelParentSession);
+                }
+                SubagentEvent::OpenSpawnAdmission { .. } => {
+                    latched = false;
+                    log_task.lock().unwrap().push(FakeEvent::OpenAdmission);
+                }
+                SubagentEvent::Spawn(req) => {
+                    log_task.lock().unwrap().push(FakeEvent::Spawn { latched });
+                    let error = if latched {
+                        "parent session is stopped"
+                    } else {
+                        "planner failed"
+                    };
+                    let result = SubagentResult {
+                        success: false,
+                        error: Some(error.into()),
+                        cancelled: latched,
+                        subagent_id: req.id.clone(),
+                        child_session_id: req.id.clone(),
+                        ..Default::default()
+                    };
+                    let _ = req.result_tx.send(result);
+                }
+                _ => {}
+            }
+        }
+    });
+    (tx, log)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn stop_then_slash_goal_resume_reopens_spawn_admission_before_planner_retry() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, log) = spawn_latching_planner_coordinator();
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            create_test_goal(&actor);
+            let _ = actor
+                .auto_pause_goal_if_active_with_message(
+                    crate::session::goal_tracker::GoalPauseReason::User,
+                    planner_failure_pause_message(),
+                )
+                .await;
+            {
+                let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert!(snap.status.is_paused(), "got {:?}", snap.status);
+                assert!(snap.plan_file.is_none());
+            }
+
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
+            {
+                let mut state = actor.state.lock().await;
+                state.running_task = Some(running_task_stub("running"));
+                state.pending_inputs.push_back(user_item("running", "test"));
+            }
+            let _ = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    trigger: Some(crate::session::CancelTrigger::CtrlC),
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+            drain_gateway_turns().await;
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec![FakeEvent::CancelParentSession],
+                "user Stop must latch spawn admission before the resume turn",
+            );
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                actor.handle_turn_input(TurnInputRequest {
+                    prompt_id: "goal-resume".into(),
+                    input_origin: InputOrigin::new(PromptOrigin::User),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "/goal resume",
+                    ))],
+                    prompt_mode: PromptMode::Agent,
+                    trace_gcs_config: None,
+                    artifact_tracker: None,
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: true,
+                    send_now: false,
+                    json_schema: None,
+                    persist_ack: None,
+                    parsed_prompt_tx: None,
+                    traceparent: None,
+                }),
+            )
+            .await
+            .expect("turn must finish");
+            assert!(
+                result.is_ok(),
+                "re-paused resume must end the host turn cleanly: {result:?}"
+            );
+
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec![
+                    FakeEvent::CancelParentSession,
+                    FakeEvent::OpenAdmission,
+                    FakeEvent::Spawn { latched: false },
+                ],
+                "the resume turn must reopen spawn admission before the planner retry",
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert!(snap.status.is_paused(), "got {:?}", snap.status);
+            assert_eq!(
+                snap.pause_message.as_deref(),
+                Some(planner_failure_pause_message().as_str()),
             );
         })
         .await;

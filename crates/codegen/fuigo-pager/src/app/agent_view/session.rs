@@ -136,11 +136,22 @@ impl AgentView {
             finished_wake_prompts: HashSet::new(),
             active_pane: ActivePane::Prompt,
             dock_cursor: 0,
+            dock_workflows_expanded: true,
             dock_subagents_expanded: true,
             dock_tasks_expanded: true,
             dock_watchers_expanded: true,
+            dock_workflows_show_all: false,
+            dock_subagents_show_all: false,
+            dock_tasks_show_all: false,
+            dock_watchers_show_all: false,
+            dock_offsets: crate::views::dock::SectionSlots::default(),
+            dock_reveal_pending: false,
+            dock_hovered: None,
+            dock_stop_button: None,
             dock_queued_expanded: true,
+            dock_on: false,
             dock_shown: false,
+            dock_hidden: false,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,
             multiline_mode: false,
@@ -175,7 +186,6 @@ impl AgentView {
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
-            pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
             turn_start_ms: None,
@@ -201,6 +211,8 @@ impl AgentView {
             deferred_text_press: None,
             persistent_text_selection: None,
             table_selection_geometry: None,
+            drag_table_geometry: None,
+            btw_selection_wrap_width: None,
             selection_created_at: None,
             last_drag_mouse: None,
             drag_autoscroll: None,
@@ -291,6 +303,7 @@ impl AgentView {
             toast: None,
             ephemeral_tip: Default::default(),
             word_select_tip_prompt_snapshot: None,
+            export_copy_detector: Default::default(),
             last_word_select_probe: None,
             sticky_toast: None,
             mode_switch_banner: None,
@@ -380,6 +393,8 @@ impl AgentView {
             optimistic_queue_ids: std::collections::HashSet::new(),
             send_now_awaiting_confirm: None,
             send_now_painted_blocks: std::collections::HashMap::new(),
+            minimal_cancel_hint_turn: None,
+            send_now_echo_pending: std::collections::HashMap::new(),
             follow_without_jump_prompt_id: None,
             plugin_cta: PluginCtaState::default(),
             follow_ups: None,
@@ -496,12 +511,12 @@ impl AgentView {
         self.finished_wake_prompts.clear();
         self.pending_cancel_resend = None;
         self.cancel_latency = None;
-        self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
         self.optimistic_queue_ids.clear();
         self.send_now_awaiting_confirm = None;
         self.send_now_painted_blocks.clear();
+        self.send_now_echo_pending.clear();
         self.workflow_blocks.clear();
         self.workflow_run_revisions.clear();
         self.cleared_workflow_runs.clear();
@@ -698,6 +713,11 @@ impl AgentView {
                 .running_wake_turn
                 .as_ref()
                 .is_some_and(|wake| wake.cancel_sent)
+    }
+    /// Whether Send now can target a local turn or an idle-looking automatic wake.
+    pub(crate) fn can_send_now(&self) -> bool {
+        self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling())
     }
     /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle and not replaying; keeps an in-flight cancel marker for the same id.
     pub(crate) fn note_streaming_wake_turn(&mut self, prompt_id: &str) {

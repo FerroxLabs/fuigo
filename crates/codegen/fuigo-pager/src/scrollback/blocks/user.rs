@@ -237,7 +237,17 @@ impl UserPromptBlock {
         let theme = Theme::current();
         // Minimal mode engages this lock; read it here instead of app state.
         let terminal_native = crate::theme::cache::terminal_native_locked();
-        let (prefix_style, text_style, skill_style) = Self::prompt_styles(&theme, terminal_native);
+        // The terminal theme (fullscreen) renders prompts bandless: bold
+        // primary text instead of a bright-black band, which can sit too
+        // close to the default fg on some profiles. Minimal keeps its band.
+        let attribute_emphasis = !terminal_native && crate::theme::cache::terminal_native_active();
+        let (mut prefix_style, mut text_style, mut skill_style) =
+            Self::prompt_styles(&theme, terminal_native);
+        if attribute_emphasis {
+            prefix_style = prefix_style.add_modifier(Modifier::BOLD);
+            text_style = text_style.add_modifier(Modifier::BOLD);
+            skill_style = skill_style.add_modifier(Modifier::BOLD);
+        }
         let band = Self::prompt_band_color_for(&theme, is_selected, terminal_native);
         // Semantic line bg (not a "panel") so it survives minimal's flat_background.
         let with_band = |line: BlockLine| -> BlockLine {
@@ -598,6 +608,29 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(line_text(&lines[0].content).starts_with("$ "));
+    }
+
+    /// Terminal theme (fullscreen): prompts render bandless — bold primary
+    /// text instead of a bright-black band — including when selected.
+    #[test]
+    fn terminal_theme_prompt_is_bold_and_bandless() {
+        let _guard = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+
+        let block = UserPromptBlock::new("hello");
+        let lines = block.wrap_prompt_lines(80, None, true, false);
+        assert!(lines[0].background.is_none(), "no band");
+        let text_span = lines[0].content.spans.last().unwrap();
+        assert!(
+            text_span.style.add_modifier.contains(Modifier::BOLD),
+            "prompt text is bold, got {:?}",
+            text_span.style
+        );
+
+        let selected = block.wrap_prompt_lines(80, None, true, true);
+        assert!(selected[0].background.is_none(), "selected: still no band");
+
+        crate::theme::cache::set(crate::theme::ThemeKind::FuigoNight);
     }
 
     #[test]

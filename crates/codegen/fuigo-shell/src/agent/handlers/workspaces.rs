@@ -73,11 +73,15 @@ pub(crate) async fn handle(
 
     let response = match agent.workspaces_client().list_workspaces(&q).await {
         Ok(page) => success_response(page),
-        Err(WsError::NoOauth) => degraded_response("no_oauth"),
         Err(e) => {
-            // Degrade to a partial result, but log the cause so failures in the field stay diagnosable
-            tracing::warn!("workspaces/list fetch failed: {e}");
-            degraded_response("error")
+            let reason = degraded_reason(&e);
+            // Degrade to a partial result, but log the cause so failures in the field stay
+            // diagnosable. `no_oauth` is an ordinary unauthenticated state, not a failure, so it
+            // stays silent exactly as before.
+            if !matches!(e, WsError::NoOauth) {
+                tracing::warn!("workspaces/list fetch failed: {e}");
+            }
+            degraded_response(reason)
         }
     };
 
@@ -100,6 +104,22 @@ fn success_response(page: ListWorkspacesPage) -> WorkspacesListResponse {
             .collect(),
         next_page_token: page.next_page_token,
         meta: None,
+    }
+}
+
+/// The `_meta["fuigo/partial"].reason` tag for a failed `workspaces/list`.
+///
+/// `NotConfigured` gets its own tag rather than falling into `error`: like its sibling
+/// `ConvError::NotConfigured` in `extensions/session_admin.rs`, it is a deployment fact
+/// ("no workspaces host is configured"), not a fetch that failed, and a client that lumps it
+/// with transport errors would tell the user to retry something that can never succeed.
+/// Clients that do not know the tag degrade to their generic "error" branch, so it is
+/// backwards-compatible. Pinned by `degraded_reason_*` below.
+fn degraded_reason(e: &WsError) -> &'static str {
+    match e {
+        WsError::NoOauth => "no_oauth",
+        WsError::NotConfigured => "not_configured",
+        _ => "error",
     }
 }
 
@@ -167,5 +187,28 @@ mod tests {
         assert!(value.get("nextPageToken").is_none());
         assert_eq!(value["_meta"]["fuigo/partial"]["workspaces"], true);
         assert_eq!(value["_meta"]["fuigo/partial"]["reason"], "no_oauth");
+    }
+
+    /// "No workspaces host is configured" is a deployment fact, not a fetch failure, and gets
+    /// its own tag — the same explicit treatment `ConvError::NotConfigured` gets in
+    /// `extensions/session_admin.rs`, instead of the generic arm.
+    #[test]
+    fn degraded_reason_separates_not_configured_from_a_failed_fetch() {
+        assert_eq!(degraded_reason(&WsError::NotConfigured), "not_configured");
+        assert_eq!(degraded_reason(&WsError::NoOauth), "no_oauth");
+        assert_eq!(degraded_reason(&WsError::Http { status: 500 }), "error");
+        assert_eq!(degraded_reason(&WsError::Policy("blocked")), "error");
+    }
+
+    /// The tag reaches the wire, and nothing else about the envelope changes, so a client that
+    /// only knows `no_oauth`/`timeout` still sees a well-formed partial it can degrade on.
+    #[test]
+    fn not_configured_reaches_the_partial_envelope() {
+        let value =
+            serde_json::to_value(degraded_response(degraded_reason(&WsError::NotConfigured)))
+                .unwrap();
+        assert_eq!(value["_meta"]["fuigo/partial"]["workspaces"], true);
+        assert_eq!(value["_meta"]["fuigo/partial"]["reason"], "not_configured");
+        assert_eq!(value["workspaces"].as_array().unwrap().len(), 0);
     }
 }

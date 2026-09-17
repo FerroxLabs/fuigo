@@ -787,7 +787,7 @@ fn parked_429_wait_does_not_drive_refreshes() {
             .await;
 
             let request = super::rate_limit_backoff_tests::conversation_request(&actor).await;
-            let mut budget = actor.rate_limit_wait_budget();
+            let mut budget = actor.rate_limit_wait_budget(None);
             let outcome = tokio::time::timeout(
                 Duration::from_secs(300),
                 actor.run_turn_via_sampler(

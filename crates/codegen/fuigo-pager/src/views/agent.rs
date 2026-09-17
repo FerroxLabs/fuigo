@@ -544,7 +544,7 @@ pub(crate) fn render_follow_ups(
     }
     const MAX_CHIP_LABEL: usize = 48;
     let chip_style = Style::default().fg(theme.link_fg);
-    let hover_style = Style::default().fg(theme.text_primary).bg(theme.bg_hover);
+    let hover_style = theme.hover_overlay().fg(theme.text_primary);
     let row_end = area.x + area.width;
     let mut x = area.x;
     for (i, label) in suggestions.iter().enumerate() {
@@ -612,134 +612,6 @@ pub fn render_entry_hover(
                 .with_bottom_clipped(last_bottom_clipped)
                 .render(buf);
         }
-    }
-}
-/// Render a floating popup showing hook details when hovering over a collapsed tool call entry that has hooks.
-pub fn render_hook_hover_popup(
-    buf: &mut Buffer,
-    scrollback_area: Rect,
-    scrollback: &ScrollbackState,
-    hovered_entry: Option<usize>,
-    mouse_pos: (u16, u16),
-    theme: &Theme,
-) {
-    let Some(hover_idx) = hovered_entry else {
-        return;
-    };
-    let Some(entry) = scrollback.get(hover_idx) else {
-        return;
-    };
-    let layout_info = scrollback
-        .get_cached_entry_layouts()
-        .and_then(|layouts| layouts.get(hover_idx));
-    if layout_info.is_some_and(|info| {
-        info.verb_group_header && !info.is_expanded_verb_header() && info.group_header_count > 1
-    }) {
-        return;
-    }
-    let is_expanded_verb_header =
-        layout_info.is_some_and(crate::scrollback::EntryLayoutInfo::is_expanded_verb_header);
-    if entry.display_mode != crate::scrollback::types::DisplayMode::Collapsed {
-        return;
-    }
-    let Some(ref hd) = entry.hook_data else {
-        return;
-    };
-    if !hd.has_content() {
-        return;
-    }
-    use crate::scrollback::blocks::tool::hook::render_hooks_for_mode;
-    let mode = crate::scrollback::types::DisplayMode::Expanded;
-    let mut lines = Vec::new();
-    let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, mode);
-    let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, mode);
-    lines.extend(pre);
-    lines.extend(post);
-    for (event_name, runs) in &hd.lifecycle {
-        lines.extend(render_hooks_for_mode(event_name, runs, mode));
-    }
-    if lines.is_empty() {
-        return;
-    }
-    let Some((entry_area, top_clipped, _)) =
-        scrollback.entry_screen_area(hover_idx, scrollback_area)
-    else {
-        return;
-    };
-    let (mouse_col, mouse_row) = mouse_pos;
-    if mouse_row < entry_area.y || mouse_row >= entry_area.y + entry_area.height {
-        return;
-    }
-    let badge_row = entry_area.y + u16::from(is_expanded_verb_header && !top_clipped);
-    if badge_row >= entry_area.y + entry_area.height {
-        return;
-    }
-    let row_start = scrollback_area.x;
-    let row_end = scrollback_area.x + scrollback_area.width;
-    let row_text: String = (row_start..row_end)
-        .filter_map(|col| {
-            buf.cell(ratatui::layout::Position::new(col, badge_row))
-                .map(|c| c.symbol().to_string())
-        })
-        .collect();
-    let Some(badge_start_in_text) = row_text.find("[hooks:") else {
-        return;
-    };
-    let badge_end_in_text = row_text[badge_start_in_text..]
-        .find(']')
-        .map(|i| badge_start_in_text + i + 1)
-        .unwrap_or(row_text.len());
-    let badge_start_col = row_start + badge_start_in_text as u16;
-    let badge_end_col = row_start + badge_end_in_text as u16;
-    if mouse_row != badge_row || mouse_col < badge_start_col || mouse_col >= badge_end_col {
-        return;
-    }
-    let buf_height = buf.area.height;
-    let buf_width = buf.area.width;
-    let popup_height = (lines.len() as u16 + 2).min(15).min(buf_height);
-    let popup_width = scrollback_area
-        .width
-        .saturating_sub(8)
-        .max(40)
-        .min(buf_width);
-    let popup_y = if entry_area.y + entry_area.height + popup_height
-        <= scrollback_area.y + scrollback_area.height
-    {
-        entry_area.y + entry_area.height
-    } else {
-        entry_area.y.saturating_sub(popup_height)
-    };
-    let popup_x = entry_area.x + 4;
-    let popup_area = Rect::new(
-        popup_x.min(scrollback_area.x + scrollback_area.width.saturating_sub(popup_width)),
-        popup_y,
-        popup_width,
-        popup_height.min(buf_height.saturating_sub(popup_y)),
-    );
-    let bg = theme.bg_base;
-    let clear_style = ratatui::style::Style::default().bg(bg);
-    for y in popup_area.y..popup_area.y + popup_area.height {
-        for x in popup_area.x..popup_area.x + popup_area.width {
-            if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
-                cell.reset();
-                cell.set_style(clear_style);
-            }
-        }
-    }
-    let border_style = ratatui::style::Style::default().fg(theme.gray);
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(border_style)
-        .style(ratatui::style::Style::default().bg(bg));
-    let inner = block.inner(popup_area);
-    ratatui::widgets::Widget::render(block, popup_area, buf);
-    for (i, line) in lines.iter().enumerate() {
-        let y = inner.y + i as u16;
-        if y >= inner.y + inner.height {
-            break;
-        }
-        buf.set_line_safe_bidi(inner.x, y, &line.content, inner.width);
     }
 }
 /// Selection/hover chrome for a side pane (todo, queue, tasks). Focused panes get a dismiss control.
@@ -888,7 +760,6 @@ pub fn build_hints(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
-    esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
     selected_is_agent_message: bool,
@@ -905,11 +776,23 @@ pub fn build_hints(
             hints
         }
         ActivePane::Dock => {
-            vec![
-                HintItem::paired(crate::key!('j'), crate::key!('k'), "navigate"),
-                HintItem::new(crate::key!(Enter), "open"),
-                HintItem::new(crate::key!('x'), "kill"),
-            ]
+            // For the dock, `group_header_label` carries `dock_enter_label()`:
+            // what Enter does on the selection, if anything. Upstream's `h`
+            // show-done hint is not offered: Fuigo's dock lists running
+            // subagents only and has no `h` binding.
+            let mut hints = vec![HintItem::paired(
+                crate::key!('j'),
+                crate::key!('k'),
+                "navigate",
+            )];
+            if let Some(label) = group_header_label {
+                hints.push(HintItem::new(crate::key!(Enter), label));
+            }
+            if selected_can_kill {
+                hints.push(HintItem::new(crate::key!('x'), "kill"));
+            }
+            hints.push(HintItem::new(crate::key!(Tab), "prompt"));
+            hints
         }
         ActivePane::Queue => {
             let mut hints = vec![
@@ -1158,11 +1041,9 @@ pub fn build_hints(
         }
     };
     if is_turn_running && let Some(def) = registry.find(ActionId::CancelTurn) {
-        let mut hint = def.hint();
-        if esc_would_cancel_turn {
-            hint.keys = vec![crate::key!(Esc)];
-        }
-        hints.push(hint);
+        // Esc never cancels a turn, in any mode, so the bar always advertises the
+        // registry binding (Ctrl+C) for it.
+        hints.push(def.hint());
     }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
     if matches!(active_pane, ActivePane::Prompt)
@@ -1233,7 +1114,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             selected_is_user_prompt,
             selected_is_agent_message,
             false,
@@ -1242,113 +1122,6 @@ mod tests {
     }
     fn first_two_labels(hints: &[HintItem]) -> Vec<&str> {
         hints.iter().take(2).map(|h| h.label.as_ref()).collect()
-    }
-    fn hooked_read_state(member_count: usize, viewport: Rect) -> ScrollbackState {
-        use crate::scrollback::RenderBlock;
-        use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-        crate::appearance::cache::set_group_tool_verbs(true);
-        crate::appearance::cache::set_show_thinking_blocks(false);
-        let mut state = ScrollbackState::new();
-        let first = state.push_block(RenderBlock::read("first.rs", None));
-        for i in 1..member_count {
-            state.push_block(RenderBlock::read(format!("member-{i}.rs"), None));
-        }
-        state.attach_hooks(
-            first,
-            HookPhase::Post,
-            vec![HookRunEntry {
-                name: "hover-hook".to_owned(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }],
-        );
-        state.prepare_layout(viewport.width, viewport.height);
-        state
-    }
-    fn render_hook_frame(state: &ScrollbackState, viewport: Rect) -> Buffer {
-        let layouts = state.get_cached_entry_layouts().expect("layout cache");
-        let entries = state.entries_in_range(0..state.len());
-        let mut buf = Buffer::empty(viewport);
-        crate::scrollback::render::render_scrolled_entries_with_scratch(
-            &mut buf,
-            viewport,
-            &entries,
-            0,
-            None,
-            &Theme::current(),
-            state.appearance(),
-            layouts,
-            0,
-            None,
-            None,
-            None,
-            0,
-            0,
-            &[],
-            Some((state.group_spans(), 0)),
-            state.cwd(),
-        );
-        buf
-    }
-    fn hover_hook_badge(buf: &mut Buffer, state: &ScrollbackState, viewport: Rect, row: u16) {
-        let row_text: String = (viewport.left()..viewport.right())
-            .map(|x| buf[(x, row)].symbol())
-            .collect();
-        let badge_col = viewport.x + row_text.find("[hooks:").expect("rendered hook badge") as u16;
-        render_hook_hover_popup(
-            buf,
-            viewport,
-            state,
-            Some(0),
-            (badge_col, row),
-            &Theme::current(),
-        );
-    }
-    fn frame_text(buf: &Buffer) -> String {
-        (buf.area.top()..buf.area.bottom())
-            .flat_map(|y| (buf.area.left()..buf.area.right()).map(move |x| buf[(x, y)].symbol()))
-            .collect()
-    }
-    #[test]
-    fn hook_hover_popup_allows_singleton_verb_header() {
-        let viewport = Rect::new(0, 0, 100, 12);
-        let state = hooked_read_state(1, viewport);
-        let layout = state.get_cached_entry_layouts().expect("layout cache")[0];
-        assert!(layout.verb_group_header);
-        assert_eq!(layout.group_header_count, 1);
-        assert!(!layout.is_expanded_verb_header());
-        let mut buf = render_hook_frame(&state, viewport);
-        hover_hook_badge(&mut buf, &state, viewport, 0);
-        assert!(frame_text(&buf).contains("hover-hook"));
-    }
-    #[test]
-    fn hook_hover_popup_allows_expanded_verb_member_zero() {
-        let viewport = Rect::new(0, 0, 100, 12);
-        let mut state = hooked_read_state(2, viewport);
-        state.set_selected(Some(0));
-        assert!(state.toggle_group_expansion());
-        state.set_selected(None);
-        state.prepare_layout(viewport.width, viewport.height);
-        assert!(
-            state.get_cached_entry_layouts().expect("layout cache")[0].is_expanded_verb_header()
-        );
-        let mut buf = render_hook_frame(&state, viewport);
-        hover_hook_badge(&mut buf, &state, viewport, 1);
-        assert!(frame_text(&buf).contains("hover-hook"));
-    }
-    #[test]
-    fn hook_hover_popup_skips_collapsed_multi_member_verb_header() {
-        let viewport = Rect::new(0, 0, 100, 12);
-        let state = hooked_read_state(2, viewport);
-        let layout = state.get_cached_entry_layouts().expect("layout cache")[0];
-        assert!(layout.verb_group_header);
-        assert_eq!(layout.group_header_count, 2);
-        assert!(!layout.is_expanded_verb_header());
-        let mut buf = render_hook_frame(&state, viewport);
-        hover_hook_badge(&mut buf, &state, viewport, 0);
-        assert!(!frame_text(&buf).contains("hover-hook"));
     }
     #[test]
     fn demotion_hint_uses_registered_ctrl_b_binding() {
@@ -1370,7 +1143,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1405,7 +1177,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1576,7 +1347,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             Some(&search),
         )
     }
@@ -1680,7 +1450,6 @@ mod tests {
             false,
             false,
             false,
-            false,
             None,
         );
         assert!(
@@ -1721,7 +1490,6 @@ mod tests {
             true,
             false,
             is_turn_running,
-            false,
             false,
             false,
             false,
@@ -1781,7 +1549,6 @@ mod tests {
                 true,
                 false,
                 true,
-                false,
                 true,
                 false,
                 false,
@@ -1796,52 +1563,48 @@ mod tests {
             );
         }
     }
-    /// The running-turn cancel hint key tracks `esc_would_cancel_turn`, the input-routing predicate computed by the caller.
-    /// The key is Esc when a bare press would reach the policy's mid-turn cancel, the registry Ctrl+C binding otherwise.
-    /// (The predicate itself, its gate, panes, and higher-priority Esc consumers, is pinned by `esc_would_cancel_turn_tests` in `agent_view::input`.)
+    /// A running turn always advertises the registry cancel binding (Ctrl+C).
+    /// Esc no longer cancels a turn in any mode, so the bar must never offer it:
+    /// replaces `running_turn_cancel_hint_key_tracks_esc_predicate`, which pinned
+    /// the removed `esc_would_cancel_turn` predicate.
     #[test]
-    fn running_turn_cancel_hint_key_tracks_esc_predicate() {
+    fn running_turn_cancel_hint_always_uses_the_registry_binding() {
         let prompt = PromptWidget::default();
         let registry = ActionRegistry::defaults();
-        for (esc_would_cancel_turn, expected) in
-            [(true, crate::key!(Esc)), (false, crate::key!('c', CONTROL))]
-        {
-            let hints = build_hints(
-                ActivePane::Prompt,
-                prompt_focus_hint(),
-                &prompt,
-                &registry,
-                false,
-                None,
-                None,
-                "expand thinking",
-                false,
-                false,
-                None,
-                false,
-                false,
-                false,
-                false,
-                true,
-                false,
-                true,
-                esc_would_cancel_turn,
-                false,
-                false,
-                false,
-                false,
-                None,
-            );
-            let cancel = hints
-                .iter()
-                .find(|h| h.label == "cancel")
-                .expect("running turn must surface the cancel hint");
-            assert_eq!(
-                cancel.keys,
-                vec![expected],
-                "cancel hint key for esc_would_cancel_turn={esc_would_cancel_turn}"
-            );
-        }
+        let hints = build_hints(
+            ActivePane::Prompt,
+            prompt_focus_hint(),
+            &prompt,
+            &registry,
+            false,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        let cancel = hints
+            .iter()
+            .find(|h| h.label == "cancel")
+            .expect("running turn must surface the cancel hint");
+        assert_eq!(cancel.keys, vec![crate::key!('c', CONTROL)]);
+        assert!(
+            !cancel.keys.contains(&crate::key!(Esc)),
+            "the cancel hint must never advertise Esc"
+        );
     }
     /// Running turn with an open scrollback search: the search's own `Esc cancel` hint stays the only Esc hint.
     /// The CancelTurn hint keeps Ctrl+C (the caller's predicate is false while the search would steal Esc).
@@ -1869,7 +1632,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,
@@ -1919,7 +1681,6 @@ mod tests {
             false,
             false,
             true,
-            false,
             false,
             false,
             false,

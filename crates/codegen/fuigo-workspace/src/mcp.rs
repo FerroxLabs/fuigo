@@ -493,14 +493,19 @@ pub(crate) async fn drive_server_starts(
             state.mark_servers_initializing(remaining_names.iter().cloned());
         }
     }
-    // Per-server startup watchdog sized to the shared deadline, so a hung
-    // handshake fails on its own before the deadline has to cancel it.
-    let startup_timeout_sec = discovery_timeout
+    // Hand each client the shared deadline rather than a startup budget computed here. Only the
+    // client knows which handshake phases its transport runs: a probing transport (HTTP, ACP)
+    // must keep the `server/discover` window out of its legacy phase, or a swallowed probe burns
+    // the whole deadline in phase 1; stdio runs no probe at all and must keep the FULL deadline
+    // for its `initialize`, or a cold-start `npx`/`uvx` server loses ten seconds to a phase it
+    // never runs. The client also bounds its own handshake RETRIES by the deadline's remainder,
+    // so a hung handshake fails with this server's own error before the deadline has to cancel it
+    // and flatten every failure into the generic discovery timeout.
+    let deadline_secs = discovery_timeout
         .as_secs()
-        .saturating_add(u64::from(discovery_timeout.subsec_nanos() != 0))
-        .max(1);
+        .saturating_add(u64::from(discovery_timeout.subsec_nanos() != 0));
     let overrides = McpClientTimeoutOverrides {
-        startup_timeout_sec: Some(startup_timeout_sec),
+        handshake_deadline_sec: Some(deadline_secs),
         ..Default::default()
     };
     // Two spawn contexts, chosen PER SERVER: only first-party app endpoints

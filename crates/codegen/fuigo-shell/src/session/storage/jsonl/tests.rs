@@ -1318,6 +1318,27 @@ async fn list_sessions_recent_excludes_hidden_sessions() {
     assert_eq!(recent[0].info.id, acp::SessionId::new("visible"));
 }
 #[tokio::test]
+async fn list_sessions_recent_excludes_unused_optimistic_husks() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = crate::util::fuigo_home::encode_cwd_dirname("/workspace");
+    let now = chrono::Utc::now();
+    write_test_summary(tmp.path(), &cwd, "real", now, None, None, None);
+    let husk_dir = write_test_summary(tmp.path(), &cwd, "husk", now, None, None, None);
+    let husk_path = husk_dir.join("summary.json");
+    let mut husk: Summary = serde_json::from_slice(&std::fs::read(&husk_path).unwrap()).unwrap();
+    husk.num_messages = 0;
+    husk.num_chat_messages = 0;
+    husk.session_summary.clear();
+    std::fs::write(&husk_path, serde_json::to_vec_pretty(&husk).unwrap()).unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let recent = adapter.list_sessions_recent(100).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(
+        recent.first().map(|s| &s.info.id),
+        Some(&acp::SessionId::new("real"))
+    );
+}
+#[tokio::test]
 async fn list_sessions_recent_skips_headless_without_shorting_the_page() {
     let tmp = TempDir::new().unwrap();
     let cwd = crate::util::fuigo_home::encode_cwd_dirname("/workspace");
@@ -2303,6 +2324,7 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            max_retries: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
             query_params: Default::default(),
@@ -2310,6 +2332,9 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
             reasoning_effort: None,
             stream_tool_calls: None,
+            mtls_cert_dir: None,
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         },
         Box::new(persistence),
         event_tx,

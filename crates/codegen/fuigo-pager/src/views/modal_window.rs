@@ -754,6 +754,17 @@ pub fn render_modal_shortcuts(
                 buf.set_string(cur_x + key_w, y, label_part, label_style);
             }
 
+            // Terminal theme (Reset band slots): the bg_highlight hover underlay is invisible — reverse video carries the cue.
+            if is_hovered && theme.is_bandless() {
+                let hover_rect = Rect {
+                    x: cur_x,
+                    y,
+                    width: visible_w,
+                    height: 1,
+                };
+                buf.set_style(hover_rect, Style::default().add_modifier(Modifier::REVERSED));
+            }
+
             hits.push(ShortcutHitArea {
                 rect: Rect {
                     x: cur_x,

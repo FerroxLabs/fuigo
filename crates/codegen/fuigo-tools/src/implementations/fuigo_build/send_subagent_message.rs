@@ -2,18 +2,64 @@
 
 use crate::implementations::fuigo_build::task::backend::SubagentBackendResource;
 use crate::implementations::fuigo_build::task::types::{
-    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SubagentDepthCounter,
+    ActiveAgentMessageOperation, ActiveAgentMessageOutcome, ActiveAgentMessageRequest,
+    SubagentDepthCounter,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 pub const SEND_SUBAGENT_MESSAGE_TOOL_NAME: &str = "send_subagent_message";
 
+/// How the SENDER meant the message. This engine lands all three the same way
+/// (see [`SendSubagentMessageTool::description_template`]); the class is
+/// recorded and named on the message's row, and does not route the delivery.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SendSubagentMessageDelivery {
+    /// Meant as a correction to the turn already in flight.
+    Steer,
+    /// Meant as a later instruction (the class of every send before this field existed).
+    Queue,
+    /// Meant as urgent.
+    Interject,
+}
+
+impl From<SendSubagentMessageDelivery> for ActiveAgentMessageOperation {
+    fn from(delivery: SendSubagentMessageDelivery) -> Self {
+        match delivery {
+            SendSubagentMessageDelivery::Steer => ActiveAgentMessageOperation::Steer,
+            SendSubagentMessageDelivery::Queue => ActiveAgentMessageOperation::Queue,
+            SendSubagentMessageDelivery::Interject => ActiveAgentMessageOperation::Interject,
+        }
+    }
+}
+
+/// The one place an omitted `delivery` becomes an operation: `queue`, the
+/// class every send carried before the field existed.
+pub fn resolve_delivery(delivery: Option<SendSubagentMessageDelivery>) -> ActiveAgentMessageOperation {
+    match delivery {
+        Some(delivery) => ActiveAgentMessageOperation::from(delivery),
+        None => ActiveAgentMessageOperation::Queue,
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendSubagentMessageInput {
-    /// ID of the active subagent that should receive the message.
+    /// ID of the subagent that should receive the message (active, or completed and eligible to resume).
     pub subagent_id: String,
     /// Text to send to the subagent.
     pub text: String,
+    /// How you mean the message; omitted means `queue`. Recorded and shown on
+    /// the message's row — it does not change how the message lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SendSubagentMessageDelivery>,
+}
+
+impl SendSubagentMessageInput {
+    pub fn operation(&self) -> ActiveAgentMessageOperation {
+        resolve_delivery(self.delivery)
+    }
 }
 
 #[derive(
@@ -143,8 +189,23 @@ impl crate::types::tool_metadata::ToolMetadata for SendSubagentMessageTool {
         ToolNamespace::FuigoBuild
     }
 
+    /// INVARIANT: this text may promise the model only what the engine
+    /// implements. Fuigo has ONE delivery for all three classes. The class is
+    /// carried as far as authorization (`fuigo-shell`
+    /// `session/message_delivery.rs` and `agent/subagent/child_runtime.rs`
+    /// are the only readers of `ActiveAgentMessageOperation`) and is never
+    /// routed on: `admit_parent_agent_message`
+    /// (`session/acp_session_impl/parent_message.rs`) commits every class
+    /// through `commit_queued_delivery`, `promote_parent_agent_messages`
+    /// then lifts every parent-agent row into the running turn at the next
+    /// safe point, and the commit raises `ParentMessageSignal`, which
+    /// interrupts an in-flight `get_task_output` wait. Upstream's
+    /// `ParentInterjectSignal` / `order_for_delivery` ordering is not ported.
+    /// If the classes are ever made to differ, rewrite this text in the same
+    /// commit: `tool_description_promises_only_the_delivery_the_engine_implements`
+    /// pins the pair.
     fn description_template(&self) -> &str {
-        "Send a follow-up message to an active subagent owned by this session. The subagent must still be active and accepting messages."
+        "Send a follow-up message to a subagent owned by this session. An active subagent receives it as a message; an eligible completed subagent (not cancelled, not workflow-owned, and one whose completion reports to this session) resumes with the same identity and runs the text as its next turn, reporting like a background completion. `delivery` (`queue` by default, `steer`, `interject`) records how you mean the message and is named on its row in the transcript; it does not change how the message lands. Every class lands the same way here: an active subagent's message joins the turn it is running at that turn's next safe point, interrupting it if it is blocked waiting on background work, and starts a turn of its own if the subagent is idle. Do not pick a class expecting a different arrival order or a different priority."
     }
 }
 
@@ -196,7 +257,12 @@ impl fuigo_tool_runtime::Tool for SendSubagentMessageTool {
         let (Some(0), Some(backend)) = (depth, backend) else {
             return Ok(SendSubagentMessageOutput::Unsupported);
         };
-        let request = match ActiveAgentMessageRequest::try_new(input.subagent_id, input.text) {
+        let operation = input.operation();
+        let request = match ActiveAgentMessageRequest::try_new_with_operation(
+            input.subagent_id,
+            input.text,
+            operation,
+        ) {
             Ok(request) => request,
             Err(outcome) => return Ok(outcome.into()),
         };

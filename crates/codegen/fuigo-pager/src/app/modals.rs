@@ -457,6 +457,10 @@ impl AgentView {
                         }
                         UsageModalOutcome::Changed => InputOutcome::Changed,
                         UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
+                        UsageModalOutcome::Close => {
+                            self.active_modal = None;
+                            InputOutcome::Changed
+                        }
                     };
                 }
                 _ => return InputOutcome::Changed,
@@ -1666,6 +1670,10 @@ impl AgentView {
                         }
                         UsageModalOutcome::Changed => InputOutcome::Changed,
                         UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
+                        UsageModalOutcome::Close => {
+                            self.active_modal = None;
+                            InputOutcome::Changed
+                        }
                     };
                 }
                 _ => return InputOutcome::Changed,
@@ -1962,7 +1970,7 @@ impl AgentView {
                 // Otherwise show the normal hints plus the `d delete` action
                 // Chat mode drops the deep-search / filter / delete hints (local-disk-row actions)
                 let chat_mode = self.app_chat_mode;
-                let mut session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
+                let session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
                     vec![
                         Shortcut {
                             label: "y confirm delete",
@@ -1984,19 +1992,19 @@ impl AgentView {
                         id: 0,
                     }];
                     if !external {
-                        shortcuts.extend([
-                            Shortcut {
-                                label: "e expand",
-                                clickable: false,
-                                id: 0,
-                            },
-                            Shortcut {
-                                label: "/ search",
-                                clickable: false,
-                                id: 0,
-                            },
-                        ]);
+                        shortcuts.push(Shortcut {
+                            label: "e expand",
+                            clickable: false,
+                            id: 0,
+                        });
                     }
+                    // The search hint is static: it reads `/ search` in every mode, so
+                    // entering or leaving search never rewrites the footer under the user.
+                    shortcuts.push(Shortcut {
+                        label: "/ search",
+                        clickable: false,
+                        id: 0,
+                    });
                     if !chat_mode {
                         shortcuts.push(Shortcut {
                             label: "f filter",
@@ -2013,10 +2021,6 @@ impl AgentView {
                     }
                     shortcuts
                 };
-                // Surface `i search` in the footer when vim nav mode is active.
-                if pending_delete.is_none() {
-                    mw::push_vim_nav_search_hint(&mut session_shortcuts, state.search_active);
-                }
                 let compact = self.scrollback.appearance().prompt.compact;
                 let modal_config = ModalWindowConfig {
                     title: "Resume session",
@@ -2037,16 +2041,11 @@ impl AgentView {
                 if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, &theme)
                 {
                     let content_area = mca.content;
-                    picker::render_picker_search_bar(
+                    crate::views::session_picker_surface::render_session_picker_search_bar(
                         buf,
-                        content_area.x,
-                        content_area.y,
-                        content_area.width,
+                        Rect::new(content_area.x, content_area.y, content_area.width, 1),
                         &theme,
                         state,
-                        state.search_active,
-                        true,
-                        Some(theme.bg_base),
                     );
                     // Render filter indicator on the search bar row (hidden in chat mode; every row is a conversation)
                     if chat_mode {
@@ -2546,6 +2545,81 @@ mod session_picker_delete_tests {
             }
             _ => None,
         }
+    }
+
+    /// Ported from upstream `focused_search_is_marked_and_keeps_the_selected_row`:
+    /// the `/resume` picker must mark the active text field (bold ` search:` label in
+    /// the title colour), keep the selected row visible while editing, and keep a
+    /// static `/ search` footer hint in every nav mode.
+    #[test]
+    fn focused_search_is_marked_and_keeps_the_selected_row() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = crate::theme::Theme::current();
+        let mut agent = make_agent();
+        open_picker(&mut agent, vec![entry("s0")]);
+        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
+            state.search_active = true;
+            state.selected = 1;
+            state.set_query("s0");
+        }
+        let area = Rect::new(0, 0, 100, 28);
+        let mut buf = Buffer::empty(area);
+        agent.draw_active_modal(area, &mut buf, theme, false);
+        let screen = |buf: &Buffer| -> String {
+            (0..buf.area.height).fold(String::new(), |mut text, y| {
+                for x in 0..buf.area.width {
+                    if let Some(cell) = buf.cell((x, y)) {
+                        text.push_str(cell.symbol());
+                    }
+                }
+                text.push('\n');
+                text
+            })
+        };
+        let content = screen(&buf);
+        assert!(
+            content.contains(" search:"),
+            "agent /resume must keep the search label, got: {content:?}"
+        );
+        assert!(!content.contains(">search:"), "{content:?}");
+        assert!(
+            content.contains("/ search"),
+            "agent /resume footer must keep / search, got: {content:?}"
+        );
+        assert!(
+            content.contains("s0"),
+            "focused search must keep the selected session visible"
+        );
+        let marked = (0..buf.area.height).any(|y| {
+            (0..buf.area.width).any(|x| {
+                buf.cell((x, y)).is_some_and(|cell| {
+                    cell.symbol() == "s"
+                        && cell.fg == theme.text_primary
+                        && cell.modifier.contains(ratatui::style::Modifier::BOLD)
+                })
+            })
+        });
+        assert!(
+            marked,
+            "the focused search label must be bold in the title colour: {content:?}"
+        );
+
+        crate::appearance::cache::set_vim_mode(true);
+        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
+            state.search_active = false;
+        }
+        let mut listed = Buffer::empty(area);
+        agent.draw_active_modal(area, &mut listed, theme, false);
+        let listed_text = screen(&listed);
+        crate::appearance::cache::set_vim_mode(false);
+        assert!(listed_text.contains("/ search"), "{listed_text:?}");
+        assert!(
+            !listed_text.contains("i search"),
+            "leaving search must not change the hint bar, got: {listed_text:?}"
+        );
     }
 
     #[test]

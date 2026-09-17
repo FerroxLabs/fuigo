@@ -179,6 +179,7 @@ mod tests {
                 max_completion_tokens: None,
                 temperature: None,
                 top_p: None,
+                max_retries: Some(6),
                 api_backend: Default::default(),
                 extra_headers: Default::default(),
                 query_params: Default::default(),
@@ -186,6 +187,9 @@ mod tests {
                 context_window: NonZeroU64::new(128_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             },
             prompt_index: 0,
             total_tokens: 0,
@@ -206,6 +210,7 @@ mod tests {
         assert!(deserialized.conversation.is_empty());
         assert!(deserialized.agent_edited_paths.is_empty());
         assert!(deserialized.last_compaction_prompt_index.is_none());
+        assert_eq!(deserialized.sampling_config.max_retries, Some(6));
     }
 
     #[test]
@@ -224,6 +229,7 @@ mod tests {
                 max_completion_tokens: Some(4096),
                 temperature: Some(0.7),
                 top_p: None,
+                max_retries: None,
                 api_backend: Default::default(),
                 extra_headers: Default::default(),
                 query_params: Default::default(),
@@ -231,6 +237,9 @@ mod tests {
                 context_window: NonZeroU64::new(128_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
+                mtls_cert_dir: None,
+                rate_limit_retry_threshold: None,
+                reasoning_summary: None,
             },
             prompt_index: 5,
             total_tokens: 1234,

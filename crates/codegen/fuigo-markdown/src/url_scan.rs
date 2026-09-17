@@ -1,5 +1,7 @@
 //! Plain-URL detection over rendered display ratatui Lines.
 
+use std::ops::Range;
+
 use linkify::{LinkFinder, LinkKind};
 use ratatui::text::Line;
 
@@ -31,8 +33,6 @@ pub(crate) fn detect_plain_urls_with_offset(
 ) -> (Vec<HyperlinkTarget>, u32) {
     let mut result = Vec::new();
     let mut current_id = next_id;
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
 
     for (i, line) in lines.iter().enumerate() {
         let line_index = line_index_offset + i;
@@ -40,31 +40,10 @@ pub(crate) fn detect_plain_urls_with_offset(
         // (pretty-mode link coloring) is one target, not a truncated prefix.
         let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        for link in finder.links(&line_text) {
-            let start = link.start();
-            let end = link.end();
-            if start > end
-                || end > line_text.len()
-                || !line_text.is_char_boundary(start)
-                || !line_text.is_char_boundary(end)
-            {
-                continue;
-            }
-            let before = &line_text[..start];
-            let matched = &line_text[start..end];
-
-            let col_start = unicode_display_width(before);
-            let col_end = col_start + unicode_display_width(matched);
-            let url = match link.kind() {
-                LinkKind::Email => {
-                    // `git@github.com:org/repo` is an scp remote, not mail.
-                    if matches!(line_text.as_bytes().get(end), Some(b':' | b'/')) {
-                        continue;
-                    }
-                    format!("mailto:{}", link.as_str())
-                }
-                _ => link.as_str().to_string(),
-            };
+        for_each_plain_link(&line_text, |range, url| {
+            let col_start = unicode_display_width(line_text.get(..range.start).unwrap_or(""));
+            let col_end =
+                col_start + unicode_display_width(line_text.get(range.clone()).unwrap_or(""));
 
             // Dedup: skip if any existing or already-added target overlaps on the same line
             let overlaps = existing.iter().chain(result.iter()).any(|h| {
@@ -82,10 +61,46 @@ pub(crate) fn detect_plain_urls_with_offset(
                 });
                 current_id += 1;
             }
-        }
+        });
     }
 
     (result, current_id)
+}
+
+/// One finder for the whole process. `LinkFinder::new` + `kinds` rebuilds the matcher config on
+/// every call, and [`detect_plain_urls_with_offset`] calls this once per *rendered line*, so
+/// building it per call put that cost on every line of every re-render.
+static PLAIN_LINK_FINDER: std::sync::LazyLock<LinkFinder> = std::sync::LazyLock::new(|| {
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
+    finder
+});
+
+/// Call `f` with the byte range and destination of every plain URL or email
+/// in `text`. Emails become `mailto:`; scp remotes (`git@host:path`) are skipped.
+pub(crate) fn for_each_plain_link(text: &str, mut f: impl FnMut(Range<usize>, String)) {
+    for link in PLAIN_LINK_FINDER.links(text) {
+        let start = link.start();
+        let end = link.end();
+        if start > end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            continue;
+        }
+        let url = match link.kind() {
+            LinkKind::Email => {
+                // `git@github.com:org/repo` is an scp remote, not mail.
+                if matches!(text.as_bytes().get(end), Some(b':' | b'/')) {
+                    continue;
+                }
+                format!("mailto:{}", link.as_str())
+            }
+            _ => link.as_str().to_string(),
+        };
+        f(start..end, url);
+    }
 }
 
 #[cfg(test)]

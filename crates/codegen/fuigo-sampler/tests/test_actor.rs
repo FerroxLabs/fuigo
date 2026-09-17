@@ -103,6 +103,9 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         subscription: None,
         subscription_resolver: None,
         header_injector: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     }
 }
 
@@ -931,6 +934,54 @@ async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
     // RATE_LIMIT_RETRY_THRESHOLD is 2, so the actor stops after two attempts: the first attempt and one retry that also 429s
     // Allow a small slack in case scheduling fires a third attempt before the threshold check
     assert!((1..=3).contains(&hits), "expected 1-3 hits, got {hits}");
+}
+
+/// F023: `[models.<key>] rate_limit_retry_threshold = N` reaches the sampler as `SamplerConfig::rate_limit_retry_threshold`
+/// and replaces the actor's `RetryPolicy` default as the total-attempt ceiling for 429s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_rate_limit_threshold_controls_total_wire_attempts() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "0")],
+                    json!({ "error": { "message": "slow down" } }).to_string(),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.max_retries = Some(6);
+    cfg.rate_limit_retry_threshold = Some(4);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let rid = RequestId::from("req-429-configured");
+    handle.submit(rid.clone(), user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(60)).await;
+    server.shutdown();
+
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, SamplingErrorKind::RateLimited);
+            assert_eq!(error.status_code, Some(429));
+        }
+        other => panic!("expected Failed(RateLimited), got {other:?}"),
+    }
+
+    let hits = counter.load(Ordering::SeqCst);
+    assert_eq!(
+        hits, 4,
+        "the configured threshold is a total-attempt ceiling and must override the policy default of 2"
+    );
 }
 
 // ---------------------------------------------------------------------------

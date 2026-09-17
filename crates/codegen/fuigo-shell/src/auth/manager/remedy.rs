@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use super::{AuthManager, RefreshReason};
 use crate::auth::error::AuthError;
 use crate::auth::model::FuigoAuth;
@@ -109,6 +111,23 @@ impl AuthManager {
             Some(serde_json::json!({ "outcome": logged })),
         );
         outcome
+    }
+
+    /// Never blocks the caller; a no-op when the credential needs no refresh.
+    /// `cancel` (the agent's teardown token) stops the task, but an exchange
+    /// already in flight is abandoned, not dropped, and may still land after
+    /// teardown ([`AuthManager::silent_refresh`]'s rotated-token safety).
+    pub fn prewarm_auth_refresh(self: &Arc<Self>, cancel: CancellationToken) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::select! {
+                // A cancel that lands before the first poll must win, so a
+                // failed spawn never starts an exchange at all.
+                biased;
+                _ = cancel.cancelled() => {}
+                _ = manager.silent_refresh() => {}
+            }
+        });
     }
 
     /// Bounded best-effort mint for RPC paths that must answer promptly.
@@ -378,6 +397,160 @@ mod tests {
             manager.auth_remedy().is_self_healing(),
             "and the other arm would have accepted the same credential",
         );
+    }
+
+    #[tokio::test]
+    async fn prewarm_lands_a_renewed_credential_without_the_caller_awaiting() {
+        struct RenewingRefresher;
+        #[async_trait::async_trait]
+        impl TokenRefresher for RenewingRefresher {
+            async fn refresh(
+                &self,
+                _reason: crate::auth::manager::RefreshReason,
+            ) -> RefreshOutcome {
+                RefreshOutcome::Success(Box::new(FuigoAuth {
+                    key: "prewarmed".into(),
+                    auth_mode: AuthMode::Oidc,
+                    refresh_token: Some("rt-new".into()),
+                    expires_at: Some(Utc::now() + Duration::hours(1)),
+                    ..FuigoAuth::test_default()
+                }))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+        // CI runs in pods where `is_devbox_environment()` is true; a mint would resolve the credential for the wrong reason
+        manager.set_devbox_env_for_test(false);
+        manager.hot_swap(FuigoAuth {
+            key: "expired-oidc".into(),
+            auth_mode: AuthMode::Oidc,
+            refresh_token: Some("rt-live".into()),
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            ..FuigoAuth::test_default()
+        });
+        manager.set_refresher(Arc::new(RenewingRefresher));
+        assert!(manager.current().is_none(), "the credential starts expired");
+
+        // Register the waiter first: the notifier uses `notify_waiters`, so a
+        // refresh landing before registration would be a lost wakeup.
+        let notifier = manager.refresh_notifier();
+        let landed = notifier.notified();
+        tokio::pin!(landed);
+        landed.as_mut().enable();
+        manager.prewarm_auth_refresh(CancellationToken::new());
+        tokio::time::timeout(std::time::Duration::from_secs(10), landed)
+            .await
+            .expect("the prewarmed refresh must land unattended");
+        assert_eq!(
+            manager.current().map(|a| a.key),
+            Some("prewarmed".into()),
+            "the renewed credential must be the one startup auth() will serve"
+        );
+    }
+
+    /// spawn_fuigo_shell's failure path drops a DropGuard before any agent
+    /// owner exists; a cancel that precedes the task's first poll must stop
+    /// the prewarm before it spends a refresh attempt. Iterated so a
+    /// regression to an unbiased select fails outright instead of flaking.
+    #[tokio::test]
+    async fn cancel_before_first_poll_stops_the_prewarm_before_it_spends_a_refresh() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingRefresher(Arc<AtomicU32>);
+        #[async_trait::async_trait]
+        impl TokenRefresher for CountingRefresher {
+            async fn refresh(
+                &self,
+                _reason: crate::auth::manager::RefreshReason,
+            ) -> RefreshOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                RefreshOutcome::transient("unreachable for a cancelled prewarm")
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+        // CI runs in pods where `is_devbox_environment()` is true; a mint would resolve the credential for the wrong reason
+        manager.set_devbox_env_for_test(false);
+        manager.hot_swap(FuigoAuth {
+            key: "expired-oidc".into(),
+            auth_mode: AuthMode::Oidc,
+            refresh_token: Some("rt-live".into()),
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            ..FuigoAuth::test_default()
+        });
+        let attempts = Arc::new(AtomicU32::new(0));
+        manager.set_refresher(Arc::new(CountingRefresher(attempts.clone())));
+
+        for _ in 0..32 {
+            let agent_cancel = CancellationToken::new();
+            // The failed-spawn `?` exit: the guard drops before the task first runs.
+            drop(agent_cancel.clone().drop_guard());
+            manager.prewarm_auth_refresh(agent_cancel.child_token());
+            // Current-thread runtime: the task first polls in these yields and
+            // must take the biased cancelled arm without touching the refresher.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "a prewarm cancelled before its first poll must never start an exchange"
+        );
+        assert!(
+            manager.current().is_none(),
+            "no credential may land from a cancelled prewarm"
+        );
+    }
+
+    /// Rule-8 measurement: an API-key credential (or none at all) never needs a refresh, so the
+    /// spawn-time prewarm must not touch the refresher for it.
+    #[tokio::test]
+    async fn prewarm_is_a_no_op_for_api_key_and_absent_credentials() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingRefresher(Arc<AtomicU32>);
+        #[async_trait::async_trait]
+        impl TokenRefresher for CountingRefresher {
+            async fn refresh(
+                &self,
+                _reason: crate::auth::manager::RefreshReason,
+            ) -> RefreshOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                RefreshOutcome::transient("unreachable for a prewarm that has nothing to refresh")
+            }
+        }
+
+        for seed in [
+            Some(FuigoAuth {
+                key: "api-key".into(),
+                auth_mode: AuthMode::ApiKey,
+                refresh_token: None,
+                expires_at: None,
+                ..FuigoAuth::test_default()
+            }),
+            None,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+            manager.set_devbox_env_for_test(false);
+            if let Some(auth) = seed {
+                manager.hot_swap(auth);
+            }
+            let attempts = Arc::new(AtomicU32::new(0));
+            manager.set_refresher(Arc::new(CountingRefresher(attempts.clone())));
+            manager.prewarm_auth_refresh(CancellationToken::new());
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                0,
+                "a prewarm with nothing to refresh must not start an exchange"
+            );
+        }
     }
 
     /// A panicked mint is an indeterminate credential state: the bounded wrapper must both return a permanent error AND record the verdict.

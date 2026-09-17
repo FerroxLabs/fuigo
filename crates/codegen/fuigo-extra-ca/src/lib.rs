@@ -23,14 +23,25 @@ pub const ENV_FUIGO_EXTRA_CA_BUNDLE: &str = "FUIGO_EXTRA_CA_BUNDLE";
 
 pub const ENV_SSL_CERT_FILE: &str = "SSL_CERT_FILE";
 
+/// ring on Windows ARM64: aws-lc-sys's jitterentropy is miscompiled for that target and overflows the stack on the first TLS handshake (upstream 1.0.32, xai-org/plugin-marketplace#426).
+/// The single `cfg!` that selects the provider; `provider_for` takes it as a value so the choice is unit-tested on every host.
+const IS_RING_TARGET: bool = cfg!(all(windows, target_arch = "aarch64"));
+
+/// The provider this crate installs: ring where `ring_target`, aws-lc-rs everywhere else.
+fn provider_for(ring_target: bool) -> rustls::crypto::CryptoProvider {
+    if ring_target {
+        rustls::crypto::ring::default_provider()
+    } else {
+        rustls::crypto::aws_lc_rs::default_provider()
+    }
+}
+
+/// Installs aws-lc-rs, or ring where `IS_RING_TARGET`.
 /// First install wins; without a default, `ClientConfig::builder()` panics when `ring` and `aws-lc-rs` are both compiled in.
 pub fn ensure_default_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        if rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .is_err()
-        {
+        if provider_for(IS_RING_TARGET).install_default().is_err() {
             let supports_p521 = rustls::crypto::CryptoProvider::get_default().is_some_and(|p| {
                 p.signature_verification_algorithms
                     .supported_schemes()
@@ -146,17 +157,13 @@ fn client_config_with_shared_roots() -> rustls::ClientConfig {
     roots.add_parsable_certificates(cached_native_der().iter().cloned());
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     roots.add_parsable_certificates(extra_root_ders().iter().cloned().map(CertificateDer::from));
-    #[expect(clippy::expect_used)]
-    rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into(),
-    )
-    .with_safe_default_protocol_versions()
-    .expect("aws-lc-rs supports the default protocol versions")
-    .with_root_certificates(roots)
-    .with_no_client_auth()
+    // Must stay on builder(): naming a provider here would bypass the per-target choice in ensure_default_crypto_provider.
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
 }
 
-/// Shared rustls config for TLS outside reqwest (WebSocket, HTTP/1.1 upgrade), pinned to this crate's provider.
+/// Shared rustls config for TLS outside reqwest (WebSocket, HTTP/1.1 upgrade), using the process default provider.
 pub fn rustls_client_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG

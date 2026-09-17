@@ -289,6 +289,7 @@ mod tests {
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            max_retries: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
             query_params: Default::default(),
@@ -296,6 +297,9 @@ mod tests {
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
             reasoning_effort: None,
             stream_tool_calls: None,
+            mtls_cert_dir: None,
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
         }
     }
 

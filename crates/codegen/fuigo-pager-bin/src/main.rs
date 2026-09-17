@@ -47,6 +47,7 @@ use fuigo_shell::leader::{
 use fuigo_telemetry::process_info::{
     Entrypoint, Interactivity, ProcessIdentity, ReleaseChannel, set_identity, set_release_channel,
 };
+use std::io::Write as _;
 fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<ProcessIdentity> {
     use fuigo_telemetry::process_info::LeaderMode::Standalone;
     let (entrypoint, interactivity) = match command {
@@ -227,26 +228,23 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
 async fn run_setup_command(json: bool) {
     use fuigo_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
-        eprintln!("No deployment key or team sign-in found.");
-        eprintln!();
-        eprintln!("To install managed configuration, sign in with a team using `fuigo login`,");
-        eprintln!("or set a deployment key:");
-        eprintln!();
-        if cfg!(unix) {
-            eprintln!("  export FUIGO_DEPLOYMENT_KEY=<your-key>");
+        let key_line = if cfg!(unix) {
+            "  export FUIGO_DEPLOYMENT_KEY=<your-key>"
         } else {
-            eprintln!("  $env:FUIGO_DEPLOYMENT_KEY=\"<your-key>\"");
-        }
-        eprintln!("  fuigo setup");
-        eprintln!();
-        eprintln!("Or add the key to ~/.fuigo/config.toml:");
-        eprintln!();
-        eprintln!("  [endpoints]");
-        eprintln!("  deployment_key = \"<your-key>\"");
-        eprintln!();
-        eprintln!(
-            "If you don't have a deployment key, contact your organization's Fuigo administrator."
+            "  $env:FUIGO_DEPLOYMENT_KEY=\"<your-key>\""
+        };
+        // One best-effort write, failure reported not raised: fd 2 may be a closed terminal
+        // pane, and `eprintln!` panics on a failed write (SIGABRT under `panic = "abort"`).
+        let report = format!(
+            "No deployment key or team sign-in found.\n\n\
+             To install managed configuration, sign in with a team using `fuigo login`,\n\
+             or set a deployment key:\n\n\
+             {key_line}\n  fuigo setup\n\n\
+             Or add the key to ~/.fuigo/config.toml:\n\n\
+             \x20 [endpoints]\n  deployment_key = \"<your-key>\"\n\n\
+             If you don't have a deployment key, contact your organization's Fuigo administrator."
         );
+        let _ = writeln!(std::io::stderr(), "{report}");
         std::process::exit(1);
     }
     if json {
@@ -1396,6 +1394,7 @@ async fn run_agent_command(
             fs_read: false,
             fs_write: false,
             status_line: false,
+            user_message_echo: false,
         };
         // Bind this bridge to its parent before the leader connect, not after:
         // a cold leader spawn takes seconds, and a client that dies inside that
@@ -2074,10 +2073,12 @@ fn main() {
     if let Err(e) = result {
         fuigo_tty_utils::restore_native_stderr();
         finalize_span_profile();
-        match e.downcast_ref::<fuigo_pager::app::StartupFailure>() {
-            Some(startup) => eprintln!("{}", startup.user_report()),
-            None => eprintln!("Error: {e:#}"),
-        }
+        // fd 2 is very likely the pane the user just closed; a panicking write would abort the process
+        let report = match e.downcast_ref::<fuigo_pager::app::StartupFailure>() {
+            Some(startup) => startup.user_report(),
+            None => format!("Error: {e:#}"),
+        };
+        fuigo_pager::best_effort_stderr::eprint_line(&report);
         drop(_sentry_guard);
         std::process::exit(1);
     }
@@ -2444,6 +2445,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 continue_last_session: args.continue_last_session,
                 fork_session: args.fork_session,
                 worktree: args.worktree,
+                worktree_ref: args.worktree_ref,
                 restore_code: args.restore_code,
                 agent: args.agent.clone(),
                 agents_json: args.agents_json.clone(),

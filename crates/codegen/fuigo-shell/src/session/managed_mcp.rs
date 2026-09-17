@@ -211,6 +211,15 @@ impl std::fmt::Display for McpDisabledReason {
 }
 
 impl McpDisabledReason {
+    /// The policy file by name only: user-facing refusals must not leak the full path.
+    pub(crate) fn user_facing_source(&self) -> String {
+        let (Self::Allowlist { source } | Self::Denylist { source }) = self;
+        source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| source.display().to_string())
+    }
     pub(crate) fn for_blocked_server(
         policy: &fuigo_workspace::permission::resolution::McpServerAllowlist,
         server: &acp::McpServer,

@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
 pub mod two_pass;
+pub mod user_echo;
 pub mod visibility;
 pub use self::acp_session::*;
 pub use self::acp_types::*;
@@ -19,10 +20,11 @@ pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
 pub use self::persistence::{
     LocalFeedbackEntry, UserFeedbackEntry, find_local_child_for_remote, resolve_local_session,
-    resolve_local_session_any_cwd, session_exists_for_cwd,
+    resolve_local_session_any_cwd, resolve_local_session_ids_any_cwd, session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
+pub use self::user_echo::{CLIENT_USER_MESSAGE_ECHO_META, USER_MESSAGE_ECHO_CAPABILITY};
 pub use fuigo_fsnotify::{
     FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind,
 };
@@ -478,6 +480,7 @@ pub(crate) mod replay_events;
 pub mod repo_changes;
 #[path = "restore_stub.rs"]
 pub mod restore;
+pub(crate) mod resume_status;
 pub mod result;
 pub mod signals;
 pub(crate) mod slash_authority;

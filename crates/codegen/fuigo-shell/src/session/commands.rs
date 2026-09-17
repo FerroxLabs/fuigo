@@ -66,6 +66,12 @@ pub const HOOK_DENIED_CATEGORY: &str = "HookDenied";
 pub const MAX_TURNS_REACHED_CATEGORY: &str = "max_turns_reached";
 /// `_meta.cancellationCategory` of a stationarity end.
 pub const ACTION_STATIONARITY_CATEGORY: &str = "action_stationarity";
+/// `_meta.cancellationCategory` of a permission reject that ended the turn.
+pub const PERMISSION_REJECTED_CATEGORY: &str = "PermissionRejected";
+/// `_meta.cancellationCategory` of a dismissed permission prompt that ended the turn.
+pub const PERMISSION_CANCELLED_CATEGORY: &str = "PermissionCancelled";
+/// `_meta.cancellationCategory` of a mid-turn abort (user stop or unnamed interrupt).
+pub const MID_TURN_ABORT_CATEGORY: &str = "MidTurnAbort";
 /// `_meta.cancellationCategory` wire name of a cancel category: an explicit match so a variant rename cannot silently change the wire.
 /// This is deliberately a second vocabulary next to the serde snake_case of the events.jsonl / after-turn rails.
 /// `_meta` shipped PascalCase and clients match it.
@@ -75,9 +81,9 @@ pub fn meta_category_str(
     use fuigo_session_events::types::CancellationCategory;
     match category {
         CancellationCategory::HookDenied => HOOK_DENIED_CATEGORY,
-        CancellationCategory::PermissionRejected => "PermissionRejected",
-        CancellationCategory::PermissionCancelled => "PermissionCancelled",
-        CancellationCategory::MidTurnAbort => "MidTurnAbort",
+        CancellationCategory::PermissionRejected => PERMISSION_REJECTED_CATEGORY,
+        CancellationCategory::PermissionCancelled => PERMISSION_CANCELLED_CATEGORY,
+        CancellationCategory::MidTurnAbort => MID_TURN_ABORT_CATEGORY,
     }
 }
 impl PromptCompletionKind {
@@ -230,6 +236,14 @@ impl CancelTrigger {
             Self::SessionDelete => "session_delete",
             Self::Client(s) => s,
         }
+    }
+    /// Wire names that are a user Stop. One list for the shell and the pager banner.
+    pub fn is_user_gesture_name(name: &str) -> bool {
+        matches!(name, "esc" | "ctrl_c" | "mouse" | "dashboard_stop")
+    }
+    /// Stop click / key only. Unknown `Client` strings stay programmatic so a new wire name cannot claim "by user".
+    pub fn is_user_gesture(&self) -> bool {
+        Self::is_user_gesture_name(self.as_str())
     }
 }
 /// What a cancel does to the in-memory conversation history.
@@ -769,6 +783,8 @@ pub enum SessionCommand {
     /// The session snapshots the conversation context, makes a single tool-free model call, and returns the response text.
     SideQuestion {
         question: String,
+        /// Attached images, inlined on the side-question item only (never persisted to the parent session).
+        images: Vec<acp::ImageContent>,
         respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast it to clients via `SessionUpdate::SessionRecap`.
@@ -863,6 +879,23 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+    /// Persist + broadcast the current background-task list via
+    /// `fuigo/session_notification` (`SessionUpdate::BackgroundTasks`).
+    ///
+    /// `respond_to` means load enqueued the persist+broadcast before returning.
+    /// It is not a client-delivery ack. Live incremental follow-ups leave it `None`.
+    ///
+    /// `pending` is the bridge coalesce bit. Live incrementals pass `Some` so
+    /// a burst collapses to one emit; load leaves it `None` (forced flush).
+    EmitBackgroundTasksSnapshot {
+        respond_to: Option<oneshot::Sender<()>>,
+        pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    },
+    /// Write `resume_status.json` (live loops/tasks/subagents/workflows/goal) before a close or unload
+    /// that does not go through `Shutdown`; the ack means the write finished, not that anything was live.
+    PersistResumeStatus {
+        respond_to: oneshot::Sender<()>,
+    },
 }
 #[cfg(test)]
 mod cancellation_category_meta_tests {
@@ -933,5 +966,20 @@ mod cancel_trigger_tests {
         ] {
             assert_eq!(trigger.kind(), expected, "{trigger:?}");
         }
+    }
+    #[test]
+    fn user_gesture_is_stop_clicks_and_keys_only() {
+        assert!(CancelTrigger::is_user_gesture_name("esc"));
+        assert!(CancelTrigger::is_user_gesture_name("mouse"));
+        assert!(!CancelTrigger::is_user_gesture_name("send_now"));
+        assert!(CancelTrigger::Esc.is_user_gesture());
+        assert!(CancelTrigger::CtrlC.is_user_gesture());
+        assert!(CancelTrigger::from_client("mouse").is_user_gesture());
+        assert!(CancelTrigger::from_client("dashboard_stop").is_user_gesture());
+        assert!(!CancelTrigger::from_client("some_future_gesture").is_user_gesture());
+        assert!(!CancelTrigger::SendNow.is_user_gesture());
+        assert!(!CancelTrigger::Shutdown.is_user_gesture());
+        assert!(!CancelTrigger::SessionClose.is_user_gesture());
+        assert!(!CancelTrigger::SessionDelete.is_user_gesture());
     }
 }

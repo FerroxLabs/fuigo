@@ -291,6 +291,33 @@ pub struct PromptFlag<'a> {
     pub bold: bool,
 }
 
+/// Info-line mode flags shared by the chat prompt and the dashboard peek badge: plan label, then permission.
+/// Plan and permission are independent axes, so neither hides the other.
+pub fn mode_flags<'a>(
+    plan_label: Option<&'a str>,
+    permission: crate::app::actions::PermissionLabel,
+    theme: &Theme,
+) -> Vec<PromptFlag<'a>> {
+    use crate::app::actions::PermissionLabel;
+    let mut flags = Vec::new();
+    if let Some(text) = plan_label {
+        flags.push(PromptFlag {
+            text,
+            color: Some(theme.accent_plan),
+            bold: false,
+        });
+    }
+    if permission != PermissionLabel::Ask {
+        flags.push(PromptFlag {
+            text: permission.as_canonical(),
+            // Blue `accent_system` reads as "system/automation", distinct from plan
+            color: (permission == PermissionLabel::Auto).then_some(theme.accent_system),
+            bold: false,
+        });
+    }
+    flags
+}
+
 /// Optional info line rendered below the prompt text.
 ///
 /// The default is blank: a caller that wants the bottom border without any info text passes it, and [`Self::is_blank`] then skips the text pass.
@@ -514,7 +541,9 @@ impl StashedPrompt {
             }
             chip.range = chip.range.start - start..chip.range.end - start;
             if chip.kind == KIND_IMAGE
-                && let Some(number) = parse_image_display_number(&text[chip.range.clone()])
+                && let Some(number) = text
+                    .get(chip.range.clone())
+                    .and_then(parse_image_display_number)
             {
                 image_numbers.insert(number);
             }
@@ -1239,7 +1268,11 @@ impl PromptWidget {
                     // Absorbing (rather than trimming the insert) lands the cursor after the separator, in the args phase
                     // Never absorb an element's byte: a chip's leading space is chip data
                     // replace_range expands any overlap to the whole element, so the absorb would swallow the chip
-                    let next_is_plain_space = self.textarea.text()[range.end..].starts_with(' ')
+                    let next_is_plain_space = self
+                        .textarea
+                        .text()
+                        .get(range.end..)
+                        .is_some_and(|s| s.starts_with(' '))
                         && !self
                             .textarea
                             .elements()
@@ -1426,7 +1459,7 @@ impl PromptWidget {
                 continue;
             }
             if cursor >= elem.range.start && cursor <= elem.range.end + 1 {
-                let text = &self.textarea.text()[elem.range.clone()];
+                let text = self.textarea.get_range(elem.range.clone())?;
                 return Some(Self::parse_file_ref_element(text));
             }
         }
@@ -1444,7 +1477,7 @@ impl PromptWidget {
                 continue;
             }
             if cursor == elem.range.end || cursor == elem.range.start {
-                let text = &self.textarea.text()[elem.range.clone()];
+                let text = self.textarea.get_range(elem.range.clone())?;
                 return Some(Self::parse_file_ref_element(text));
             }
         }
@@ -1713,7 +1746,7 @@ impl PromptWidget {
         // Ctrl-Shift-V: inline paste, inserting clipboard content directly without creating a [Pasted: N lines] element
         if crate::input::key::is_inline_paste_key(key) {
             if let Some(text) = system_clipboard_get() {
-                let text = normalize_cr(&text);
+                let text = normalize_line_breaks(&text);
                 if text.is_empty() {
                     crate::clipboard::log_paste_key_empty_host_clipboard("prompt_widget_inline");
                     return PromptEvent::Ignored;
@@ -2155,6 +2188,16 @@ impl PromptWidget {
     /// The caller should forward ALL mouse events, not just those in the prompt area.
     /// TextArea tracks drag state internally and handles drag-beyond-edge.
     pub fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> PromptEvent {
+        self.handle_mouse_inner(mouse).0
+    }
+
+    /// Forward a wheel event to the textarea; `true` when the textarea actually scrolled its own
+    /// content, so the caller can hand an unconsumed wheel to the conversation instead.
+    pub fn handle_mouse_scroll(&mut self, mouse: &crossterm::event::MouseEvent) -> bool {
+        self.handle_mouse_inner(mouse).1
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: &crossterm::event::MouseEvent) -> (PromptEvent, bool) {
         use fuigo_ratatui_textarea::{MouseAction, TextElementEventKind};
 
         self.post_insert_image_preview = None;
@@ -2183,7 +2226,8 @@ impl PromptWidget {
             }
         }
 
-        match action {
+        let did_scroll = matches!(action, MouseAction::Scrolled);
+        let event = match action {
             MouseAction::CursorPlaced
             | MouseAction::SelectionUpdated
             | MouseAction::SelectionFinished
@@ -2193,7 +2237,8 @@ impl PromptWidget {
                 PromptEvent::Edited
             }
             MouseAction::Nothing => PromptEvent::Edited,
-        }
+        };
+        (event, did_scroll)
     }
 
     /// Handle a paste event.
@@ -2208,16 +2253,17 @@ impl PromptWidget {
         }
         self.post_insert_image_preview = None;
 
-        let text = normalize_cr(text);
+        let text = normalize_line_breaks(text);
         let text = &text;
         let replacing_selection = self.textarea.selection_range().is_some();
 
         // Repaste-to-expand: "paste didn't do what I want? paste again."
-        // Requires exact byte equality after the original insertion's canonicalization (normalize_cr above and the textarea's tab expansion)
+        // Requires exact byte equality after the original insertion's canonicalization (normalize_line_breaks above and the textarea's tab expansion)
         // E.g. a trailing-newline difference is a different paste and takes the normal path below.
+        let expanded = self.textarea.expand_tabs(text);
         if !replacing_selection
             && let Some(elem) = self.paste_element_near_cursor()
-            && self.textarea.text()[elem.range.clone()] == *self.textarea.expand_tabs(text)
+            && self.textarea.get_range(elem.range.clone()) == Some(expanded.as_ref())
         {
             let id = elem.id;
             self.expand_element(id);
@@ -2405,7 +2451,10 @@ impl PromptWidget {
             // Primary: match by element_id (collision-free, stable for non-undo/redo edits)
             if let Some(mut img) = stored_by_id.remove(id) {
                 // Refresh display_number from the live buffer text in case the chip was renumbered externally (sanity)
-                let parsed = parse_image_display_number(&self.textarea.text()[range.clone()])
+                let parsed = self
+                    .textarea
+                    .get_range(range.clone())
+                    .and_then(parse_image_display_number)
                     .unwrap_or(img.display_number);
                 img.element_id = *id;
                 img.display_number = parsed;
@@ -2413,8 +2462,11 @@ impl PromptWidget {
                 continue;
             }
             // Fallback (redo path): match by display_number from the stash, then rebind to the freshly-issued `element_id`
-            let display_number =
-                parse_image_display_number(&self.textarea.text()[range.clone()]).unwrap_or(0);
+            let display_number = self
+                .textarea
+                .get_range(range.clone())
+                .and_then(parse_image_display_number)
+                .unwrap_or(0);
             if let Some(mut img) = stash_by_number.remove(&display_number) {
                 img.element_id = *id;
                 img.display_number = display_number;
@@ -2552,17 +2604,31 @@ impl PromptWidget {
     /// Buffer text with `[Image #N]` chip placeholders removed.
     /// For text-only consumers (e.g. question/permission feedback) that must not leak image tokens onto the wire.
     pub(crate) fn text_without_image_chips(&self) -> String {
-        let text = self.textarea.text();
-        let mut out = String::with_capacity(text.len());
+        self.submitted_text_without_image_chips(self.textarea.text())
+    }
+
+    /// [`Self::text_without_image_chips`] for a submission already taken out of the composer.
+    /// The live element ranges index the buffer, so they only describe `submitted` while it still
+    /// starts with it (a voice interim appends); anything else is returned unchanged rather than sliced blind.
+    pub(crate) fn submitted_text_without_image_chips(&self, submitted: &str) -> String {
+        if !submitted.starts_with(self.textarea.text()) {
+            return submitted.to_owned();
+        }
+        let mut out = String::with_capacity(submitted.len());
         let mut prev_end = 0usize;
         for elem in self.textarea.elements() {
             if elem.kind != KIND_IMAGE {
                 continue;
             }
-            out.push_str(&text[prev_end..elem.range.start]);
+            let Some(gap) = submitted.get(prev_end..elem.range.start) else {
+                continue;
+            };
+            out.push_str(gap);
             prev_end = elem.range.end;
         }
-        out.push_str(&text[prev_end..]);
+        if let Some(tail) = submitted.get(prev_end..) {
+            out.push_str(tail);
+        }
         out
     }
 
@@ -2606,7 +2672,10 @@ impl PromptWidget {
             if elem.kind != KIND_IMAGE {
                 continue;
             }
-            if let Some(dn) = parse_image_display_number(&buf[elem.range.clone()]) {
+            if let Some(dn) = buf
+                .get(elem.range.clone())
+                .and_then(parse_image_display_number)
+            {
                 if by_number.iter().any(|(seen_dn, _)| *seen_dn == dn) {
                     tracing::warn!(
                         target: PROMPT_IMAGES_TRACING_TARGET,
@@ -2691,7 +2760,9 @@ impl PromptWidget {
 
     /// Buffer text of `elem` if it is a paste chip (`KIND_PASTE`).
     fn paste_text(&self, elem: &TextElement) -> Option<&str> {
-        (elem.kind == KIND_PASTE).then(|| &self.textarea.text()[elem.range.clone()])
+        (elem.kind == KIND_PASTE)
+            .then_some(elem.range.clone())
+            .and_then(|range| self.textarea.get_range(range))
     }
 
     /// Check if the cursor is currently on a paste element.
@@ -3580,18 +3651,17 @@ fn chip_line(label: String) -> Line<'static> {
     ])
 }
 
-/// Normalize bare `\r` to `\n`, leaving `\r\n` pairs intact.
-///
-/// Some terminals send bare `\r` for line breaks in bracketed-paste content.
-/// Rust's `str::lines()` only splits on `\n` and `\r\n`, so without this normalization multi-line pastes would be treated as a single line.
-fn normalize_cr(text: &str) -> String {
+/// Normalize bare `\r`, U+2028, and U+2029 to `\n`, leaving `\r\n` intact. Rust's `str::lines()`
+/// splits on none of these, so without this normalization such pastes count as a single line and
+/// the invisible separators break the textarea's width model.
+fn normalize_line_breaks(text: &str) -> String {
     let mut s = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\r' && chars.peek() != Some(&'\n') {
-            s.push('\n');
-        } else {
-            s.push(c);
+        match c {
+            '\r' if chars.peek() != Some(&'\n') => s.push('\n'),
+            '\u{2028}' | '\u{2029}' => s.push('\n'),
+            _ => s.push(c),
         }
     }
     s

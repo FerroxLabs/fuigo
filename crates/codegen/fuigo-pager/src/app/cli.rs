@@ -605,7 +605,7 @@ pub struct PagerArgs {
     pub fork_session: bool,
     /// Start the session in a new git worktree, optionally named.
     /// With `--resume` of a remote session, pass `--restore-code` to apply the snapshot codebase (conversation is restored either way).
-    /// Headless (`-p`) does not create a worktree from this flag.
+    /// Headless (`-p`) creates the worktree too and runs the prompt inside it.
     #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).

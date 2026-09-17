@@ -24,6 +24,7 @@ fn test_config_with_window(context_window: u64) -> SamplingConfig {
         max_completion_tokens: None,
         temperature: None,
         top_p: None,
+        max_retries: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -32,6 +33,9 @@ fn test_config_with_window(context_window: u64) -> SamplingConfig {
             .expect("test context_window must be non-zero"),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     }
 }
 
@@ -1433,6 +1437,7 @@ async fn update_sampling_config_is_queryable() {
         max_completion_tokens: Some(4096),
         temperature: Some(0.5),
         top_p: None,
+        max_retries: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -1440,6 +1445,9 @@ async fn update_sampling_config_is_queryable() {
         context_window: NonZeroU64::new(200_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
     h.handle.update_sampling_config(new_config.clone());
 
@@ -1849,6 +1857,7 @@ async fn build_request_uses_sampling_config() {
         max_completion_tokens: Some(8192),
         temperature: Some(0.7),
         top_p: Some(0.9),
+        max_retries: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -1856,6 +1865,9 @@ async fn build_request_uses_sampling_config() {
         context_window: NonZeroU64::new(128_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
     let h = TestHarness::with_config(vec![ConversationItem::user("hi")], config);
 
@@ -4405,6 +4417,7 @@ async fn sampling_config_survives_compaction_replacement() {
         max_completion_tokens: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
+        max_retries: None,
         api_backend: ApiBackend::Responses,
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -4412,6 +4425,9 @@ async fn sampling_config_survives_compaction_replacement() {
         context_window: NonZeroU64::new(500_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
 
     let h = TestHarness::with_config(
@@ -4491,6 +4507,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
         max_completion_tokens: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
+        max_retries: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -4498,6 +4515,9 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
         context_window: NonZeroU64::new(500_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
 
     let h = TestHarness::with_config(
@@ -4583,6 +4603,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
         max_completion_tokens: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
+        max_retries: None,
         api_backend: ApiBackend::Responses,
         extra_headers: Default::default(),
         query_params: Default::default(),
@@ -4590,6 +4611,9 @@ async fn context_window_downgrade_triggers_auto_compact() {
         context_window: NonZeroU64::new(500_000).unwrap(),
         reasoning_effort: None,
         stream_tool_calls: None,
+        mtls_cert_dir: None,
+        rate_limit_retry_threshold: None,
+        reasoning_summary: None,
     };
 
     let h = TestHarness::with_config(vec![], config);

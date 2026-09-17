@@ -216,6 +216,12 @@ impl coordinator::ChildRunner for ShellChildRunner {
             }
         })
     }
+    /// `handle_request` resumes a spawn whose `resume_from` is its own id in
+    /// place (same session dir, no copy), so a completed child can be woken.
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
     fn on_completed(&self, completion: coordinator::ChildCompletion<Self::CompletionData>) {
         let gateway = self.agent_ref.get().gateway.clone();
         let will_wake = will_wake_for(&completion);
@@ -313,6 +319,15 @@ pub(crate) fn spawn_subagent_coordinator(
         limits,
         limit_sink: Some(limit_sink),
         buffer_completions: true,
+        // Stays `None` on purpose. This cap is per BUFFERED SUMMARY and would
+        // fire even for a toolset with no polling tool, where the between-turn
+        // reminder is the model's only copy of the child's output. The
+        // aggregate the audit flagged — an unbounded 256-entry batch at
+        // `INLINE_SUBAGENT_OUTPUT_BYTES` each — is bounded one layer up
+        // instead, by `BETWEEN_TURN_INLINE_OUTPUT_BYTES` in
+        // `fuigo_tools::reminders::task_completion::format_between_turn_completions`,
+        // which applies only where a `get_task_output` pointer exists to
+        // recover the rest.
         buffered_completion_output_cap: None,
     };
     tokio::task::spawn_local(
@@ -363,6 +378,7 @@ pub(crate) fn present_child_completion(
             parent_cmd_tx: completion_data.parent_cmd_tx.as_ref(),
             task_output_tool_name: &completion_data.task_output_tool_name,
             scheduler_delete_tool_name: completion_data.scheduler_delete_tool_name.as_deref(),
+            scheduler_create_tool_name: completion_data.scheduler_create_tool_name.as_deref(),
             synthetic_trace_tx: &completion_data.synthetic_trace_tx,
             goal_loop_active: &completion_data.goal_loop_active,
         });
@@ -422,6 +438,7 @@ pub(crate) struct InjectParams<'a> {
     pub parent_cmd_tx: Option<&'a mpsc::UnboundedSender<SessionCommand>>,
     pub task_output_tool_name: &'a str,
     pub scheduler_delete_tool_name: Option<&'a str>,
+    pub scheduler_create_tool_name: Option<&'a str>,
     pub synthetic_trace_tx:
         &'a Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     pub goal_loop_active: &'a std::sync::atomic::AtomicBool,
@@ -436,6 +453,7 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
         parent_cmd_tx,
         task_output_tool_name,
         scheduler_delete_tool_name,
+        scheduler_create_tool_name,
         synthetic_trace_tx,
         goal_loop_active,
     } = params;
@@ -457,6 +475,7 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
         &summary,
         Some(task_output_tool_name),
         scheduler_delete_tool_name,
+        scheduler_create_tool_name,
     );
     let wrapped = fuigo_tools::reminders::wrap_reminder(&message);
     let prompt_id = format!("subagent-completed-{subagent_id}");

@@ -80,7 +80,7 @@ impl AgentView {
     /// Bare Enter and the send-now chord share this path; queue-pane selection and mouse "Send now" keep intentional selection.
     /// Returns `None` when there is nothing to send.
     pub(super) fn try_send_now_queued_from_prompt(&mut self) -> Option<InputOutcome> {
-        if !self.session.state.is_turn_running() {
+        if !self.can_send_now() {
             return None;
         }
         self.sync_queue_pane();
@@ -121,7 +121,7 @@ impl AgentView {
     /// Whether an explicit send-now dispatched right now will actually cancel the running turn shell-side.
     /// Also requires the front committed so a spared send-now does not paint under later output from that front.
     pub(crate) fn expects_send_now_cancel(&self) -> bool {
-        self.session.state.is_turn_running()
+        self.can_send_now()
             && self.front_message_committed
             && !self
                 .goal_state
@@ -145,6 +145,33 @@ impl AgentView {
     pub(crate) fn clear_send_now_expectation(&mut self) {
         self.expect_send_now_cancel = None;
         self.follow_without_jump_prompt_id = None;
+    }
+
+    /// Claim the shell's live user echo for a send-now-painted prompt, if one is pending.
+    /// Returns `true` when the caller must drop the echo: the optimistic paint already
+    /// shows this text, so rendering the echo too would duplicate the message.
+    pub(crate) fn take_send_now_user_echo(&mut self, text: &str, prompt_id: Option<&str>) -> bool {
+        let echo = text.trim();
+        if let Some(id) = prompt_id
+            && self
+                .send_now_echo_pending
+                .get(id)
+                .is_some_and(|pending| pending == echo)
+        {
+            self.send_now_echo_pending.remove(id);
+            return true;
+        }
+        let matched = self
+            .send_now_echo_pending
+            .iter()
+            .find(|(_, pending)| pending.as_str() == echo)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = matched {
+            self.send_now_echo_pending.remove(&id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Whether `prompt_id` names a Send Now painted block still awaiting its authoritative interjection notification.
@@ -268,6 +295,11 @@ impl AgentView {
         self.is_parked_on_sendable_wait() && !self.is_waiting_on_subagent()
     }
 
+    /// A Ctrl+G-hidden dock is unpainted, so the idle cues stay.
+    pub(crate) fn dock_covers_idle_cues(&self, dock_on: bool) -> bool {
+        dock_on && !self.dock_hidden
+    }
+
     /// Live counts for the turn-status watching cue; see [`crate::views::turn_status::Watchers`].
     pub(crate) fn watchers(&self) -> crate::views::turn_status::Watchers {
         let mut watchers = crate::views::turn_status::Watchers::default();
@@ -298,18 +330,9 @@ impl AgentView {
     }
 
     /// Shared tail of every turn-end marker push (`push_turn_terminal_marker`).
-    pub(crate) fn push_end_marker_block(
-        &mut self,
-        event: crate::scrollback::blocks::SessionEvent,
-        stop_hooks: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
-        prompt_id: Option<String>,
-    ) {
-        // The marker keeps its turn's pid for the tail-merge attribution check.
-        let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
-            event, stop_hooks, prompt_id,
-        );
+    pub(crate) fn push_end_marker_block(&mut self, event: crate::scrollback::blocks::SessionEvent) {
         self.scrollback
-            .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
+            .push_block(crate::scrollback::block::RenderBlock::session_event(event));
     }
 
     pub(in crate::app) fn server_row_capabilities(
@@ -355,7 +378,7 @@ impl AgentView {
 
     /// Send one merged-queue row now (cancel-and-send), by selection id. The shell cancels the running turn and runs this row as the next turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
-        if !self.session.state.is_turn_running() {
+        if !self.can_send_now() {
             self.show_toast("No turn running: prompt will send when ready");
             return InputOutcome::Changed;
         }
@@ -455,6 +478,9 @@ impl AgentView {
         if self.send_now_awaiting_confirm.as_deref() == Some(old_id) {
             self.send_now_awaiting_confirm = None;
         }
+        if let Some(text) = self.send_now_echo_pending.remove(old_id) {
+            self.send_now_echo_pending.insert(new_id.to_string(), text);
+        }
         if let Some(entry) = self.send_now_painted_blocks.remove(old_id) {
             match self.send_now_painted_blocks.entry(new_id.to_string()) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
@@ -470,6 +496,7 @@ impl AgentView {
 
     /// Remove the optimistic block for a send-now'd prompt that will never run (send failure, removal); a leftover would duplicate on requeue.
     pub(crate) fn retire_send_now_painted_block(&mut self, prompt_id: &str) {
+        self.send_now_echo_pending.remove(prompt_id);
         if let Some((id, _)) = self.send_now_painted_blocks.remove(prompt_id) {
             self.scrollback.remove_entry(id);
         }
@@ -1388,6 +1415,57 @@ mod queue_edit_routing_tests {
         assert!(agent.prompt.images.is_empty());
         assert!(agent.toast.is_none(), "no drop toast expected");
         assert_eq!(agent.prompt.text(), "");
+    }
+
+    #[test]
+    fn idle_looking_wake_keeps_prompt_send_now_available() {
+        for key in [
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            force_interject_key(),
+        ] {
+            let mut agent = running_agent_local_only();
+            agent.session.state = AgentState::Idle;
+            agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                prompt_id: "task-completed-bg1".into(),
+                cancel_sent: false,
+            });
+            agent.active_pane = AgentPane::Prompt;
+            agent.queue.overlay.focused = false;
+            agent.prompt.set_text("");
+
+            let outcome = agent.handle_prompt_key_for_test(&key);
+            assert!(
+                matches!(outcome, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "local one"),
+                "idle-looking wake must allow queued send-now for {key:?}, got {outcome:?}"
+            );
+            assert!(agent.session.pending_prompts.is_empty());
+        }
+    }
+
+    #[test]
+    fn cancelling_turns_block_prompt_send_now() {
+        for state in [AgentState::TurnCancelling, AgentState::Idle] {
+            for key in [
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                force_interject_key(),
+            ] {
+                let mut agent = running_agent_local_only();
+                agent.session.state = state.clone();
+                if agent.session.state.is_idle() {
+                    agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                        prompt_id: "task-completed-bg1".into(),
+                        cancel_sent: true,
+                    });
+                }
+                agent.active_pane = AgentPane::Prompt;
+                agent.queue.overlay.focused = false;
+                agent.prompt.set_text("");
+
+                let outcome = agent.handle_prompt_key_for_test(&key);
+                assert!(!matches!(outcome, InputOutcome::Action(_)));
+                assert_eq!(agent.session.pending_prompts.len(), 1);
+            }
+        }
     }
 
     /// Force-interject with no turn running is a guarded no-op (toast only); it must never emit a server interject for an idle session.

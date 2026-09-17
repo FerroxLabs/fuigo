@@ -52,10 +52,26 @@ pub(super) fn min_content_height(
     tip_height: u16,
     info_height: u16,
 ) -> u16 {
+    min_content_height_with_prompt(error_height, menu_height, tip_height, info_height, PROMPT_HEIGHT)
+}
+
+/// [`min_content_height`] beside a composer of `prompt_height` rows: a taller draft never reflows the
+/// box, so when it no longer fits the caller falls back to the stacked layout.
+pub(super) fn min_content_height_with_prompt(
+    error_height: u16,
+    menu_height: u16,
+    tip_height: u16,
+    info_height: u16,
+    prompt_height: u16,
+) -> u16 {
     let inner = super::logo::full_logo_line_count().max(right_col_height(menu_height, info_height));
     let hero_box_height = 2 + V_PAD * 2 + inner;
     let gap_after_error = if error_height > 0 { 1u16 } else { 0 };
-    gap_after_error + error_height + hero_box_height + 1 + WelcomeLayout::fixed_below(tip_height)
+    gap_after_error
+        + error_height
+        + hero_box_height
+        + 1
+        + WelcomeLayout::fixed_below_with_prompt(tip_height, prompt_height)
 }
 
 /// Largest in-box info-slot height, at most `desired`, for which the hero box still fits in `content_height`.
@@ -98,10 +114,11 @@ pub(super) fn compute_hero_box(
     announcement: Option<&fuigo_announcements::RemoteAnnouncement>,
     expanded: bool,
     has_upgrade_cta: bool,
+    prompt_height: u16,
 ) -> WelcomeLayout {
     let zero = Rect::default();
     let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
-    let fixed_below = WelcomeLayout::fixed_below(tip_height);
+    let fixed_below = WelcomeLayout::fixed_below_with_prompt(tip_height, prompt_height);
 
     // Column widths are height-independent, so derive them once and reuse for both the measurement and the rects
     // `hero_info.width == info_slot_width`, so the measured width is the drawn width
@@ -129,17 +146,17 @@ pub(super) fn compute_hero_box(
     let gap_after_error = if error_height > 0 { 1 } else { 0 };
     let fixed_above = gap_after_error + error_height;
 
-    // Top padding for vertical centering (use the default menu height so the logo position stays constant regardless of picker or focus state)
+    // Top padding for vertical centering (use the default menu height and the one-line prompt so the logo position stays constant regardless of picker/focus state or draft length)
     let default_menu_height = 4u16;
     let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
     let default_hero = 2 + V_PAD * 2 + default_inner;
     let remaining = content_area.height.saturating_sub(fixed_above);
     let top_pad = remaining
         .saturating_sub(default_hero)
-        .saturating_sub(fixed_below)
+        .saturating_sub(WelcomeLayout::fixed_below(tip_height))
         / 3;
     // Centering derives top_pad from the default-menu box, but the fit gate (min_content_height) sizes for the actual box with no pad
-    // Clamp to the real slack so a menu taller than the default can't push the rows below the box off the bottom at the tight boundary
+    // Clamp to the real slack so a taller menu or draft can't push the rows below the box off the bottom at the tight boundary
     let top_pad = top_pad.min(
         content_area
             .height
@@ -165,7 +182,7 @@ pub(super) fn compute_hero_box(
         Constraint::Min(1), // flex gap
         Constraint::Length(tip_height),
         Constraint::Length(tip_gap),
-        Constraint::Length(PROMPT_HEIGHT),
+        Constraint::Length(prompt_height),
         Constraint::Length(VERSION_GAP),
         Constraint::Length(1),
     ])

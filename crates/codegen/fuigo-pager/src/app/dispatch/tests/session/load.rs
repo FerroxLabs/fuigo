@@ -1309,7 +1309,7 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
         }),
         &mut app,
     );
-    let request_id = match dispatch(Action::SendBtw("old question".into()), &mut app).as_slice() {
+    let request_id = match dispatch(Action::SendBtw { question: "old question".into(), images: Vec::new() }, &mut app).as_slice() {
         [
             Effect::SendBtw {
                 minimal_request_id: Some(id),

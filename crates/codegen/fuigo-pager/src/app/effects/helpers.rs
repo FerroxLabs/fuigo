@@ -26,7 +26,7 @@ pub(super) fn session_rpc_timeout() -> std::time::Duration {
     SESSION_RPC_FLOOR.max(fuigo_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
 }
 /// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming `action` instead of an eternal spinner.
-pub(super) async fn acp_send_bounded<R, T>(
+pub(crate) async fn acp_send_bounded<R, T>(
     request: T,
     tx: &tokio::sync::mpsc::UnboundedSender<R>,
     action: &str,
@@ -194,14 +194,14 @@ pub(crate) fn compact_error(err: &acp::Error) -> CompactError {
 pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs >= 60 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
+        crate::views::dock::fmt_elapsed(secs)
     } else {
         format!("{}.{:01}s", secs, d.subsec_millis() / 100)
     }
 }
 /// CANONICAL wire parser for the worktree resume response.
 /// Any other code consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape MUST go through this function; do not re-implement.
-pub(super) fn parse_worktree_restore_payload(
+pub(crate) fn parse_worktree_restore_payload(
     result_obj: &serde_json::Value,
 ) -> (bool, Option<String>, Option<fuigo_workspace::session::git::RestoreDegree>) {
     let code_restored = result_obj
@@ -706,6 +706,19 @@ pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope
 pub(super) fn parse_session_picker_entries(
     payload: &serde_json::Value,
 ) -> Vec<crate::app::app_view::SessionPickerEntry> {
+    parse_session_picker_entries_with(payload, |ids| {
+        fuigo_shell::session::resolve_local_session_ids_any_cwd(ids)
+    })
+}
+
+/// [`parse_session_picker_entries`] with an injectable local-session resolver.
+///
+/// `resolve_local` receives candidate ids and returns the subset persisted on disk; each call is a full
+/// `~/.fuigo/sessions` walk, so the relabel pass must hand it the whole list at once.
+pub(super) fn parse_session_picker_entries_with(
+    payload: &serde_json::Value,
+    resolve_local: impl Fn(&[&str]) -> std::io::Result<std::collections::HashSet<String>>,
+) -> Vec<crate::app::app_view::SessionPickerEntry> {
     use crate::app::app_view::SessionPickerEntry;
     let entries: Vec<serde_json::Value> = payload
         .get("sessions")
@@ -714,7 +727,7 @@ pub(super) fn parse_session_picker_entries(
         .unwrap_or_default();
     let now = chrono::Utc::now();
     let cutoff = now - chrono::Duration::days(30);
-    entries
+    let mut parsed: Vec<SessionPickerEntry> = entries
         .into_iter()
         .filter_map(|v| {
             let id = v
@@ -862,15 +875,35 @@ pub(super) fn parse_session_picker_entries(
                     return None;
                 }
             }
-            if e.source == "remote"
-                && fuigo_shell::session::resolve_local_session_any_cwd(&e.id)
-                    .is_some()
-            {
-                e.source = "local".to_string();
-            }
             Some(e)
         })
-        .collect()
+        .collect();
+    // The shell labels a row `remote` when it is absent from the cwd buckets it scanned, so a session stored
+    // under another cwd is still local. One storage walk classifies the whole list; the shell's labels are
+    // still usable without the disk check, so a failed walk degrades instead of failing
+    let remote_ids: Vec<&str> = parsed
+        .iter()
+        .filter(|e| e.source == "remote")
+        .map(|e| e.id.as_str())
+        .collect();
+    if remote_ids.is_empty() {
+        return parsed;
+    }
+    let local_ids = match resolve_local(&remote_ids) {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(%error, "session list local-session resolution failed");
+            return parsed;
+        }
+    };
+    // A conversation row can share an id with a Build row; only the rows that supplied the ids may flip
+    for e in parsed
+        .iter_mut()
+        .filter(|e| e.source == "remote" && local_ids.contains(&e.id))
+    {
+        e.source = "local".to_string();
+    }
+    parsed
 }
 /// Convert a resume-picker session into a dormant dashboard roster row.
 ///
@@ -1184,6 +1217,18 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("contextual_hints.ssh_wrap", "Bool", &value));
             };
             fuigo_shell::util::config::set_contextual_hint_ssh_wrap(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "contextual_hints.export_copy" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch(
+                    "contextual_hints.export_copy",
+                    "Bool",
+                    &value,
+                ));
+            };
+            fuigo_shell::util::config::set_contextual_hint_export_copy(b)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -1746,5 +1791,22 @@ pub(super) fn unregister_active_session_best_effort_in(
         )
         }
         Err(e) => tracing::warn!(?e, "Failed to unregister active session"),
+    }
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::format_restore_elapsed;
+    use std::time::Duration;
+
+    /// Restore progress keeps tenths under a minute and rolls into hours past one.
+    #[test]
+    fn restore_elapsed_rolls_into_hours() {
+        assert_eq!(format_restore_elapsed(Duration::from_millis(4_300)), "4.3s");
+        assert_eq!(format_restore_elapsed(Duration::from_secs(65)), "1m05s");
+        assert_eq!(
+            format_restore_elapsed(Duration::from_secs(194 * 60 + 4)),
+            "3h14m"
+        );
     }
 }

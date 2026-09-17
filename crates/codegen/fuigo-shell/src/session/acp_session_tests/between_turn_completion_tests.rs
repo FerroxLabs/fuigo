@@ -9,6 +9,7 @@ fn summary(
     ms: u64,
     tools: u32,
 ) -> SubagentCompletionSummary {
+    let output = format!("the answer for {id}");
     SubagentCompletionSummary {
         subagent_id: id.into(),
         subagent_type: typ.into(),
@@ -18,7 +19,8 @@ fn summary(
         duration_ms: ms,
         tool_calls: tools,
         turns: 1,
-        output: std::sync::Arc::from(format!("the answer for {id}").as_str()),
+        full_output_bytes: output.len(),
+        output: std::sync::Arc::from(output),
     }
 }
 
@@ -32,14 +34,20 @@ fn single_successful_completion_with_poll_tool() {
         12300,
         5,
     )];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
     assert!(result.starts_with("While you were idle, 1 background subagent completed:\n"));
     assert!(result.contains("[explore]"));
     assert!(result.contains("completed successfully"));
     assert!(result.contains("12.3s"));
     assert!(result.contains("5 tool calls"));
     assert!(result.contains("abc-123"));
-    assert!(result.contains("get_task_output"));
+    assert!(
+        result.contains(
+            "(12.3s, 5 tool calls)\n  subagent_id: abc-123\n  response:\nthe answer for abc-123\n"
+        ),
+        "{result}"
+    );
+    assert!(!result.contains("to see the full output"), "{result}");
 }
 
 #[test]
@@ -51,9 +59,12 @@ fn scheduled_completion_includes_resolved_cleanup_tool() {
         &[completion],
         Some("get_task_output"),
         Some("renamed_scheduler_delete"),
+        Some("renamed_scheduler_create"),
     );
 
     assert!(result.contains("renamed_scheduler_delete(\"loop-123\")"));
+    assert!(result.contains("renamed_scheduler_create(new_prompt, interval, \"loop-123\")"));
+    assert!(result.contains("Check the subagent output using get_task_output(\"abc-123\")"));
 }
 
 #[test]
@@ -66,7 +77,7 @@ fn failed_completion_with_poll_tool() {
         45200,
         12,
     )];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
     assert!(result.contains("failed"));
     assert!(result.contains("45.2s"));
     assert!(result.contains("12 tool calls"));
@@ -79,12 +90,21 @@ fn multiple_completions_batched_with_poll_tool() {
         summary("b", "general-purpose", "task 2", false, 5000, 8),
         summary("c", "explore", "task 3", true, 3000, 4),
     ];
-    let result = format_between_turn_completions(&completions, Some("get_task_output"), None);
+    let result = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
     assert!(result.starts_with("While you were idle, 3 background subagents completed:\n"));
-    // All three entries appear
-    assert!(result.contains("subagent_id: a."));
-    assert!(result.contains("subagent_id: b."));
-    assert!(result.contains("subagent_id: c."));
+    // All three entries appear, each with its own inlined output
+    assert!(
+        result.contains("subagent_id: a\n  response:\nthe answer for a\n"),
+        "{result}"
+    );
+    assert!(
+        result.contains("subagent_id: b\n  response:\nthe answer for b\n"),
+        "{result}"
+    );
+    assert!(
+        result.contains("subagent_id: c\n  response:\nthe answer for c\n"),
+        "{result}"
+    );
 }
 
 #[test]
@@ -99,7 +119,7 @@ fn no_poll_tool_inlines_output() {
         12300,
         5,
     )];
-    let result = format_between_turn_completions(&completions, None, None);
+    let result = format_between_turn_completions(&completions, None, None, None);
     assert!(result.contains("[explore]"));
     assert!(result.contains("abc-123"));
     assert!(

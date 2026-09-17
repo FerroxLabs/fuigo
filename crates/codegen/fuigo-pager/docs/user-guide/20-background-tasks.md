@@ -22,6 +22,10 @@ Use the `get_command_or_subagent_output` tool to check on a background command o
 - `get_command_or_subagent_output(task_id)` — current output and status without waiting
 - `get_command_or_subagent_output(task_id, timeout_ms=30000)` — wait up to the given milliseconds for completion
 
+A positive `timeout_ms` is clamped to **1 hour** (`3600000` ms). Hosts with a shorter transport deadline set `FUIGO_MAX_WAIT_BLOCK_MS` (plain milliseconds; unparseable values keep the default).
+
+If the wait returns while the child is still running, leave it alone: do not kill it or tell it to stop. Completion wakes the parent automatically. Poll again only if you need another snapshot.
+
 ### Waiting for Multiple Tasks
 
 Use `wait_commands_or_subagents` to block on several tasks at once:

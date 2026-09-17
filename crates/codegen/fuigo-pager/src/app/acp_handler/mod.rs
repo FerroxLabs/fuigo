@@ -318,10 +318,20 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             (false, false)
                         };
                         let user_echo = matches!(update, acp::SessionUpdate::UserMessageChunk(_));
-                        let changed =
+                        // A send-now'd queue row is painted optimistically at dispatch; the
+                        // shell's live echo for the same text would paint it a second time.
+                        let swallow_send_now_echo = user_echo
+                            && !meta.is_replay
+                            && user_message_text(&update).is_some_and(|text| {
+                                agent.take_send_now_user_echo(text, meta.prompt_id.as_deref())
+                            });
+                        let changed = if swallow_send_now_echo {
+                            false
+                        } else {
                             agent
                                 .session
-                                .handle_update(update, &meta, &mut agent.scrollback);
+                                .handle_update(update, &meta, &mut agent.scrollback)
+                        };
                         if meta.is_replay
                             && let Some(pid) = meta.prompt_id.as_ref()
                         {
@@ -588,6 +598,16 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
     }
 }
 
+fn user_message_text(update: &acp::SessionUpdate) -> Option<&str> {
+    let acp::SessionUpdate::UserMessageChunk(chunk) = update else {
+        return None;
+    };
+    match &chunk.content {
+        acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+        _ => None,
+    }
+}
+
 fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Some(banner) = crate::acp::version_mismatch_banner(notif.params.get()) else {
         tracing::warn!("ignoring fuigo/leader/version_mismatch without usable versions");
@@ -626,6 +646,7 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
         if agent.is_self_originated_prompt(iid)
             && let Some((entry_id, _)) = agent.send_now_painted_blocks.remove(iid)
         {
+            agent.send_now_echo_pending.remove(iid);
             agent.clear_send_now_expectation();
             if let Some(index) = agent.scrollback.index_of_id(entry_id)
                 && let Some(RenderBlock::UserPrompt(block)) = agent

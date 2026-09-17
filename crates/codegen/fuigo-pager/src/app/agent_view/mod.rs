@@ -26,27 +26,24 @@
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
-//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
-//!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
+//!       turn running, every mode → Changed (swallow) plus a
+//!         "Press <cancel key> to cancel the turn" hint (toast in fullscreen,
+//!         at most one committed system line per user turn in minimal); the
+//!         draft is preserved and the turn keeps running
+//!       turn cancelling → Changed (swallow) with no hint; Ctrl+C escalates to Quit
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
-//!         within ESC_CANCEL_REWIND_GRACE of an Esc-fired cancel) →
+//!         within ESC_CANCEL_REWIND_GRACE of a mid-turn Esc) →
 //!         ArmPending RewindShowPicker (2×, silent)
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
-//!         open history search / post-cancel grace, or empty + no messages) →
+//!         open history search / mid-turn Esc grace, or empty + no messages) →
 //!         Changed (swallow Esc; not FocusScrollback)
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!
-//! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
-//! (scrollback nav); everything else, and all of it with respect to
-//! `[ui].simple_mode` (prompt editor), is mode-independent. Tab remains
-//! leave-prompt in both modes.
+//! No Esc-policy branch depends on `[ui].vim_mode` (scrollback nav) or
+//! `[ui].simple_mode` (prompt editor). Tab remains leave-prompt in both modes.
 //!
 //! ## Future: data/view split
 //!
@@ -181,7 +178,13 @@ mod selection;
 mod session;
 mod shell_completion;
 #[cfg(test)]
+mod dock_input_tests;
+#[cfg(test)]
+mod extensions_row_hint_tests;
+#[cfg(test)]
 mod task_status_tests;
+#[cfg(test)]
+mod header_tests;
 mod viewer;
 mod workflows_overlay;
 use super::actions;
@@ -265,6 +268,37 @@ fn record_dot_pulse() -> (bool, f32) {
     let brightness = 0.4 + 0.6 * (0.5 + 0.5 * s);
     (s >= 0.0, brightness)
 }
+/// Painted kill hit. A click is ignored unless this identity still occupies the cell.
+#[derive(Clone, Debug)]
+pub struct CachedDockStop {
+    pub rect: Rect,
+    pub(crate) id: DockKillId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DockKillId {
+    Subagent(String),
+    Task(String),
+    Loop(String),
+    Workflow(String),
+}
+
+impl DockKillId {
+    pub(crate) fn from_action(action: &crate::app::actions::Action) -> Option<Self> {
+        use crate::app::actions::Action;
+        match action {
+            Action::KillSubagent(id) => Some(Self::Subagent(id.clone())),
+            Action::KillBgTask(id) => Some(Self::Task(id.clone())),
+            Action::CancelScheduledTask(id) => Some(Self::Loop(id.clone())),
+            Action::SendSlashCommandPreservingDraft(cmd) => cmd
+                .strip_prefix("/workflow stop ")
+                .filter(|name| !name.is_empty())
+                .map(|name| Self::Workflow(name.to_owned())),
+            _ => None,
+        }
+    }
+}
+
 /// A clickable/hoverable screen region.
 ///
 /// Tracks an optional screen rect (set during render) and whether the
@@ -445,7 +479,7 @@ pub struct TextClickState {
     pub click_count: u8,
 }
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
-pub(super) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
+pub(crate) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
 /// Minimum interval (ms) between clipboard toasts for rapid word/line
 /// selections. Drag completions always show the toast regardless.
 const CLIPBOARD_TOAST_DEBOUNCE_MS: u128 = 500;
@@ -569,15 +603,15 @@ pub(crate) struct PendingTurnEnd {
     /// `agentResult` detail from the broadcast (error text, when present).
     pub agent_result: Option<String>,
     /// `_meta.cancellationCategory` from the broadcast (`"HookDenied"` picks
-    /// the "blocked by a hook" marker over "cancelled by user"). `None` on
-    /// older shells or plain user cancels.
+    /// the "blocked by a hook" marker; permission / max-turns categories name
+    /// the cancel banner). `None` on older shells or plain user cancels.
     pub cancellation_category: Option<String>,
     /// `_meta.cancellationContext` from the broadcast (hook name, reason for
     /// the blocked-prompt card). `None` on older shells / non-hook cancels.
     pub cancellation_context: Option<serde_json::Value>,
     /// `_meta.cancelTrigger` from the broadcast (`"send_now"` marks a
-    /// cancel-and-send whose "Turn cancelled" marker is suppressed). `None`
-    /// on older shells / non-cancel ends.
+    /// cancel-and-send whose "Turn cancelled" marker is suppressed; any other
+    /// value names the banner's cause). `None` on older shells / non-cancel ends.
     pub cancel_trigger: Option<String>,
     /// Typed kind of a failed stop from the broadcast, parsed at the wire
     /// ingress (`MaxTokensTruncation` picks the truncation copy).
@@ -621,16 +655,6 @@ pub(crate) struct PendingCancelResend {
     pub cancel_subagents: bool,
     /// Replayed so a resend still enables the shell's task-wake barrier.
     pub trigger: crate::app::actions::CancelTrigger,
-}
-/// Turn-end hook runs held for the live turn's marker. See [`AgentView::pending_stop_hooks`].
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PendingStopHooks {
-    /// The turn the stash belongs to; a stash that can't be matched to the
-    /// ending turn flushes standalone instead of attaching to its marker.
-    pub prompt_id: Option<String>,
-    /// `(event_name, runs)` per hook batch, in arrival order
-    /// (`stop_failure` before `stop` on error turns).
-    pub groups: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
 }
 /// Components for the deferred fork banner. Stored by
 /// `dispatch_fork_resolved` and formatted into the final banner text
@@ -930,16 +954,38 @@ pub struct AgentView {
     pub active_pane: AgentPane,
     /// Cursor over the dock's visible items (headers + rows).
     pub dock_cursor: usize,
+    pub dock_workflows_expanded: bool,
     pub dock_subagents_expanded: bool,
     pub dock_tasks_expanded: bool,
     pub dock_watchers_expanded: bool,
+    /// A section the user opened with `show N more`; it alone may grow the dock
+    /// past [`crate::views::dock::MAX_DOCK_ROWS`].
+    pub dock_workflows_show_all: bool,
+    pub dock_subagents_show_all: bool,
+    pub dock_tasks_show_all: bool,
+    pub dock_watchers_show_all: bool,
+    /// First row each dock section paints. Sections scroll inside their own
+    /// band, so headers never scroll away.
+    pub dock_offsets: crate::views::dock::SectionSlots<usize>,
+    /// A reveal is waiting for the frame to assign it rows. Until then the dock
+    /// budgets its full ask, so the cursor can reach a row the reveal uncovered.
+    /// Every path that ends a frame clears this.
+    pub dock_reveal_pending: bool,
+    /// Hover is independent of dock keyboard focus.
+    pub dock_hovered: Option<crate::views::dock::DockItem>,
+    pub dock_stop_button: Option<CachedDockStop>,
     /// Sticky: render enforces the queue overlay's visibility from this each
     /// frame, so the queue's auto-show can't re-open a manual collapse.
     pub dock_queued_expanded: bool,
+    /// Last frame: the dock replaced the Tasks/Queue panes, even if every
+    /// section is empty.
+    pub dock_on: bool,
     /// Set each render: dock enabled, terminal tall enough, ≥1 non-empty
     /// section. Key handling reads it so `Ctrl+G` only focuses the dock when it
     /// exists (and short terminals fall back to the tasks pane).
     pub dock_shown: bool,
+    /// Sticky: Ctrl+G hid the dock; paint stays off until the next Ctrl+G.
+    pub dock_hidden: bool,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
     /// Current special prompt input mode (Normal/Bash/Remember).
@@ -1030,9 +1076,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// Turn-end hook runs waiting for the turn's marker, which they race. Consumed or flushed
-    /// by `push_turn_terminal_marker`; dropped on every replay-window entry.
-    pub(crate) pending_stop_hooks: Option<PendingStopHooks>,
     /// Goal id of the most recently cleared goal, captured from the dropped
     /// state (the `cleared` event itself carries an empty id). Drops a late
     /// in-flight `GoalUpdated` that would otherwise resurrect the cleared
@@ -1126,9 +1169,12 @@ pub struct AgentView {
     /// completion, double-click, or triple-click. Cleared on next click
     /// elsewhere, Escape, or navigation.
     pub persistent_text_selection: Option<PersistentTextSelection>,
-    /// Table geometry backing a table-shaped drag / persistent selection,
-    /// keyed to that selection; ignored when the key doesn't match.
+    /// Table geometry for the held highlight. Not shared with an in-progress drag.
     pub table_selection_geometry: Option<TableSelectionGeometry>,
+    /// Table geometry for the active drag. A `/btw` drag must not steal the held slot.
+    pub drag_table_geometry: Option<TableSelectionGeometry>,
+    /// Wrap width the `/btw` selection was armed against. A mismatch invalidates it.
+    pub btw_selection_wrap_width: Option<u16>,
     /// Timestamp when the current persistent selection was created.
     /// Used for auto-dismissal after a configurable timeout.
     pub selection_created_at: Option<Instant>,
@@ -1369,6 +1415,8 @@ pub struct AgentView {
     /// intercept refuses and the tick path retires the tip, so the long TTL
     /// can never shadow yank mid-edit. `None` while the tip is not showing.
     pub(crate) word_select_tip_prompt_snapshot: Option<String>,
+    /// Drag-copy cluster detector behind the `/copy` · `/export` tip; ticks down the Copied! toast before showing.
+    pub(crate) export_copy_detector: crate::tips::export_copy::ExportCopyDetector,
     /// When the last fold/nav double-click landed on assistant text (a
     /// word-select probe). A second probe within the repeat window is the
     /// repeated-selection-attempt signal that fires the word-select tip;
@@ -1585,13 +1633,17 @@ pub struct AgentView {
     /// Cleared on any non-`d` key press, after 500ms expiry, or once
     /// `try_handle_esc_policy` consumes the Esc. `pub(crate)` for policy tests.
     pub(crate) esc_pressed_at: Option<std::time::Instant>,
-    /// Post-cancel grace deadline: while `now` is before it, the Esc policy
-    /// holds the idle rewind ARM so Esc-mashing past a cancel cannot
+    /// Mid-turn Esc grace deadline: while `now` is before it, the Esc policy
+    /// holds the idle rewind ARM so Esc-mashing past a turn's end cannot
     /// silently arm the rewind picker. Set (`now + ESC_CANCEL_REWIND_GRACE`)
-    /// by `suppress_rewind_arm` on every Esc-fired cancel, consumed and
+    /// by `suppress_rewind_arm` on every mid-turn Esc, consumed and
     /// retired-on-expiry by `rewind_arm_suppressed`. `pub(crate)` for policy
     /// tests.
     pub(crate) rewind_suppress_deadline: Option<std::time::Instant>,
+    /// Minimal mode has no toast slot, so the mid-turn "press <cancel key>" hint is
+    /// a committed system line; this is the turn it was last committed for, so Esc
+    /// mashing commits at most one hint per user turn.
+    pub(crate) minimal_cancel_hint_turn: Option<usize>,
     /// First prompt to enqueue once the session finishes loading replay.
     /// Set by `/fork` when a directive is provided; drained in the
     /// `TaskResult::SessionLoaded` arm via `enqueue_prompt_front` so the
@@ -1681,7 +1733,7 @@ pub struct AgentView {
     /// cancel-and-send this client dispatched into a running turn (send-now
     /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
     /// imminent cancel is the silent half of cancel-and-send, so the turn-end
-    /// rails suppress the "Turn cancelled by user …" marker.
+    /// rails suppress the "Turn cancelled …" marker.
     ///
     /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is
     /// trusted over this flag (`"send_now"` suppresses, anything else
@@ -1718,6 +1770,11 @@ pub struct AgentView {
     /// adoption captures). Cleared on session reload.
     pub(crate) send_now_painted_blocks:
         std::collections::HashMap<String, (crate::scrollback::EntryId, bool)>,
+    /// Text of a send-now-painted prompt, keyed by prompt id, kept until the
+    /// shell's live user echo for it arrives (and is swallowed) or the paint is
+    /// adopted/retired. Without it a send-now'd queue row renders twice: once
+    /// from the optimistic paint and once from the racing `UserMessageChunk`.
+    pub(crate) send_now_echo_pending: std::collections::HashMap<String, String>,
     /// Cached official-marketplace candidates for the plugin CTA, populated on
     /// session start independently of the Extensions modal.
     pub plugin_cta: PluginCtaState,
@@ -2076,7 +2133,9 @@ pub(crate) fn render_dropdown_chrome(
             panel_area,
             Style::default().fg(theme.text_primary).bg(theme.bg_light),
         );
-        let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+        let border_style = Style::default()
+            .fg(theme.panel_border_fg())
+            .bg(theme.bg_base);
         let border_line = Line::styled("\u{2500}".repeat(panel_width as usize), border_style);
         buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
         buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);

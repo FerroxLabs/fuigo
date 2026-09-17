@@ -94,6 +94,7 @@ fn configure_dashboard_state(app: &mut AppView) {
     if let Some(d) = app.dashboard.as_mut() {
         d.close_popup();
         d.location_picker = None;
+        d.usage_modal = None;
         d.cwd = cwd.clone();
         d.cwd_has_git_ancestor = cwd_has_git_ancestor;
         d.dispatch_worktree = false;
@@ -256,9 +257,16 @@ pub(super) fn dispatch_exit_dashboard(app: &mut AppView) -> Vec<Effect> {
         .take()
         .filter(|t| app.agents.contains_key(&t.agent_id()));
     // Overlay chrome only when the preferred target is still alive, never on the insertion-order fallback after the return agent was closed
+    // The fallback never lands on the unused home husk: closing the dashboard opened from Welcome goes back to Welcome with the husk still hidden
     let (return_id, rearm_overlay) = match preferred {
         Some(t) => (Some(t.agent_id()), t.is_overlay()),
-        None => (app.agents.keys().next().copied(), false),
+        None => (
+            app.agents
+                .keys()
+                .copied()
+                .find(|id| app.home_session_agent != Some(*id)),
+            false,
+        ),
     };
     if let Some(id) = return_id {
         app.active_view = ActiveView::Agent(id);
@@ -429,6 +437,8 @@ pub(super) fn dispatch_dashboard_overlay_exit(app: &mut AppView) -> Vec<Effect> 
     if let Some(d) = app.dashboard.as_mut() {
         d.restore_peek_viewport(&mut app.agents);
         d.close_popup();
+        // The modal returns `Unchanged` for control chords, so Ctrl+\ can reach the overlay with it still open; don't bring it back
+        d.usage_modal = None;
     }
     // Leaving the overlay by mouse (`[Dashboard]` click) doesn't pass through the key-press disarm in `handle_input`
     // An armed stop-confirm would survive the exit and let a later Ctrl+X on the dashboard close a session with a single press
@@ -484,6 +494,7 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
         dashboard_neighbor_row(app, &crate::views::dashboard::DashboardRowId::TopLevel(id));
     if let Some(d) = app.dashboard.as_mut() {
         d.close_popup();
+        d.usage_modal = None;
     }
     app.active_view = ActiveView::AgentDashboard;
     let effects = dispatch_sessions_confirm_close(app, id);
@@ -676,7 +687,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
     let (pending_mode, policy_block) = resolve_pending_dispatch_mode(app);
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     log_dashboard_launched("new_agent_button");
-    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id, false);
     set_create_permission_mode(&mut effects, pending_mode);
     if let Some(agent) = app.agents.get_mut(&new_id) {
         apply_pending_dispatch_config(agent, pending_model.as_ref(), pending_mode, policy_block);
@@ -995,22 +1006,20 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
     // When the dashboard was never opened, build a throwaway state from the persisted layout (pins, reorder, grouping)
     // Prev/next then match what the user sees after opening; `load_persisted` is cached on `app.dashboard_persisted`
     let order = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(
-                    &app.agents,
-                    snapshot,
-                    crate::views::dashboard::render::cached_home(),
-                )
-                .into_iter()
-                .filter_map(|row| match row.id {
-                    DashboardRowId::TopLevel(id) if !row.is_more_placeholder => Some(id),
-                    _ => None,
-                })
-                .collect()
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            crate::views::dashboard::render::cached_home(),
+        )
+        .into_iter()
+        .filter_map(|row| match row.id {
+            DashboardRowId::TopLevel(id) if !row.is_more_placeholder => Some(id),
+            _ => None,
+        })
+        .collect()
     } else {
         match app.dashboard.as_ref() {
             Some(d) => crate::views::dashboard::overlay_cycle_order(d, &app.agents),
@@ -1143,7 +1152,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         });
     let (prompt_text, mut pasted_images, chip_elements) = prompt_state.into_submission();
     log_dashboard_launched("prompt");
-    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id, false);
     set_create_permission_mode(&mut effects, pending_mode);
     if let Some(agent) = app.agents.get_mut(&new_id) {
         agent.session.enqueue_prompt(prompt_text);
@@ -1764,12 +1773,14 @@ pub(super) fn dashboard_neighbor_row(
         &app.dashboard_local_sessions
     };
     let rows = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            home,
+        )
     } else {
         crate::views::dashboard::build_rows_with_roster(
             &app.agents,
@@ -2087,12 +2098,14 @@ pub(super) fn dispatch_dashboard_select(app: &mut AppView, next: bool) {
         &app.dashboard_local_sessions
     };
     let rows = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            home,
+        )
     } else {
         crate::views::dashboard::build_rows_with_roster(
             &app.agents,

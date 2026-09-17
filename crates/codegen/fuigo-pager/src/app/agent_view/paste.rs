@@ -261,10 +261,7 @@ impl AgentView {
             }
             AgentDeferredSend::Interject => {
                 let text = self.prompt.text().trim().to_string();
-                if !ActionRegistry::interjection_possible(
-                    self.session.state.is_turn_running(),
-                    !text.is_empty(),
-                ) {
+                if !ActionRegistry::interjection_possible(self.can_send_now(), !text.is_empty()) {
                     return None;
                 }
                 let images = self.prompt.drain_images();

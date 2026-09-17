@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::io::Write;
 
 use crate::notifications::tmux;
 use crate::terminal::{MultiplexerKind, TerminalContext, TerminalName};
@@ -89,36 +88,36 @@ fn notification_sequence(
     })
 }
 
-/// Build the escape sequence for a notification, then write it to stderr.
+/// Build the notification bytes ready for the tty. `None` means emit nothing.
 ///
 /// When running under tmux the sequence is wrapped in DCS passthrough so the outer terminal sees it.
+fn notification_bytes(
+    protocol: NotificationProtocol,
+    title: &str,
+    body: &str,
+    ctx: &TerminalContext,
+) -> Option<Vec<u8>> {
+    let sequence = notification_sequence(protocol, title, body)?;
+    Some(if ctx.is_tmux_backed() {
+        tmux::tmux_passthrough(&sequence).into_bytes()
+    } else if matches!(protocol, NotificationProtocol::Bel) {
+        BEL_BYTE.to_vec()
+    } else {
+        sequence.into_owned().into_bytes()
+    })
+}
+
+/// Build the escape sequence for a notification and enqueue it on the terminal writer
+/// (notifications fire from the event-loop thread; see `EscapeWriter`).
 pub fn emit_notification(
     protocol: NotificationProtocol,
     title: &str,
     body: &str,
     ctx: &TerminalContext,
+    writer: &crate::render::draw::EscapeWriter,
 ) {
-    let Some(sequence) = notification_sequence(protocol, title, body) else {
-        return;
-    };
-
-    if ctx.is_tmux_backed() {
-        let wrapped = tmux::tmux_passthrough(&sequence);
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            let _ = stderr.write_all(wrapped.as_bytes());
-            let _ = stderr.flush();
-        });
-    } else if matches!(protocol, NotificationProtocol::Bel) {
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            let _ = stderr.write_all(BEL_BYTE);
-            let _ = stderr.flush();
-        });
-    } else {
-        let bytes = sequence.as_bytes();
-        fuigo_shell::util::with_locked_stderr(|stderr| {
-            let _ = stderr.write_all(bytes);
-            let _ = stderr.flush();
-        });
+    if let Some(bytes) = notification_bytes(protocol, title, body, ctx) {
+        writer.emit(bytes);
     }
 }
 
@@ -179,37 +178,55 @@ mod tests {
         );
     }
 
-    // --- emit_notification: verifies None is a no-op (does not panic) ---
-
-    #[test]
-    fn emit_none_is_noop() {
-        let ctx = ctx_with_brand(TerminalName::FuigoDesktop);
-        // Returns immediately without writing anything
-        emit_notification(NotificationProtocol::None, "title", "body", &ctx);
+    fn capture_writer() -> (
+        crate::render::draw::EscapeWriter,
+        std::sync::mpsc::Receiver<crate::render::draw::WriterPayload>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer =
+            crate::render::draw::EscapeWriter::new(tx, crate::render::draw::WriterSync::new());
+        (writer, rx)
     }
 
+    /// The emit path enqueues the built bytes on the writer queue (never an inline tty write).
     #[test]
-    fn emit_bel_does_not_panic() {
-        let ctx = ctx_with_brand(TerminalName::Unknown);
-        emit_notification(NotificationProtocol::Bel, "", "", &ctx);
-    }
-
-    #[test]
-    fn emit_osc9_does_not_panic() {
-        let ctx = ctx_with_brand(TerminalName::Iterm2);
-        emit_notification(NotificationProtocol::Osc9, "title", "body", &ctx);
-    }
-
-    #[test]
-    fn emit_osc99_does_not_panic() {
-        let ctx = ctx_with_brand(TerminalName::Kitty);
-        emit_notification(NotificationProtocol::Osc99, "title", "body", &ctx);
-    }
-
-    #[test]
-    fn emit_osc777_does_not_panic() {
+    fn emit_enqueues_bytes_on_writer_queue() {
         let ctx = ctx_with_brand(TerminalName::Ghostty);
-        emit_notification(NotificationProtocol::Osc777, "title", "body", &ctx);
+        let (writer, rx) = capture_writer();
+        emit_notification(NotificationProtocol::Osc777, "title", "body", &ctx, &writer);
+        let payload = rx.try_recv().expect("one payload enqueued");
+        assert_eq!(
+            payload.data(),
+            "\x1b]777;notify;Fuigo;body\x1b\\".as_bytes()
+        );
+    }
+
+    #[test]
+    fn emit_none_enqueues_nothing() {
+        let ctx = ctx_with_brand(TerminalName::FuigoDesktop);
+        let (writer, rx) = capture_writer();
+        emit_notification(NotificationProtocol::None, "title", "body", &ctx, &writer);
+        assert!(rx.try_recv().is_err(), "no payload expected");
+    }
+
+    #[test]
+    fn emit_bel_enqueues_the_bell_byte() {
+        let ctx = ctx_with_brand(TerminalName::Unknown);
+        let (writer, rx) = capture_writer();
+        emit_notification(NotificationProtocol::Bel, "", "", &ctx, &writer);
+        assert_eq!(rx.try_recv().expect("bell enqueued").data(), b"\x07");
+    }
+
+    #[test]
+    fn bytes_tmux_backed_wraps_in_dcs_passthrough() {
+        let ctx = TerminalContext {
+            brand: TerminalName::Iterm2,
+            multiplexer: MultiplexerKind::Tmux,
+            tmux_version: Some("tmux 3.3".into()),
+            ..Default::default()
+        };
+        let bytes = notification_bytes(NotificationProtocol::Osc9, "t", "b", &ctx).expect("bytes");
+        assert!(bytes.starts_with(b"\x1bPtmux;"), "missing DCS passthrough");
     }
 
     #[test]
