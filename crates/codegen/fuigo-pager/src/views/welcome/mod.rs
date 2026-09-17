@@ -210,6 +210,12 @@ struct WelcomeLayoutInput<'a> {
     prompt_height: Option<u16>,
 }
 
+/// Cap for the composer rows the welcome layout reserves: half the screen, and never more than the
+/// column can give up once the logo is hidden, but never less than the default box.
+fn prompt_max_height(_input: &WelcomeLayoutInput<'_>) -> u16 {
+    PROMPT_HEIGHT
+}
+
 impl WelcomeLayout {
     /// Whether the hero box (side-by-side logo and menu inside a border) is active.
     pub(super) fn has_hero_box(&self) -> bool {
@@ -3603,6 +3609,89 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(layout.changelog.height, 5);
+    }
+
+    fn places_every_row(layout: &WelcomeLayout, input: &WelcomeLayoutInput<'_>) -> bool {
+        let prompt_height = input.prompt_height.unwrap_or(PROMPT_HEIGHT);
+        let stacked_rows =
+            layout.menu.height == input.menu_height && layout.error.height == input.error_height;
+        (layout.has_hero_box() || stacked_rows)
+            && layout.tip.height == input.tip_height
+            && layout.prompt.height == prompt_height
+            && layout.version.height == 1
+    }
+
+    fn assert_places_every_row(layout: &WelcomeLayout, input: &WelcomeLayoutInput<'_>) {
+        assert!(
+            places_every_row(layout, input),
+            "a row lost height: menu {} tip {} prompt {} version {} for prompt {:?} in {:?}",
+            layout.menu.height,
+            layout.tip.height,
+            layout.prompt.height,
+            layout.version.height,
+            input.prompt_height,
+            input.content_area
+        );
+    }
+
+    #[test]
+    fn hero_box_prompt_grows_into_the_flex_gap_and_holds_the_box_still() {
+        let area = Rect::new(0, 0, 90, 50);
+        let input = |prompt_height| WelcomeLayoutInput {
+            content_area: area,
+            menu_height: 4,
+            prompt_height,
+            ..Default::default()
+        };
+        let one_line = WelcomeLayout::compute(input(None));
+        let five_lines = WelcomeLayout::compute(input(Some(PROMPT_HEIGHT + 4)));
+        assert!(one_line.has_hero_box() && five_lines.has_hero_box());
+        assert_eq!(one_line.prompt.height, PROMPT_HEIGHT);
+        assert_eq!(five_lines.prompt.height, PROMPT_HEIGHT + 4);
+        assert_eq!(five_lines.version, one_line.version);
+        assert_eq!(five_lines.prompt.bottom(), one_line.prompt.bottom());
+        assert_eq!(
+            five_lines.hero_box, one_line.hero_box,
+            "a taller draft eats the flex gap before moving the hero box"
+        );
+        assert_places_every_row(&five_lines, &input(Some(PROMPT_HEIGHT + 4)));
+    }
+
+    #[test]
+    fn stacked_layout_reserves_the_requested_prompt_rows() {
+        let area = Rect::new(0, 0, 60, 40);
+        let input = |prompt_height| WelcomeLayoutInput {
+            content_area: area,
+            menu_height: 4,
+            prompt_height,
+            ..Default::default()
+        };
+        let one_line = WelcomeLayout::compute_stacked(input(None));
+        let tall = WelcomeLayout::compute_stacked(input(Some(PROMPT_HEIGHT + 4)));
+        assert_eq!(one_line.prompt.height, PROMPT_HEIGHT);
+        assert_eq!(tall.prompt.height, PROMPT_HEIGHT + 4);
+        assert_eq!(tall.version, one_line.version);
+        assert_places_every_row(&tall, &input(Some(PROMPT_HEIGHT + 4)));
+    }
+
+    /// The composer may grow to half the screen but never below its default, and never past what the
+    /// column can give up once the logo is gone.
+    #[test]
+    fn prompt_max_height_is_bounded_by_the_column_and_half_the_screen() {
+        let input = |height| WelcomeLayoutInput {
+            content_area: Rect::new(0, 0, 90, height),
+            menu_height: 4,
+            ..Default::default()
+        };
+        assert_eq!(prompt_max_height(&input(60)), 30);
+        assert_eq!(prompt_max_height(&input(10)), PROMPT_HEIGHT);
+        // 14 rows minus logo gap(1), menu(4), flex gap(1) and the version rows: the column, not half the screen, caps it
+        let column_only = 14u16 - (1 + 4 + 1 + WelcomeLayout::fixed_below_with_prompt(0, 0));
+        assert!(
+            column_only < 7 && column_only >= PROMPT_HEIGHT,
+            "column_only={column_only}"
+        );
+        assert_eq!(prompt_max_height(&input(14)), column_only);
     }
 
     #[test]
