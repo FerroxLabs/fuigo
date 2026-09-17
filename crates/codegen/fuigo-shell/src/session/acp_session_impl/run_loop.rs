@@ -26,14 +26,51 @@ mod yolo_toggle_report_tests {
 /// Best-effort removal of this session's scratch staging on teardown.
 /// A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
+/// Bound on joining a cancelled SessionStart hook task at session end.
+const DEFERRED_START_CANCEL_JOIN: std::time::Duration = std::time::Duration::from_millis(500);
+/// The SessionStart hook runs on its own local task so `session/new` and the first prompt do not
+/// wait on the command loop behind it. Session end cancels it and joins (bounded) before
+/// SessionEnd hooks fire, so a cancelled start never reports after the end.
+pub(super) struct DeferredStart {
+    cancel: tokio_util::sync::CancellationToken,
+    task: Option<tokio_util::task::AbortOnDropHandle<()>>,
+}
+impl DeferredStart {
+    pub(super) fn new() -> Self {
+        Self {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            task: None,
+        }
+    }
+    fn arm(&mut self, handle: tokio::task::JoinHandle<()>) {
+        let handle = tokio_util::task::AbortOnDropHandle::new(handle);
+        if self.cancel.is_cancelled() {
+            drop(handle);
+            return;
+        }
+        self.task = Some(handle);
+    }
+    async fn seal_and_join(&mut self) {
+        self.cancel.cancel();
+        if let Some(mut start) = self.task.take() {
+            tokio::select! {
+                biased;
+                _ = &mut start => {}
+                _ = tokio::time::sleep(DEFERRED_START_CANCEL_JOIN) => {}
+            }
+        }
+    }
+}
 /// SessionEnd hooks and stop dispatch.
 /// Shared so the channel-closed and Shutdown paths cannot drift on hook ordering (memory save still runs after this).
 pub(super) async fn fire_session_end_hooks(
     session: &SessionActor,
     reason: &str,
     timer: &SharedSessionEndTimer,
+    start: &mut DeferredStart,
 ) {
     let span = session_end::span(Phase::Hooks);
+    start.seal_and_join().await;
     let envelope = session.fire_hook(
         fuigo_hooks::event::HookEventName::SessionEnd,
         None,
@@ -409,6 +446,7 @@ pub(super) async fn run_session(
     impl Drop for DreamTask { fn drop(&mut self) { if let Some(task) = &self.0 { task.abort(); } } }
     let mut dream_task = DreamTask(None);
     tokio::pin!(dream_check_sleep);
+    let mut deferred_start = DeferredStart::new();
     loop {
         tokio::select! {
                 biased;
@@ -525,7 +563,7 @@ pub(super) async fn run_session(
                         // Hooks fire BEFORE memory auto-save
                         let end_timer = session_end::SessionEndTimer::new_shared();
                         turn_end_queue.flush().await;
-                        fire_session_end_hooks(&session, "channel_closed", &end_timer).await;
+                        fire_session_end_hooks(&session, "channel_closed", &end_timer, &mut deferred_start).await;
                         session
                             .run_session_end_memory_pipeline(
                                 "channel closed, session summary saved",
@@ -1826,25 +1864,48 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::DispatchSessionStartHook { source } => {
-                            let envelope = session.fire_hook(
-                                fuigo_hooks::event::HookEventName::SessionStart,
-                                None,
-                                fuigo_hooks::event::HookPayload::SessionStart {
-                                    source,
-                                    model_id: None,
-                                    agent_type: None,
-                                },
-                            );
-                            if let Some(registry) = session.hook_registry.borrow().clone() {
-                                let ctx = session.hook_run_ctx();
-                                let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
-                                    &registry,
-                                    fuigo_hooks::event::HookEventName::SessionStart,
-                                    &envelope,
-                                    &ctx,
-                                )
-                                .await;
-                                session.send_hook_execution("session_start", None, None, &results).await;
+                            // Observe hooks cannot gate; don't hold session/new on the command loop.
+                            if !deferred_start.cancel.is_cancelled() {
+                                let s = session.clone();
+                                let cancel = deferred_start.cancel.clone();
+                                let handle = tokio::task::spawn_local(async move {
+                                    let run = async {
+                                        if cancel.is_cancelled() {
+                                            return;
+                                        }
+                                        let envelope = s.fire_hook(
+                                            fuigo_hooks::event::HookEventName::SessionStart,
+                                            None,
+                                            fuigo_hooks::event::HookPayload::SessionStart {
+                                                source,
+                                                model_id: None,
+                                                agent_type: None,
+                                            },
+                                        );
+                                        let Some(registry) = s.hook_registry.borrow().clone() else {
+                                            return;
+                                        };
+                                        let ctx = s.hook_run_ctx();
+                                        let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
+                                            &registry,
+                                            fuigo_hooks::event::HookEventName::SessionStart,
+                                            &envelope,
+                                            &ctx,
+                                        )
+                                        .await;
+                                        if cancel.is_cancelled() {
+                                            return;
+                                        }
+                                        s.send_hook_execution("session_start", None, None, &results)
+                                            .await;
+                                    };
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel.cancelled() => {}
+                                        _ = run => {}
+                                    }
+                                });
+                                deferred_start.arm(handle);
                             }
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
@@ -2150,7 +2211,7 @@ pub(super) async fn run_session(
                             // ── session_end (shutdown path) ────────────
                             // Hooks fire BEFORE memory auto-save
                             turn_end_queue.flush().await;
-                            fire_session_end_hooks(&session, "shutdown", &end_timer).await;
+                            fire_session_end_hooks(&session, "shutdown", &end_timer, &mut deferred_start).await;
                             session
                                 .run_session_end_memory_pipeline(
                                     "session summary saved",
