@@ -569,15 +569,15 @@ pub(crate) struct PendingTurnEnd {
     /// `agentResult` detail from the broadcast (error text, when present).
     pub agent_result: Option<String>,
     /// `_meta.cancellationCategory` from the broadcast (`"HookDenied"` picks
-    /// the "blocked by a hook" marker over "cancelled by user"). `None` on
-    /// older shells or plain user cancels.
+    /// the "blocked by a hook" marker; permission / max-turns categories name
+    /// the cancel banner). `None` on older shells or plain user cancels.
     pub cancellation_category: Option<String>,
     /// `_meta.cancellationContext` from the broadcast (hook name, reason for
     /// the blocked-prompt card). `None` on older shells / non-hook cancels.
     pub cancellation_context: Option<serde_json::Value>,
     /// `_meta.cancelTrigger` from the broadcast (`"send_now"` marks a
-    /// cancel-and-send whose "Turn cancelled" marker is suppressed). `None`
-    /// on older shells / non-cancel ends.
+    /// cancel-and-send whose "Turn cancelled" marker is suppressed; any other
+    /// value names the banner's cause). `None` on older shells / non-cancel ends.
     pub cancel_trigger: Option<String>,
     /// Typed kind of a failed stop from the broadcast, parsed at the wire
     /// ingress (`MaxTokensTruncation` picks the truncation copy).
@@ -1681,7 +1681,7 @@ pub struct AgentView {
     /// cancel-and-send this client dispatched into a running turn (send-now
     /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's
     /// imminent cancel is the silent half of cancel-and-send, so the turn-end
-    /// rails suppress the "Turn cancelled by user …" marker.
+    /// rails suppress the "Turn cancelled …" marker.
     ///
     /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is
     /// trusted over this flag (`"send_now"` suppresses, anything else

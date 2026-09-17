@@ -1107,17 +1107,10 @@ pub(crate) fn execute(
                                         } else {
                                             "Restore complete"
                                         };
-                                        if elapsed_secs >= 60 {
-                                            Some(
-                                                format!(
-                                        "{status} ({}m{:02}s).",
-                                        elapsed_secs / 60,
-                                        elapsed_secs % 60
-                                    ),
-                                            )
-                                        } else {
-                                            Some(format!("{status} ({elapsed_secs}s)."))
-                                        }
+                                        Some(format!(
+                                            "{status} ({}).",
+                                            crate::views::dock::fmt_elapsed(elapsed_secs)
+                                        ))
                                     }
                                     _ => None,
                                 };
