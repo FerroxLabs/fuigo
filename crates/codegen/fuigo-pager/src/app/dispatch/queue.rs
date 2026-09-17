@@ -25,8 +25,7 @@ pub(super) fn push_and_page_flip(scrollback: &mut ScrollbackState, block: Render
         return;
     }
     let idx = scrollback.len() - 1;
-    scrollback.scroll_to_entry_top(idx);
-    scrollback.enable_follow_with_preserve();
+    scrollback.page_flip_to_entry(idx);
 }
 
 fn combine_queued_prompts_enabled() -> bool {
