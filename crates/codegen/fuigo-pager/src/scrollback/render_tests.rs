@@ -3308,11 +3308,10 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
 }
 
 /// Long URL inside a list item. Same OSC-coverage invariant as the blockquote test above.
-/// See that test for the rationale and the related indent-inclusion bug.
-/// Both its symptoms apply here too.
-/// The indent inherits the URL styling, and the last `indent_width` URL cells of each continuation row are not clickable.
+/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
 #[test]
 fn overlay_pretty_link_url_in_list_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/list/item/path/with/many/hyphens-and-segments-here";
     let markdown = format!("- See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3332,6 +3331,17 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // Top-level list items render as "\u{2022} \u{2026}" with no quote-bar indent on continuation rows
+    // Continuation OverlayLinks start at content_x (no indent offset)
+    for frag in group.get(1..).into_iter().flatten() {
+        assert_eq!(
+            frag.col_start, content_x,
+            "OverlayLink on list continuation row must start at content_x (no quote-bar indent); got col_start={} but expected {}",
+            frag.col_start, content_x
+        );
+    }
+
+    // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
             frag.col_start >= content_x,
@@ -3342,6 +3352,18 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Width changes trigger `set_max_table_width` resets inside `MarkdownContent::ensure_wrapped`.
