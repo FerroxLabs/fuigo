@@ -8,7 +8,6 @@ use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
 use agent_client_protocol as acp;
-use regex::Regex;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     process::{ChildStderr, Command},
@@ -48,36 +47,17 @@ use fuigo_tools::util::{ProcessGroup, ProcessScope};
 /// Canonical definition lives in `fuigo_workspace_types`; re-exported here for callers that historically imported it from this module.
 pub use fuigo_workspace_types::MCP_TOOL_NAME_DELIMITER;
 
+pub use crate::tool_name::{
+    MCP_QUALIFIED_NAME_MAX_CHARS, McpToolAdmissionError, PROVIDER_TOOL_NAME_MAX_CHARS,
+    parse_mcp_qualified_name, parse_mcp_tool_name, qualify_mcp_tool_name, validate_tool_name,
+};
+
 /// Advisory local session routing, never authentication.
 pub const GROK_AGENT_ID_HEADER: &str = "X-Grok-Agent-ID";
 
 /// Reqwest 0.13 twin of the 0.12 adapters in `fuigo_extra_ca`.
 fn with_extra_root_certificates(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     crate::http_policy::configure(builder)
-}
-
-/// Regex for strictest cross-provider tool name validation.
-///
-/// Requirements across providers:
-/// - Anthropic/OpenAI: `^[a-zA-Z0-9_-]{1,64}$` (allows starting with digit/hyphen)
-/// - Google Gemini: `^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$` (must start with letter/underscore, allows dots)
-///
-/// Strictest common denominator: must start with letter/underscore, only alphanumeric/_/- allowed, max 64 chars.
-static TOOL_NAME_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$").unwrap());
-
-/// Validate that a tool name matches the strictest cross-provider LLM API requirements.
-pub fn validate_tool_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("tool name cannot be empty".to_string());
-    }
-    if !TOOL_NAME_REGEX.is_match(name) {
-        return Err(format!(
-            "tool name '{}' is invalid — must match ^[a-zA-Z_][a-zA-Z0-9_-]{{0,63}}$ (start with letter/underscore, max 64 chars)",
-            name
-        ));
-    }
-    Ok(())
 }
 
 /// Max protocol icons kept per server/tool at ingest.
@@ -1153,32 +1133,6 @@ pub fn parse_mcp_meta_config(
 /// MCP initialization strategy. Defined in `fuigo-telemetry`; re-exported here so existing call sites continue to work.
 pub use fuigo_telemetry::enums::McpInitStrategy;
 
-/// Parse a non-empty `server__tool` ID with one overlap-aware delimiter and valid [`fuigo_tool_protocol::ToolId`] syntax.
-pub fn parse_mcp_qualified_name(name: &str) -> Option<(fuigo_tool_protocol::ToolId, &str, &str)> {
-    let delimiter = MCP_TOOL_NAME_DELIMITER.as_bytes();
-    // Byte windows preserve both overlapping `__` boundaries in `___`.
-    let mut boundaries = name
-        .as_bytes()
-        .windows(delimiter.len())
-        .enumerate()
-        .filter_map(|(index, window)| (window == delimiter).then_some(index));
-    let boundary = boundaries.next()?;
-    if boundaries.next().is_some() {
-        return None;
-    }
-    let (server, tool_with_delimiter) = name.split_at(boundary);
-    let tool = &tool_with_delimiter[MCP_TOOL_NAME_DELIMITER.len()..];
-    if server.is_empty() || tool.is_empty() {
-        return None;
-    }
-    Some((fuigo_tool_protocol::ToolId::new(name).ok()?, server, tool))
-}
-
-/// Parse an MCP tool name in `server__tool` format into owned segments.
-pub fn parse_mcp_tool_name(name: &str) -> Option<(String, String)> {
-    parse_mcp_qualified_name(name).map(|(_, server, tool)| (server.to_owned(), tool.to_owned()))
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
     #[error("MCP client error: {0}")]
@@ -1458,64 +1412,20 @@ impl McpTool {
     }
 
     /// Convert into the data needed for `ToolBridge::register_erased()`.
-    ///
-    /// Invalid or ambiguous qualified IDs and provider-invalid names are logged and skipped.
-    /// The upstream connector must provide non-empty `server` and `tool` segments separated by exactly one `__` boundary.
-    /// The model-facing name: `server__tool`, projected onto the provider limit.
-    ///
-    /// Provider function names are capped at 64 characters, and a reverse-DNS host
-    /// server name plus a descriptive tool name overruns that easily
-    /// (`io-github-taylorwilsdon-google-workspace-mcp__batch_modify_gmail_message_labels`
-    /// is 79). When the qualified name is too long the TOOL segment is shortened to
-    /// fit and suffixed with `-` plus a 6-hex FNV-1a digest of the original tool
-    /// name, so sibling tools that share a prefix stay distinct and the name is
-    /// stable across sessions. The server segment is never touched: everything
-    /// keyed by server (permissions, the merge map, `use_tool`) keeps working, and
-    /// dispatch uses `self.name`, the ORIGINAL tool name, so the wire call is
-    /// unchanged. `None` when the server segment alone leaves no room for a
-    /// meaningful tool segment.
-    pub fn qualified_name(&self) -> Option<String> {
-        project_qualified_tool_name(&self.server_name, &self.name)
-    }
-
-    pub fn into_registration(self) -> Option<McpToolRegistration> {
-        let Some(qualified_name) = self.qualified_name() else {
-            tracing::error!(
-                server = %self.server_name,
-                tool = %self.name,
-                "Skipping MCP tool: server name leaves no room for a tool segment within the 64-char provider limit"
-            );
-            return None;
-        };
-        if qualified_name.len()
-            != self.server_name.len() + MCP_TOOL_NAME_DELIMITER.len() + self.name.len()
-        {
-            tracing::warn!(
-                server = %self.server_name,
-                tool = %self.name,
-                model_name = %qualified_name,
-                "MCP tool name shortened to the 64-char provider limit; the model sees the shortened name"
-            );
-        }
-
-        if parse_mcp_qualified_name(&qualified_name).is_none() {
-            tracing::error!(
-                server = %self.server_name,
-                tool = %self.name,
-                qualified = %qualified_name,
-                "Skipping MCP tool with invalid or ambiguous qualified name"
-            );
-            return None;
-        }
-        if let Err(reason) = validate_tool_name(&qualified_name) {
-            tracing::error!(
-                tool_name = %qualified_name,
-                server = %self.server_name,
-                reason = %reason,
-                "Skipping MCP tool with invalid name"
-            );
-            return None;
-        }
+    /// Invalid or ambiguous qualified IDs and charset-invalid segments are logged and skipped.
+    /// Length of the concatenated `server__tool` key is not limited to the 64-char provider budget:
+    /// MCP tools are reached through `search_tool` / `use_tool`, never listed to the model as
+    /// direct functions.
+    pub fn into_registration(self) -> Result<McpToolRegistration, McpToolAdmissionError> {
+        let qualified_name =
+            qualify_mcp_tool_name(&self.server_name, &self.name).inspect_err(|reason| {
+                tracing::error!(
+                    server = %self.server_name,
+                    tool = %self.name,
+                    reason = %reason,
+                    "Skipping MCP tool"
+                );
+            })?;
 
         let description = self.description.clone();
         let input_schema = self.schema.clone();
@@ -1529,7 +1439,7 @@ impl McpTool {
             .map(|arr| arr.iter().any(|s| s.as_str() == Some("model")))
             .unwrap_or(true); // default: visible to model
 
-        Some(McpToolRegistration {
+        Ok(McpToolRegistration {
             name: qualified_name,
             description,
             input_schema,
@@ -1577,11 +1487,13 @@ impl fuigo_tool_runtime::Tool for McpErasedTool {
 
     fn id(&self) -> fuigo_tool_protocol::ToolId {
         // Use the qualified name (server__tool) so that two MCP servers exposing the same raw tool name get distinct LocalRegistry entries.
-        // Same projection as the registration name, so the registry key and the id agree.
-        self.tool
-            .qualified_name()
-            .and_then(|qualified| fuigo_tool_protocol::ToolId::new(&qualified).ok())
-            .unwrap_or_else(|| fuigo_tool_protocol::ToolId::new("mcp_tool").expect("valid"))
+        // Same key as the registration name, so the registry key and the id agree.
+        let qualified = format!(
+            "{}{}{}",
+            self.tool.server_name, MCP_TOOL_NAME_DELIMITER, self.tool.name
+        );
+        fuigo_tool_protocol::ToolId::new(&qualified)
+            .unwrap_or_else(|_| fuigo_tool_protocol::ToolId::new("mcp_tool").expect("valid"))
     }
 
     fn description(
@@ -4604,6 +4516,8 @@ impl McpClient {
             }
         }
 
+        let event_writer = mcp_state.lock().await.event_writer().clone();
+        let listed_count = all_tools.len();
         let registrations: Vec<_> = all_tools
             .into_iter()
             .filter_map(|tool| {
@@ -4629,20 +4543,38 @@ impl McpClient {
 
                 let icons = McpIcon::from_rmcp_list(tool.icons);
                 let mcp_tool = McpTool {
-                    name,
+                    name: name.clone(),
                     description,
                     server_name: self.server_name.clone(),
                     mcp_state: Arc::clone(&mcp_state),
                     schema,
                     meta,
                 };
-                // Invalid tools (bad names) return None and are skipped
-                mcp_tool.into_registration().map(|mut reg| {
-                    reg.icons = icons;
-                    reg
-                })
+                match mcp_tool.into_registration() {
+                    Ok(mut reg) => {
+                        reg.icons = icons;
+                        Some(reg)
+                    }
+                    Err(reason) => {
+                        event_writer.emit(fuigo_session_events::Event::McpToolRegistrationFailed {
+                            server_name: self.server_name.clone(),
+                            tool_name: name,
+                            error: reason.to_string(),
+                        });
+                        None
+                    }
+                }
             })
             .collect();
+        if registrations.len() != listed_count {
+            tracing::warn!(
+                server = %self.server_name,
+                listed = listed_count,
+                admitted = registrations.len(),
+                skipped = listed_count.saturating_sub(registrations.len()),
+                "MCP tools/list included tools skipped by session admission"
+            );
+        }
 
         // Warn about tool_timeouts keys that don't match any discovered tool.
         // This catches typos like `creat_issue` instead of `create_issue`.
@@ -5166,46 +5098,6 @@ pub async fn start_mcp_servers(
 ///   result becomes `mcp`
 ///
 /// Identity for a name that is already well-formed, so hosts with clean names see no change.
-/// Provider limit on a function name (OpenAI and Anthropic both cap at 64).
-pub const MAX_TOOL_NAME_LEN: usize = 64;
-
-/// Fewest characters of the original tool name worth keeping in a shortened one.
-const MIN_TOOL_STEM_LEN: usize = 4;
-
-/// See [`McpTool::qualified_name`]. Identity for a name that already fits.
-pub fn project_qualified_tool_name(server: &str, tool: &str) -> Option<String> {
-    let full = format!("{server}{MCP_TOOL_NAME_DELIMITER}{tool}");
-    if full.len() <= MAX_TOOL_NAME_LEN {
-        return Some(full);
-    }
-    let digest = format!("-{:06x}", fnv1a_32(tool) & 0xff_ffff);
-    let budget = MAX_TOOL_NAME_LEN
-        .checked_sub(server.len() + MCP_TOOL_NAME_DELIMITER.len() + digest.len())?;
-    if budget < MIN_TOOL_STEM_LEN {
-        return None;
-    }
-    // Cut on a char boundary, then drop a dangling separator so the stem reads cleanly.
-    let mut stem: &str = tool;
-    while stem.len() > budget {
-        let mut end = stem.len() - 1;
-        while !stem.is_char_boundary(end) {
-            end -= 1;
-        }
-        stem = &stem[..end];
-    }
-    let stem = stem.trim_end_matches(['-', '_']);
-    Some(format!("{server}{MCP_TOOL_NAME_DELIMITER}{stem}{digest}"))
-}
-
-/// 32-bit FNV-1a: tiny, dependency-free and stable across builds, which is what
-/// a name the model learns needs (the same tool must project to the same name
-/// in every session).
-fn fnv1a_32(s: &str) -> u32 {
-    s.bytes().fold(0x811c_9dc5u32, |h, b| {
-        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
-    })
-}
-
 pub fn sanitize_mcp_server_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut underscores = 0usize;

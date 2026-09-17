@@ -50,4 +50,5 @@ pub mod oauth;
 pub mod oauth_config;
 pub mod owned_clients;
 pub mod servers;
+mod tool_name;
 pub mod wire;
