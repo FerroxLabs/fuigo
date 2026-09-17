@@ -3347,7 +3347,7 @@ impl MvpAgent {
         meta.insert("fuigo/sessionDetail".to_string(), serde_json::json!(detail));
         if let Some(background_loops) = self
             .resident_handle(session_id)
-            .map(|handle| handle.scheduler_background_loops)
+            .map(|handle| handle.spawn_snapshot.scheduler_background_loops)
         {
             meta.insert(
                 SCHEDULER_BACKGROUND_LOOPS_META_KEY.to_string(),

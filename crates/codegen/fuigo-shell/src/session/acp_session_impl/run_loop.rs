@@ -234,6 +234,41 @@ async fn emit_session_end_timings(timer: &SharedSessionEndTimer, is_subagent: bo
     )
     .await;
 }
+/// The deferred startup jobs, owned by the run loop so a session ending mid-startup aborts them instead of leaving them detached.
+struct StartupTasks {
+    _mcp_init_prompt_promote: crate::util::AbortOnDrop,
+    _context_snapshot: Option<crate::util::AbortOnDrop>,
+}
+impl StartupTasks {
+    fn spawn(
+        session: &Arc<SessionActor>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
+    ) -> Self {
+        let session_for_mcp = session.clone();
+        let mcp_init_prompt_promote =
+            crate::util::AbortOnDrop(tokio::task::spawn_local(async move {
+                session_for_mcp.ensure_mcp_tools_initialized().await;
+                SessionActor::maybe_start_running_task(session_for_mcp.clone(), completion_tx)
+                    .await;
+            }));
+        let context_snapshot = if session.startup_hints.is_subagent {
+            tracing::info!("session_context_snapshot: skipped (subagent)");
+            None
+        } else {
+            let s = session.clone();
+            Some(crate::util::AbortOnDrop(tokio::task::spawn_local(
+                instrument_task!("session.context_snapshot", Parent::Inherit, async move {
+                    s.wait_for_mcp_initialized().await;
+                    s.emit_session_context_snapshot().await;
+                }),
+            )))
+        };
+        Self {
+            _mcp_init_prompt_promote: mcp_init_prompt_promote,
+            _context_snapshot: context_snapshot,
+        }
+    }
+}
 pub(super) async fn run_session(
     session: Arc<SessionActor>,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCommand>,
@@ -303,12 +338,6 @@ pub(super) async fn run_session(
     {
         let s = session.clone();
         tokio::task::spawn_local(async move { s.maybe_notify_git_branch().await });
-    }
-    if session.startup_hints.is_subagent {
-        tracing::info!("session_context_snapshot: skipped (subagent)");
-    } else {
-        session.wait_for_mcp_initialized().await;
-        session.emit_session_context_snapshot().await;
     }
     tokio::task::spawn_local(super::status_line::run_status_emitter(Arc::downgrade(
         &session,
@@ -387,13 +416,7 @@ pub(super) async fn run_session(
             .await;
         });
     }
-    let session_for_mcp = session.clone();
-    let completion_tx_for_mcp = completion_tx.clone();
-    tokio::task::spawn_local(async move {
-        session_for_mcp.ensure_mcp_tools_initialized().await;
-        SessionActor::maybe_start_running_task(session_for_mcp.clone(), completion_tx_for_mcp)
-            .await;
-    });
+    let _startup_tasks = StartupTasks::spawn(&session, completion_tx.clone());
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
     let idle_flush_sleep = match session.idle_flush_timeout {
