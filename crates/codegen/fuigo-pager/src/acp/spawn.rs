@@ -211,6 +211,14 @@ pub async fn spawn_fuigo_shell(
     // re-login). No-op where the OS listener is unavailable.
     auth_manager.start_system_power_listener();
 
+    let agent_cancel = cancel.child_token();
+
+    auth_manager.prewarm_auth_refresh(agent_cancel.child_token());
+    // Dropping a token does not cancel it: a `?` exit below creates no
+    // SpawnedAgent and no AgentShutdownGuard, so this guard cancels the
+    // prewarm instead. Disarmed where ownership transfers to SpawnedAgent.
+    let cancel_prewarm_unless_spawned = agent_cancel.clone().drop_guard();
+
     fuigo_shell::agent::app::apply_otel_config(&auth_manager, &agent_config.fuigo_com_config);
 
     fuigo_shell::agent::models::startup_prefetch::begin_before_policy_gate(&agent_config);
@@ -224,7 +232,6 @@ pub async fn spawn_fuigo_shell(
             .map_err(anyhow::Error::new)?;
     models_manager.spawn_background_refresh();
 
-    let agent_cancel = cancel.child_token();
     let (acp_client, acp_agent) = acp_channels();
 
     // Clone before `auth_manager` is moved into the agent closure below, so the
@@ -251,6 +258,8 @@ pub async fn spawn_fuigo_shell(
     let handle =
         spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone(), skills_paths).await?;
 
+    // The spawn succeeded: the caller's AgentShutdownGuard owns cancellation now.
+    let agent_cancel = cancel_prewarm_unless_spawned.disarm();
     Ok(SpawnedAgent {
         thread_handle: handle,
         channel: acp_client,
