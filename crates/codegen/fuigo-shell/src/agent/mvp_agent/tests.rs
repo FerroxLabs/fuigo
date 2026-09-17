@@ -5565,6 +5565,161 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
         assert!(agent.post_auth_settings_in_flight.get());
     });
 }
+#[tokio::test(flavor = "current_thread")]
+async fn settings_fetch_coalesces_concurrent_callers() {
+    let agent = build_minimal_agent_for_tests();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let leader = || {
+        let calls = calls.clone();
+        move || async move {
+            calls.set(calls.get() + 1);
+            tokio::task::yield_now().await;
+            crate::remote::SettingsFetch::Fetched(Box::default())
+        }
+    };
+    let auth = crate::auth::FuigoAuth::test_default();
+    let cluster = (0..5).map(|_| agent.settings_manager.fetch(&auth, leader()));
+    let outcomes = futures::future::join_all(cluster).await;
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, Some(crate::remote::SettingsFetch::Fetched(_)))),
+        "every coalesced caller receives the shared success"
+    );
+    assert_eq!(calls.get(), 1, "concurrent callers share one leader fetch");
+    let _ = agent.settings_manager.fetch(&auth, leader()).await;
+    assert_eq!(
+        calls.get(),
+        2,
+        "a sequential trigger re-fetches; no stale replay"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_leader_refetches_instead_of_gate_opening_retry() {
+    let agent = build_minimal_agent_for_tests();
+    let auth = crate::auth::FuigoAuth::test_default();
+    let mut leader = Box::pin(
+        agent
+            .settings_manager
+            .fetch(&auth, std::future::pending::<crate::remote::SettingsFetch>),
+    );
+    tokio::select! {
+        biased;
+        _ = &mut leader => unreachable!("a pending leader cannot complete"),
+        _ = tokio::task::yield_now() => {}
+    }
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let calls_follower = calls.clone();
+    let mut follower = Box::pin(agent.settings_manager.fetch(&auth, move || async move {
+        calls_follower.set(calls_follower.get() + 1);
+        crate::remote::SettingsFetch::Fetched(Box::default())
+    }));
+    tokio::select! {
+        biased;
+        _ = &mut follower => unreachable!("the follower must park on the in-flight leader"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(calls.get(), 0, "a joining follower must not fetch");
+    drop(leader);
+    assert!(
+        matches!(
+            follower.await,
+            Some(crate::remote::SettingsFetch::Fetched(_))
+        ),
+        "a cancelled leader drives a real re-fetch, not a gate-opening Retry"
+    );
+    assert_eq!(
+        calls.get(),
+        1,
+        "the follower re-plans and leads exactly one fresh fetch"
+    );
+}
+
+/// A follower that keeps joining leaders which drop before publishing must eventually give up with
+/// `None` — never a fabricated `Retry` that would open the fail-closed OTEL gate on cancellation churn.
+#[tokio::test(flavor = "current_thread")]
+async fn settings_fetch_returns_none_after_repeated_leader_drops() {
+    let agent = build_minimal_agent_for_tests();
+    let auth = crate::auth::FuigoAuth::test_default();
+    macro_rules! new_fetch {
+        () => {
+            Box::pin(
+                agent
+                    .settings_manager
+                    .fetch(&auth, std::future::pending::<crate::remote::SettingsFetch>),
+            )
+        };
+    }
+    macro_rules! poll_park {
+        ($fut:expr, $msg:expr) => {
+            tokio::select! {
+                biased;
+                _ = &mut $fut => unreachable!($msg),
+                _ = tokio::task::yield_now() => {}
+            }
+        };
+    }
+    let mut leader = new_fetch!();
+    poll_park!(leader, "the first leader parks on its pending fetch");
+    let mut follower = new_fetch!();
+    poll_park!(follower, "the follower joins the first in-flight leader");
+    for _ in 0..3 {
+        let mut next = new_fetch!();
+        drop(leader);
+        poll_park!(next, "a fresh leader grabs the freed lead slot");
+        poll_park!(
+            follower,
+            "the follower re-joins the fresh leader after a drop"
+        );
+        leader = next;
+    }
+    drop(leader);
+    assert!(
+        follower.await.is_none(),
+        "past the reattempt budget the follower yields None, not a gate-opening Retry"
+    );
+}
+
+/// Wiring pin for the coalescer: the post-auth path (`fetch_settings_resolving_gate`, which both
+/// `spawn_post_auth_settings` and the reconnect path funnel through) must fetch *through*
+/// [`SettingsManager`]. The three tests above drive `SettingsManager::fetch` directly, so removing
+/// the manager from `fetch_settings_resolving_gate` would leave every one of them green while the
+/// shipped product coalesced nothing.
+///
+/// A leader is parked on the manager first, so a wired call joins it and performs no fetch of its
+/// own; an unwired one would lead a second, uncoalesced fetch and never enter the manager.
+#[tokio::test(flavor = "current_thread")]
+async fn resolving_gate_fetches_through_the_settings_coalescer() {
+    let agent = build_minimal_agent_for_tests();
+    let auth = crate::auth::FuigoAuth::test_default();
+    assert_eq!(agent.settings_manager.entries_for_test(), 0);
+
+    let mut leader = Box::pin(
+        agent
+            .settings_manager
+            .fetch(&auth, std::future::pending::<crate::remote::SettingsFetch>),
+    );
+    tokio::select! {
+        biased;
+        _ = &mut leader => unreachable!("a pending leader cannot complete"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(agent.settings_manager.entries_for_test(), 1);
+
+    let mut gate = Box::pin(agent.fetch_settings_resolving_gate(&auth));
+    tokio::select! {
+        biased;
+        _ = &mut gate => unreachable!("a wired gate call parks on the in-flight leader"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        agent.settings_manager.entries_for_test(),
+        2,
+        "fetch_settings_resolving_gate must fetch through the settings coalescer, not around it"
+    );
+}
+
 /// The tier re-check work is single-flight across every caller: back-to-back gated initializes run at most one live check.
 /// An awaited authenticate-path check skips (rather than doubles or waits out) a check already wedged on a stalled subscription endpoint.
 /// Drives the exact block `initialize` runs when `tier_allowed` is false.

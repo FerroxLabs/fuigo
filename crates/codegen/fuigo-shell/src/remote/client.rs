@@ -602,7 +602,7 @@ impl BackendClient {
     }
 }
 /// Distinguishes the three cases the external-OTEL gate cares about (see [`crate::agent::mvp_agent`]).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use]
 #[non_exhaustive]
 pub enum SettingsFetch {

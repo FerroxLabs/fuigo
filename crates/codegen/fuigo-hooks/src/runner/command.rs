@@ -36,6 +36,37 @@ pub(crate) const MAX_OUTPUT_BYTES: usize =
 
 const GATE_EXIT_CODE: i32 = 2;
 
+/// Killpg's a hook's process group unless the hook ran to completion.
+///
+/// Drop — not a return path — is what makes this cover *cancellation*: when the session-end path
+/// cancels a deferred `SessionStart` hook it drops the hook's future mid-run, and tokio's
+/// `kill_on_drop` SIGKILLs only the direct child, so a hook that backgrounded a grandchild would
+/// otherwise leak it past the end of the session. Registration in the session's `ProcessScope`
+/// cannot cover it either: the scope holds only a `Weak`, so dropping this owner makes the
+/// enrollment dead and `kill_all` skips it.
+struct HookProcessGuard {
+    group: Option<Arc<ProcessGroup>>,
+}
+
+impl HookProcessGuard {
+    fn arm(group: Option<Arc<ProcessGroup>>) -> Self {
+        Self { group }
+    }
+
+    /// The hook exited on its own; leave whatever it deliberately backgrounded alone.
+    fn disarm(&mut self) {
+        self.group = None;
+    }
+}
+
+impl Drop for HookProcessGuard {
+    fn drop(&mut self) {
+        if let Some(group) = self.group.take() {
+            let _ = group.kill();
+        }
+    }
+}
+
 // SECURITY: a process group lets session close killpg the whole tree; kill_on_drop would leak detached grandchildren.
 fn hook_process_group(child: &tokio::process::Child) -> Option<Arc<ProcessGroup>> {
     let mut group = ProcessGroup::new()
@@ -190,19 +221,20 @@ pub async fn run_command_hook(
         }
     };
 
-    let mut hook_group = None;
-    if let Some(scope) = ctx.process_scope.as_ref()
-        && let Some(group) = hook_process_group(&child)
+    // Built whether or not there is a scope to enroll it in: the guard below is what killpg's the
+    // tree if this future is dropped mid-run, and that path has no scope to fall back on.
+    let hook_group = hook_process_group(&child);
+    if let (Some(scope), Some(group)) = (ctx.process_scope.as_ref(), hook_group.as_ref())
+        && !scope.register(group)
     {
-        if !scope.register(&group) {
-            return (
-                HookRunnerResult::Failed("session closed before the hook ran".to_string()),
-                start.elapsed(),
-                None,
-            );
-        }
-        hook_group = Some(group);
+        // `register` already killpg'd the group: the scope was closed and will not run again.
+        return (
+            HookRunnerResult::Failed("session closed before the hook ran".to_string()),
+            start.elapsed(),
+            None,
+        );
     }
+    let mut reap = HookProcessGuard::arm(hook_group.clone());
 
     let stdin = child.stdin.take();
     let timeout = Duration::from_millis(spec.timeout_ms);
@@ -219,9 +251,9 @@ pub async fn run_command_hook(
 
     let elapsed = start.elapsed();
 
-    if !matches!(result, Ok(Ok(_)))
-        && let Some(group) = &hook_group
-    {
+    if matches!(result, Ok(Ok(_))) {
+        reap.disarm();
+    } else if let Some(group) = &hook_group {
         let _ = group.kill();
     }
 
@@ -2381,6 +2413,51 @@ mod tests {
         assert!(
             !marker.exists(),
             "grandchild outlived session close, so the group was not killpg'd"
+        );
+    }
+
+    /// Cancellation, not session close: the deferred `SessionStart` path drops a running hook's
+    /// future at session end. `kill_on_drop` reaches only the direct child, so without a
+    /// killpg-on-drop guard a hook that backgrounded a grandchild leaks it past the session.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_hook_cancelled_mid_run_reaps_whole_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("grandchild_alive");
+        let started = tmp.path().join("started");
+        let mut spec = make_shell_spec(&format!(
+            "sh -c 'sleep 3 && echo alive > {}' & touch {}; wait",
+            marker.display(),
+            started.display()
+        ));
+        spec.timeout_ms = 60_000;
+        let envelope = make_envelope();
+        let scope = fuigo_tools::util::ProcessScope::new();
+        let ctx = make_scoped_ctx(scope);
+        {
+            let hook = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe);
+            tokio::pin!(hook);
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut hook => panic!("the hook must still be running when it is cancelled"),
+                        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                    }
+                    if started.exists() {
+                        return;
+                    }
+                }
+            })
+            .await
+            .expect("the hook must reach its backgrounded grandchild before being cancelled");
+            // Dropping `hook` here is the cancel path.
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            !marker.exists(),
+            "grandchild outlived the cancelled hook, so its group was not killpg'd"
         );
     }
 

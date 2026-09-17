@@ -10,6 +10,7 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
 
+use crate::cleanup_downloads::cleanup_old_downloads;
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_fuigo_version, get_latest_version,
     is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
@@ -974,7 +975,7 @@ pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
 /// An hour is generous compared to the longest plausible download.
 /// The per-request budget is [`DOWNLOAD_REQUEST_TIMEOUT`] and the leader's check-and-download pass matches it.
 /// So a concurrent updater's in-flight or just-landed file is never deleted out from under it.
-const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
+pub(crate) const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Total timeout for a CLI artifact download request (including body).
 /// Tighter budgets abort slow-link transfers mid-body and restart them from zero.
@@ -2083,116 +2084,6 @@ async fn sweep_old_exe_backups(old: &std::path::Path) {
         };
         if name.starts_with(&prefix) && name.ends_with(".old") {
             let _ = tokio::fs::remove_file(entry.path()).await;
-        }
-    }
-}
-
-/// Best-effort cleanup of old versioned binaries for a given binary name.
-///
-/// Mirrors the npm `cleanupOldVersions()` policy: keeps the current version plus one previous version.
-/// A process may still be running the old binary without having loaded all its pages yet.
-/// Deleting it on macOS causes SIGKILL because the kernel can no longer verify the code signature.
-///
-/// `bin_prefix` is the binary name prefix, e.g. `"fuigo"` or `"fuigo-pager"`.
-/// Files must match `{bin_prefix}-{digit}*` to be considered versioned binaries (this avoids `fuigo-*` matching `fuigo-pager-*` or `fuigo-latest`).
-///
-/// Temporary/partial files (containing `.tmp`) are deleted only once they are **stale** (mtime older than [`STALE_TMP_AGE`]).
-/// A fresh `.tmp` may be a concurrent updater's in-flight download (the same-instant race the lock-free design accepts).
-/// Deleting it out from under that updater would make its atomic rename fail.
-async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_version: &str) {
-    let prefix = format!("{}-", bin_prefix);
-    let current_semver = match semver::Version::parse(current_version) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                "cleanup_old_downloads: invalid current version '{}': {}",
-                current_version,
-                e
-            );
-            return;
-        }
-    };
-
-    let mut entries = match tokio::fs::read_dir(dir).await {
-        Ok(rd) => rd,
-        Err(e) => {
-            tracing::warn!(
-                "cleanup_old_downloads: failed to read {}: {}",
-                dir.display(),
-                e
-            );
-            return;
-        }
-    };
-
-    let mut versioned: Vec<(semver::Version, String)> = Vec::new();
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with(&prefix) {
-            continue;
-        }
-        // Temp/partial files: sweep only STALE ones (a fresh `.tmp` may be a concurrent updater's in-flight download)
-        if name.contains(".tmp") {
-            let stale = match entry.metadata().await.and_then(|m| m.modified()) {
-                Ok(modified) => std::time::SystemTime::now()
-                    .duration_since(modified)
-                    .map(|age| age > STALE_TMP_AGE)
-                    // Future mtime (clock skew): can't tell; leave it
-                    .unwrap_or(false),
-                // Unknown mtime: leave it; it is swept once readable and old
-                Err(_) => false,
-            };
-            if stale && let Err(e) = tokio::fs::remove_file(entry.path()).await {
-                tracing::warn!("failed to remove stale temp file {}: {}", name, e);
-            }
-            continue;
-        }
-        // Skip symlinks (e.g. fuigo-latest).
-        if let Ok(ft) = entry.file_type().await
-            && ft.is_symlink()
-        {
-            continue;
-        }
-        // The suffix after the prefix must start with a digit to be a versioned binary (avoids `fuigo-latest`, `fuigo-pager-*` when prefix is `fuigo`)
-        let suffix = &name[prefix.len()..];
-        if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
-            continue;
-        }
-        // Extract the version portion via the shared parser
-        // It handles the internal `fuigo-0.1.150-macos-aarch64`, pre-release, and npm `fuigo-0.1.150` layouts
-        let Some(ver_str) = crate::version::version_from_versioned_binary_name(&name, bin_prefix)
-        else {
-            continue;
-        };
-        if let Ok(v) = semver::Version::parse(&ver_str) {
-            // Never delete the current version
-            if v == current_semver {
-                continue;
-            }
-            versioned.push((v, name));
-        }
-    }
-
-    versioned.sort_by(|a, b| b.0.cmp(&a.0));
-
-    // Keep the most recent old version (the newest sorts first) and delete the rest
-    for (_, name) in versioned.iter().skip(1) {
-        let path = dir.join(name);
-        // Same freshness guard as the `.tmp` sweep: a versioned binary written moments ago is likely a concurrent installer's just-renamed download
-        // Its symlink swap hasn't happened yet; deleting the binary would leave that swap pointing at nothing
-        // Old binaries from previous releases are days old
-        let fresh = tokio::fs::metadata(&path)
-            .await
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age <= STALE_TMP_AGE);
-        if fresh {
-            continue;
-        }
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            tracing::warn!("failed to remove old binary {}: {}", name, e);
         }
     }
 }
