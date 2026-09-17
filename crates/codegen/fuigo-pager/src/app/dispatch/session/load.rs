@@ -4,8 +4,8 @@ use super::foreign::{
 };
 use super::fork::build_child_fork_marker;
 use super::lifecycle::{
-    clear_startup_actions, dispatch_new_session_inner, dispatch_new_worktree_session,
-    refuse_chat_mode_build_agent,
+    abandon_unused_empty_for_load, clear_startup_actions, dispatch_new_session_inner,
+    dispatch_new_worktree_session, refuse_chat_mode_build_agent,
 };
 use super::picker_routing::{PickerRequest, PickerSeqKind, accept_picker_result};
 use crate::acp::tracker::AcpUpdateTracker;
@@ -163,6 +163,7 @@ fn dispatch_load_session_ungated(
         }
         return vec![];
     }
+    let mut effects = abandon_unused_empty_for_load(app, &session_id);
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
@@ -284,13 +285,14 @@ fn dispatch_load_session_ungated(
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
     switch_to_agent(app, agent_id, SwitchCause::Load);
-    vec![Effect::LoadSession {
+    effects.push(Effect::LoadSession {
         agent_id,
         session_id,
         session_cwd,
         // Conversation-entry bit; the effects layer ORs in SessionFlags.chat_mode for the meta
         chat_kind,
-    }]
+    });
+    effects
 }
 /// Load the session selected in the session picker.
 pub(in crate::app::dispatch) fn dispatch_pick_session(

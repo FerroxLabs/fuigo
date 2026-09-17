@@ -819,6 +819,11 @@ pub struct AppView {
     /// Whether the welcome screen prompt is currently capturing focus (user typed in it).
     /// When true, menu shortcuts like n/w/q are disabled and Escape unfocuses the prompt.
     pub welcome_prompt_focused: bool,
+    /// Session created in the background while the welcome screen stays up; the first interaction reveals it.
+    /// `None` once revealed or abandoned.
+    pub home_session_agent: Option<AgentId>,
+    /// Welcome husk. Survives reveal, which clears `home_session_agent`; a load that opens a different session drops it while it is still empty.
+    pub optimistic_home_husk: Option<AgentId>,
     /// Sticky flag: set once the user types in the welcome prompt, hides the tip for the rest of the session (even if the input is cleared).
     pub welcome_tip_typing_dismissed: bool,
     /// Effects queued by notification handlers (drained by the event loop).
@@ -1563,6 +1568,8 @@ impl AppView {
             slash_mru,
             command_tags,
             welcome_prompt_focused: true,
+            home_session_agent: None,
+            optimistic_home_husk: None,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -2274,6 +2281,10 @@ impl AppView {
             ActiveView::Agent(id) => self.agents.get(&id),
             _ => None,
         }
+    }
+    /// The unused session prepared behind the welcome screen, if any (see `home_session_agent`).
+    pub fn home_session(&self) -> Option<&AgentView> {
+        self.home_session_agent.and_then(|id| self.agents.get(&id))
     }
     /// Session ID of the active agent, if one exists and has an established session.
     pub fn active_session_id(&self) -> Option<&str> {
@@ -4061,7 +4072,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
         {
-            return InputOutcome::Action(Action::NewSession);
+            return InputOutcome::Action(Action::LeaveHome);
         }
         if matches!(ctx.auth_state, AuthState::Done) {
             if ctx.upgrade_cta_keyboard && key!('o', CONTROL).matches(key) {
@@ -4089,7 +4100,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
         }
         if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
-            return InputOutcome::ActionThenForward(Action::NewSession);
+            return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if *ctx.prompt_focused
             && matches!(ctx.auth_state, AuthState::Done)
@@ -4097,7 +4108,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && (crate::input::key::is_text_input_key(key)
                 || (ch == 'v' && crate::input::key::is_paste_key(key)))
         {
-            return InputOutcome::ActionThenForward(Action::NewSession);
+            return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if *ctx.prompt_focused {
             let had_highlight = ctx.prompt.textarea.selection_range().is_some();
@@ -4133,7 +4144,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if crate::input::key::is_text_input_key(key) {
                 *ctx.prompt_focused = true;
                 *ctx.menu_index = None;
-                return InputOutcome::ActionThenForward(Action::NewSession);
+                return InputOutcome::ActionThenForward(Action::LeaveHome);
             }
         }
         match ctx.auth_state {
@@ -4254,7 +4265,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if !ctx.has_access || ctx.is_zdr_blocked {
                     return InputOutcome::Unchanged;
                 }
-                return InputOutcome::ActionThenForward(Action::NewSession);
+                return InputOutcome::ActionThenForward(Action::LeaveHome);
             }
             AuthState::Authenticating {
                 mode: AuthMode::Loopback | AuthMode::ApiKey,

@@ -110,6 +110,8 @@ pub enum Action {
     QuitConfirmed,
     /// Create a new session from the welcome screen.
     NewSession,
+    /// Leave the welcome screen for the session prepared in the background (or a fresh one when there is none).
+    LeaveHome,
     /// Ask whether the new session should use a git worktree.
     ChooseNewSessionMode,
     /// Exit the current session and return to the welcome screen.
@@ -1387,6 +1389,8 @@ pub enum AfterSessionDelete {
     Welcome,
     /// `/delete` from a dashboard-attached agent, or dashboard row delete.
     Dashboard,
+    /// The unused optimistic home session was abandoned: nothing to toast, no view to move.
+    UnusedHusk,
 }
 /// Async side effect produced by [`super::dispatch::dispatch`].
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.

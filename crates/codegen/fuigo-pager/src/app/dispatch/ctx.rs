@@ -272,6 +272,14 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
     if matches!(app.active_view, ActiveView::Agent(current) if current == target) {
         return;
     }
+    // Unused home is only unused while hidden. Switching to it promotes it (dashboard attach, settings fallback).
+    // Switching elsewhere abandons it so Ctrl+N cannot delete a live conversation.
+    if app.home_session_agent == Some(target) {
+        app.home_session_agent = None;
+    } else if app.home_session_agent.is_some() {
+        let abandoned = super::session::lifecycle::abandon_unused_home_session(app);
+        app.pending_effects.extend(abandoned);
+    }
     // Capture before mutating active_view (subagent views are not top-level ids).
     let previous_top_level = match app.active_view {
         ActiveView::Agent(id) => Some(id),
