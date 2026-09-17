@@ -55,23 +55,16 @@ fn tag_suffix_width(row: &SuggestionRow) -> usize {
 ///
 /// The label column gets up to 60% of the available width (capped at `LABEL_CAP`), prioritising the full command name over the description.
 /// The tag suffix is folded in so a `/cmd [tag]` row and a plain `/cmd` row share the same description column.
-/// An untagged row longer than `LABEL_CAP` is ignored.
-/// A tagged row always contributes a `LABEL_CAP`-clamped width, so a long tag can never zero out the column.
+/// Clamped name+tag per row, then the 60% budget. A short sibling cannot collapse an overlong name,
+/// and a lone overlong name still gets a (`LABEL_CAP`-wide, ellipsized) column instead of a blank label.
 fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
     let budget = (content_w * 3 / 5).min(LABEL_CAP);
-    let max_display_w = items
+    items
         .iter()
-        .filter_map(|r| {
-            let base = r.display.width();
-            if r.tag.is_none() {
-                (base <= LABEL_CAP).then_some(base)
-            } else {
-                Some((base + tag_suffix_width(r)).min(LABEL_CAP))
-            }
-        })
+        .map(|r| (r.display.width() + tag_suffix_width(r)).min(LABEL_CAP))
         .max()
-        .unwrap_or(0);
-    max_display_w.min(budget)
+        .unwrap_or(0)
+        .min(budget)
 }
 
 /// Build a flat list of styled lines for all visible items.
