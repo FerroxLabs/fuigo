@@ -339,17 +339,24 @@ fn cancel_agent_turn(
     let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
     // Captured before `finish_turn` clears it; no id means the standard cancel
     let rewind_prompt_id = agent.session.current_prompt_id.clone();
-    let rewinding = agent.shared_queue.is_empty()
-        && cancel_rewind_enabled
+    // The in-flight prompt's own shared-queue row (an early cancel can land before the server's
+    // `queue/changed` removes it) does not hold the turn; any other queued or pending prompt does
+    let queue_held_behind_turn = !agent.session.pending_prompts.is_empty()
+        || agent
+            .shared_queue
+            .iter()
+            .any(|e| Some(e.id.as_str()) != rewind_prompt_id.as_deref());
+    let rewinding = cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
-        && agent.session.pending_prompts.is_empty()
+        && !queue_held_behind_turn
         && !in_flight_committed
         && !composer_has_draft
         && rewind_prompt_id.is_some();
-    if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
-        if let Some(pid) = rewind_prompt_id.as_deref() {
-            agent.note_rewound_prompt(pid);
-        }
+    if rewinding
+        && let Some(pid) = rewind_prompt_id.as_deref()
+        && let Some(stashed) = agent.session.in_flight_prompt.take()
+    {
+        agent.note_rewound_prompt(pid);
         agent.prompt.set_text(&stashed.text);
         agent.prompt.restore_chip_elements(&stashed.chip_elements);
         agent.prompt.set_images(stashed.images);
@@ -358,6 +365,7 @@ fn cancel_agent_turn(
             agent.scrollback.remove_entry(id);
         }
         agent.scrollback.remove_entry(stashed.scrollback_entry);
+        agent.shared_queue.retain(|e| e.id != pid);
         // Full state reset: tracker cleanup, state back to Idle, timing fields and current_prompt_id cleared
         agent.session.finish_turn(&mut agent.scrollback);
         agent.turn_started_at = None;
