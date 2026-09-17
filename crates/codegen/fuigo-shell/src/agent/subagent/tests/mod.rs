@@ -807,6 +807,7 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: Some("renamed_scheduler_delete"),
+        scheduler_create_tool_name: Some("renamed_scheduler_create"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -821,9 +822,14 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
                     _ => None,
                 })
                 .collect::<String>();
-            assert!(prompt.contains("renamed_scheduler_delete"));
-            assert!(prompt.contains("loop-123"));
-            assert!(prompt.contains("to stop the monitor"));
+            assert!(prompt.contains(
+                "Check the subagent output using get_command_or_subagent_output(\"sa-1\")"
+            ));
+            assert!(prompt.contains("renamed_scheduler_delete(\"loop-123\")"));
+            assert!(prompt.contains(
+                "renamed_scheduler_create(new_prompt, interval, \"loop-123\")"
+            ));
+            assert!(!prompt.contains("update it with scheduler_create("));
         }
         _ => panic!("expected SessionCommand::Prompt"),
     }
@@ -847,6 +853,7 @@ fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: Some("scheduler_delete"),
+        scheduler_create_tool_name: Some("scheduler_create"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -863,7 +870,8 @@ fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
         })
         .collect::<String>();
     assert!(!prompt.contains("scheduler_delete"));
-    assert!(!prompt.contains("to stop the monitor"));
+    assert!(!prompt.contains("no longer relevant"));
+    assert!(!prompt.contains("Check the subagent output"));
 }
 #[test]
 fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
@@ -883,6 +891,7 @@ fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(true),
     });
@@ -910,6 +919,7 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         synthetic_trace_tx: &Some(trace_tx),
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
