@@ -1769,12 +1769,50 @@ fn workspace_row_never_arms_permanent_delete() {
     assert!(dispatch_dashboard_stop(&mut app).is_empty());
     assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
 }
+/// Provisional rows join the overlay cycle: a live, adoptable agent the store has not committed yet
+/// (session id unbound, or the write still in flight) is reachable before the snapshot catches up.
 #[test]
-fn workspace_overlay_cycle_omits_unadopted_live_agents() {
+fn workspace_overlay_cycle_includes_provisional_live_agents() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     let second = insert_second_agent(&mut app);
     mark_agent_nonempty(&mut app, second);
+    app.workspace_dashboard_enabled = true;
+    app.workspace_snapshot = Some(fuigo_dashboard_store::WorkspaceSnapshot {
+        grouping: fuigo_dashboard_store::Grouping::State,
+        members: vec![fuigo_dashboard_store::Member {
+            session_id: fuigo_dashboard_store::SessionId::new("test-session").unwrap(),
+            kind: fuigo_dashboard_store::MemberKind::Build,
+            origin: fuigo_dashboard_store::MemberOrigin::Local,
+            cwd: Some("/tmp".to_owned()),
+            title: Some("Saved".to_owned()),
+            model: None,
+            last_turn_summary: None,
+            is_worktree: false,
+            last_change_unix_ms: 1,
+            pin_rank: None,
+            order_rank: None,
+        }],
+        data_version: 1,
+    });
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
+    assert_eq!(
+        app.active_view,
+        ActiveView::Agent(second),
+        "the uncommitted live agent renders a provisional row and is cycled to"
+    );
+}
+
+/// A live agent that can never become a workspace member (a conversation entry) is still omitted:
+/// provisional rows follow the adoption rules minus the late-binding session id.
+#[test]
+fn workspace_overlay_cycle_omits_ineligible_live_agents() {
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let second = insert_second_agent(&mut app);
+    mark_agent_nonempty(&mut app, second);
+    app.agents.get_mut(&second).unwrap().conversation_entry = true;
     app.workspace_dashboard_enabled = true;
     app.workspace_snapshot = Some(fuigo_dashboard_store::WorkspaceSnapshot {
         grouping: fuigo_dashboard_store::Grouping::State,

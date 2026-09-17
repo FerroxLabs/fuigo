@@ -1014,12 +1014,14 @@ fn dashboard_row_order(app: &AppView) -> Vec<crate::views::dashboard::DashboardR
         &app.dashboard_local_sessions
     };
     let rows = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            home,
+        )
     } else {
         crate::views::dashboard::build_rows_with_roster(
             &app.agents,

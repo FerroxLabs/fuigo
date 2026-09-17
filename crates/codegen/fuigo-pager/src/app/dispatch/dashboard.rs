@@ -995,22 +995,20 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
     // When the dashboard was never opened, build a throwaway state from the persisted layout (pins, reorder, grouping)
     // Prev/next then match what the user sees after opening; `load_persisted` is cached on `app.dashboard_persisted`
     let order = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(
-                    &app.agents,
-                    snapshot,
-                    crate::views::dashboard::render::cached_home(),
-                )
-                .into_iter()
-                .filter_map(|row| match row.id {
-                    DashboardRowId::TopLevel(id) if !row.is_more_placeholder => Some(id),
-                    _ => None,
-                })
-                .collect()
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            crate::views::dashboard::render::cached_home(),
+        )
+        .into_iter()
+        .filter_map(|row| match row.id {
+            DashboardRowId::TopLevel(id) if !row.is_more_placeholder => Some(id),
+            _ => None,
+        })
+        .collect()
     } else {
         match app.dashboard.as_ref() {
             Some(d) => crate::views::dashboard::overlay_cycle_order(d, &app.agents),
@@ -1764,12 +1762,14 @@ pub(super) fn dashboard_neighbor_row(
         &app.dashboard_local_sessions
     };
     let rows = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            home,
+        )
     } else {
         crate::views::dashboard::build_rows_with_roster(
             &app.agents,
@@ -2087,12 +2087,14 @@ pub(super) fn dispatch_dashboard_select(app: &mut AppView, next: bool) {
         &app.dashboard_local_sessions
     };
     let rows = if app.workspace_dashboard_enabled {
-        app.workspace_snapshot
-            .as_ref()
-            .map(|snapshot| {
-                crate::views::dashboard::build_rows_with_workspace(&app.agents, snapshot, home)
-            })
-            .unwrap_or_default()
+        let snapshot = app.workspace_snapshot.as_ref();
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(&app.agents, snapshot);
+        crate::views::dashboard::build_rows_with_workspace(
+            &app.agents,
+            snapshot,
+            &provisional,
+            home,
+        )
     } else {
         crate::views::dashboard::build_rows_with_roster(
             &app.agents,

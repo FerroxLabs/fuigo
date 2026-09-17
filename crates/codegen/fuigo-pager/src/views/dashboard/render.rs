@@ -116,9 +116,8 @@ pub fn render_dashboard(
 
     let home = cached_home();
     let rows = if workspace_dashboard_enabled {
-        workspace_snapshot
-            .map(|snapshot| build_rows_with_workspace(agents, snapshot, home))
-            .unwrap_or_default()
+        let provisional = crate::app::workspace_sync::provisional_agent_ids(agents, workspace_snapshot);
+        build_rows_with_workspace(agents, workspace_snapshot, &provisional, home)
     } else {
         build_rows_with_roster(
             agents,
