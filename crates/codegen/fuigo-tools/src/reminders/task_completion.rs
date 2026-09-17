@@ -43,6 +43,27 @@ fn user_killed_notice(task: &TaskSnapshot) -> &'static str {
 const MAX_INLINE_COMPLETION_BYTES: usize = 4_000;
 /// Byte cap for the child's final text inlined next to a polling tool; the rest is one poll away.
 pub const INLINE_SUBAGENT_OUTPUT_BYTES: usize = 16_000;
+/// Total bytes of child output ONE between-turn drain may inline across the
+/// whole batch.
+///
+/// Per-completion the cap above is upstream's and is not raised. The batch is
+/// the unbounded part: `drain_between_turn_subagent_completions` hands the
+/// entire buffer to [`format_between_turn_completions`] in a single system
+/// reminder, production leaves `buffered_completion_output_cap: None`
+/// (`fuigo-shell` `agent/subagent/spawn.rs`), and the coordinator bounds the
+/// buffer only at `MAX_PENDING_COMPLETIONS = 256` entries. Unbounded, one
+/// drain can therefore inject 256 x 16 KB of output into a single turn —
+/// measured at 4_151_645 bytes, roughly a million tokens, by
+/// `between_turn_batch_shares_one_inline_budget` run against the unbounded
+/// formatter — where before the output was inlined each entry carried only a
+/// ~55-byte `get_task_output` pointer.
+///
+/// Entries past the budget keep their `[output truncated: ...]` marker and
+/// their `get_task_output` pointer, so nothing is lost: the text is one poll
+/// away, exactly as it was before it was inlined. A batch whose outputs fit
+/// inside the budget — the ordinary case, including every single-completion
+/// drain — renders byte-identically to the uncapped version.
+pub const BETWEEN_TURN_INLINE_OUTPUT_BYTES: usize = INLINE_SUBAGENT_OUTPUT_BYTES;
 #[derive(Clone, Debug, Default)]
 pub struct TaskCompletionReservations(pub Arc<std::sync::Mutex<HashMap<String, usize>>>);
 impl TaskCompletionReservations {
@@ -426,10 +447,22 @@ fn append_loop_remediation_hint(
 /// The one place a cut is rendered: whatever cut the text, fewer bytes than `full_output_bytes`
 /// means one marker and, with a polling tool, one pointer.
 fn inline_subagent_output(c: &SubagentCompletionSummary, poll_tool: Option<&str>) -> String {
+    inline_subagent_output_capped(c, poll_tool, INLINE_SUBAGENT_OUTPUT_BYTES).0
+}
+/// As [`inline_subagent_output`], with the inline cap supplied by the caller
+/// so a batch can share one budget. Returns the rendered block and the bytes
+/// of child output it actually inlined. `poll_tool: None` still inlines the
+/// output verbatim whatever `cap` says: with no polling tool this notice is
+/// the model's only chance to see it.
+fn inline_subagent_output_capped(
+    c: &SubagentCompletionSummary,
+    poll_tool: Option<&str>,
+    cap: usize,
+) -> (String, usize) {
     use std::fmt::Write as _;
     let mut head: &str = &c.output;
     if poll_tool.is_some() {
-        head = truncate_str(head, INLINE_SUBAGENT_OUTPUT_BYTES);
+        head = truncate_str(head, cap);
     }
     let mut output = head.to_owned();
     if head.len() < c.full_output_bytes {
@@ -447,7 +480,7 @@ fn inline_subagent_output(c: &SubagentCompletionSummary, poll_tool: Option<&str>
             );
         }
     }
-    output
+    (output, head.len())
 }
 /// Format a model-facing message from a [`SubagentCompletionSummary`] for
 /// the auto-wake prompt and the next-tool-call reminder surface.
@@ -512,7 +545,9 @@ fn append_scheduler_cleanup_hint(
     );
 }
 /// Format buffered between-turn subagent completions into a system-reminder
-/// string; each entry inlines the child's text per [`inline_subagent_output`].
+/// string; each entry inlines the child's text per [`inline_subagent_output`],
+/// and the batch shares one [`BETWEEN_TURN_INLINE_OUTPUT_BYTES`] budget so a
+/// 256-entry drain cannot inject megabytes into a single turn.
 pub fn format_between_turn_completions(
     completions: &[SubagentCompletionSummary],
     task_output_name: Option<&str>,
@@ -522,6 +557,7 @@ pub fn format_between_turn_completions(
     let n = completions.len();
     let label = if n == 1 { "subagent" } else { "subagents" };
     let mut buf = format!("While you were idle, {n} background {label} completed:\n");
+    let mut budget = BETWEEN_TURN_INLINE_OUTPUT_BYTES;
     for c in completions {
         let status = if c.success {
             "completed successfully"
@@ -535,7 +571,13 @@ pub fn format_between_turn_completions(
             c.subagent_type, c.description, c.tool_calls, c.subagent_id,
         );
         buf.push_str("\n  response:\n");
-        buf.push_str(&inline_subagent_output(c, task_output_name));
+        let (block, inlined) = inline_subagent_output_capped(
+            c,
+            task_output_name,
+            budget.min(INLINE_SUBAGENT_OUTPUT_BYTES),
+        );
+        budget = budget.saturating_sub(inlined);
+        buf.push_str(&block);
         append_scheduler_cleanup_hint(&mut buf, c, scheduler_delete_name, "\n  ");
         append_loop_remediation_hint(&mut buf, c, "\n\n");
         buf.push('\n');
@@ -2307,6 +2349,92 @@ mod tests {
             "between-turn subagent inline output must be preserved verbatim"
         );
         assert!(!msg.contains("[Output truncated"));
+    }
+    /// A saturated between-turn drain: `MAX_PENDING_COMPLETIONS` (256) entries,
+    /// each with the full per-completion cap of output, in ONE system reminder.
+    /// Measured on the unbounded formatter this renders 4_151_645 bytes —
+    /// roughly a million tokens injected into a single turn. The shared batch
+    /// budget holds it to the size of one completion's inline cap plus the
+    /// per-entry headers and pointers.
+    #[test]
+    fn between_turn_batch_shares_one_inline_budget() {
+        const BATCH: usize = 256;
+        let completions: Vec<SubagentCompletionSummary> = (0..BATCH)
+            .map(|i| {
+                let mut c = make_subagent_completion(&format!("sub-{i}"), true);
+                let output = "z".repeat(INLINE_SUBAGENT_OUTPUT_BYTES * 2);
+                c.full_output_bytes = output.len();
+                c.output = std::sync::Arc::from(output.as_str());
+                c
+            })
+            .collect();
+        let msg = format_between_turn_completions(&completions, Some("get_task_output"), None);
+        // Headroom for 256 entries of header, truncation marker and pointer.
+        const CEILING: usize = BETWEEN_TURN_INLINE_OUTPUT_BYTES + 64 * 1024;
+        assert!(
+            msg.len() <= CEILING,
+            "between-turn batch inlined {} bytes; the shared budget must hold it to {CEILING}",
+            msg.len()
+        );
+        // Nothing is lost: every entry that was cut says so and says where to look.
+        assert_eq!(msg.matches("[output truncated:").count(), BATCH);
+        assert_eq!(
+            msg.matches("Use get_task_output(").count(),
+            BATCH,
+            "every truncated entry keeps its pointer to the full output"
+        );
+        // The budget is spent, not merely unused: the first entry is inlined in full.
+        assert!(msg.contains(&"z".repeat(BETWEEN_TURN_INLINE_OUTPUT_BYTES)));
+    }
+    /// The batch budget must not change the ordinary drain. One completion at
+    /// the per-completion cap renders exactly as it did before the budget
+    /// existed.
+    #[test]
+    fn between_turn_batch_budget_leaves_a_fitting_batch_byte_identical() {
+        let small: Vec<SubagentCompletionSummary> = (0..8)
+            .map(|i| make_subagent_completion(&format!("sub-{i}"), true))
+            .collect();
+        let msg = format_between_turn_completions(&small, Some("get_task_output"), None);
+        assert!(!msg.contains("[output truncated:"));
+        for c in &small {
+            assert!(msg.contains(c.output.as_ref()));
+        }
+
+        let mut one = make_subagent_completion("sub-solo", true);
+        let output = "y".repeat(INLINE_SUBAGENT_OUTPUT_BYTES);
+        one.full_output_bytes = output.len();
+        one.output = std::sync::Arc::from(output.as_str());
+        let solo = format_between_turn_completions(
+            std::slice::from_ref(&one),
+            Some("get_task_output"),
+            None,
+        );
+        assert!(solo.contains(&output));
+        assert!(!solo.contains("[output truncated:"));
+    }
+    /// With no polling tool the reminder is the model's ONLY copy of the
+    /// output, so the batch budget must not cut it — for a batch, not just for
+    /// the single completion the sibling test covers.
+    #[test]
+    fn between_turn_batch_budget_never_cuts_when_there_is_no_poll_tool() {
+        let completions: Vec<SubagentCompletionSummary> = (0..4)
+            .map(|i| {
+                let mut c = make_subagent_completion(&format!("sub-{i}"), true);
+                let output = format!("{i}").repeat(INLINE_SUBAGENT_OUTPUT_BYTES);
+                c.full_output_bytes = output.len();
+                c.output = std::sync::Arc::from(output.as_str());
+                c
+            })
+            .collect();
+        let msg = format_between_turn_completions(&completions, None, None);
+        assert!(!msg.contains("[output truncated:"));
+        for c in &completions {
+            assert!(
+                msg.contains(c.output.as_ref()),
+                "no-poll-tool batch must keep {} verbatim",
+                c.subagent_id
+            );
+        }
     }
     /// The reminder pipeline ignores `MonitorEventBuffer` — the turn loop
     /// owns the drain. Guards against the tool-result append path being
