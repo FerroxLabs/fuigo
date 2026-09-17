@@ -852,6 +852,29 @@ pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
     token.parse().ok()
 }
 
+/// The `reasoning.summary` requested on the Responses API.
+/// `None` omits the field, for gateways that reject it (AWS Bedrock Mantle returns 400 for it as of 2026-09).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningSummary {
+    None,
+    Auto,
+    #[default]
+    Concise,
+    Detailed,
+}
+
+impl ReasoningSummary {
+    pub fn to_responses_api(self) -> Option<crate::rs::ReasoningSummary> {
+        match self {
+            Self::None => None,
+            Self::Auto => Some(crate::rs::ReasoningSummary::Auto),
+            Self::Concise => Some(crate::rs::ReasoningSummary::Concise),
+            Self::Detailed => Some(crate::rs::ReasoningSummary::Detailed),
+        }
+    }
+}
+
 pub const REASONING_EFFORT_META_KEY: &str = "reasoningEffort";
 pub const SUPPORTS_REASONING_EFFORT_META_KEY: &str = "supportsReasoningEffort";
 
@@ -1036,10 +1059,19 @@ impl ApiBackend {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SamplingConfig {
     pub base_url: String,
+    /// Local directory containing the mTLS client identity for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_cert_dir: Option<std::path::PathBuf>,
     pub model: String,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    /// Model-resolved general retry budget paired with the rate-limit ceiling below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Model-resolved total-attempt ceiling for rate-limited requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_retry_threshold: Option<u32>,
     /// Which API backend to use for this model
     #[serde(default)]
     pub api_backend: ApiBackend,
@@ -1057,9 +1089,37 @@ pub struct SamplingConfig {
     /// Reasoning effort level for reasoning models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Responses API `reasoning.summary`; `None` keeps the request builder's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<ReasoningSummary>,
     /// When true, inject `stream_tool_calls: true` into the Responses API request body so the upstream emits per-chunk argument deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
+}
+
+impl Default for SamplingConfig {
+    /// Empty defaults so construction sites (tests especially) can use `..Default::default()` and new fields don't ripple through every literal.
+    /// `context_window` defaults to the inert minimum; real configs must set it.
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            mtls_cert_dir: None,
+            model: String::new(),
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            max_retries: None,
+            rate_limit_retry_threshold: None,
+            api_backend: ApiBackend::default(),
+            extra_headers: indexmap::IndexMap::new(),
+            query_params: indexmap::IndexMap::new(),
+            env_http_headers: indexmap::IndexMap::new(),
+            context_window: NonZeroU64::MIN,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            stream_tool_calls: None,
+        }
+    }
 }
 
 // ============ Responses API wrapper ============
@@ -1090,6 +1150,10 @@ pub struct CreateResponseWrapper {
     /// Ferrox Labs-specific tool definitions that can't be expressed via `async_openai`'s `rs::Tool` enum (e.g., `x_search`).
     /// They are injected as raw JSON into the serialized request body's `tools` array.
     pub extra_tool_entries: Vec<serde_json::Value>,
+
+    /// Carried from [`ConversationRequest::suppress_reasoning_summary`]: a non-interactive session never sends
+    /// `reasoning.summary`, so a per-model `reasoning_summary` override must not re-add it.
+    pub suppress_reasoning_summary: bool,
 }
 
 impl CreateResponseWrapper {
@@ -1106,6 +1170,7 @@ impl CreateResponseWrapper {
             x_fuigo_user_id: None,
             trace: None,
             extra_tool_entries: vec![],
+            suppress_reasoning_summary: false,
         }
     }
 

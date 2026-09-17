@@ -2182,6 +2182,37 @@ async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
 }
+/// F023: the parent's live sampling config carries the model-resolved retry budget and 429 ceiling, and the
+/// child inherits them (the catalog entry whose key is the routing slug must not shadow the session's model).
+#[tokio::test]
+async fn read_parent_sampling_config_keeps_catalog_threshold_when_routing_slug_is_also_key() {
+    let mut models = indexmap::IndexMap::new();
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.max_retries = Some(6);
+    entry.info.rate_limit_retry_threshold = Some(6);
+    models.insert("auto".to_string(), entry);
+    let mut competing_entry = test_model_entry("grok-4.5");
+    competing_entry.info.max_retries = Some(3);
+    competing_entry.info.rate_limit_retry_threshold = Some(3);
+    models.insert("grok-4.5".to_string(), competing_entry);
+    let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "composer-2-fast", models);
+    let parent_chat_state = ctx.parent_chat_state.as_ref().unwrap();
+    let mut parent_config = parent_chat_state.get_sampling_config().await.unwrap();
+    parent_config.max_retries = ctx
+        .available_models
+        .get("auto")
+        .and_then(|entry| entry.info.max_retries);
+    parent_config.rate_limit_retry_threshold = ctx
+        .available_models
+        .get("auto")
+        .and_then(|entry| entry.info.rate_limit_retry_threshold);
+    parent_chat_state.update_sampling_config(parent_config);
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(config.model, "grok-4.5");
+    assert_eq!(model_id.0.as_ref(), "auto");
+    assert_eq!(config.max_retries, Some(6));
+    assert_eq!(config.rate_limit_retry_threshold, Some(6));
+}
 #[tokio::test]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
     crate::agent::config::Config::install_test_trusted_origins();

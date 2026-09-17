@@ -560,10 +560,13 @@ async fn apply_retry_decision(
     cancel_token: &CancellationToken,
     completion: &mut CompletionState,
 ) -> bool {
-    let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
-        retry_mod::RATE_LIMIT_RETRY_THRESHOLD
-    } else {
-        retry_policy.rate_limit_retry_threshold
+    // A per-model `rate_limit_retry_threshold` (config.toml) beats the actor's policy; zero on either never disables the cap
+    let rate_limit_threshold = match config
+        .rate_limit_retry_threshold
+        .unwrap_or(retry_policy.rate_limit_retry_threshold)
+    {
+        0 => retry_mod::RATE_LIMIT_RETRY_THRESHOLD,
+        threshold => threshold,
     };
     // An empty response is judged on its own resend count against its low cap, so an earlier retry of another kind never spends it
     // It still never runs past the configured budget, which bounds every resend of the request
@@ -668,6 +671,7 @@ async fn apply_retry_decision(
                 | SamplingError::StreamError { .. }
                 | SamplingError::Auth { .. }
                 | SamplingError::InvalidConfiguration(_)
+                | SamplingError::MtlsConfiguration(_)
                 | SamplingError::Http(_)
                 | SamplingError::Serialization(_)
                 | SamplingError::EventStreamError(_)

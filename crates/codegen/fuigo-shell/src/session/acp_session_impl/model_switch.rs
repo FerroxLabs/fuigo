@@ -64,6 +64,12 @@ impl SessionActor {
                 context_window: new_context_window,
                 reasoning_effort: sampling_config.reasoning_effort,
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),
+                mtls_cert_dir: sampling_config.mtls_cert_dir.clone(),
+                max_retries: Some(fuigo_sampler::resolve_max_retries(
+                    sampling_config.max_retries,
+                )),
+                rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
+                reasoning_summary: sampling_config.reasoning_summary,
             });
         let existing = self.chat_state_handle.get_credentials().await;
         let session_key = self
