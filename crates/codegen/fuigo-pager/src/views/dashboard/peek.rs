@@ -1222,6 +1222,12 @@ mod tests {
                 .map(|x| buf[(x, h - 1)].symbol().to_string())
                 .collect()
         };
+        // The badge paints over the bottom border, right-aligned inside the corners:
+        // `╰──…─ <badge text> ╯`. Strip the border fill so the badge itself can be pinned exactly.
+        let badge_text = |row: &str| -> String {
+            row.trim_matches(|c: char| matches!(c, '─' | '╰' | '╯' | ' '))
+                .to_string()
+        };
 
         // Summary mode: model and always-approve on the bottom border
         let mut panel =
@@ -1276,18 +1282,18 @@ mod tests {
             "plan flag must show in plan mode: {plan_bottom:?}",
         );
 
-        // Plan plus always-approve shows `plan` only
-        // Plan and the permission mode are independent axes: plan mode never hides the permission flag,
-        // so the badge reads `plan · always-approve` (yolo still wins over auto within the permission axis)
+        // Plan and the permission mode are independent axes: plan mode never hides the permission
+        // flag, so the badge reads `plan · always-approve` (yolo still wins over auto within the
+        // permission axis).
+        // Pinned as the WHOLE badge text rather than a pair of `contains` probes: an exact match
+        // also catches a dropped model name, a missing ` · ` separator, a duplicated or reordered
+        // flag, and an `auto` flag appearing anywhere on the row — none of which `contains` can see.
         planp.auto_approve = true;
         planp.auto = true;
         let plan_yolo_bottom = badge_row(&planp, 6);
-        assert!(
-            plan_yolo_bottom.contains("plan"),
-            "plan flag must show in plan+yolo: {plan_yolo_bottom:?}",
-        );
-        assert!(
-            plan_yolo_bottom.contains("always-approve") && !plan_yolo_bottom.contains(" auto"),
+        assert_eq!(
+            badge_text(&plan_yolo_bottom),
+            "Grok 4 Fast · plan · always-approve",
             "plan keeps always-approve visible and yolo still wins over auto: {plan_yolo_bottom:?}",
         );
 
