@@ -270,6 +270,13 @@ struct WrapCache {
     lines: Vec<Range<usize>>,
 }
 
+/// Whether a wrapped row's exclusive end is a cursor position on that row.
+#[derive(Debug, Clone, Copy)]
+enum RowEnd {
+    HardBreak,
+    SoftWrap,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TextAreaState {
     /// Index into wrapped lines of the first visible line.
@@ -392,20 +399,15 @@ impl TextArea {
     /// which confuses `effective_scroll` into thinking the cursor hasn't
     /// actually moved to the target line.
     ///
-    /// Uses `self.text` to find the last valid char boundary inside the line
-    /// so we never land in the middle of a multi-byte character.
+    /// Clamps to the start of the last grapheme in the line so we never land in the
+    /// middle of a multi-byte character or a multi-codepoint cluster.
     fn clamp_to_line(&self, pos: usize, line_start: usize, line_end: usize) -> usize {
-        if line_end > line_start {
-            // Find the start of the last character in the line.
-            let last_char_start = self.text[line_start..line_end]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| line_start + i)
-                .unwrap_or(line_start);
-            pos.min(last_char_start)
-        } else {
-            line_start
-        }
+        let last_grapheme_start = self
+            .text
+            .get(line_start..line_end)
+            .and_then(|line| line.grapheme_indices(true).next_back())
+            .map_or(line_start, |(i, _)| line_start + i);
+        pos.min(last_grapheme_start)
     }
 
     pub fn new() -> Self {
@@ -1802,6 +1804,32 @@ impl TextArea {
         if idx == 0 { None } else { Some(idx - 1) }
     }
 
+    /// Soft-wrapped rows are byte-adjacent because the wrap folds trailing spaces into the row;
+    /// a hard row leaves the newline or dropped whitespace between it and the next.
+    fn row_with_end(lines: &[Range<usize>], idx: usize) -> Option<(Range<usize>, RowEnd)> {
+        let row = lines.get(idx)?;
+        let end_kind = match lines.get(idx + 1) {
+            Some(next) if next.start == row.end => RowEnd::SoftWrap,
+            _ => RowEnd::HardBreak,
+        };
+        Some((row.clone(), end_kind))
+    }
+
+    /// A soft row's exclusive end is the next row's start, so Up/Down onto it must stop at the
+    /// last grapheme start (or before an atomic element that closes the row).
+    fn clamp_to_row(&self, pos: usize, row: &Range<usize>, end_kind: RowEnd) -> usize {
+        match end_kind {
+            RowEnd::HardBreak => pos,
+            RowEnd::SoftWrap => {
+                let last_grapheme_start = self.clamp_to_line(pos, row.start, row.end);
+                // Elements wrap atomically: a soft row closed by one ends at the element's start.
+                self.find_element_containing(last_grapheme_start)
+                    .and_then(|idx| self.elements.get(idx))
+                    .map_or(last_grapheme_start, |element| element.range.start)
+            }
+        }
+    }
+
     /// Map a display column to a buffer byte position on a given wrapped line.
     ///
     /// Pure query — does not mutate any state. Handles elements (snapping to
@@ -1892,13 +1920,12 @@ impl TextArea {
 
     fn move_to_display_col_on_line(
         &mut self,
-        line_start: usize,
-        line_end: usize,
+        row: Range<usize>,
         target_col: usize,
+        end_kind: RowEnd,
     ) {
-        let cursor = self
-            .display_col_to_buffer_pos(line_start, line_end, target_col)
-            .0;
+        let (pos, _hit_element) = self.display_col_to_buffer_pos(row.start, row.end, target_col);
+        let cursor = self.clamp_to_row(pos, &row, end_kind);
         self.set_cursor_inner(cursor);
     }
 
@@ -2495,14 +2522,10 @@ impl TextArea {
                     let target_col = self.preferred_col.unwrap_or_else(|| {
                         self.display_width_of_range(cur_range.start, self.cursor())
                     });
-                    if idx > 0 {
-                        let prev = &lines[idx - 1];
-                        let line_start = prev.start;
-                        let line_end = prev.end;
-                        Some((target_col, Some((line_start, line_end))))
-                    } else {
-                        Some((target_col, None))
-                    }
+                    let prev = idx
+                        .checked_sub(1)
+                        .and_then(|prev_idx| Self::row_with_end(lines, prev_idx));
+                    Some((target_col, prev))
                 } else {
                     None
                 }
@@ -2512,11 +2535,11 @@ impl TextArea {
         } {
             // We had wrapping info. Apply movement accordingly.
             match maybe_line {
-                Some((line_start, line_end)) => {
+                Some((prev, end_kind)) => {
                     if self.preferred_col.is_none() {
                         self.preferred_col = Some(target_col);
                     }
-                    self.move_to_display_col_on_line(line_start, line_end, target_col);
+                    self.move_to_display_col_on_line(prev, target_col, end_kind);
                     return;
                 }
                 None => {
@@ -2540,7 +2563,11 @@ impl TextArea {
             };
             let prev_line_start = self.text[..prev_nl].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let prev_line_end = prev_nl;
-            self.move_to_display_col_on_line(prev_line_start, prev_line_end, target_col);
+            self.move_to_display_col_on_line(
+                prev_line_start..prev_line_end,
+                target_col,
+                RowEnd::HardBreak,
+            );
         } else {
             self.set_cursor_inner(0);
             self.preferred_col = None;
@@ -2559,14 +2586,7 @@ impl TextArea {
                     let target_col = self.preferred_col.unwrap_or_else(|| {
                         self.display_width_of_range(cur_range.start, self.cursor())
                     });
-                    if idx + 1 < lines.len() {
-                        let next = &lines[idx + 1];
-                        let line_start = next.start;
-                        let line_end = next.end;
-                        Some((target_col, Some((line_start, line_end))))
-                    } else {
-                        Some((target_col, None))
-                    }
+                    Some((target_col, Self::row_with_end(lines, idx + 1)))
                 } else {
                     None
                 }
@@ -2575,11 +2595,11 @@ impl TextArea {
             }
         } {
             match move_to_last {
-                Some((line_start, line_end)) => {
+                Some((next, end_kind)) => {
                     if self.preferred_col.is_none() {
                         self.preferred_col = Some(target_col);
                     }
-                    self.move_to_display_col_on_line(line_start, line_end, target_col);
+                    self.move_to_display_col_on_line(next, target_col, end_kind);
                     return;
                 }
                 None => {
@@ -2609,7 +2629,11 @@ impl TextArea {
                 .find('\n')
                 .map(|i| i + next_line_start)
                 .unwrap_or(self.text.len());
-            self.move_to_display_col_on_line(next_line_start, next_line_end, target_col);
+            self.move_to_display_col_on_line(
+                next_line_start..next_line_end,
+                target_col,
+                RowEnd::HardBreak,
+            );
         } else {
             self.set_cursor_inner(self.text.len());
             self.preferred_col = None;
