@@ -207,7 +207,7 @@ impl HeadlessEmitter {
     fn on_lifecycle(&mut self, event: Lifecycle) {
         match self.format {
             OutputFormat::Plain => {
-                eprintln!("{}", event.plain_message());
+                crate::best_effort_stderr::eprint_line(&event.plain_message());
             }
             OutputFormat::Json => {}
             OutputFormat::StreamingJson | OutputFormat::StreamingMessagesJson => {
@@ -337,7 +337,7 @@ impl HeadlessEmitter {
                 let _ = self.write_out(b"\n", false);
                 // Plain has no terminal document: the failure goes to stderr, as `on_error` does.
                 if let Some(error) = error {
-                    eprintln!("{error}");
+                    crate::best_effort_stderr::eprint_line(error);
                 }
             }
             OutputFormat::Json => {
@@ -383,7 +383,7 @@ impl HeadlessEmitter {
     /// Emit the max turns marker for the active format.
     fn on_max_turns(&mut self) {
         match self.format {
-            OutputFormat::Plain => eprintln!("Max turns reached"),
+            OutputFormat::Plain => crate::best_effort_stderr::eprint_line("Max turns reached"),
             // Conveyed by `stopReason` in the terminal JSON and result.
             OutputFormat::Json => {}
             OutputFormat::StreamingJson | OutputFormat::StreamingMessagesJson => {
@@ -398,7 +398,7 @@ impl HeadlessEmitter {
     /// Emit the terminal error; `stop_reason_override` stamps a Messages stop reason (e.g. `max_tokens`).
     fn on_error(&mut self, message: &str, stop_reason_override: Option<&str>) {
         match self.format {
-            OutputFormat::Plain => eprintln!("{message}"),
+            OutputFormat::Plain => crate::best_effort_stderr::eprint_line(message),
             OutputFormat::Json => {
                 let mut err = serde_json::json!({"type":"error","message": message});
                 if let Some(usage) = &self.usage {
@@ -993,8 +993,8 @@ pub async fn run_single_turn(
     if options.include_partial_messages
         && options.output_format != OutputFormat::StreamingMessagesJson
     {
-        eprintln!(
-            "warning: --include-partial-messages only affects --output-format streaming-messages-json; ignoring it"
+        crate::best_effort_stderr::eprint_line(
+            "warning: --include-partial-messages only affects --output-format streaming-messages-json; ignoring it",
         );
     }
 

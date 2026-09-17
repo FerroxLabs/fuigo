@@ -20,6 +20,11 @@ pub fn eprint_line(line: &str) {
     write_line(&mut std::io::stderr(), line);
 }
 
+/// [`write_line`] to process stderr, reporting whether the line was written.
+pub fn eprint_line_reported(line: &str) -> bool {
+    write_line(&mut std::io::stderr(), line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
