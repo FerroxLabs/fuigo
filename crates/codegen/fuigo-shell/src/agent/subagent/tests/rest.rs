@@ -2162,7 +2162,13 @@ fn ctx_with_parent_chat_state(
 ) -> SubagentSpawnContext {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new(session_model_id);
-    ctx.parent_chat_state = Some(spawn_test_parent_chat_state(inference_slug));
+    let parent_chat_state = spawn_test_parent_chat_state(inference_slug);
+    let mut parent_sampling_config = test_sampling_config(inference_slug);
+    parent_sampling_config.max_retries = available_models
+        .get(session_model_id)
+        .and_then(|entry| entry.info.max_retries);
+    parent_chat_state.update_sampling_config(parent_sampling_config);
+    ctx.parent_chat_state = Some(parent_chat_state);
     ctx.models_manager = crate::agent::models::ModelsManager::new(
         None,
         available_models.clone(),
@@ -2181,6 +2187,21 @@ async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
+}
+#[tokio::test]
+async fn read_parent_sampling_config_keeps_catalog_threshold_when_routing_slug_is_also_key() {
+    let mut models = indexmap::IndexMap::new();
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.max_retries = Some(6);
+    models.insert("auto".to_string(), entry);
+    let mut competing_entry = test_model_entry("grok-4.5");
+    competing_entry.info.max_retries = Some(3);
+    models.insert("grok-4.5".to_string(), competing_entry);
+    let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "composer-2-fast", models);
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(config.model, "grok-4.5");
+    assert_eq!(model_id.0.as_ref(), "auto");
+    assert_eq!(config.max_retries, Some(6));
 }
 #[tokio::test]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {

@@ -2572,6 +2572,7 @@ fn test_sampling_config(model_slug: &str) -> fuigo_sampling_types::SamplingConfi
         temperature: None,
         top_p: None,
         api_backend: Default::default(),
+        max_retries: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),

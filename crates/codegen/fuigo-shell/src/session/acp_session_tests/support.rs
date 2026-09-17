@@ -243,6 +243,7 @@ pub(crate) async fn create_test_actor_with_terminal(
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            max_retries: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
             query_params: Default::default(),
