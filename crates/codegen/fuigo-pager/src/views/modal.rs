@@ -958,6 +958,10 @@ pub fn render_cancel_turn_panel(
             Span::styled(choice.label(), label_style),
         ]);
         buf.set_line(content_x, y, &line, content_w as u16);
+        // Terminal theme (Reset bands): reverse video; no-op on RGB.
+        if is_cursor && focused {
+            buf.set_style(row_rect, theme.selection_overlay());
+        }
         y += 1;
     }
     if !focused {

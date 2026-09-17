@@ -2471,69 +2471,6 @@
         );
     }
 
-    #[test]
-    fn viewer_stop_hooks_after_marker_attach_to_it() {
-        // Viewer order: the durable TurnCompleted pushes the marker first; the batch arriving right after merges into it
-        let mut app = make_app_with_agent("sess-view-hooks");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-        let _ = handle(
-            make_agent_chunk_message_with_prompt("sess-view-hooks", "chunk", "pid-v", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &fuigo_turn_completed_notif("sess-view-hooks", "pid-v", "end_turn", false),
-            &mut app,
-        );
-        assert_eq!(
-            last_marker_stop_hook_groups(&app.agents[&AgentId(0)].scrollback),
-            Some(0),
-            "marker starts without hooks"
-        );
-
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-view-hooks", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "the batch must merge into the existing marker"
-        );
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            0,
-            "no standalone stop block on the live viewer path"
-        );
-
-        // A second, differently-named batch of the same turn (stop_failure and stop on error turns) merges too…
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-view-hooks", "stop_failure", false),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(2),
-            "a second batch with a new event name must also merge"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-
-        // …but a same-name repeat (e.g. the session-end `stop` batch) does not belong to this marker and stays standalone.
-        let _ = handle_ext_notification(
-            &fuigo_hook_execution_notif("sess-view-hooks", "stop", false),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(last_marker_stop_hook_groups(&agent.scrollback), Some(2));
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "a repeated same-name batch falls back to the standalone block"
-        );
-    }
-
     /// No regression: a running prompt whose terminal did NOT arrive in replay is still adopted on load.
     /// The replay terminal set blocks only ended turns.
     #[test]

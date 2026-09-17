@@ -3165,7 +3165,9 @@ impl AgentView {
                         panel_area,
                         Style::default().fg(theme.text_primary).bg(theme.bg_light),
                     );
-                    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+                    let border_style = Style::default()
+                        .fg(theme.panel_border_fg())
+                        .bg(theme.bg_base);
                     let border_line = Line::styled("─".repeat(panel_width as usize), border_style);
                     buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
                     buf.set_line_safe(panel_x, bottom_border_y, &border_line, panel_width);
@@ -3307,7 +3309,9 @@ impl AgentView {
                     panel_area,
                     Style::default().fg(theme.text_primary).bg(theme.bg_light),
                 );
-                let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+                let border_style = Style::default()
+                    .fg(theme.panel_border_fg())
+                    .bg(theme.bg_base);
                 let border_line =
                     Line::styled("\u{2500}".repeat(panel_width as usize), border_style);
                 buf.set_line_safe(panel_x, top_border_y, &border_line, panel_width);
@@ -3469,6 +3473,19 @@ impl AgentView {
                                 cell.set_style(st);
                             }
                             col += cw;
+                        }
+                        // Bandless palette: `bg_visual`/`bg_hover` are `Reset`, so the painted
+                        // `row_bg` is no cue at all; reverse video carries it. No-op on RGB themes.
+                        let row_rect = Rect {
+                            x: items_x,
+                            y: row_y,
+                            width: fill_width,
+                            height: 1,
+                        };
+                        if is_selected {
+                            buf.set_style(row_rect, theme.selection_overlay());
+                        } else if is_hovered {
+                            buf.set_style(row_rect, theme.hover_overlay());
                         }
                     }
                     if needs_scrollbar {

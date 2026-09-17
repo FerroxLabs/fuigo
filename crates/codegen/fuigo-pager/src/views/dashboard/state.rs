@@ -561,6 +561,9 @@ pub struct DashboardState {
     /// `Some` while the modal is open; input is routed to it before the dashboard's own handlers, and the renderer paints it on top of the row list.
     /// Cleared on close (Esc, `[✗]`, or the chrome's CloseRequested).
     pub shortcuts_modal: Option<Box<ShortcutsModalState>>,
+    /// `/usage` modal, hosted here because the dashboard has no agent to hang it on (session-less: no session id).
+    /// Owns input while open; cleared on dashboard-open and on every overlay exit back to the list.
+    pub usage_modal: Option<Box<crate::views::usage_modal::UsageInfoModalState>>,
     /// True when the header's `[+ New Agent]` button has focus.
     ///
     /// The button is the default selection target when no row is selected; Up-arrow from the first row, Esc deselect, and
@@ -1254,6 +1257,7 @@ impl DashboardState {
             viewport_offset: 0,
             manual_scroll_active: false,
             shortcuts_modal: None,
+            usage_modal: None,
             pending_model: None,
             pending_mode: DashboardDispatchMode::Normal,
             models: crate::acp::model_state::ModelState::default(),
@@ -1878,6 +1882,10 @@ impl DashboardState {
         // Mirrors how `agent_view` short-circuits any `active_modal` before the per-pane handlers run
         if self.shortcuts_modal.is_some() {
             return self.handle_shortcuts_modal_input(ev);
+        }
+
+        if self.usage_modal.is_some() {
+            return self.handle_usage_modal_input(ev);
         }
 
         // The location picker owns input while open; its query field, row nav, and chrome buttons would all be inconsistent if the dashboard's own

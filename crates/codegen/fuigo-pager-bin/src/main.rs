@@ -2445,6 +2445,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 continue_last_session: args.continue_last_session,
                 fork_session: args.fork_session,
                 worktree: args.worktree,
+                worktree_ref: args.worktree_ref,
                 restore_code: args.restore_code,
                 agent: args.agent.clone(),
                 agents_json: args.agents_json.clone(),

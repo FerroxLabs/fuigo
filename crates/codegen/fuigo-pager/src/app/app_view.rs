@@ -824,6 +824,11 @@ pub struct AppView {
     /// Whether the welcome screen prompt is currently capturing focus (user typed in it).
     /// When true, menu shortcuts like n/w/q are disabled and Escape unfocuses the prompt.
     pub welcome_prompt_focused: bool,
+    /// Session created in the background while the welcome screen stays up; the first interaction reveals it.
+    /// `None` once revealed or abandoned.
+    pub home_session_agent: Option<AgentId>,
+    /// Welcome husk. Survives reveal, which clears `home_session_agent`; a load that opens a different session drops it while it is still empty.
+    pub optimistic_home_husk: Option<AgentId>,
     /// Sticky flag: set once the user types in the welcome prompt, hides the tip for the rest of the session (even if the input is cleared).
     pub welcome_tip_typing_dismissed: bool,
     /// Effects queued by notification handlers (drained by the event loop).
@@ -1035,6 +1040,8 @@ pub struct AppView {
     /// Passed to `show_ephemeral_tip`, which increments the matching key in place.
     /// In-memory only and per-session: never persisted to disk, so each pager run starts fresh (count 0).
     pub tip_seen_counts: std::collections::HashMap<&'static str, u32>,
+    /// `/copy` or `/export` was used this run: the export-copy tip is moot for every view from then on.
+    pub export_copy_slash_used: bool,
     /// Terminal height (rows) from startup / the last `Event::Resize`.
     /// Feeds the auto-compact derivation (`views::agent::effective_compact`).
     /// The render-value compact flag is forced on while the terminal is `AUTO_COMPACT_MAX_ROWS` or shorter.
@@ -1573,6 +1580,8 @@ impl AppView {
             slash_mru,
             command_tags,
             welcome_prompt_focused: true,
+            home_session_agent: None,
+            optimistic_home_husk: None,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -1662,6 +1671,7 @@ impl AppView {
             contextual_hints: Default::default(),
             remote_contextual_hints: None,
             tip_seen_counts: Default::default(),
+            export_copy_slash_used: false,
             last_known_terminal_rows: 0,
             small_screen_tip_evaluated: false,
             ssh_wrap_tip_evaluated: false,
@@ -2283,6 +2293,10 @@ impl AppView {
             ActiveView::Agent(id) => self.agents.get(&id),
             _ => None,
         }
+    }
+    /// The unused session prepared behind the welcome screen, if any (see `home_session_agent`).
+    pub fn home_session(&self) -> Option<&AgentView> {
+        self.home_session_agent.and_then(|id| self.agents.get(&id))
     }
     /// Session ID of the active agent, if one exists and has an established session.
     pub fn active_session_id(&self) -> Option<&str> {
@@ -4073,7 +4087,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
         {
-            return InputOutcome::Action(Action::NewSession);
+            return InputOutcome::Action(Action::LeaveHome);
         }
         if matches!(ctx.auth_state, AuthState::Done) {
             if ctx.upgrade_cta_keyboard && key!('o', CONTROL).matches(key) {
@@ -4101,7 +4115,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
         }
         if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
-            return InputOutcome::ActionThenForward(Action::NewSession);
+            return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if *ctx.prompt_focused
             && matches!(ctx.auth_state, AuthState::Done)
@@ -4109,7 +4123,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && (crate::input::key::is_text_input_key(key)
                 || (ch == 'v' && crate::input::key::is_paste_key(key)))
         {
-            return InputOutcome::ActionThenForward(Action::NewSession);
+            return InputOutcome::ActionThenForward(Action::LeaveHome);
         }
         if *ctx.prompt_focused {
             let had_highlight = ctx.prompt.textarea.selection_range().is_some();
@@ -4145,7 +4159,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if crate::input::key::is_text_input_key(key) {
                 *ctx.prompt_focused = true;
                 *ctx.menu_index = None;
-                return InputOutcome::ActionThenForward(Action::NewSession);
+                return InputOutcome::ActionThenForward(Action::LeaveHome);
             }
         }
         match ctx.auth_state {
@@ -4266,7 +4280,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 if !ctx.has_access || ctx.is_zdr_blocked {
                     return InputOutcome::Unchanged;
                 }
-                return InputOutcome::ActionThenForward(Action::NewSession);
+                return InputOutcome::ActionThenForward(Action::LeaveHome);
             }
             AuthState::Authenticating {
                 mode: AuthMode::Loopback | AuthMode::ApiKey,
@@ -5340,6 +5354,7 @@ impl AppView {
                                 self.workspace_snapshot.as_ref(),
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
+                                self.credit_balance.as_ref(),
                             );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
@@ -5556,7 +5571,7 @@ impl AppView {
             || self.welcome_doc_viewer.is_some()
             || self.tutorial.is_some()
             || matches!(self.active_view, ActiveView::AgentDashboard
-                if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some()))
+                if self.dashboard.as_ref().is_some_and(|d| d.shortcuts_modal.is_some() || d.usage_modal.is_some()))
             || cloud_modal_open
     }
     /// Store the resolved per-tip gates and propagate the prompt-relevant tips (undo and plan nudge) to every agent's prompt.
@@ -5864,6 +5879,24 @@ impl AppView {
             needs_redraw |= agent.prompt.history_search.poll();
             needs_redraw |= agent.poll_scrollback_search();
             needs_redraw |= agent.tick_toast();
+            if !self.export_copy_slash_used
+                && let Some(child_sid) = agent.active_subagent.clone()
+                && let Some(child_view) = agent.subagent_views.get_mut(&child_sid)
+            {
+                if child_view.tick_export_copy_detector() {
+                    needs_redraw |= super::dispatch::present_export_copy_tip(
+                        child_view,
+                        &mut self.tip_seen_counts,
+                        self.contextual_hints.export_copy,
+                    );
+                }
+            } else if !self.export_copy_slash_used && agent.tick_export_copy_detector() {
+                needs_redraw |= super::dispatch::present_export_copy_tip(
+                    agent,
+                    &mut self.tip_seen_counts,
+                    self.contextual_hints.export_copy,
+                );
+            }
             needs_redraw |= agent.tick_extensions_result_notice();
             needs_redraw |= agent.tick_ephemeral_tip();
             needs_redraw |= agent.tick_mode_banner();

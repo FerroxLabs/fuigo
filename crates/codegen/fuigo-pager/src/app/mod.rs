@@ -46,7 +46,7 @@ pub mod subagent;
 pub mod subscription;
 mod x10_filter;
 pub(crate) use effects::sanitize_user_error;
-mod event_loop;
+pub(crate) mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;
@@ -64,6 +64,7 @@ pub mod signal_handler;
 mod startup_failure;
 mod turn_completion;
 pub(crate) mod workspace_sync;
+pub(crate) mod worktree_session;
 mod xt_filter;
 pub(crate) use crate::terminal::{kitty_flags_pushed, kitty_releases_reported};
 pub use cli::{
@@ -234,6 +235,28 @@ pub(crate) fn resolve_voice_mode_enabled(
         return true;
     }
     is_api_key && resolved.source == ConfigSource::Remote
+}
+fn terminal_theme_flag_in(layer: &toml::Value) -> Option<bool> {
+    layer
+        .get("features")?
+        .get(fuigo_shell::agent::config::Feature::TerminalTheme.key())?
+        .as_bool()
+}
+/// `[features] terminal_theme` from merged `requirements.toml`.
+fn terminal_theme_requirement_pin() -> Option<bool> {
+    terminal_theme_flag_in(&fuigo_config::load_merged_requirements()?)
+}
+/// `[features] terminal_theme` from effective config (user + managed).
+fn terminal_theme_config_value() -> Option<bool> {
+    terminal_theme_flag_in(&fuigo_shell::config::load_effective_config().ok()?)
+}
+/// Registry precedence: pin, `FUIGO_TERMINAL_THEME`, config, default off. The key has no remote tier.
+pub(crate) fn resolve_terminal_theme_enabled() -> bool {
+    use fuigo_shell::agent::config::{Feature, FeatureSources};
+    let mut sources = FeatureSources::from_process_env(Feature::TerminalTheme);
+    sources.pin = terminal_theme_requirement_pin();
+    sources.config = terminal_theme_config_value();
+    Feature::TerminalTheme.resolve(sources).value
 }
 /// Resolve from live policy, env, remote, and API-key state.
 pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) -> bool {
@@ -869,6 +892,7 @@ pub async fn run(
     if disabled_by_confinement.is_some() && screen_mode.is_fullscreen() {
         tokio::time::sleep(SANDBOX_NOTICE_LINGER).await;
     }
+    crate::theme::cache::set_terminal_theme_enabled(resolve_terminal_theme_enabled());
     engage_startup_theme(screen_mode);
     let minimal_live_rows = config_watcher.current().minimal_live_rows;
     let (frame_tx, writer_sync, writer_event_rx, writer_thread) =

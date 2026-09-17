@@ -315,51 +315,18 @@ fn open_prompt_blocked_card(
     agent.prompt.set_text("");
 }
 
-/// Push a turn-terminal marker ("Turn completed/cancelled/failed"), folding any pending stop-family hook runs into it.
-/// The folded runs render inline (right-justified) on the marker line instead of as a standalone block.
+/// Push a turn-terminal marker ("Turn completed/cancelled/failed").
 ///
 /// All three marker rails route through here: the driver's `PromptResponse`, the lost-RPC reconcile, and the viewer finalize.
 /// (Wake turns route through `finish_wake_turn` in acp_handler, which maps their stop reason and calls here only when a marker is due.)
-/// `event == None` (bash turns, rate-limit / re-auth UX that replaces the marker) flushes the held hooks as the legacy standalone lifecycle block.
-/// Failures then stay visible.
-///
-/// A stamped stash folds only on an exact ending-id match.
-/// On a mismatch it flushes standalone (the ending turn is THE turn; an older stash has no marker coming).
-/// An unstamped stash keeps the legacy stashed-during-this-turn heuristic.
+/// `event == None` (bash turns, rate-limit / re-auth UX that replaces the marker) pushes nothing.
 pub(super) fn push_turn_terminal_marker(
     agent: &mut AgentView,
     event: Option<SessionEvent>,
     ending_prompt_id: Option<&str>,
 ) {
-    let pending = agent.pending_stop_hooks.take();
-    let groups = match pending {
-        None => Vec::new(),
-        Some(pending) => {
-            let stale = match (pending.prompt_id.as_deref(), ending_prompt_id) {
-                (Some(stashed), Some(ending)) => stashed != ending,
-                (Some(_), None) => true,
-                (None, _) => false,
-            };
-            if stale {
-                for (name, runs) in pending.groups {
-                    agent.scrollback.push_lifecycle_hooks(name, runs);
-                }
-                Vec::new()
-            } else {
-                pending.groups
-            }
-        }
-    };
-
-    match event {
-        Some(event) => {
-            agent.push_end_marker_block(event, groups, ending_prompt_id.map(str::to_string));
-        }
-        None => {
-            for (name, runs) in groups {
-                agent.scrollback.push_lifecycle_hooks(name, runs);
-            }
-        }
+    if let Some(event) = event {
+        agent.push_end_marker_block(event, Vec::new(), ending_prompt_id.map(str::to_string));
     }
 }
 

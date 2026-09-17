@@ -257,21 +257,20 @@ fn headless_materialize_ctx_stays_non_chat() {
     use crate::app::session_startup::TitleResolution;
     for pinned in [false, true] {
         for restore_code in [false, true] {
-            let ctx = headless_materialize_ctx(pinned, restore_code);
-            assert!(!ctx.chat_mode);
-            assert!(
-                !ctx.has_worktree,
-                "headless must not defer remote miss to a worktree it never creates"
-            );
-            assert_eq!(ctx.restore_code, restore_code);
-            assert_eq!(
-                ctx.title_resolution,
-                if pinned {
-                    TitleResolution::PinnedPreSandbox
-                } else {
-                    TitleResolution::Allowed
-                }
-            );
+            for has_worktree in [false, true] {
+                let ctx = headless_materialize_ctx(pinned, restore_code, has_worktree);
+                assert!(!ctx.chat_mode);
+                assert_eq!(ctx.has_worktree, has_worktree);
+                assert_eq!(ctx.restore_code, restore_code);
+                assert_eq!(
+                    ctx.title_resolution,
+                    if pinned {
+                        TitleResolution::PinnedPreSandbox
+                    } else {
+                        TitleResolution::Allowed
+                    }
+                );
+            }
         }
     }
 }
@@ -280,19 +279,19 @@ fn headless_materialize_ctx_stays_non_chat() {
 fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
     use crate::app::session_startup::{RemoteMissPlan, plan_remote_miss};
     for restore_code in [false, true] {
-        let ctx = headless_materialize_ctx(false, restore_code);
+        let ctx = headless_materialize_ctx(false, restore_code, false);
         assert!(!matches!(
             plan_remote_miss(ctx, true),
             RemoteMissPlan::DeferToWorktree { .. }
         ));
     }
-    let mut conv = headless_materialize_ctx(false, false);
+    let mut conv = headless_materialize_ctx(false, false, false);
     conv.allow_remote_restore = true;
     assert_eq!(
         plan_remote_miss(conv, true),
         RemoteMissPlan::RestoreConversation
     );
-    let mut code = headless_materialize_ctx(false, true);
+    let mut code = headless_materialize_ctx(false, true, false);
     code.allow_remote_restore = true;
     assert_eq!(
         plan_remote_miss(code, true),
@@ -300,6 +299,335 @@ fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
             title_miss_hint: false,
         }
     );
+}
+
+#[test]
+fn headless_remote_miss_defers_to_worktree_when_requested() {
+    use crate::app::session_startup::{RemoteMissPlan, plan_remote_miss};
+    for restore_code in [false, true] {
+        let ctx = headless_materialize_ctx(false, restore_code, true);
+        assert_eq!(
+            plan_remote_miss(ctx, true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+    }
+}
+
+/// Fake agent for the worktree paths: answers the extension method with `ext_reply`, then
+/// `session/new` and `session/load` as directed. Records every request for assertions.
+#[derive(Default)]
+struct FakeAgentLog {
+    ext: Vec<(String, serde_json::Value)>,
+    new_sessions: Vec<(std::path::PathBuf, Option<acp::Meta>)>,
+    loads: Vec<(String, std::path::PathBuf, Option<acp::Meta>)>,
+}
+
+fn spawn_fake_agent(
+    ext_reply: serde_json::Value,
+    session_open: Result<&'static str, &'static str>,
+) -> (
+    fuigo_acp_lib::AcpAgentTx,
+    std::sync::Arc<std::sync::Mutex<FakeAgentLog>>,
+) {
+    use std::sync::{Arc, Mutex};
+    use fuigo_acp_lib::AcpAgentMessage;
+    let log = Arc::new(Mutex::new(FakeAgentLog::default()));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
+    let log_for_task = log.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                AcpAgentMessage::ExtMethod(args) => {
+                    let params: serde_json::Value =
+                        serde_json::from_str(args.request.params.get()).unwrap();
+                    log_for_task
+                        .lock()
+                        .unwrap()
+                        .ext
+                        .push((args.request.method.to_string(), params));
+                    let raw = serde_json::value::to_raw_value(&ext_reply).unwrap();
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+                }
+                AcpAgentMessage::NewSession(args) => {
+                    log_for_task
+                        .lock()
+                        .unwrap()
+                        .new_sessions
+                        .push((args.request.cwd.clone(), args.request.meta.clone()));
+                    // Like the agent, a `meta.sessionId` names the new session; otherwise mint one.
+                    let forced = args
+                        .request
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("sessionId"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    let _ = args.response_tx.send(match session_open {
+                        Ok(sid) => Ok(acp::NewSessionResponse::new(
+                            forced.unwrap_or_else(|| sid.to_owned()),
+                        )),
+                        Err(msg) => Err(acp::Error::internal_error().data(msg)),
+                    });
+                }
+                AcpAgentMessage::LoadSession(args) => {
+                    log_for_task.lock().unwrap().loads.push((
+                        args.request.session_id.0.to_string(),
+                        args.request.cwd.clone(),
+                        args.request.meta.clone(),
+                    ));
+                    let _ = args.response_tx.send(match session_open {
+                        Ok(_) => Ok(acp::LoadSessionResponse::new()),
+                        Err(msg) => Err(acp::Error::internal_error().data(msg)),
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
+    (tx, log)
+}
+
+#[tokio::test]
+async fn worktree_create_opens_session_at_worktree_subdirectory() {
+    let source = tempfile::tempdir().unwrap();
+    let launch_cwd = source.path().join("crates").join("pager");
+    std::fs::create_dir_all(&launch_cwd).unwrap();
+    let wt_root = tempfile::tempdir().unwrap();
+    let (tx, log) = spawn_fake_agent(
+        serde_json::json!({"result": {
+            "worktreePath": wt_root.path(),
+            "sourceGitRoot": source.path(),
+        }}),
+        Ok("sess-new"),
+    );
+    let spec = WorktreeSpec::from_cli(Some("fix"), Some("origin/main")).unwrap();
+
+    let opened = open_session_in_new_worktree(&tx, &launch_cwd, &spec, None, RunDeadline::start(None))
+        .await
+        .unwrap();
+
+    assert_eq!(opened.session_id.0.as_ref(), "sess-new");
+    assert_eq!(opened.cwd, wt_root.path().join("crates").join("pager"));
+    let log = log.lock().unwrap();
+    let Some((method, params)) = log.ext.first() else {
+        panic!("expected an ext call: {:?}", log.ext);
+    };
+    assert_eq!(method, "fuigo/git/worktree/create_from_worktree_sync");
+    assert_eq!(
+        params.get("sourceWorktreePath").and_then(|v| v.as_str()),
+        Some(launch_cwd.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        params.get("copyMode").and_then(|v| v.as_str()),
+        Some("clean")
+    );
+    assert_eq!(params.get("label").and_then(|v| v.as_str()), Some("fix"));
+    assert_eq!(
+        params.get("gitRef").and_then(|v| v.as_str()),
+        Some("origin/main")
+    );
+    assert!(
+        params
+            .get("newSessionId")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.starts_with("pager-"))
+    );
+    assert_eq!(log.new_sessions.len(), 1);
+    assert_eq!(log.new_sessions.first().map(|s| &s.0), Some(&opened.cwd));
+    assert!(log.loads.is_empty());
+}
+
+#[tokio::test]
+async fn worktree_create_with_session_id_names_worktree_and_session() {
+    let source = tempfile::tempdir().unwrap();
+    let wt_root = tempfile::tempdir().unwrap();
+    let (tx, log) = spawn_fake_agent(
+        serde_json::json!({"worktreePath": wt_root.path()}),
+        Ok("minted-if-not-forced"),
+    );
+    let sid = "2d3c6b3e-3d43-4f0a-9d2e-2b6d1b6a9c11";
+
+    let opened =
+        open_session_in_new_worktree(&tx, source.path(), &WorktreeSpec::default(), Some(sid), RunDeadline::start(None))
+            .await
+            .unwrap();
+
+    assert_eq!(opened.session_id.0.as_ref(), sid);
+    assert_eq!(opened.cwd, wt_root.path());
+    let log = log.lock().unwrap();
+    let Some((_, params)) = log.ext.first() else {
+        panic!("expected an ext call: {:?}", log.ext);
+    };
+    assert_eq!(
+        params.get("newSessionId").and_then(|v| v.as_str()),
+        Some(sid)
+    );
+    assert_eq!(
+        params.get("copyMode").and_then(|v| v.as_str()),
+        Some("dirty")
+    );
+    let meta = log
+        .new_sessions
+        .first()
+        .and_then(|s| s.1.as_ref())
+        .expect("session id forced via meta");
+    assert_eq!(meta.get("sessionId").and_then(|v| v.as_str()), Some(sid));
+}
+
+#[tokio::test]
+async fn worktree_create_failure_is_reported_before_any_session_opens() {
+    let source = tempfile::tempdir().unwrap();
+    for (reply, expect) in [
+        (
+            serde_json::json!({"error": "no space left for worktree"}),
+            "no space left for worktree",
+        ),
+        (
+            serde_json::json!({"result": {}}),
+            "response missing worktreePath",
+        ),
+    ] {
+        let (tx, log) = spawn_fake_agent(reply, Ok("never"));
+        let err = open_session_in_new_worktree(&tx, source.path(), &WorktreeSpec::default(), None, RunDeadline::start(None))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("couldn't create worktree"), "{err}");
+        assert!(err.contains(expect), "{err}");
+        assert!(log.lock().unwrap().new_sessions.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn worktree_create_then_session_failure_names_the_orphaned_worktree() {
+    let source = tempfile::tempdir().unwrap();
+    let wt_root = tempfile::tempdir().unwrap();
+    let (tx, _log) = spawn_fake_agent(
+        serde_json::json!({"worktreePath": wt_root.path()}),
+        Err("agent refused"),
+    );
+
+    let err = open_session_in_new_worktree(&tx, source.path(), &WorktreeSpec::default(), None, RunDeadline::start(None))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("agent refused"), "{err}");
+    assert!(err.contains(&wt_root.path().display().to_string()), "{err}");
+    assert!(err.contains("fuigo worktree rm"), "{err}");
+}
+
+#[tokio::test]
+async fn worktree_resume_loads_reported_session_without_re_restoring_code() {
+    let source = tempfile::tempdir().unwrap();
+    let wt_root = tempfile::tempdir().unwrap();
+    let eff_cwd = wt_root.path().join("sub");
+    let (tx, log) = spawn_fake_agent(
+        serde_json::json!({"result": {
+            "sessionId": "forked-in-worktree",
+            "worktreePath": wt_root.path(),
+            "effectiveCwd": eff_cwd,
+            "codeRestored": true,
+        }}),
+        Ok("unused"),
+    );
+    let spec = WorktreeSpec::from_cli(Some(""), Some("v1.2")).unwrap();
+
+    let opened =
+        resume_session_in_new_worktree(&tx, source.path(), &spec, "orig", Some(true), false, RunDeadline::start(None))
+            .await
+            .unwrap();
+
+    assert_eq!(opened.session_id.0.as_ref(), "forked-in-worktree");
+    assert_eq!(opened.cwd, eff_cwd);
+    let log = log.lock().unwrap();
+    let Some((method, params)) = log.ext.first() else {
+        panic!("expected an ext call: {:?}", log.ext);
+    };
+    assert_eq!(method, "fuigo/git/worktree/resume_session");
+    assert_eq!(
+        params.get("sessionId").and_then(|v| v.as_str()),
+        Some("orig")
+    );
+    assert_eq!(
+        params.get("sourceCwd").and_then(|v| v.as_str()),
+        Some(source.path().to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        params.get("copyMode").and_then(|v| v.as_str()),
+        Some("clean")
+    );
+    assert_eq!(params.get("gitRef").and_then(|v| v.as_str()), Some("v1.2"));
+    assert_eq!(
+        params.get("restoreCode").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert!(params.get("worktreeType").is_some());
+    let Some((loaded_sid, loaded_cwd, meta)) = log.loads.first() else {
+        panic!("expected a load: {:?}", log.loads);
+    };
+    assert_eq!(loaded_sid, "forked-in-worktree");
+    assert_eq!(loaded_cwd, &eff_cwd);
+    let meta = meta.as_ref().unwrap();
+    assert_eq!(meta.get("noReplay").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        meta.get("fuigo/restore_code").is_none(),
+        "load must not request code restore a second time"
+    );
+    assert!(log.new_sessions.is_empty());
+}
+
+#[tokio::test]
+async fn worktree_resume_failure_carries_local_miss_hint_like_the_tui() {
+    let source = tempfile::tempdir().unwrap();
+    let (tx, _log) = spawn_fake_agent(serde_json::json!({"error": "archive unavailable"}), Ok("x"));
+    let spec = WorktreeSpec::default();
+
+    let hinted = resume_session_in_new_worktree(&tx, source.path(), &spec, "my title", None, true, RunDeadline::start(None))
+        .await
+        .unwrap_err()
+        .to_string();
+    let plain = resume_session_in_new_worktree(&tx, source.path(), &spec, "my title", None, false, RunDeadline::start(None))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        plain,
+        crate::app::session_title_resolve::worktree_resume_failure_message(
+            None,
+            "archive unavailable"
+        )
+    );
+    assert_eq!(
+        hinted,
+        crate::app::session_title_resolve::worktree_resume_failure_message(
+            Some("my title"),
+            "archive unavailable"
+        )
+    );
+    assert_ne!(hinted, plain);
+}
+
+#[test]
+fn worktree_with_fork_is_rejected_at_intent() {
+    use crate::app::session_startup::{
+        SessionStartupFlags, StartupFlagError, session_startup_intent_from_flags,
+    };
+    let err = session_startup_intent_from_flags(SessionStartupFlags {
+        session_id: None,
+        resume_session_id: Some("01a06380-62b5-7881-b173-c69cd2c213fd"),
+        resume_most_recent: false,
+        continue_last_session: false,
+        fork_session: true,
+        has_worktree: true,
+    })
+    .unwrap_err();
+    assert!(matches!(err, StartupFlagError::ForkWithWorktree));
 }
 
 #[test]
@@ -554,6 +882,7 @@ fn timeout_test_options(total_timeout: Option<std::time::Duration>) -> super::He
         continue_last_session: false,
         fork_session: false,
         worktree: None,
+        worktree_ref: None,
         restore_code: false,
         agent: None,
         agents_json: None,

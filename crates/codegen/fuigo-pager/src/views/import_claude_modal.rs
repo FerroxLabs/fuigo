@@ -679,6 +679,13 @@ pub fn render_import_claude_modal(
             height: 1,
         };
         Paragraph::new(line).render(row_rect, buf);
+        // Terminal theme (Reset band slots): reverse-video focus cue; RGB themes keep the bg_highlight underlay painted above.
+        if is_focused && !is_blank && theme.is_bandless() {
+            buf.set_style(
+                row_rect,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
+        }
     }
 }
 

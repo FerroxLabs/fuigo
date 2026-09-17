@@ -68,7 +68,15 @@ fn quit_hint_spans(theme: &Theme) -> Vec<Span<'static>> {
 /// Shared by the announcement and changelog renderers.
 pub(super) fn hover_style(theme: &Theme, hovered: bool, base: Style) -> Style {
     if hovered {
-        Style::default().fg(theme.text_primary)
+        // Brighten to the primary fg; on the terminal palette the base fgs and text_primary are all
+        // `Reset`, so bold carries the cue instead.
+        if theme.is_bandless() {
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary)
+        }
     } else {
         base
     }
@@ -2715,7 +2723,7 @@ fn render_auth_input_box(
         if input_width > 0 {
             let cursor_x = inner.x + prompt_width + cursor_column as u16;
             if let Some(cell) = buf.cell_mut((cursor_x, inner.y)) {
-                cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+                cell.set_style(theme.block_cursor_over(theme.bg_base));
             }
         }
     }

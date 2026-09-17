@@ -2604,17 +2604,31 @@ impl PromptWidget {
     /// Buffer text with `[Image #N]` chip placeholders removed.
     /// For text-only consumers (e.g. question/permission feedback) that must not leak image tokens onto the wire.
     pub(crate) fn text_without_image_chips(&self) -> String {
-        let text = self.textarea.text();
-        let mut out = String::with_capacity(text.len());
+        self.submitted_text_without_image_chips(self.textarea.text())
+    }
+
+    /// [`Self::text_without_image_chips`] for a submission already taken out of the composer.
+    /// The live element ranges index the buffer, so they only describe `submitted` while it still
+    /// starts with it (a voice interim appends); anything else is returned unchanged rather than sliced blind.
+    pub(crate) fn submitted_text_without_image_chips(&self, submitted: &str) -> String {
+        if !submitted.starts_with(self.textarea.text()) {
+            return submitted.to_owned();
+        }
+        let mut out = String::with_capacity(submitted.len());
         let mut prev_end = 0usize;
         for elem in self.textarea.elements() {
             if elem.kind != KIND_IMAGE {
                 continue;
             }
-            out.push_str(&text[prev_end..elem.range.start]);
+            let Some(gap) = submitted.get(prev_end..elem.range.start) else {
+                continue;
+            };
+            out.push_str(gap);
             prev_end = elem.range.end;
         }
-        out.push_str(&text[prev_end..]);
+        if let Some(tail) = submitted.get(prev_end..) {
+            out.push_str(tail);
+        }
         out
     }
 

@@ -674,6 +674,12 @@ pub fn render_permission_view(
             height: 1,
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
+        // Bandless palette: `bg_visual` is `Reset`, so the cursor / hovered row carries reverse video instead
+        if is_cursor && focused {
+            buf.set_style(row_rect, theme.selection_overlay());
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        }
         buf.set_line(content_x, y, &line, content_width);
         y += 1;
     }
@@ -719,7 +725,12 @@ fn render_pattern_editor_line(
     let start = (cursor_idx + 1).saturating_sub(window);
 
     let text_style = Style::default().fg(theme.text_primary);
-    let caret_style = Style::default().fg(theme.bg_light).bg(theme.accent_user);
+    // Accent-colored block on RGB themes; reverse video on the bandless palette, whose `Reset` accent would paint no block at all.
+    let caret_style = if theme.is_bandless() {
+        theme.block_cursor_over(theme.bg_light)
+    } else {
+        Style::default().fg(theme.bg_light).bg(theme.accent_user)
+    };
 
     let end = (start + window).min(chars.len());
     let mut col: u16 = 0;

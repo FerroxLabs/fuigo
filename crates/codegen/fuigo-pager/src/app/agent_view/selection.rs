@@ -851,6 +851,47 @@ impl AgentView {
         self.selection_created_at = Some(Instant::now());
     }
 
+    fn export_copy_tip_showing(&self) -> bool {
+        self.ephemeral_tip.current_key() == Some(crate::tips::export_copy::EXPORT_COPY_TIP_KEY)
+    }
+
+    /// Note a successful drag-copy on this view, rebasing entry_idx by this scrollback's visible start.
+    fn note_own_scrollback_drag_copy(&mut self, entry_idx: usize, toast_ticks: u16) {
+        if entry_idx == BTW_OVERLAY_ENTRY_IDX {
+            return;
+        }
+        let visible_start = self.scrollback.visible_entry_range().start;
+        let abs_key = (entry_idx as u64).saturating_add(visible_start as u64);
+        self.export_copy_detector.note_drag_copy(
+            std::time::Instant::now(),
+            abs_key,
+            self.export_copy_tip_showing(),
+            toast_ticks,
+        );
+    }
+
+    /// Note on the AgentView whose scrollback was copied: the fullscreen child when
+    /// active_subagent is set (same view reconstruct_drag_copy / with_entry_* use).
+    fn note_scrollback_drag_copy(&mut self, entry_idx: usize, toast_ticks: u16) {
+        if let Some(child_id) = self.active_subagent.clone()
+            && let Some(child) = self.subagent_views.get_mut(&child_id)
+        {
+            child.note_own_scrollback_drag_copy(entry_idx, toast_ticks);
+            return;
+        }
+        self.note_own_scrollback_drag_copy(entry_idx, toast_ticks);
+    }
+
+    /// One frame of the Copied! debounce; true when the export-copy tip is due.
+    pub(in crate::app) fn tick_export_copy_detector(&mut self) -> bool {
+        self.export_copy_detector
+            .tick(self.export_copy_tip_showing())
+    }
+
+    pub(in crate::app) fn note_export_copy_slash_used(&mut self) {
+        self.export_copy_detector.note_slash_used();
+    }
+
     pub(in crate::app) fn finish_text_drag(&mut self) -> bool {
         let drag = self.drag_selection;
         let copied = drag.and_then(|d| self.reconstruct_drag_copy(&d));
@@ -866,7 +907,9 @@ impl AgentView {
             if let Some(d) = drag {
                 self.persist_drag_selection(&d, kind);
             }
-            self.copy_to_clipboard(&text);
+            let delivery = self.copy_to_clipboard(&text);
+            let entry_key = drag.map(|d| d.anchor.entry_idx).unwrap_or(0);
+            self.note_scrollback_drag_copy(entry_key, u16::from(delivery.toast_ticks()));
             return true;
         }
         false
@@ -1564,6 +1607,7 @@ mod tests {
     use super::*;
     use crate::actions::ActionRegistry;
     use crate::app::agent_view::test_fixtures::make_agent;
+    use crate::scrollback::block::RenderBlock;
     use crate::scrollback::table_geometry::CellRef;
     use crate::scrollback::text_selection::{ResolvedSelectableLine, VisibleBlockGeometry};
     use crossterm::event::{Event, MouseButton, MouseEventKind};
@@ -1579,6 +1623,57 @@ mod tests {
 
     fn table_geometry() -> TableGeometry {
         TableGeometry::detect(|i| TABLE.get(i).map(|s| s.to_string()), 1).expect("grid detected")
+    }
+
+    /// Three nearby scrollback drag-copies inside the window arm the `/copy` · `/export` tip; it shows once the
+    /// Copied! toast has ticked out and stays gated behind `contextual_hints.export_copy`.
+    #[test]
+    fn three_drag_copies_show_export_copy_tip_after_toast() {
+        use crate::tips::export_copy::EXPORT_COPY_TIP_KEY;
+        const TOAST_TICKS: u16 = 90;
+        let mut agent = make_agent();
+        agent.last_terminal_size = (80, 30);
+        for i in 0..3 {
+            agent
+                .scrollback
+                .push_block(RenderBlock::agent_message(format!("reply {i}")));
+        }
+        let mut seen = std::collections::HashMap::new();
+
+        agent.note_scrollback_drag_copy(0, TOAST_TICKS);
+        agent.note_scrollback_drag_copy(1, TOAST_TICKS);
+        assert!(
+            !agent.tick_export_copy_detector(),
+            "two copies never arm the tip"
+        );
+        agent.note_scrollback_drag_copy(2, TOAST_TICKS);
+        for _ in 0..(TOAST_TICKS - 1) {
+            assert!(!agent.tick_export_copy_detector(), "toast still showing");
+            assert_eq!(agent.ephemeral_tip.current_key(), None);
+        }
+        assert!(agent.tick_export_copy_detector(), "due once the toast expires");
+
+        assert!(
+            !crate::app::dispatch::present_export_copy_tip(&mut agent, &mut seen, false),
+            "the contextual_hints.export_copy gate must hold the tip back"
+        );
+        assert_eq!(agent.ephemeral_tip.current_key(), None);
+
+        assert!(crate::app::dispatch::present_export_copy_tip(
+            &mut agent, &mut seen, true
+        ));
+        assert_eq!(agent.ephemeral_tip.current_key(), Some(EXPORT_COPY_TIP_KEY));
+        assert_eq!(seen.get("export_copy_tip_shown_count"), Some(&1));
+
+        // `/copy` or `/export` this session retires the detector for good.
+        agent.ephemeral_tip.clear(EXPORT_COPY_TIP_KEY);
+        agent.note_export_copy_slash_used();
+        agent.note_scrollback_drag_copy(0, TOAST_TICKS);
+        agent.note_scrollback_drag_copy(1, TOAST_TICKS);
+        agent.note_scrollback_drag_copy(2, TOAST_TICKS);
+        for _ in 0..TOAST_TICKS {
+            assert!(!agent.tick_export_copy_detector());
+        }
     }
 
     /// Agent whose TABLE lines are in the visible model but with no `visible_blocks`/scrollback entry.

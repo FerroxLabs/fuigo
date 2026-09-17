@@ -415,6 +415,25 @@ impl AgentView {
                 self.close_subagent_fullscreen();
                 return InputOutcome::Changed;
             }
+            // A bare Enter in the child's block viewer quotes into the PARENT composer (the child is read-only).
+            let child_quote = match ev {
+                Event::Key(key) => self
+                    .subagent_views
+                    .get_mut(child_sid)
+                    .map(|child| child.try_take_idle_enter_quote(key)),
+                _ => None,
+            };
+            match child_quote {
+                Some(super::viewer::IdleEnterQuote::Quoted(quoted)) => {
+                    self.close_subagent_fullscreen();
+                    self.insert_quoted_reply(&quoted);
+                    return InputOutcome::Changed;
+                }
+                Some(super::viewer::IdleEnterQuote::ConsumedEmpty) => {
+                    return InputOutcome::Changed;
+                }
+                Some(super::viewer::IdleEnterQuote::NotHandled) | None => {}
+            }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
                 child_view.mark_as_subagent_view();
                 return child_view.handle_input_inner(ev, registry, prompt_paging);

@@ -66,6 +66,8 @@ pub enum ContextualTipKind {
     WordSelect,
     /// An SSH session without `fuigo wrap` shows a tip to wrap the ssh command locally.
     SshWrap,
+    /// Repeated scrollback drag-copies show a tip pointing at `/copy` and `/export`.
+    ExportCopy,
 }
 
 #[derive(Serialize, Clone, Copy)]

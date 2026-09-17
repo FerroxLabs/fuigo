@@ -1296,7 +1296,7 @@ fn render_agents_search(
             .saturating_add(viewport.cursor_display_column as u16)
             .min(area.width - 1);
         if let Some(cell) = buf.cell_mut((area.x + cursor_offset, area.y)) {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
 }
@@ -1893,7 +1893,7 @@ fn render_create_text_field(
         if cursor_x < content_area.x + content_area.width
             && let Some(cell) = buf.cell_mut((cursor_x, y))
         {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
     y + 2
