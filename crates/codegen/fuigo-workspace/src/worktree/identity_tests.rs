@@ -156,6 +156,16 @@ fn plain_directory_under_worktrees_dir_does_not_inherit_enclosing_repo() {
     let fixture = locked_worktrees_fixture(&temp);
     fuigo_test_utils::git::init_git_repo(&fixture.root);
     std::fs::write(fixture.root.join("tracked.txt"), "x").unwrap();
+    // `fuigo-home` sits inside this repo, and `worktrees.db` there is a live SQLite file: its
+    // `-journal` / `-wal` siblings come and go while other tests in the binary touch it, and a
+    // `git add .` that lists one and then stats it after it vanished fails the whole fixture
+    // (`fatal: unable to stat 'fuigo-home/worktrees.db-wal'`). The test is about the enclosing
+    // repo's EXISTENCE, not its contents, so keep the database out of the commit.
+    std::fs::write(
+        fixture.root.join(".gitignore"),
+        "fuigo-home/worktrees.db*\n",
+    )
+    .unwrap();
     fuigo_test_utils::git::git_commit_all(&fixture.root, "initial");
     let not_a_repo = fixture.worktrees.join("repo").join("deleted-worktree");
     std::fs::create_dir_all(&not_a_repo).unwrap();

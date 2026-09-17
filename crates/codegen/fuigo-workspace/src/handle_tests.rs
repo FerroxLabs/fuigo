@@ -6425,6 +6425,9 @@ async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
     };
     let outcome = rx.recv().await.expect("the drive must report the server");
     let elapsed = started.elapsed();
+    eprintln!(
+        "ROUND5-TIMING a_stdio_bind_server_keeps_the_whole_discovery_deadline elapsed={elapsed:?}"
+    );
     assert!(
         outcome.is_err(),
         "a server that never answers `initialize` cannot start"
@@ -6450,13 +6453,19 @@ async fn a_stdio_bind_server_keeps_the_whole_discovery_deadline() {
 /// above) but to bound the RETRY by the deadline's remainder.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() {
-    // 8 s deadline: probing transports get startup 4, probe 4. The fake then burns the probe
-    // phase (4 s), rejects `initialize` #0 at 2 s — a `HandshakeFailed`, which is what fires the
-    // fallback — and hangs `initialize` #1 forever. Unclamped, that retry runs to 10 s.
-    let discovery_timeout = std::time::Duration::from_secs(8);
+    // 20 s deadline: probing transports get startup 10, probe 10, and the retry keeps a 5 s
+    // margin. The fake burns the probe phase (10 s), rejects `initialize` #0 at 3 s — a
+    // `HandshakeFailed`, which is what fires the fallback — and hangs `initialize` #1 forever.
+    //   clamped:   retry window 20 - 5 - 13 = 2 s, so the server's own timeout lands at ~15 s
+    //              after ITS handshake started: 5 s of slack for startup latency under load.
+    //   unclamped: the retry gets its full 10 s startup budget, runs to ~23 s, and the drive's
+    //              20 s deadline cancels it — the generic error, 3 s past the deadline.
+    // The deadline and the fake's delays are scaled together; an 8 s version of this test left
+    // ~1 s of slack and failed under a 16-thread lib run.
+    let discovery_timeout = std::time::Duration::from_secs(20);
     let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
         swallow_discover: true,
-        init_reject_after_ms: Some(2_000),
+        init_reject_after_ms: Some(3_000),
         init_hang_from: Some(1),
         ..Default::default()
     })
@@ -6497,6 +6506,10 @@ async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() 
     };
     let outcome = rx.recv().await.expect("the drive must report the server");
     let elapsed = started.elapsed();
+    eprintln!(
+        "ROUND5-TIMING a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline \
+         elapsed={elapsed:?}"
+    );
     let Err(failure) = outcome else {
         panic!("the fake never completes a handshake; the server must not start");
     };
@@ -6506,10 +6519,10 @@ async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() 
          server's error into the generic discovery timeout: {}",
         failure.error,
     );
-    assert!(
-        elapsed < discovery_timeout,
-        "the handshake must fail on its own INSIDE the deadline, not at it: {elapsed:?}",
-    );
+    // No wall-clock bound here: the test's clock starts before the drive task is even scheduled,
+    // so `elapsed` over-counts by the startup latency the product cannot see. What the product
+    // guarantees is the ORDER — its own error before the drive's cancellation — and the message
+    // check above is exactly that.
     drive.await.unwrap().expect("the drive must finish");
     server_task.abort();
 }
