@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use rmcp::{
-    ClientHandler, ServiceExt,
+    ClientHandler, ClientLifecycleMode, ClientServiceExt,
     model::{
         CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
         PaginatedRequestParams,
@@ -2841,6 +2841,25 @@ impl Transport<RoleClient> for SafeTokioChildProcess {
     }
 }
 
+/// Whether a handshake attempt runs the `server/discover` probe phase before the legacy `initialize`.
+#[derive(Clone, Copy)]
+enum HandshakeProbe {
+    /// Probe first; the transport is rebuilt for the legacy phase when the server is legacy.
+    Discover,
+    /// Legacy `initialize` only: the server is already known to be legacy (protocol-version retry).
+    Skip,
+}
+
+/// Outcome of the `server/discover` probe phase (see `McpClient::probe_modern`).
+enum ProbeVerdict {
+    /// Modern negotiation succeeded; this running service IS the connection.
+    Modern(Box<rmcp::service::RunningService<RoleClient, FuigoClientHandler>>),
+    /// The server was reached but is not a usable modern server; run the
+    /// legacy handshake. The probe's error is kept so a subsequent legacy
+    /// failure can log both phases together.
+    Legacy { probe_error: String },
+}
+
 /// Transport configuration before connection is established.
 enum PendingTransport {
     Stdio(Box<SafeTokioChildProcess>),
@@ -3093,12 +3112,14 @@ fn restorable_http_transport(pending: &PendingTransport) -> Option<PendingTransp
     }
 }
 
-/// The protocol version this client asks for on the first `initialize`.
+/// The protocol version this client asks for on the first legacy `initialize`.
 ///
 /// This pin currently equals rmcp 3.2 LATEST. The explicit constant must remain so a future rmcp
 /// bump cannot silently move the wire. 2026-07-28 brings SEP-2322 multi round-trip requests
 /// (`input_required` results); older servers negotiate down and keep the server-initiated
-/// `elicitation/create` flow.
+/// `elicitation/create` flow. Session-less 2026-07-28 servers (SEP-2575) never answer
+/// `initialize` at all: they are reached through the `server/discover` probe that precedes the
+/// legacy handshake on every rebuildable transport (see `McpClient::probe_modern`).
 const REQUESTED_PROTOCOL_VERSION: rmcp::model::ProtocolVersion =
     rmcp::model::ProtocolVersion::V_2026_07_28;
 
@@ -3696,11 +3717,12 @@ impl McpClient {
     /// On rare contention the slot stays `Initializing`; the wait-timeout fallback below then surfaces a clear error rather than blocking forever.
     pub async fn ensure_initialized(&self) -> Result<McpService, McpError> {
         // Bound how long a parked caller waits on `init_done` before surfacing an error
-        // `try_handshake` is itself bounded by `startup_timeout_sec`
+        // `try_handshake` is itself bounded per phase: the `server/discover` probe plus the legacy
+        // `initialize` with its full `startup_timeout_sec` (see `handshake_budget_secs`)
         // Anything beyond that plus a 1 s margin means the holder was dropped without restoring the transport (cancellation under heavy contention)
         // Wedging silently would recreate the exact "stuck client" failure mode
         let inflight_wait =
-            std::time::Duration::from_secs(self.startup_timeout_sec.saturating_add(1));
+            std::time::Duration::from_secs(self.handshake_budget_secs().saturating_add(1));
 
         // Drive the loop body until we either return directly or break out with an owned `PendingTransport`
         // We deliberately use a labelled `loop` with a `break <expr>`
@@ -3783,7 +3805,9 @@ impl McpClient {
 
         let handshake_start = std::time::Instant::now();
         let mut protocol_version = REQUESTED_PROTOCOL_VERSION;
-        let mut result = self.try_handshake(pending, protocol_version.clone()).await;
+        let mut result = self
+            .try_handshake(pending, protocol_version.clone(), HandshakeProbe::Discover)
+            .await;
 
         // An HTTP server that cannot hold a session initialised at the requested version gets one
         // more `initialize`, at the widely-deployed fallback. Spec-wise a server that negotiates
@@ -3794,7 +3818,9 @@ impl McpClient {
         // rmcp's own `notifications/initialized` - with `400 invalid session`, so the handshake
         // fails inside `serve` and the negotiated version is never observable here. Initialising
         // at 2025-11-25 gives a working session. One extra `initialize`, only after a failure that
-        // is not a timeout; a server that speaks the requested version pays nothing.
+        // is not a timeout; a server that speaks the requested version pays nothing. The
+        // `server/discover` probe is not repeated: a server that answered `initialize` at all has
+        // already shown it is a legacy server.
         if let Some(retry_transport) = restore_for_fallback
             && let Err(err) = &result
             && !matches!(err, McpError::Timeout { .. })
@@ -3808,7 +3834,11 @@ impl McpClient {
             );
             protocol_version = FALLBACK_PROTOCOL_VERSION;
             result = self
-                .try_handshake(retry_transport, protocol_version.clone())
+                .try_handshake(
+                    retry_transport,
+                    protocol_version.clone(),
+                    HandshakeProbe::Skip,
+                )
                 .await;
         }
 
@@ -3837,7 +3867,10 @@ impl McpClient {
                     config: config.clone(),
                     auth_manager: auth_mgr.clone(),
                 };
-                result = self.try_handshake(retry_transport, protocol_version).await;
+                // A fresh token can turn a probe rejection into a modern session, so probe again
+                result = self
+                    .try_handshake(retry_transport, protocol_version, HandshakeProbe::Discover)
+                    .await;
             }
         }
 
@@ -3908,6 +3941,12 @@ impl McpClient {
     }
 
     /// Run the MCP handshake (no lock held).
+    ///
+    /// Every transport that can rebuild itself (all but stdio) first probes for a 2026-07-28
+    /// session-less server with `server/discover` and, when the server turns out to be legacy,
+    /// runs the `initialize` handshake naming `protocol_version` on a fresh transport
+    /// (`HandshakeProbe::Discover`). `HandshakeProbe::Skip` runs only the legacy phase: the
+    /// protocol-version retry in [`Self::ensure_initialized`] already knows the server is legacy.
     #[tracing::instrument(
         name = "mcp.serve",
         skip_all,
@@ -3918,115 +3957,265 @@ impl McpClient {
         &self,
         pending: PendingTransport,
         protocol_version: rmcp::model::ProtocolVersion,
+        probe: HandshakeProbe,
     ) -> Result<rmcp::service::RunningService<RoleClient, FuigoClientHandler>, McpError> {
-        let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
         let name = &self.server_name;
 
         match pending {
-            PendingTransport::Stdio(process) => {
-                let handler = self.make_client_handler(protocol_version.clone());
-                tokio::time::timeout(timeout, handler.serve(*process))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
-            }
+            // Stdio stays on the legacy `initialize`-only handshake. Probing it is unsafe on two counts: a slow-starting server can answer the abandoned `server/discover` after rmcp has already sent
+            // `initialize` on the SAME byte stream, and rmcp rejects that late response as uncorrelated; and unlike the other transports the child process cannot be rebuilt here for a clean fallback.
+            // Modern-only stdio servers stay unsupported until rmcp tolerates late responses to abandoned requests.
+            PendingTransport::Stdio(process) => self.serve_legacy(*process, protocol_version).await,
             PendingTransport::Http(config) => {
-                let transport =
-                    Self::build_http_transport(&config, name, self.warn_budget.clone())?;
-                let handler = self.make_client_handler(protocol_version.clone());
-                tokio::time::timeout(timeout, handler.serve(transport))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
+                // One reqwest client for both phases: the probe and the legacy transports stay separate rmcp sessions, but share the connection pool, so a responsive legacy server doesn't pay a second TCP+TLS setup.
+                let http_client = Self::build_http_client(&config, name, self.warn_budget.clone())?;
+                self.probe_then_legacy(
+                    || {
+                        StreamableHttpClientTransport::with_client(
+                            http_client.clone(),
+                            StreamableHttpClientTransportConfig::with_uri(config.url.as_str()),
+                        )
+                    },
+                    protocol_version,
+                    probe,
+                )
+                .await
             }
             PendingTransport::HttpAuth {
                 config,
                 auth_manager,
             } => {
-                // Local app endpoints skip OAuth outright (`start_mcp_server`
-                // routes them to `NoOauthSupport`), so this transport must
-                // never see one — its client is built without the local
-                // no-proxy/no-redirect hardening.
-                debug_assert!(
-                    !config.local_agent_endpoint,
-                    "a local agent endpoint must not reach the OAuth transport"
-                );
-                // Authorization is injected per-request by `AuthClient`, never
-                // carried in `default_headers`.
-                let mut headers = parse_config_headers(
-                    name,
-                    "oauth-transport",
-                    config
-                        .headers
-                        .iter()
-                        .filter(|(key, _)| !key.eq_ignore_ascii_case("Authorization"))
-                        .map(|(key, value)| (key.as_str(), value.as_str())),
-                );
-                apply_user_agent_policy(&mut headers, name, &config.url);
-                // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-                #[allow(clippy::disallowed_methods)]
-                let http_client = with_extra_root_certificates(
-                    reqwest::Client::builder()
-                        .default_headers(headers)
-                        .connect_timeout(HTTP_CONNECT_TIMEOUT),
+                let http_client = self.build_oauth_http_client(&config, &auth_manager).await?;
+                self.probe_then_legacy(
+                    || {
+                        StreamableHttpClientTransport::with_client(
+                            http_client.clone(),
+                            StreamableHttpClientTransportConfig::with_uri(config.url.as_str()),
+                        )
+                    },
+                    protocol_version,
+                    probe,
                 )
-                .build()
-                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
-                // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow
-                // The struct is non_exhaustive, so build with a throwaway manager and swap in the shared one
-                let placeholder_manager = crate::http_policy::auth_manager(config.url.as_str())
-                    .await
-                    .map_err(|e| {
-                        McpError::ClientError(format!("Failed to build OAuth client: {e}"))
-                    })?;
-                let mut auth_client =
-                    rmcp::transport::auth::AuthClient::new(http_client, placeholder_manager);
-                auth_client.auth_manager = auth_manager.clone();
-                let mcp_http_client = crate::mcp_http_client::McpHttpClient::new(
-                    auth_client,
-                    name.as_str(),
-                    self.warn_budget.clone(),
-                );
-                let transport_config =
-                    StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
-                let transport =
-                    StreamableHttpClientTransport::with_client(mcp_http_client, transport_config);
-                let handler = self.make_client_handler(protocol_version.clone());
-                tokio::time::timeout(timeout, handler.serve(transport))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
+                .await
             }
             PendingTransport::Acp { server_id, invoker } => {
-                // Per-reverse-call backstop on `fuigo/mcp/sdk_call`: the larger of the startup and tool timeouts
-                // It never undercuts the real outer bound: the handshake `initialize` is bounded by the serve `timeout` below
-                // Tool calls are bounded by `tool_timeout_for` in `try_call_tool`
-                // The bridge forwards raw JSON-RPC without the tool name, so per-TOOL overrides aren't applied here in v1
-                // The HTTP path still honors them
-                let invoke_timeout = std::time::Duration::from_secs(
-                    self.startup_timeout_sec.max(self.tool_timeout_sec),
-                );
-                let transport =
-                    crate::acp_transport::acp_bridge_transport(server_id, invoker, invoke_timeout);
-                let handler = self.make_client_handler(protocol_version.clone());
-                tokio::time::timeout(timeout, handler.serve(transport))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
+                self.probe_then_legacy(
+                    || self.build_acp_transport(server_id.clone(), &invoker),
+                    protocol_version,
+                    probe,
+                )
+                .await
             }
         }
+    }
+
+    /// Probe for a modern server, then run the legacy handshake on a fresh transport when the probe says "legacy". Shared by every transport that can rebuild its transport (all but stdio).
+    /// When both phases fail, the probe's error is warned alongside the legacy error so diagnostics show the whole story, while [`McpError`] carries only the legacy error (the actionable one for a legacy-majority world).
+    async fn probe_then_legacy<T, E, A>(
+        &self,
+        mut make_transport: impl FnMut() -> T,
+        protocol_version: rmcp::model::ProtocolVersion,
+        probe: HandshakeProbe,
+    ) -> Result<rmcp::service::RunningService<RoleClient, FuigoClientHandler>, McpError>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let probe_failure = match probe {
+            HandshakeProbe::Skip => None,
+            HandshakeProbe::Discover => match self.probe_modern(make_transport()).await? {
+                ProbeVerdict::Modern(service) => return Ok(*service),
+                ProbeVerdict::Legacy { probe_error } => Some(probe_error),
+            },
+        };
+        let result = self.serve_legacy(make_transport(), protocol_version).await;
+        if let (Err(legacy_error), Some(probe_error)) = (&result, probe_failure) {
+            tracing::warn!(
+                server = %self.server_name,
+                %probe_error,
+                %legacy_error,
+                "both handshake phases failed (surfacing the legacy error)"
+            );
+        }
+        result
+    }
+
+    /// Cap on the `server/discover` probe phase. Mirrors rmcp's private
+    /// `DEFAULT_AUTO_DISCOVER_TIMEOUT` so a server that swallows the probe
+    /// (never answers unknown methods) costs at most this much extra startup latency before the legacy handshake runs with its full budget.
+    pub(crate) const DISCOVER_PROBE_TIMEOUT_SECS: u64 = 10;
+
+    /// Timeout of the `server/discover` probe phase: [`Self::DISCOVER_PROBE_TIMEOUT_SECS`],
+    /// shrunk to the startup budget when that is shorter. Never skipped: 2026-07-28-era servers
+    /// reject every `tools/call` on a legacy session, so a short budget must still probe.
+    fn probe_timeout_secs(&self) -> u64 {
+        Self::DISCOVER_PROBE_TIMEOUT_SECS
+            .min(self.startup_timeout_sec)
+            .max(1)
+    }
+
+    /// Worst-case wall time of one [`Self::try_handshake`] attempt: the probe phase plus the legacy phase's full startup budget. Anything that waits on a handshake holder must use this bound, not `startup_timeout_sec` alone — a swallowed probe legitimately keeps the holder busy past the startup budget.
+    fn handshake_budget_secs(&self) -> u64 {
+        self.startup_timeout_sec
+            .saturating_add(self.probe_timeout_secs())
+    }
+
+    /// Phase 1: probe `server/discover` so 2026-07-28 (SEP-2575 session-less) servers are
+    /// negotiated the only way they can be: they never answer `initialize`.
+    /// [`ProbeVerdict::Legacy`] means "run the legacy handshake on a fresh transport". Every probe outcome showing the SERVER was reached maps there: immediate rejections (correlated JSON-RPC errors like method-not-found, the middleware 4xx shapes rmcp classifies itself, and non-JSON 5xx / SSE error events surfaced as transport errors) fall back at once, while servers that ACCEPT the probe but never answer it
+    /// fall back after the probe timeout.
+    /// Connect-phase failures are the exception: the probe never reached a server, so a legacy attempt against the same endpoint would only double the time-to-error on a blackholed host. Those surface as `Err` directly, through the same typed/message classification
+    /// [`McpError::is_connect_failure`] uses.
+    async fn probe_modern<T, E, A>(&self, transport: T) -> Result<ProbeVerdict, McpError>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let probe_timeout = std::time::Duration::from_secs(self.probe_timeout_secs());
+        // The `ClientInfo` protocol version is irrelevant to a discover probe: the lifecycle
+        // names its preferred versions itself, and rmcp stamps the negotiated one per request.
+        let handler = self.make_client_handler(REQUESTED_PROTOCOL_VERSION);
+        let lifecycle = ClientLifecycleMode::Discover {
+            preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+        };
+        match tokio::time::timeout(
+            probe_timeout,
+            handler.serve_with_lifecycle(transport, lifecycle),
+        )
+        .await
+        {
+            Ok(Ok(service)) => Ok(ProbeVerdict::Modern(Box::new(service))),
+            Ok(Err(probe_error)) => {
+                if init_error_is_connect_phase(&probe_error)
+                    || is_connect_failure_message(&probe_error.to_string())
+                {
+                    return Err(McpError::HandshakeFailed {
+                        server: self.server_name.to_string(),
+                        source: Box::new(probe_error),
+                    });
+                }
+                tracing::debug!(
+                    server = %self.server_name,
+                    %probe_error,
+                    "server/discover probe failed; falling back to the legacy initialize handshake"
+                );
+                Ok(ProbeVerdict::Legacy {
+                    probe_error: probe_error.to_string(),
+                })
+            }
+            Err(_) => {
+                tracing::debug!(
+                    server = %self.server_name,
+                    "server/discover probe timed out; falling back to the legacy initialize handshake"
+                );
+                Ok(ProbeVerdict::Legacy {
+                    probe_error: format!(
+                        "server/discover probe timed out after {}s",
+                        probe_timeout.as_secs()
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Phase 2 (and the only phase for stdio): the legacy
+    /// `initialize` handshake, on its own fresh transport with the FULL startup budget — the probe phase never erodes it, so `startup_timeout_sec` keeps its pre-probe meaning for legacy servers. Its failure is surfaced directly (never wrapped in a fallback-specific error), so the auth and transport classifiers on [`McpError::HandshakeFailed`] see the same errors they saw before the probe existed.
+    /// The `initialize` names `protocol_version`: `REQUESTED_PROTOCOL_VERSION` on the first
+    /// attempt, `FALLBACK_PROTOCOL_VERSION` on the retry [`Self::ensure_initialized`] makes for an
+    /// HTTP server that rejects the requested version's session.
+    async fn serve_legacy<T, E, A>(
+        &self,
+        transport: T,
+        protocol_version: rmcp::model::ProtocolVersion,
+    ) -> Result<rmcp::service::RunningService<RoleClient, FuigoClientHandler>, McpError>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
+        let handler = self.make_client_handler(protocol_version);
+        tokio::time::timeout(
+            timeout,
+            handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
+        )
+        .await
+        .map_err(|_| McpError::timeout(&self.server_name, timeout))?
+        .map_err(|e| McpError::HandshakeFailed {
+            server: self.server_name.to_string(),
+            source: Box::new(e),
+        })
+    }
+
+    fn build_acp_transport(
+        &self,
+        server_id: String,
+        invoker: &Arc<dyn crate::acp_transport::AcpReverseInvoker>,
+    ) -> crate::acp_transport::AcpBridgeTransport {
+        // Per-reverse-call backstop on `fuigo/mcp/sdk_call`: the larger of the startup and tool timeouts
+        // It never undercuts the real outer bound: the handshake is bounded per phase in `try_handshake`
+        // Tool calls are bounded by `tool_timeout_for` in `try_call_tool`
+        // The bridge forwards raw JSON-RPC without the tool name, so per-TOOL overrides aren't applied here in v1
+        // The HTTP path still honors them
+        let invoke_timeout =
+            std::time::Duration::from_secs(self.startup_timeout_sec.max(self.tool_timeout_sec));
+        crate::acp_transport::acp_bridge_transport(server_id, Arc::clone(invoker), invoke_timeout)
+    }
+
+    /// OAuth flavor of [`Self::build_http_client`]: one shared, cloneable
+    /// client for both handshake phases, with per-request `Authorization`
+    /// injected by the shared [`rmcp::transport::auth::AuthClient`].
+    async fn build_oauth_http_client(
+        &self,
+        config: &HttpConfig,
+        auth_manager: &Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>,
+    ) -> Result<
+        crate::mcp_http_client::McpHttpClient<rmcp::transport::auth::AuthClient<reqwest::Client>>,
+        McpError,
+    > {
+        let name = &self.server_name;
+        // Local app endpoints skip OAuth outright (`start_mcp_server`
+        // routes them to `NoOauthSupport`), so this transport must
+        // never see one — its client is built without the local
+        // no-proxy/no-redirect hardening.
+        debug_assert!(
+            !config.local_agent_endpoint,
+            "a local agent endpoint must not reach the OAuth transport"
+        );
+        // Authorization is injected per-request by `AuthClient`, never
+        // carried in `default_headers`.
+        let mut headers = parse_config_headers(
+            name,
+            "oauth-transport",
+            config
+                .headers
+                .iter()
+                .filter(|(key, _)| !key.eq_ignore_ascii_case("Authorization"))
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+        apply_user_agent_policy(&mut headers, name, &config.url);
+        // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
+        #[allow(clippy::disallowed_methods)]
+        let http_client = with_extra_root_certificates(
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .connect_timeout(HTTP_CONNECT_TIMEOUT),
+        )
+        .build()
+        .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+        // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow
+        // The struct is non_exhaustive, so build with a throwaway manager and swap in the shared one
+        let placeholder_manager = crate::http_policy::auth_manager(config.url.as_str())
+            .await
+            .map_err(|e| McpError::ClientError(format!("Failed to build OAuth client: {e}")))?;
+        let mut auth_client =
+            rmcp::transport::auth::AuthClient::new(http_client, placeholder_manager);
+        auth_client.auth_manager = auth_manager.clone();
+        let mcp_http_client = crate::mcp_http_client::McpHttpClient::new(
+            auth_client,
+            name.as_str(),
+            self.warn_budget.clone(),
+        );
+        Ok(mcp_http_client)
     }
 
     fn make_client_info(
@@ -4062,12 +4251,14 @@ impl McpClient {
                 fuigo_version::VERSION.to_string(),
             ),
         )
-        // `REQUESTED_PROTOCOL_VERSION` on the first handshake; `FALLBACK_PROTOCOL_VERSION` on the
-        // HTTP retry (see `ensure_initialized`)
+        // `REQUESTED_PROTOCOL_VERSION` on the first legacy `initialize`; `FALLBACK_PROTOCOL_VERSION`
+        // on the HTTP retry (see `ensure_initialized`). 2026-07-28 session-less servers are
+        // negotiated via `server/discover` instead (see `probe_modern`). The explicit setter must
+        // remain so a future rmcp bump cannot silently move the wire.
         .with_protocol_version(protocol_version)
     }
 
-    /// Build the [`FuigoClientHandler`] that drives `client.serve(...)`.
+    /// Build the [`FuigoClientHandler`] that drives `client.serve_with_lifecycle(...)`.
     ///
     /// The handler holds a **clone of `Arc<Mutex<Option<Sender>>>`**, not a snapshot, so a later [`Self::set_event_tx`] reaches the live handler.
     fn make_client_handler(
@@ -4175,14 +4366,13 @@ impl McpClient {
         true
     }
 
-    fn build_http_transport(
+    /// One reqwest-backed MCP HTTP client, cloneable so both handshake phases
+    /// (probe and legacy) share its connection pool.
+    fn build_http_client(
         config: &HttpConfig,
         server_name: &str,
         warn_budget: crate::mcp_http_client::WarnBudget,
-    ) -> Result<
-        StreamableHttpClientTransport<crate::mcp_http_client::McpHttpClient<reqwest::Client>>,
-        McpError,
-    > {
+    ) -> Result<crate::mcp_http_client::McpHttpClient<reqwest::Client>, McpError> {
         let mut headers = parse_config_headers(
             server_name,
             "transport",
@@ -4211,12 +4401,10 @@ impl McpClient {
         let client = builder
             .build()
             .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
-        let mcp_http_client =
-            crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget);
-        let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
-        Ok(StreamableHttpClientTransport::with_client(
-            mcp_http_client,
-            transport_config,
+        Ok(crate::mcp_http_client::McpHttpClient::new(
+            client,
+            server_name,
+            warn_budget,
         ))
     }
 
