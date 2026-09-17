@@ -795,4 +795,39 @@ mod tests {
         assert_eq!(l.text, "Reading 1 file, Running 1 subagent");
         assert!(l.running);
     }
+
+    fn running_sub(child_sid: &str) -> ScrollbackEntry {
+        let mut entry = sub_started(child_sid);
+        entry.is_running = true;
+        entry
+    }
+
+    #[test]
+    fn mixed_subagents_show_running_and_completed_counts() {
+        let l = label(&[
+            running_sub("a"),
+            running_sub("b"),
+            sub_completed("c"),
+            sub_completed("d"),
+            sub_completed("e"),
+        ]);
+        assert_eq!(l.text, "Running 2 subagents, 3 completed");
+        assert!(l.running);
+
+        let l = label(&[running_sub("a"), sub_completed("b")]);
+        assert_eq!(l.text, "Running 1 subagent, 1 completed");
+        assert!(l.running);
+    }
+
+    #[test]
+    fn finished_subagents_do_not_claim_running_when_another_kind_is() {
+        let mut entries = vec![read("a.rs"), sub_completed("child-A")];
+        let Some(file) = entries.get_mut(0) else {
+            panic!("expected two entries: {entries:?}");
+        };
+        file.is_running = true;
+        let l = label(&entries);
+        assert_eq!(l.text, "Reading 1 file, Ran 1 subagent");
+        assert!(l.running);
+    }
 }
