@@ -532,6 +532,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 effects: vec![Effect::Compact {
                     agent_id,
                     session_id,
+                    user_context: None,
                 }],
                 page_flip_entry: None,
             }

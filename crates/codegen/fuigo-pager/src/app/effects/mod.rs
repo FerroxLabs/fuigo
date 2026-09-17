@@ -1664,13 +1664,23 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::Compact { agent_id, session_id } => {
+        Effect::Compact {
+            agent_id,
+            session_id,
+            user_context,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                });
+                    let mut params = serde_json::Map::new();
+                    params.insert(
+                        "sessionId".into(),
+                        serde_json::Value::String(session_id.0.to_string()),
+                    );
+                    if let Some(ctx) = user_context {
+                        params.insert("userContext".into(), serde_json::Value::String(ctx));
+                    }
+                    let params = serde_json::Value::Object(params);
                     let req = acp::ExtRequest::new(
                         "fuigo/compact_conversation",
                         serde_json::value::to_raw_value(&params)

@@ -1565,6 +1565,8 @@ pub enum Effect {
     Compact {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        /// `/compact <instructions>`: forwarded as `userContext`; bare `/compact` sends none.
+        user_context: Option<String>,
     },
     /// Kill a background task.
     KillBgTask {
