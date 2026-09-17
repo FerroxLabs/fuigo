@@ -774,11 +774,11 @@ impl AgentView {
         }
     }
 
-    /// How long after an Esc-fired cancel the idle rewind ARM stays suppressed (see [`Self::rewind_arm_suppressed`]).
+    /// How long after a mid-turn Esc the idle rewind ARM stays suppressed (see [`Self::rewind_arm_suppressed`]).
     /// Must exceed `PendingAction::ESC_DOUBLE_PRESS_TTL` (800ms): the grace exists to absorb the double-press gesture itself.
     /// It therefore has to outlast one full arm-to-fire window, or a mash could still arm-and-fire around it.
     /// The invariant is pinned by `esc_cancel_rewind_grace_outlives_double_press_ttl`.
-    /// The pty-only `FUIGO_ESC_DOUBLE_PRESS_MS` override can exceed this; no pty case mashes Esc across a cancel.
+    /// The pty-only `FUIGO_ESC_DOUBLE_PRESS_MS` override can exceed this; no pty case mashes Esc across a turn end.
     pub(crate) const ESC_CANCEL_REWIND_GRACE: std::time::Duration =
         std::time::Duration::from_millis(1000);
 
@@ -856,7 +856,7 @@ impl AgentView {
         // Arming under a pending permission/plan/cancel-turn/question overlay would therefore let the picker key-starve it
         // A rewind could also mutate the session out from under that overlay
         // The step 0b history-search intercept is prompt-pane-only, so arming would stack the rewind picker on the open search overlay
-        // The grace guard holds only this ARM (never modal/other Esc handling) right after an Esc-fired cancel; see `rewind_arm_suppressed`
+        // The grace guard holds only this ARM (never modal/other Esc handling) right after a mid-turn Esc; see `rewind_arm_suppressed`
         if !has_content
             && self.scrollback.turn_count() > 0
             && self.prompt_input_mode == PromptInputMode::Normal
@@ -893,9 +893,9 @@ impl AgentView {
         }
     }
 
-    /// Arm the post-cancel grace: push the rewind-ARM suppression deadline out to `now + ESC_CANCEL_REWIND_GRACE`.
-    /// After an Esc-fired cancel the session goes Cancelling to Idle with (typically) an empty composer.
-    /// A user mashing Esc would otherwise immediately arm-and-fire the silent double-Esc rewind picker.
+    /// Arm the mid-turn Esc grace: push the rewind-ARM suppression deadline out to `now + ESC_CANCEL_REWIND_GRACE`.
+    /// A user mashing Esc at a turn that then ends (Ctrl+C cancel or natural completion) lands on an idle, typically empty composer.
+    /// Without the grace the next press would immediately arm-and-fire the silent double-Esc rewind picker.
     /// Takes `now` so tests are deterministic (no fabricated `Instant`s).
     pub(crate) fn suppress_rewind_arm(&mut self, now: std::time::Instant) {
         self.rewind_suppress_deadline = Some(now + Self::ESC_CANCEL_REWIND_GRACE);
