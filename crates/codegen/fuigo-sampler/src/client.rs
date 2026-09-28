@@ -88,13 +88,42 @@ impl FuigoRequestHeaders<'_> {
 /// Deserialize a Responses API SSE event, with a fallback for Ferrox Labs-specific tool types (e.g., `x_search`) that `async_openai` can't parse.
 /// The API echoes the request's `tools` array in `ResponseCreated` and `ResponseCompleted` events.
 /// If we sent `{"type": "x_search"}`, `rs::Tool` deserialization fails, so we strip unrecognized tools from the raw JSON and retry.
-fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+/// True when `data`'s top-level `type` tag names a stream event this client does not model.
+///
+/// Probes with the tag ALONE: a known tag then fails on missing fields, while an unknown tag
+/// fails with serde's `unknown variant`. That isolates the top-level tag from any nested enum
+/// inside a known event body — an unknown `status` inside `response.completed` must still fail
+/// closed, because silently dropping a terminal event would hang the turn instead of erroring.
+fn unknown_event_type(value: &serde_json::Value) -> Option<String> {
+    let tag = value.get("type")?.as_str()?;
+    match serde_json::from_value::<rs::ResponseStreamEvent>(serde_json::json!({ "type": tag })) {
+        Ok(_) => None,
+        Err(e) if e.to_string().contains("unknown variant") => Some(tag.to_owned()),
+        Err(_) => None,
+    }
+}
+
+/// `Ok(None)` means "a well-formed event whose `type` this client does not model": skip it.
+fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
     // Programmatic-tool-calling items (`program`, `program_output`) have no typed variant; rewrite them into carriers first
     let transcoded = crate::stream::responses_ptc::transcode_sse(data);
     let data = transcoded.as_deref().unwrap_or(data);
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
         Err(first_err) => {
+            // An SSE event stream is forward-compatible: the server may introduce event types at
+            // any time, and OpenAI now emits `keepalive` during long reasoning turns. An unknown
+            // `type` is benign and MUST be skipped -- failing here aborts the entire turn, which
+            // selects precisely for the longest turns, the ones most expensive to lose.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(tag) = unknown_event_type(&value)
+            {
+                tracing::warn!(
+                    event_type = %tag,
+                    "Skipping unrecognized Responses API stream event"
+                );
+                return Ok(None);
+            }
             // Try sanitizing: parse as Value, strip unknown tools, retry.
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
                 // Strip tools that async_openai's rs::Tool can't deserialize (e.g., Ferrox Labs-specific "x_search")
@@ -107,7 +136,7 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                 }
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                     apply_terminal_event_overrides(&mut event, data);
-                    return Ok(event);
+                    return Ok(Some(event));
                 }
             }
             tracing::error!(
@@ -119,7 +148,7 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
         }
     };
     apply_terminal_event_overrides(&mut event, data);
-    Ok(event)
+    Ok(Some(event))
 }
 
 /// On `response.completed` / `response.incomplete`, rewrite `usage.total_tokens` to the live context length from `context_details`.
@@ -1716,11 +1745,18 @@ impl SamplingClient {
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
                         } else {
-                            let mut parsed = deserialize_response_event(data);
-                            if let (Some(output), Ok(event)) = (&mut codex_output, &mut parsed) {
-                                output.observe(event);
+                            match deserialize_response_event(data) {
+                                // A well-formed event whose `type` we do not model: swallow it and
+                                // keep the stream alive, exactly as the doom-loop event above does.
+                                Ok(None) => Some(None),
+                                Ok(Some(mut event)) => {
+                                    if let Some(output) = &mut codex_output {
+                                        output.observe(&mut event);
+                                    }
+                                    Some(Some(Ok(event)))
+                                }
+                                Err(e) => Some(Some(Err(e))),
                             }
-                            Some(Some(parsed))
                         }
                     }
                     Err(e) => {
@@ -3408,6 +3444,38 @@ mod tests {
     /// The new value is the live context length (`ctx.input + ctx.output`).
     /// Billing fields stay on the wire's cumulative values.
     #[test]
+    /// An unknown top-level `type` is benign and must be SKIPPED, not fatal.
+    /// OpenAI emits `keepalive` during long reasoning turns; before this, one such frame
+    /// aborted the whole turn with `unknown variant `keepalive``, so the failure selected
+    /// for the longest and most expensive turns.
+    #[test]
+    fn unknown_stream_event_type_is_skipped_not_fatal() {
+        for raw in [
+            r#"{"type":"keepalive"}"#,
+            r#"{"type":"keepalive","sequence_number":7}"#,
+            r#"{"type":"response.some_future_event","whatever":{"nested":true}}"#,
+        ] {
+            let parsed = deserialize_response_event(raw);
+            assert!(
+                matches!(parsed, Ok(None)),
+                "expected {raw} to be skipped, got {:?}",
+                parsed.map(|e| e.is_some())
+            );
+        }
+    }
+
+    /// The converse, and the reason the check probes the tag alone: a KNOWN event type whose
+    /// body is malformed must still fail closed. Silently dropping a corrupt terminal event
+    /// would hang the turn instead of surfacing an error.
+    #[test]
+    fn known_stream_event_type_with_bad_body_still_errors() {
+        let raw = r#"{"type":"response.completed","response":"not-an-object"}"#;
+        assert!(
+            deserialize_response_event(raw).is_err(),
+            "a known event type with a malformed body must not be silently skipped"
+        );
+    }
+
     fn deserialize_response_event_overrides_total_tokens_from_context_details() {
         let sse = r#"{
             "type": "response.completed",
@@ -3432,7 +3500,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3469,7 +3537,7 @@ mod tests {
             )
         };
 
-        let event = deserialize_response_event(&make(78)).expect("parse");
+        let event = deserialize_response_event(&make(78)).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3483,7 +3551,7 @@ mod tests {
         );
 
         // The REST mapper backfills 0 for unbilled requests: no stash.
-        let event = deserialize_response_event(&make(0)).expect("parse");
+        let event = deserialize_response_event(&make(0)).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3513,7 +3581,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3547,7 +3615,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3567,7 +3635,9 @@ mod tests {
             "delta": "hello",
             "logprobs": []
         }"#;
-        let event = deserialize_response_event(sse).expect("non-terminal event parses");
+        let event = deserialize_response_event(sse)
+            .expect("non-terminal event parses")
+            .expect("event");
         assert!(matches!(
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
