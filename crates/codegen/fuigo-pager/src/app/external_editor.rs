@@ -43,6 +43,15 @@ pub(crate) enum PendingEditorRequest {
     },
 }
 
+/// A user program launched on a file (`$EDITOR`, `$PAGER`). It is the user's own program, so Fuigo's secrets are
+/// removed from its environment (P120).
+pub(crate) fn user_program_command(program: &str, args: &[String], path: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
+    cmd.args(args).arg(path);
+    cmd
+}
+
 pub(crate) struct EditorLaunch {
     pub(crate) argv: Vec<String>,
     pub(crate) path: PathBuf,
@@ -650,5 +659,31 @@ mod tests {
             } if original_text == "sensitive draft"
         ));
         drop(request);
+    }
+}
+
+/// P120: `$EDITOR` and `$PAGER` are the user's own programs; they must not inherit Fuigo's own secrets.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[test]
+    fn p120_editor_and_pager_programs_do_not_inherit_fuigo_secrets() {
+        const NAME: &str = "app::external_editor::p120_tests::p120_editor_and_pager_programs_do_not_inherit_fuigo_secrets";
+        const REGISTERED: &str = "P120_EDITOR_BEARER";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let dir = probe::scratch_dir("p120-editor");
+        let out = dir.join("env.txt");
+        let args = vec!["-c".to_string(), format!("env > '{}'", out.display())];
+        let status = user_program_command("sh", &args, &dir.join("draft.md")).status().unwrap();
+        assert!(status.success());
+        let dump = std::fs::read_to_string(&out).unwrap();
+        probe::assert_clean(&dump, &[]);
+        probe::assert_kept(&dump, REGISTERED);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -49,6 +49,11 @@ const PARENT_PROMPT_TAIL: &str = "latency probe subagents.";
 /// (`burst_tool_calls_sse`: `"Reply with the word done and nothing else (000)."`).
 const CHILD_PROMPT_TAIL: &str = "nothing else (000).";
 
+/// How long the fixture stalls every `tools/list` after the parent's.
+/// Far longer than the child's spawn-to-first-turn path, so a child that does not wait for the registration misses the server notice,
+/// and well inside the 10 s bound `await_inherited_mcp_registration` waits for it.
+const CHILD_TOOLS_LIST_DELAY_MS: u64 = 3000;
+
 #[derive(Clone)]
 struct FixtureMcp {
     initializes: Arc<AtomicUsize>,
@@ -73,7 +78,11 @@ async fn handle_post(State(state): State<FixtureMcp>, Json(req): Json<Value>) ->
             ([("mcp-session-id", "parent-pool-fixture-session")], Json(result)).into_response()
         }
         Some("tools/list") => {
-            state.tool_lists.fetch_add(1, Ordering::SeqCst);
+            // The first call is the parent's own registration. Every later call is a child registering the
+            // inherited client's tools, and a slow one is what exposed the "was the child told" race.
+            if state.tool_lists.fetch_add(1, Ordering::SeqCst) >= 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(CHILD_TOOLS_LIST_DELAY_MS)).await;
+            }
             Json(json!({
                 "jsonrpc": "2.0",
                 "id": req["id"],
@@ -121,9 +130,28 @@ fn tool_names(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn last_user_message(body: &Value) -> Option<String> {
-    let last = body["messages"].as_array()?.last()?;
-    (last["role"] == "user").then(|| last["content"].to_string())
+/// Every user-role message of a request, as JSON text.
+///
+/// Not just the last one: a turn's prompt is not always its last message. Under load the child's inherited MCP pool
+/// reports "MCP server connected" before the child builds its first request, and that `<system-reminder>` is appended
+/// as a trailing user message after the probe prompt. Matching on the LAST user message then missed the child's
+/// main-turn request entirely (measured: request `turn_idx=1`, `[system, probe prompt, reminder]`, advertising
+/// `search_tool`/`use_tool`), and the test failed with "no main-turn inference request from the child".
+fn user_messages(body: &Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .map(|m| m["content"].to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn has_user_message(body: &Value, tail: &str) -> bool {
+    user_messages(body).iter().any(|c| c.contains(tail))
 }
 
 #[test]
@@ -193,11 +221,11 @@ fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
         .collect();
 
     // Control: the parent declared the server itself, so its own-servers term keeps
-    // the pair regardless of the call site under test. Its turn is the one whose last
-    // message is `run_burst`'s opening prompt.
+    // the pair regardless of the call site under test. Its turn is the first one that
+    // carries `run_burst`'s opening prompt.
     let parent = bodies
         .iter()
-        .find(|b| last_user_message(b).is_some_and(|c| c.contains(PARENT_PROMPT_TAIL)))
+        .find(|b| has_user_message(b, PARENT_PROMPT_TAIL))
         .expect("the parent's main-turn inference request");
     for required in ["search_tool", "use_tool"] {
         assert!(
@@ -207,17 +235,19 @@ fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
         );
     }
 
-    // The child's turn: its last message is the probe prompt the parent's scripted
-    // `spawn_subagent` call gave it (same match as `emit_mock_request_marks`).
+    // The child's turn: it carries, as a user message, the probe prompt the parent's
+    // scripted `spawn_subagent` call gave it, and never the parent's prompt (the parent's
+    // own requests hold the probe text only inside its tool-call arguments).
     let child_requests: Vec<&Value> = bodies
         .iter()
-        .filter(|b| last_user_message(b).is_some_and(|c| c.contains(CHILD_PROMPT_TAIL)))
+        .filter(|b| has_user_message(b, CHILD_PROMPT_TAIL) && !has_user_message(b, PARENT_PROMPT_TAIL))
         .collect();
     assert!(
         !child_requests.is_empty(),
         "no main-turn inference request from the child was observed\n{}",
         server.request_log_summary()
     );
+    let first_child = child_requests[0];
     for child in child_requests {
         let offered = tool_names(child);
         for required in ["search_tool", "use_tool"] {
@@ -229,4 +259,19 @@ fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
             );
         }
     }
+
+    // P-6: the child must be told about the inherited server deterministically, in its FIRST request, exactly once.
+    // Before the fix the notice depended on whether the child's tool registration beat the turn's reminder injection.
+    let notice_count = first_child["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|m| m["content"].to_string().contains("MCP server connected:"))
+        .filter(|m| m["content"].to_string().contains("parent-pool-fixture"))
+        .count();
+    assert_eq!(
+        notice_count, 1,
+        "the child's first request must carry exactly one 'MCP server connected' notice naming the inherited server \
+         (got {notice_count}); a missing notice means the turn started before the inherited tools registered"
+    );
 }

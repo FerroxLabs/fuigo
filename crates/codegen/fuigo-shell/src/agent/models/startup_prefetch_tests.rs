@@ -1,3 +1,22 @@
+//! Startup-prefetch registry tests.
+//!
+//! Every assertion here turns on ONE thing: whether `still_accepted` agrees that
+//! the registered fetch's origin is still the process's origin. It re-resolves
+//! that origin from the effective config — `EndpointsConfig::default()` reads
+//! `FUIGO_CLI_CHAT_PROXY_BASE_URL`, the rest comes from `$FUIGO_HOME/config.toml`
+//! — and `resolve_remote_fetch_enabled()` reads the same layers. Both are
+//! process-global, and `#[serial(remote_sig_disarm)]` does not protect them:
+//! `serial_test` named groups exclude only their own members, so the 85 tests
+//! that set `FUIGO_HOME` under the UNNAMED `#[serial]` group run concurrently
+//! with every test in this file. One of them moving `FUIGO_HOME` between
+//! `register_finished` and `accept_within` turns `Consumed` into `Miss`, which is
+//! `no_auth_boot_is_not_a_degraded_start` failing in a full run and passing
+//! alone.
+//!
+//! So each test opens with a private `FuigoHome`. That guard is exclusive
+//! process-wide (`fuigo_test_support::env::PROCESS_ANCHORS`), which is what
+//! actually pins the origin — not the attribute.
+
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -26,6 +45,14 @@ fn registered_marker() -> Option<bool> {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn begin_does_not_replace_an_inflight_fetch() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     clear_for_tests();
     super::inject_for_tests(marker_settings());
     begin_before_policy_gate(&Config::default());
@@ -40,6 +67,14 @@ fn begin_does_not_replace_an_inflight_fetch() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn accept_discards_a_fetch_from_another_origin() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     clear_for_tests();
     inject_with_origin_for_tests(marker_settings(), "https://elsewhere.invalid".to_string());
     assert!(
@@ -55,6 +90,14 @@ fn accept_discards_a_fetch_from_another_origin() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn accept_deadline_spends_the_budget() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     if !crate::util::config::resolve_remote_fetch_enabled() {
         eprintln!("skipped: remote_fetch disabled in this environment");
         return;
@@ -92,6 +135,14 @@ fn accept_deadline_spends_the_budget() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn abandoned_fetch_commits_caches_when_the_worker_finishes() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     if !crate::util::config::resolve_remote_fetch_enabled() {
         eprintln!("skipped: remote_fetch disabled in this environment");
         return;
@@ -124,6 +175,14 @@ fn abandoned_fetch_commits_caches_when_the_worker_finishes() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn fallback_fetch_honors_the_caller_deadline() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     if !crate::util::config::resolve_remote_fetch_enabled() {
         eprintln!("skipped: remote_fetch disabled in this environment");
         return;
@@ -157,6 +216,14 @@ fn fallback_fetch_honors_the_caller_deadline() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn stale_origin_fetch_is_discarded_without_waiting() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     clear_for_tests();
     let never_finishing = Arc::new(Inflight {
         origin: "https://elsewhere.invalid".to_string(),
@@ -208,6 +275,14 @@ fn register_finished(settings: Option<RemoteSettings>, settings_attempted: bool)
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn no_auth_boot_is_not_a_degraded_start() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     if !crate::util::config::resolve_remote_fetch_enabled() {
         eprintln!("skipped: remote_fetch disabled in this environment");
         return;
@@ -230,6 +305,14 @@ fn no_auth_boot_is_not_a_degraded_start() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn attempted_settings_fetch_failure_is_a_degraded_start() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     if !crate::util::config::resolve_remote_fetch_enabled() {
         eprintln!("skipped: remote_fetch disabled in this environment");
         return;
@@ -250,6 +333,14 @@ fn attempted_settings_fetch_failure_is_a_degraded_start() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn wait_settings_leaves_the_fetch_for_accept() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = super::own_registry_for_test();
+    // Pin the origin these assertions are about; see the module note.
+    let _home = fuigo_test_support::FuigoHome::new();
     if !crate::util::config::resolve_remote_fetch_enabled() {
         eprintln!("skipped: remote_fetch disabled in this environment");
         return;

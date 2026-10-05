@@ -2216,9 +2216,151 @@ async fn test_connect_waits_for_leader_ready() {
     cancel.cancel();
 }
 
+// ── initialize model patch (P50) ──────────────────────────────────────
+
+/// Live leader test of the `initialize` model patch: with a client `default_model`, the leader rewrites `_meta.modelState.currentModelId` in the `initialize` response, and an unrelated response that arrives first must not consume the patch.
+#[tokio::test]
+async fn test_initialize_response_model_patched_by_request_id() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, response_tx) = setup_test_server(&temp).await;
+
+    let mut client = LeaderClient::connect(
+        sock_path,
+        "fuigo-tui",
+        ClientMode::Stdio,
+        ClientCapabilities {
+            default_model: Some("client-pick".to_string()),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    client
+        .send(r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#.to_string())
+        .unwrap();
+    client
+        .send(r#"{"jsonrpc":"2.0","id":8,"method":"fuigo/test_ping","params":{}}"#.to_string())
+        .unwrap();
+
+    let mut init_ns = None;
+    let mut ping_ns = None;
+    for _ in 0..2 {
+        let fwd: serde_json::Value = serde_json::from_str(
+            &tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+                .await
+                .expect("timeout waiting for forwarded request")
+                .expect("channel closed"),
+        )
+        .unwrap();
+        let ns = fwd["id"].as_str().unwrap().to_string();
+        match fwd["method"].as_str().unwrap() {
+            "initialize" => init_ns = Some(ns),
+            "fuigo/test_ping" => ping_ns = Some(ns),
+            other => panic!("unexpected forwarded method {other}"),
+        }
+    }
+    let (init_ns, ping_ns) = (init_ns.unwrap(), ping_ns.unwrap());
+
+    // The unrelated response arrives first; it must pass through untouched and must not disarm the patch.
+    response_tx
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": ping_ns, "result": {"pong": true}}).to_string())
+        .unwrap();
+    let ping_resp: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .expect("timeout waiting for ping response")
+            .expect("channel closed"),
+    )
+    .unwrap();
+    assert_eq!(ping_resp["id"], 8);
+    assert_eq!(ping_resp["result"], serde_json::json!({"pong": true}));
+
+    let init_result = serde_json::json!({
+        "protocolVersion": 1,
+        "_meta": {
+            "fuigoShell": true,
+            "modelState": {
+                "currentModelId": "agent-default",
+                "availableModels": [
+                    {"modelId": "agent-default", "name": "A"},
+                    {"modelId": "client-pick", "name": "B"}
+                ]
+            }
+        }
+    });
+    response_tx
+        .send(serde_json::json!({"jsonrpc": "2.0", "id": init_ns, "result": init_result}).to_string())
+        .unwrap();
+    let init_resp: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .expect("timeout waiting for initialize response")
+            .expect("channel closed"),
+    )
+    .unwrap();
+    assert_eq!(init_resp["id"], 7);
+    assert_eq!(
+        init_resp["result"]["_meta"]["modelState"]["currentModelId"], "client-pick",
+        "initialize response must carry the client's default model: {init_resp}"
+    );
+    assert_eq!(init_resp["result"]["_meta"]["fuigoShell"], true);
+
+    client.cancel();
+    cancel.cancel();
+}
+
+/// Live leader test: an error response to `initialize` passes through to the client unchanged (id restored, no `result` added) even with a client `default_model`.
+#[tokio::test]
+async fn test_initialize_error_response_passes_through_unpatched() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, response_tx) = setup_test_server(&temp).await;
+    let mut client = LeaderClient::connect(
+        sock_path,
+        "fuigo-tui",
+        ClientMode::Stdio,
+        ClientCapabilities {
+            default_model: Some("client-pick".to_string()),
+            ..ClientCapabilities::default()
+        },
+    )
+    .await
+    .unwrap();
+    client
+        .send(r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#.to_string())
+        .unwrap();
+    let fwd: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+            .await
+            .expect("timeout waiting for forwarded initialize")
+            .expect("channel closed"),
+    )
+    .unwrap();
+    let ns = fwd["id"].as_str().unwrap().to_string();
+    response_tx
+        .send(
+            serde_json::json!({"jsonrpc": "2.0", "id": ns, "error": {"code": -32603, "message": "boom"}})
+                .to_string(),
+        )
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .expect("timeout waiting for initialize error response")
+            .expect("channel closed"),
+    )
+    .unwrap();
+    assert_eq!(
+        resp,
+        serde_json::json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32603, "message": "boom"}})
+    );
+    client.cancel();
+    cancel.cancel();
+}
+
 // ── Version mismatch notification ────────────────────────────────────
 
-/// A connected client receives `fuigo/leader/version_mismatch` when its `client_version` differs from the leader's version.
+/// A connected client receives `_fuigo/leader/version_mismatch` (ACP ext-method wire name) when its `client_version` differs from the leader's version.
 /// Uses `leader_version_override` so the test bypasses the `"unknown"` constant that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
 #[tokio::test]
 async fn test_version_mismatch_notification_sent_to_client() {
@@ -2285,7 +2427,7 @@ async fn test_version_mismatch_notification_sent_to_client() {
         .expect("channel closed");
 
     let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
-    assert_eq!(json["method"], "fuigo/leader/version_mismatch");
+    assert_eq!(json["method"], "_fuigo/leader/version_mismatch");
     assert_eq!(json["params"]["clientVersion"], "test-client-0.1.157");
     assert_eq!(json["params"]["leaderVersion"], "test-leader-0.1.150");
 
@@ -2360,6 +2502,92 @@ async fn test_no_version_mismatch_notification_when_versions_match() {
 
     client.cancel();
     cancel.cancel();
+}
+
+/// Start a leader the way production does (no `leader_version_override`) and attach one client with `client_version`;
+/// return the first message the client receives within `wait`, if any.
+async fn production_leader_first_message(client_version: &str, wait: Duration) -> Option<String> {
+    use fuigo_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, run_leader_server};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use tokio::sync::{mpsc, watch};
+    use tokio_util::sync::CancellationToken;
+
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("leader.sock");
+    let (acp_tx, _acp_rx) = mpsc::unbounded_channel::<String>();
+    let (_response_tx, response_rx) = mpsc::unbounded_channel::<String>();
+    let cancel = CancellationToken::new();
+    let sock_clone = sock_path.clone();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        let control_state = LeaderServerControlState::new(LeaderServerMetadata {
+            pid: std::process::id(),
+            socket_path: sock_clone.clone(),
+            lock_path: sock_clone.with_extension("lock"),
+            ws_url_suffix: String::new(),
+            leader_binary_version: fuigo_version::VERSION.to_string(),
+        });
+        let _ = run_leader_server(
+            sock_clone,
+            acp_tx,
+            response_rx,
+            cancel_clone,
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            fuigo_shell::agent::activity::AgentActivity::default(),
+            watch::channel(true).1,
+            watch::channel(false).0,
+            watch::channel(fuigo_shell::leader::ShutdownReason::Manual).0,
+            None, // production: the leader's own version
+            control_state,
+        )
+        .await;
+    });
+    wait_for_socket(&sock_path).await;
+    let mut client = LeaderClient::connect(
+        sock_path,
+        "p151-client",
+        ClientMode::Stdio,
+        ClientCapabilities {
+            client_version: Some(client_version.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let msg = tokio::time::timeout(wait, client.recv()).await.ok().flatten();
+    client.cancel();
+    cancel.cancel();
+    msg
+}
+
+/// P151 (F17): with no test override, a leader warns a client that runs another release (C1b: never sent live).
+#[tokio::test]
+async fn test_production_leader_warns_a_client_of_another_release() {
+    let msg = production_leader_first_message("0.0.1", Duration::from_secs(5))
+        .await
+        .expect("the production leader must send the version-mismatch notice");
+    let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
+    assert_eq!(json["method"], "_fuigo/leader/version_mismatch");
+    assert_eq!(json["params"]["clientVersion"], "0.0.1");
+    assert_eq!(json["params"]["leaderVersion"], fuigo_version::VERSION);
+}
+
+/// P151 (F17): a same-release client is never warned, whether it sends the plain version or a commit-stamped one.
+#[tokio::test]
+async fn test_production_leader_does_not_warn_a_same_release_client() {
+    for client_version in [
+        fuigo_version::VERSION.to_string(),
+        format!("{} (abcdef123456)", fuigo_version::VERSION),
+    ] {
+        let msg = production_leader_first_message(&client_version, Duration::from_millis(500)).await;
+        assert!(
+            !msg.as_deref().unwrap_or("").contains("version_mismatch"),
+            "client {client_version:?} must not be warned, got {msg:?}"
+        );
+    }
 }
 
 // ── Shutdown reason end-to-end ────────────────────────────────────────
@@ -2524,6 +2752,70 @@ async fn test_relaunch_for_update_declines_when_not_newer() {
         None,
         "declined relaunch must not shut the leader down"
     );
+}
+
+/// P124: after an explicit downgrade, `fuigo update` asks a newer leader to stop; it drains and broadcasts `AutoUpdate`
+/// so connected clients reconnect (the next connect spawns a leader from the installed binary).
+#[tokio::test]
+async fn test_stop_leader_for_downgrade_stops_a_newer_leader() {
+    use fuigo_shell::leader::{
+        ClientCapabilities, ClientMode, DowngradeStopResult, LeaderClient, ShutdownReason,
+        stop_leader_for_downgrade,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("leader.sock");
+    let _handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    wait_for_socket(&sock_path).await;
+
+    let client = LeaderClient::connect(
+        sock_path.clone(),
+        "test-client",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+    assert!(client.registration().supports_downgrade_stop());
+    let mut shutdown_reason_rx = client.shutting_down_reason();
+
+    // 0.0.0-0 is strictly older than any released leader version.
+    let result = stop_leader_for_downgrade(sock_path, "0.0.0-0").await;
+    assert!(matches!(result, DowngradeStopResult::Stopping { .. }), "{result:?}");
+
+    tokio::time::timeout(Duration::from_secs(5), shutdown_reason_rx.changed())
+        .await
+        .expect("timeout waiting for ShuttingDown after the downgrade stop")
+        .expect("watch sender dropped");
+    assert_eq!(*shutdown_reason_rx.borrow(), Some(ShutdownReason::AutoUpdate));
+}
+
+/// P124: a leader that is not newer than the installed version is never stopped by `StopForDowngrade`.
+#[tokio::test]
+async fn test_stop_leader_for_downgrade_leaves_a_not_newer_leader_alone() {
+    use fuigo_shell::leader::{
+        ClientCapabilities, ClientMode, DowngradeStopResult, LeaderClient, stop_leader_for_downgrade,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("leader.sock");
+    let _handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    wait_for_socket(&sock_path).await;
+
+    let client = LeaderClient::connect(
+        sock_path.clone(),
+        "test-client",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+    let shutdown_reason_rx = client.shutting_down_reason();
+
+    let result = stop_leader_for_downgrade(sock_path, "999.0.0").await;
+    assert!(matches!(result, DowngradeStopResult::Declined(_)), "{result:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(*shutdown_reason_rx.borrow(), None, "a declined stop must not shut the leader down");
 }
 
 /// The bounded-grace drain waits while the agent is busy and only relaunches once it goes idle.
@@ -3338,5 +3630,162 @@ async fn test_driver_sever_mid_turn_viewer_sees_durable_terminal() {
 
     drop(viewer_reader);
     drop(viewer_writer);
+    cancel.cancel();
+}
+
+// ── P130: relay refusal emitted during session/new reaches the creating client ──
+
+fn p130_refusal_line(session_id: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": format!("_{}", fuigo_shell::agent::relay_opt_in::RELAY_REFUSED_METHOD),
+        "params": {
+            "origin": "https://relay.example",
+            "use": "tui",
+            "message": "refused: trust it",
+            "sessionId": session_id,
+        },
+    })
+    .to_string()
+}
+
+/// The agent sends `fuigo/relay/refused {sessionId}` while it handles `session/new`, BEFORE the response that names
+/// the session. A real leader must still hand it to the client that created the session (and only that client), after
+/// the response.
+#[tokio::test]
+async fn p130_relay_refusal_during_session_new_reaches_the_creating_client() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, response_tx) = setup_test_server(&temp).await;
+    let mut creator = LeaderClient::connect(
+        sock_path.clone(),
+        "fuigo-tui",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+    let mut bystander = LeaderClient::connect(
+        sock_path,
+        "other-tui",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+
+    creator
+        .send(r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#.to_string())
+        .unwrap();
+    let received = acp_rx.recv().await.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&received).unwrap();
+    let namespaced_id = json["id"].as_str().unwrap().to_string();
+
+    // Agent order: notification first, response second.
+    response_tx.send(p130_refusal_line("sess-p130")).unwrap();
+    response_tx
+        .send(format!(
+            r#"{{"jsonrpc":"2.0","result":{{"sessionId":"sess-p130"}},"id":"{namespaced_id}"}}"#
+        ))
+        .unwrap();
+
+    let first = tokio::time::timeout(Duration::from_secs(2), creator.recv())
+        .await
+        .expect("timeout waiting for the session/new response")
+        .expect("closed");
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(first["result"]["sessionId"], "sess-p130", "the response comes first: {first}");
+    let second = tokio::time::timeout(Duration::from_secs(2), creator.recv())
+        .await
+        .expect("the relay refusal never reached the client that created the session")
+        .expect("closed");
+    let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(
+        second["method"],
+        format!("_{}", fuigo_shell::agent::relay_opt_in::RELAY_REFUSED_METHOD)
+    );
+    assert_eq!(second["params"]["sessionId"], "sess-p130");
+
+    // Not leaked to a client that does not own the session.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), bystander.recv()).await.is_err(),
+        "another client must not receive the creator's refusal"
+    );
+    creator.cancel();
+    bystander.cancel();
+    cancel.cancel();
+}
+
+/// A held refusal is also delivered when the client's first message for the session arrives before any response, and a
+/// refusal for a session nobody ever claims is never handed to an unrelated client.
+#[tokio::test]
+async fn p130_held_relay_refusal_goes_only_to_the_client_that_subscribes() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, _acp_rx, response_tx) = setup_test_server(&temp).await;
+    let mut owner = LeaderClient::connect(
+        sock_path.clone(),
+        "fuigo-tui",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+    let mut other = LeaderClient::connect(
+        sock_path,
+        "other-tui",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+
+    response_tx.send(p130_refusal_line("sess-held")).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // `other` talks about a different session: gets nothing.
+    other
+        .send(r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-else"}}"#.to_string())
+        .unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(300), other.recv()).await.is_err());
+    // `owner` sends a message for the session: now it is told.
+    owner
+        .send(r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-held"}}"#.to_string())
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(2), owner.recv())
+        .await
+        .expect("the held refusal was not delivered on the client's first message for the session")
+        .expect("closed");
+    let got: serde_json::Value = serde_json::from_str(&got).unwrap();
+    assert_eq!(got["params"]["sessionId"], "sess-held");
+    owner.cancel();
+    other.cancel();
+    cancel.cancel();
+}
+
+/// Astra R1 MEDIUM-1: a refusal held for a session whose `session/new` was abandoned must not be replayed to a client that
+/// later LOADS the session (trust may have changed; the agent re-emits a fresh notice if it is still refused).
+#[tokio::test]
+async fn p130_stale_held_refusal_is_not_replayed_on_session_load() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, mut acp_rx, response_tx) = setup_test_server(&temp).await;
+    let mut client = LeaderClient::connect(
+        sock_path,
+        "fuigo-tui",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    .unwrap();
+    response_tx.send(p130_refusal_line("sess-stale")).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    client
+        .send(r#"{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-stale","cwd":"/tmp","mcpServers":[]}}"#.to_string())
+        .unwrap();
+    // The load is forwarded to the agent.
+    let forwarded = acp_rx.recv().await.unwrap();
+    assert!(forwarded.contains("session/load"), "{forwarded}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), client.recv()).await.is_err(),
+        "a stale held refusal was replayed on session/load"
+    );
+    client.cancel();
     cancel.cancel();
 }

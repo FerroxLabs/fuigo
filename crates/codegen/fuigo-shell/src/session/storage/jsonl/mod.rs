@@ -12,7 +12,29 @@ use fuigo_workspace::session::file_state::RewindPoint;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+
+/// How long a rewrite of `rewind_points.jsonl` waits for its append lock before it gives up (`WouldBlock`).
+const REWRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Test seam: a shorter wait when a test asks for one.
+#[cfg(test)]
+pub(crate) static REWRITE_LOCK_WAIT_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test seam: how many times a rewriter found the rewrite lock held by another (a test waits for this to know that a
+/// second rewriter is queued behind the first).
+#[cfg(test)]
+pub(crate) static REWRITE_LOCK_CONTENDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn rewrite_lock_wait() -> std::time::Duration {
+    #[cfg(test)]
+    if let ms @ 1.. = REWRITE_LOCK_WAIT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        return std::time::Duration::from_millis(ms);
+    }
+    REWRITE_LOCK_WAIT
+}
 mod copy;
+pub(crate) mod compaction_witness;
+pub(crate) mod load_repair;
 #[derive(Clone)]
 enum SessionDirMode {
     FromRoot(PathBuf),
@@ -164,13 +186,34 @@ impl JsonlStorageAdapter {
         self.parent_sync_probe = Some(std::sync::Arc::new(parent_sync_probe));
         self
     }
-    /// Fork bootstrap uses this to load the copied parent conversation.
+    /// Fork bootstrap and subagent resume use this to load a conversation from its directory.
+    ///
+    /// A history that was damaged (the reader skipped an unreadable line, or an earlier load did and kept its raw file as
+    /// `.corrupt`) is handed back repaired, as a session's own load repairs it (P96): a tool result whose call was lost
+    /// would make the provider reject every request. The repair is in memory. The file keeps the unreadable line's raw
+    /// text in the reader's `.corrupt` copy, and a subagent's session is rewritten from this history when it resumes, so
+    /// the `.pre-repair` backup a user's session gets is not made here (P123, K14).
     pub fn load_chat_history_from_dir(
         &self,
         dir: &std::path::Path,
     ) -> std::io::Result<Vec<ConversationItem>> {
         let chat_file = dir.join(super::CHAT_HISTORY_FILE);
-        self.read_chat_history_sync(chat_file, CHAT_FORMAT_VERSION)
+        let (mut items, skipped_lines) =
+            self.read_chat_history_counting_sync(chat_file.clone(), CHAT_FORMAT_VERSION)?;
+        if skipped_lines > 0 || load_repair::quarantine_of_earlier_load(&chat_file).is_some() {
+            let report = fuigo_chat_state::compaction_utils::repair_history(&mut items);
+            if report.changed() {
+                tracing::warn!(
+                    path = %chat_file.display(),
+                    skipped_lines,
+                    duplicates_removed = report.duplicates_removed,
+                    stripped_tool_result_ids = ?report.stripped_tool_result_ids,
+                    synthetic_results_inserted = report.synthetic_results_inserted,
+                    "loaded a damaged chat history and repaired it in memory"
+                );
+            }
+        }
+        Ok(items)
     }
     fn session_dir(&self, info: &Info) -> PathBuf {
         match &self.dir_mode {
@@ -422,12 +465,11 @@ impl JsonlStorageAdapter {
         debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
         let lock = Self::lock_append(path).map_err(AppendLineError::NotCommitted)?;
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(AppendLineError::NotCommitted)?;
+            let mut file = super::owner_only::open(
+                OpenOptions::new().read(true).create(true).append(true),
+                path,
+            )
+            .map_err(AppendLineError::NotCommitted)?;
             let len = file
                 .metadata()
                 .map_err(AppendLineError::NotCommitted)?
@@ -546,12 +588,11 @@ impl JsonlStorageAdapter {
             {
                 return Ok(StrictAppendAck::AlreadyPresent(authoritative));
             }
-            let mut file = OpenOptions::new()
-                .read(true)
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(super::AppendCwdSwitchError::NotCommitted)?;
+            let mut file = super::owner_only::open(
+                OpenOptions::new().read(true).create(true).append(true),
+                path,
+            )
+            .map_err(super::AppendCwdSwitchError::NotCommitted)?;
             let len = file
                 .metadata()
                 .map_err(super::AppendCwdSwitchError::NotCommitted)?
@@ -590,12 +631,10 @@ impl JsonlStorageAdapter {
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
     fn lock_append(path: &Path) -> io::Result<std::fs::File> {
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("jsonl.lock"))?;
+        let lock = super::owner_only::open(
+            OpenOptions::new().read(true).write(true).create(true).truncate(false),
+            &path.with_extension("jsonl.lock"),
+        )?;
         lock.lock_exclusive()?;
         Ok(lock)
     }
@@ -610,23 +649,168 @@ impl JsonlStorageAdapter {
     async fn write_jsonl<T: serde::Serialize>(&self, path: PathBuf, items: &[T]) -> io::Result<()> {
         super::write_jsonl_atomic_async(&path, items).await
     }
-    fn read_jsonl<T: serde::de::DeserializeOwned>(&self, path: PathBuf) -> io::Result<Vec<T>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let mut file = OpenOptions::new().read(true).open(&path)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let mut items = Vec::new();
-        for line in contents.lines() {
-            if line.trim().is_empty() {
-                continue;
+    /// Rewrite `rewind_points.jsonl` crash-atomically through `edit`, which sees every line, damaged ones included.
+    ///
+    /// The append lock (`rewind_points.jsonl.lock`, which every append takes exclusively) is held from the read to the
+    /// rename, so a row another process appends meanwhile waits and lands after the rewrite instead of being overwritten
+    /// by it (P123; before, the read and the rename were separate and such a row was lost). Two rewriters (two Fuigo
+    /// processes) exclude each other through the rewrite lock, taken first (P140, K19). A Fuigo older than P140 does not
+    /// take it, so a rewrite by one of those can still race a rewrite by a newer one.
+    async fn rewrite_rewind_points(
+        &self,
+        info: &Info,
+        edit: impl FnOnce(
+            Vec<fuigo_workspace::session::file_state::RewindPointsLine>,
+        ) -> Vec<fuigo_workspace::session::file_state::RewindPointsLine>
+        + Send
+        + 'static,
+    ) -> io::Result<()> {
+        let path = self.rewind_points_file(info);
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            // Bounded: this runs on the persistence actor's queue, so a holder that is stuck (another process suspended
+            // inside its append) must not hold every later write and flush hostage. A lock file that cannot be opened
+            // at all leaves the rewrite unlocked, as it was before the lock was taken (the readers do the same).
+            // The rewrite lock comes first (P140), then the append lock; one deadline covers both. Dropping the rewrite
+            // lock file handle releases it on every path, including an error from the second lock.
+            let deadline = std::time::Instant::now() + rewrite_lock_wait();
+            let _rewrite_lock = Self::lock_rewrite_bounded(&path, deadline)?;
+            let lock = Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?;
+            let result = Self::rewrite_rewind_points_locked(&path, lock.is_some(), edit).map(|_| ());
+            if let Some(lock) = lock {
+                let _ = lock.unlock();
             }
-            let item: T = serde_json::from_str(line)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            items.push(item);
+            result
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+    /// The rewrite itself, with the rewrite lock and (when `append_locked`) the append lock already held: edits every
+    /// line and renames the result into place. Returns what the file held before (`None`: it did not exist) and what
+    /// was written, for a rewind that may have to put it back (P146). A failure leaves the file as it was: when the rename landed but a
+    /// later step failed (the directory sync), the previous content is written back, and the error says when even that
+    /// failed.
+    fn rewrite_rewind_points_locked(
+        path: &Path,
+        append_locked: bool,
+        edit: impl FnOnce(
+            Vec<fuigo_workspace::session::file_state::RewindPointsLine>,
+        ) -> Vec<fuigo_workspace::session::file_state::RewindPointsLine>,
+    ) -> io::Result<(Option<Vec<u8>>, Vec<u8>)> {
+        let previous = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let lines = if append_locked {
+            fuigo_workspace::session::file_state::read_rewind_points_lines_holding_append_lock(path)?
+        } else {
+            fuigo_workspace::session::file_state::read_rewind_points_lines(path)?
+        };
+        let bytes = fuigo_workspace::session::file_state::encode_rewind_points_lines(&edit(lines))
+            .map_err(io::Error::other)?;
+        if let Err(error) = super::write_bytes_atomic(path, &bytes) {
+            return Err(match Self::put_back_rewind_points(path, previous.as_deref()) {
+                Ok(()) => error,
+                Err(put_back) => io::Error::new(
+                    error.kind(),
+                    format!("{error}; rewind_points.jsonl was replaced and could not be put back ({put_back})"),
+                ),
+            });
         }
-        Ok(items)
+        Ok((previous, bytes))
+    }
+    /// Make `path` hold `previous` again (`None`: remove it) when it no longer does.
+    fn put_back_rewind_points(path: &Path, previous: Option<&[u8]>) -> io::Result<()> {
+        let current = std::fs::read(path).ok();
+        if current.as_deref() == previous {
+            return Ok(());
+        }
+        let outcome = match previous {
+            Some(bytes) => super::write_bytes_atomic(path, bytes),
+            None => std::fs::remove_file(path),
+        };
+        if let Err(error) = &outcome {
+            tracing::warn!(%error, path = %path.display(), "rewind_points.jsonl could not be put back after a failed rewrite");
+        }
+        outcome
+    }
+    /// The rewrite lock (`rewind_points.jsonl.rewrite.lock`, P140): EXCLUSIVE, taken by every rewriter of the rewind
+    /// points BEFORE the shared append lock. Two rewriters hold the append lock shared at once, so without this one both
+    /// read, edit and rename and the later rename drops the earlier edit (K19). Appenders and readers never take it.
+    /// Bounded like the shared append lock the rewrite takes next (SHARED, `lock_bounded`, same deadline): `WouldBlock` after the deadline, `Ok(None)` when the lock
+    /// file cannot be opened or locked.
+    fn lock_rewrite_bounded(path: &Path, deadline: std::time::Instant) -> io::Result<Option<std::fs::File>> {
+        Self::lock_bounded(path, path.with_extension("jsonl.rewrite.lock"), false, deadline)
+    }
+
+    fn lock_bounded(
+        path: &Path,
+        lock_path: PathBuf,
+        shared: bool,
+        deadline: std::time::Instant,
+    ) -> io::Result<Option<std::fs::File>> {
+        let lock = match super::owner_only::open(
+            OpenOptions::new().read(true).write(true).create(true).truncate(false),
+            &lock_path,
+        ) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::debug!(%error, path = %lock_path.display(), "rewrite without a lock: it cannot be opened");
+                return Ok(None);
+            }
+        };
+        loop {
+            // Append lock: shared, so it keeps every append (an exclusive taker) out for the whole rewrite and does not
+            // wait for readers, which hold it shared too. Rewrite lock: exclusive, so rewriters take turns.
+            let taken = if shared {
+                fs2::FileExt::try_lock_shared(&lock)
+            } else {
+                fs2::FileExt::try_lock_exclusive(&lock)
+            };
+            match taken {
+                Ok(()) => return Ok(Some(lock)),
+                Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
+                    #[cfg(test)]
+                    if !shared {
+                        REWRITE_LOCK_CONTENDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("{} is being written by another Fuigo process; it was not rewritten", path.display()),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => {
+                    tracing::debug!(%error, path = %lock_path.display(), "rewrite without a lock: it cannot be taken");
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    /// The rewind points of `path` that parse, in file order, and the line numbers of the rows that do not. A damaged row
+    /// (a torn append the next append terminated) is neither dropped from the file nor allowed to fail the read: the full
+    /// loads tolerate it the way rewind does (P123, P114 open item). Waits at most a few seconds for an append in progress
+    /// (see `read_rewind_points_lines`), so it runs on a blocking thread.
+    async fn read_rewind_points_tolerant(
+        &self,
+        path: PathBuf,
+    ) -> io::Result<(Vec<RewindPoint>, Vec<usize>)> {
+        tokio::task::spawn_blocking(move || {
+            let lines = fuigo_workspace::session::file_state::read_rewind_points_lines(&path)?;
+            let mut points = Vec::new();
+            let mut damaged = Vec::new();
+            for line in lines {
+                match line {
+                    fuigo_workspace::session::file_state::RewindPointsLine::Point(point) => points.push(point),
+                    fuigo_workspace::session::file_state::RewindPointsLine::Damaged { line, .. } => damaged.push(line),
+                }
+            }
+            Ok((points, damaged))
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
     pub(super) async fn append_update_to_file(
@@ -988,10 +1172,32 @@ impl JsonlStorageAdapter {
         path: PathBuf,
         chat_format_version: u8,
     ) -> io::Result<Vec<ConversationItem>> {
+        self.read_chat_history_counting_sync(path, chat_format_version)
+            .map(|(items, _skipped_lines)| items)
+    }
+    /// [`Self::read_chat_history_sync`], also returning how many lines were skipped as unparseable.
+    /// The resume path uses the count, and the `.corrupt` copy made below, to decide whether the history needs
+    /// [`load_repair`].
+    fn read_chat_history_counting_sync(
+        &self,
+        path: PathBuf,
+        chat_format_version: u8,
+    ) -> io::Result<(Vec<ConversationItem>, usize)> {
         if !path.exists() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let contents = std::fs::read(&path)?;
+        self.read_chat_history_counting_from_bytes(&path, &contents, chat_format_version)
+    }
+    /// [`Self::read_chat_history_counting_sync`] on bytes the caller already read from `path` (the quarantine copy, when
+    /// one is needed, is still made from the file). A fork copy reads the source once, under its append locks, and parses
+    /// those bytes (P123).
+    fn read_chat_history_counting_from_bytes(
+        &self,
+        path: &Path,
+        contents: &[u8],
+        chat_format_version: u8,
+    ) -> io::Result<(Vec<ConversationItem>, usize)> {
         let mut sibling_btc_ids_seen: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut upgraded_reasoning_count: usize = 0;
@@ -1056,7 +1262,7 @@ impl JsonlStorageAdapter {
         if first_skipped.is_some() || stripped > 0 {
             let quarantine = path.with_extension("jsonl.corrupt");
             if !quarantine.exists()
-                && let Err(e) = std::fs::copy(&path, &quarantine)
+                && let Err(e) = super::owner_only::copy(path, &quarantine)
             {
                 tracing::warn!(
                     error = %e,
@@ -1092,7 +1298,7 @@ impl JsonlStorageAdapter {
                 "reconstructed legacy reasoning siblings from pre-sibling-split session"
             );
         }
-        Ok(items)
+        Ok((items, skipped_lines))
     }
     /// Apply a typed [`SummaryPatch`](super::summary_write::SummaryPatch) to this session's `summary.json` under an exclusive sidecar lock.
     /// The read-modify-write thus serializes against every other writer (including a second persistence actor on reconnect, or another process).
@@ -1119,6 +1325,35 @@ impl JsonlStorageAdapter {
         })
         .await
         .map_err(io::Error::other)?
+    }
+    /// `replace_chat_history` on the calling (blocking) thread, without the rewrite gate: the caller has just made
+    /// the `.pre-repair` backup. For the load-time repair, which must hold the session lock until this I/O is done.
+    pub(super) fn replace_chat_history_after_backup_sync(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
+        super::write_jsonl_atomic(&self.chat_file(info), messages)?;
+        super::summary_write::apply_patch_locked(
+            &self.summary_file(info),
+            &self.summary_lock_file(info),
+            &chat_rewrite_summary_patch(messages),
+        )
+        .map(|_| ())
+    }
+}
+/// The summary fields set by a full rewrite of `chat_history.jsonl`.
+fn chat_rewrite_summary_patch(messages: &[ConversationItem]) -> super::summary_write::SummaryPatch {
+    let cwd_switch_bookkeeping_generation = messages
+        .iter()
+        .filter_map(ConversationItem::working_directory_switch_generation)
+        .max()
+        .unwrap_or(0);
+    super::summary_write::SummaryPatch {
+        chat_messages: Some(super::summary_write::CounterOp::Set(messages.len())),
+        chat_format_version: Some(CHAT_FORMAT_VERSION),
+        cwd_switch_bookkeeping_generation: Some(cwd_switch_bookkeeping_generation),
+        ..Default::default()
     }
 }
 fn transform_session_id_in_update(
@@ -1498,7 +1733,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             std::process::id(),
             uuid::Uuid::now_v7().simple()
         ));
-        tokio::fs::write(&tmp, json).await?;
+        super::owner_only::write_async(&tmp, json).await?;
         #[cfg(windows)]
         match tokio::fs::remove_file(&target).await {
             Ok(()) => {}
@@ -1520,7 +1755,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             tokio::fs::create_dir_all(parent).await?;
             let cleared = parent.join("cleared");
             if !cleared.exists() {
-                tokio::fs::write(cleared, []).await?;
+                super::owner_only::write_async(cleared, Vec::new()).await?;
             }
         }
         match tokio::fs::remove_file(target).await {
@@ -1552,7 +1787,16 @@ impl StorageAdapter for JsonlStorageAdapter {
                 &self.goal_mode_state_file(info),
             )?;
         let workflow_runs = self.load_workflow_runs_sync(info)?;
-        let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
+        let (rewind_points, damaged_rewind_lines) = self
+            .read_rewind_points_tolerant(self.rewind_points_file(info))
+            .await?;
+        if !damaged_rewind_lines.is_empty() {
+            tracing::warn!(
+                session_id = %info.id,
+                lines = ?damaged_rewind_lines,
+                "rewind_points.jsonl has damaged rows; they are kept in the file and left out of this load"
+            );
+        }
         let result = PersistedData {
             summary,
             chat_history,
@@ -1560,6 +1804,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             plan_state,
             plan_mode_state,
             rewind_points,
+            damaged_rewind_lines,
             signals,
             announcement_state,
             goal_mode_state,
@@ -1588,7 +1833,17 @@ impl StorageAdapter for JsonlStorageAdapter {
         let summary = self.read_summary_sync(info)?;
         let chat_file = self.chat_file(info);
         self.ensure_chat_history(info, summary.chat_format_version)?;
-        let chat_history = self.read_chat_history_sync(chat_file, summary.chat_format_version)?;
+        let (mut chat_history, mut skipped_chat_lines) =
+            self.read_chat_history_counting_sync(chat_file, summary.chat_format_version)?;
+        // A compaction that committed while its rewrite of chat_history.jsonl never landed: the history is its
+        // projection and the items written after it (P111, DI-03). Unreadable lines among those are counted like torn
+        // lines, so the load-time repair (P96) sees them.
+        if let Some(recovered) =
+            compaction_witness::recover_unapplied_compaction(&self.session_dir(info))
+        {
+            chat_history = recovered.history;
+            skipped_chat_lines = recovered.skipped_lines;
+        }
         let plan_state = self.read_optional_json_sync::<TodoState>(&self.plan_file(info))?;
         let plan_mode_state = self
             .read_optional_json_sync::<crate::session::plan_mode::PlanModeSnapshot>(
@@ -1609,6 +1864,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let result = super::PersistedDataLight {
             summary,
             chat_history,
+            skipped_chat_lines,
             plan_state,
             plan_mode_state,
             signals,
@@ -1659,31 +1915,140 @@ impl StorageAdapter for JsonlStorageAdapter {
             .await
     }
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>> {
-        let info_clone = info.clone();
-        let adapter_clone = self.clone();
+        let (points, damaged) = self
+            .read_rewind_points_tolerant(self.rewind_points_file(info))
+            .await?;
+        if !damaged.is_empty() {
+            tracing::warn!(
+                session_id = %info.id,
+                lines = ?damaged,
+                "rewind_points.jsonl has damaged rows; they are kept in the file and left out of this load"
+            );
+        }
+        Ok(points)
+    }
+    // Both rewrites keep the rows that do not parse (a torn append the next append terminated): failing on them left
+    // the undone prompts' points on disk for the next resume, and dropping them would forget which prompts' saved
+    // files are missing, which file rewinds must keep refusing (P114).
+    async fn truncate_rewind_points_from(&self, info: &Info, from_index: usize) -> io::Result<()> {
+        self.rewrite_rewind_points(info, move |lines| {
+            fuigo_workspace::session::file_state::truncate_rewind_points_lines(lines, from_index)
+        })
+        .await
+    }
+    async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()> {
+        self.rewrite_rewind_points(info, move |lines| {
+            fuigo_workspace::session::file_state::merge_rewind_points_lines(lines, target_index)
+        })
+        .await
+    }
+    async fn lock_rewind_points_rewrite(&self, info: &Info) -> io::Result<super::RewindPointsRewriteLock> {
+        let path = self.rewind_points_file(info);
         tokio::task::spawn_blocking(move || {
-            let adapter = adapter_clone;
-            let path = adapter.rewind_points_file(&info_clone);
-            adapter.read_jsonl::<RewindPoint>(path)
+            // The rewrite lock is kept by the rewind until it is done: no other rewriter can come between the rewind's
+            // rewrite and a put-back (P146). The append lock is only probed, under the same deadline, so that an
+            // append stuck in another process refuses the rewind now; holding it would stop this process's own
+            // appends on the persistence queue the rewind waits on.
+            let deadline = std::time::Instant::now() + rewrite_lock_wait();
+            let rewrite = Self::lock_rewrite_bounded(&path, deadline)?;
+            drop(Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?);
+            Ok(super::RewindPointsRewriteLock { rewrite })
         })
         .await
         .map_err(io::Error::other)?
     }
-    async fn truncate_rewind_points_from(&self, info: &Info, from_index: usize) -> io::Result<()> {
-        let points = self.load_rewind_points(info).await?;
-        let filtered: Vec<RewindPoint> = points
-            .into_iter()
-            .filter(|p| p.prompt_index < from_index)
-            .collect();
-        self.write_jsonl(self.rewind_points_file(info), &filtered)
-            .await
+    async fn rewrite_rewind_points_holding(
+        &self,
+        info: &Info,
+        rewrite: super::RewindPointsRewrite,
+    ) -> io::Result<super::RewindPointsUndo> {
+        let path = self.rewind_points_file(info);
+        tokio::task::spawn_blocking(move || -> io::Result<super::RewindPointsUndo> {
+            // The caller holds the rewrite lock. Everything below runs under the append lock, so the durable copy, the
+            // bytes kept for a put-back and the rewrite all see the same file.
+            let deadline = std::time::Instant::now() + rewrite_lock_wait();
+            let append = Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?;
+            let result = (|| {
+                // What the file holds now goes to a durable copy first, so that a put-back that fails (or a crash
+                // before the rewind is done) never loses it. A copy left by an earlier rewind refuses this one before
+                // it starts (see the rewind handler), so none is overwritten here.
+                let copy = super::rewind_points_pre_rewind_copy(&path);
+                match std::fs::read(&path) {
+                    Ok(bytes) => super::write_bytes_atomic(&copy, &bytes)?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                let (previous, written) =
+                    Self::rewrite_rewind_points_locked(&path, append.is_some(), move |lines| match rewrite {
+                        super::RewindPointsRewrite::TruncateFrom(from_index) => {
+                            fuigo_workspace::session::file_state::truncate_rewind_points_lines(lines, from_index)
+                        }
+                        super::RewindPointsRewrite::MergeFrom(target_index) => {
+                            fuigo_workspace::session::file_state::merge_rewind_points_lines(lines, target_index)
+                        }
+                    })
+                    .inspect_err(|_| {
+                        // The file is as it was (nothing changed, or it was put back): the copy is not needed. When
+                        // it is not, the copy stays.
+                        if std::fs::read(&path).ok() == std::fs::read(&copy).ok() {
+                            let _ = std::fs::remove_file(&copy);
+                        }
+                    })?;
+                Ok(super::RewindPointsUndo { previous, written })
+            })();
+            if let Some(append) = append {
+                let _ = append.unlock();
+            }
+            result
+        })
+        .await
+        .map_err(io::Error::other)?
     }
-    async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()> {
-        let points = self.load_rewind_points(info).await?;
-        let merged =
-            fuigo_workspace::session::file_state::merge_rewind_points_from(points, target_index);
-        self.write_jsonl(self.rewind_points_file(info), &merged)
-            .await
+    async fn end_rewind_points_rewrite(
+        &self,
+        info: &Info,
+        undo: super::RewindPointsUndo,
+        put_back: bool,
+    ) -> io::Result<()> {
+        let path = self.rewind_points_file(info);
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            // The caller still holds the rewrite lock: no other rewrite came in between. Appends may have: the
+            // put-back keeps every row appended after the rewind's rewrite, behind what the file held before.
+            if put_back {
+                let deadline = std::time::Instant::now() + rewrite_lock_wait();
+                let append = Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?;
+                let result = (|| {
+                    let current = std::fs::read(&path)?;
+                    let Some(appended) = current.strip_prefix(undo.written.as_slice()) else {
+                        return Err(io::Error::other(
+                            "rewind_points.jsonl was rewritten by another process since the rewind changed it",
+                        ));
+                    };
+                    let mut restored = undo.previous.clone().unwrap_or_default();
+                    // A last row the file held without its newline must not run into the first appended row.
+                    if !appended.is_empty() && !restored.is_empty() && !restored.ends_with(b"\n") {
+                        restored.push(b'\n');
+                    }
+                    restored.extend_from_slice(appended);
+                    if undo.previous.is_none() && restored.is_empty() {
+                        return Self::put_back_rewind_points(&path, None);
+                    }
+                    super::write_bytes_atomic(&path, &restored)
+                })();
+                if let Some(append) = append {
+                    let _ = append.unlock();
+                }
+                result?;
+            }
+            // The rewind is done either way; the durable copy is not needed any more. When the put-back failed it
+            // stays (the error above returned first), and the message names it.
+            match std::fs::remove_file(super::rewind_points_pre_rewind_copy(&path)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            }
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn sync_session_files_selected(
         &self,
@@ -1732,7 +2097,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             return Ok(());
         }
         let staging = path.with_extension("jsonl.pre-strip.tmp");
-        tokio::fs::copy(&path, &staging).await?;
+        super::owner_only::copy_async(&path, &staging).await?;
         tokio::fs::rename(&staging, &backup).await?;
         Ok(())
     }
@@ -1741,23 +2106,32 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         messages: &[ConversationItem],
     ) -> io::Result<()> {
-        self.write_jsonl(self.chat_file(info), messages).await?;
-        let new_count = messages.len();
-        let cwd_switch_bookkeeping_generation = messages
-            .iter()
-            .filter_map(ConversationItem::working_directory_switch_generation)
-            .max()
-            .unwrap_or(0);
-        self.apply_summary_patch(
-            info,
-            super::summary_write::SummaryPatch {
-                chat_messages: Some(super::summary_write::CounterOp::Set(new_count)),
-                chat_format_version: Some(CHAT_FORMAT_VERSION),
-                cwd_switch_bookkeeping_generation: Some(cwd_switch_bookkeeping_generation),
-                ..Default::default()
-            },
-        )
-        .await
+        let chat_file = self.chat_file(info);
+        // A load-time repair that could not be backed up holds back every rewrite until the backup exists (P96).
+        load_repair::rewrite_gate(&chat_file)?;
+        self.write_jsonl(chat_file, messages).await?;
+        self.apply_summary_patch(info, chat_rewrite_summary_patch(messages))
+            .await
+    }
+    async fn replace_chat_history_commit_aware(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> Result<(), super::AppendChatError> {
+        use super::AppendChatError::{Committed, NotCommitted};
+        let chat_file = self.chat_file(info);
+        load_repair::rewrite_gate(&chat_file).map_err(NotCommitted)?;
+        let bytes = super::to_jsonl_bytes(messages).map_err(NotCommitted)?;
+        // The writer says whether its rename over the file happened (a failed directory sync after it still leaves the
+        // new history in place).
+        match super::write_bytes_atomic_reporting_async(&chat_file, bytes).await {
+            Ok(()) => {}
+            Err(super::AtomicWriteError::Replaced(error)) => return Err(Committed(error)),
+            Err(super::AtomicWriteError::NotReplaced(error)) => return Err(NotCommitted(error)),
+        }
+        self.apply_summary_patch(info, chat_rewrite_summary_patch(messages))
+            .await
+            .map_err(Committed)
     }
     async fn copy_session_data(
         &self,
@@ -1864,6 +2238,38 @@ impl StorageAdapter for JsonlStorageAdapter {
             }, || super::sync_parent_dir_durable(&path))
         }).await.map_err(io::Error::other)?
     }
+    async fn write_compaction_witness(
+        &self,
+        info: &Info,
+        checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
+    ) -> io::Result<()> {
+        let session_dir = self.session_dir(info);
+        let checkpoint = checkpoint.clone();
+        tokio::task::spawn_blocking(move || {
+            compaction_witness::write_compaction_witness_sync(&session_dir, &checkpoint)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+    async fn compaction_activated(&self, info: &Info, checkpoint_id: &str) {
+        let session_dir = self.session_dir(info);
+        let checkpoint_id = checkpoint_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            compaction_witness::compaction_activated_sync(&session_dir, &checkpoint_id)
+        })
+        .await;
+    }
+    async fn unapplied_compaction_projection(&self, info: &Info) -> Option<Vec<ConversationItem>> {
+        let session_dir = self.session_dir(info);
+        tokio::task::spawn_blocking(move || {
+            compaction_witness::unapplied_compaction_projection(&session_dir)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "compaction witness check stopped; resuming from chat_history.jsonl");
+            None
+        })
+    }
     async fn write_compaction_request(
         &self,
         info: &Info,
@@ -1874,7 +2280,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let path = dir.join(format!("{}.json", request.request_id));
         let bytes = serde_json::to_vec_pretty(request)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        tokio::fs::write(path, bytes).await
+        super::owner_only::write_async(path, bytes).await
     }
     async fn write_recap_request(
         &self,
@@ -1886,7 +2292,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         let path = dir.join(format!("{}.json", request.request_id));
         let bytes = serde_json::to_vec_pretty(request)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        tokio::fs::write(path, bytes).await
+        super::owner_only::write_async(path, bytes).await
     }
     async fn write_compaction_segment(
         &self,
@@ -1908,14 +2314,13 @@ impl StorageAdapter for JsonlStorageAdapter {
             segment.detail,
             &segment.timestamp,
         );
-        tokio::fs::write(base.join(segment_filename(index)), md.as_bytes()).await?;
+        super::owner_only::write_async(base.join(segment_filename(index)), md.clone().into_bytes()).await?;
         let index_path = base.join(INDEX_FILE);
         let needs_header = !tokio::fs::try_exists(&index_path).await.unwrap_or(false);
-        let mut f = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&index_path)
-            .await?;
+        let mut f = tokio::fs::File::from_std(super::owner_only::open(
+            std::fs::OpenOptions::new().create(true).append(true),
+            &index_path,
+        )?);
         if needs_header {
             f.write_all(INDEX_HEADER.as_bytes()).await?;
         }
@@ -1930,8 +2335,13 @@ impl StorageAdapter for JsonlStorageAdapter {
         info: &Info,
         checkpoint_file: &str,
     ) -> io::Result<crate::extensions::notification::CompactionCheckpointFile> {
-        let path = self.session_dir(info).join(checkpoint_file);
-        let bytes = tokio::fs::read(&path).await?;
+        let dir = self.session_dir(info);
+        let checkpoint_file = checkpoint_file.to_owned();
+        let bytes = tokio::task::spawn_blocking(move || {
+            crate::extensions::notification::read_contained_checkpoint(&dir, &checkpoint_file)
+        })
+        .await
+        .map_err(io::Error::other)??;
         serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }

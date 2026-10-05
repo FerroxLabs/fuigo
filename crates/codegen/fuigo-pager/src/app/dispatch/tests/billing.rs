@@ -1269,6 +1269,7 @@ fn free_usage_failure_opens_paywall_modal() {
                 max_retries: 2,
                 reason: "429 Too Many Requests".into(),
                 error_type: None,
+                verdicts: None,
             }),
             &mut agent.session,
             &mut agent.scrollback,
@@ -1281,6 +1282,7 @@ fn free_usage_failure_opens_paywall_modal() {
                     .into(),
                 is_rate_limited: true,
                 error_type: None,
+                verdicts: None,
             }),
             &mut agent.session,
             &mut agent.scrollback,
@@ -1294,6 +1296,7 @@ fn free_usage_failure_opens_paywall_modal() {
             agent_id: id,
             result: Err("rate limited".into()),
             http_status: Some(429),
+            verdicts: None,
             prompt_id,
         }),
         &mut app,
@@ -1302,6 +1305,94 @@ fn free_usage_failure_opens_paywall_modal() {
         app.agents[&id].question_view.is_some(),
         "paywall modal must open"
     );
+}
+
+/// P119: the turn-end error text was scrubbed by the shell, so the credit-limit and free-usage decisions come from
+/// the verdicts it sent, not from the words of the text (which no longer hold the marker).
+#[test]
+fn turn_end_error_decides_on_the_shells_verdicts_not_on_scrubbed_text() {
+    use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+
+    let scrubbed = "Request failed (<redacted>): <redacted>";
+    // Credit limit: the prompt is stashed for the retry after the upsell.
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let _ = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
+    let prompt_id = app.agents[&id].session.current_prompt_id.clone();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(scrubbed.into()),
+            http_status: None,
+            verdicts: Some(ErrorVerdicts {
+                credit_limit: true,
+                ..ErrorVerdicts::default()
+            }),
+            prompt_id: prompt_id.clone(),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].credit_limit_stashed_prompt.is_some(),
+        "a credit-limit verdict must stash the prompt even though the text names nothing"
+    );
+
+    // Free usage: the paywall modal opens.
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
+    let prompt_id = app.agents[&id].session.current_prompt_id.clone();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(scrubbed.into()),
+            http_status: None,
+            verdicts: Some(ErrorVerdicts {
+                free_usage: true,
+                ..ErrorVerdicts::default()
+            }),
+            prompt_id,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].question_view.is_some(), "paywall modal must open");
+
+    // Disk full: the dedicated disk-full block is shown although the text was scrubbed.
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
+    let prompt_id = app.agents[&id].session.current_prompt_id.clone();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(scrubbed.into()),
+            http_status: None,
+            verdicts: Some(ErrorVerdicts {
+                disk_full: true,
+                ..ErrorVerdicts::default()
+            }),
+            prompt_id,
+        }),
+        &mut app,
+    );
+    assert!(crate::app::dispatch::scrollback_has_recent_disk_full(
+        &app.agents[&id].scrollback
+    ));
+
+    // No verdict, no marker in the text: neither fires.
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
+    let prompt_id = app.agents[&id].session.current_prompt_id.clone();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(scrubbed.into()),
+            http_status: None,
+            verdicts: Some(ErrorVerdicts::default()),
+            prompt_id,
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&id].credit_limit_stashed_prompt.is_none());
+    assert!(app.agents[&id].question_view.is_none());
 }
 
 /// Answer translation: the one remaining option opens our own billing page.

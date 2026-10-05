@@ -1,0 +1,87 @@
+# macOS tests: the macOS code of the state-file locks and atomic writes (P17-F1, P49, P61, P72, P79) and of
+# the crash handler (P05a). No other workflow runs it: the Linux jobs never compile the
+# `cfg(target_os = "macos")` paths (O_SEARCH directory handles, the staging directory, ACL and xattr
+# carry-over), and the P79 real-filesystem tests need a case-insensitive volume, which the runner's APFS
+# disk is. Until this job, every one of those paths was compile-checked only (receipts R033, R046, R064,
+# R074 section 0.1, R084 section 0.2).
+#
+# Deliberately NO `paths:` filter, for the reason given in binary-driven-tests.yml.
+name: macOS tests
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-tests-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    # macos-14 is arm64 and is the macOS label release.yml has probed (macos-13 queues forever).
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '3'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml pins 1.94.0 and rustup honours it inside the checkout; fail early if it did not.
+      - name: Confirm the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          rustc --version | grep -q '^rustc 1\.94\.0 ' || { echo "::error::expected rustc 1.94.0 from rust-toolchain.toml"; exit 1; }
+          command -v cmake && cmake --version | head -1
+      # fuigo-tools-api needs protoc 3.15 or newer at build time; the same pinned 29.3 asset and digest as
+      # release.yml's darwin-arm64 build.
+      - name: Prepare pinned protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-osx-aarch_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "2b8a3403cd097f95f3ba656e14b76c732b6b26d7f183330b11e36ef2bc028765  $RUNNER_TEMP/protoc.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          chmod +x "$RUNNER_TEMP/protoc/bin/protoc"
+          "$RUNNER_TEMP/protoc/bin/protoc" --version
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-tests
+          cache-on-failure: true
+      - name: Run macOS tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p macos-receipts
+          failed=0
+          # P49, P61, P72, P79: fs_atomic, write_through, lock identity, managed_text, every test of the crate.
+          cargo test --locked --no-fail-fast -p fuigo-config 2>&1 | tee macos-receipts/fuigo-config.log || failed=1
+          # P79 real-filesystem tests, with their stderr markers: on APFS each must say it RAN, not SKIPPED.
+          cargo test --locked -p fuigo-config --lib -- fs_atomic --nocapture 2>&1 | tee macos-receipts/fuigo-config-fs-atomic.log || failed=1
+          for marker in P79_CI_REAL_RAN P79_RESPELL_RAN; do
+            if ! grep -q "$marker" macos-receipts/fuigo-config-fs-atomic.log; then
+              echo "::error::$marker missing: the P79 case-insensitive test did not run on the real filesystem"
+              failed=1
+            fi
+          done
+          # State-lock users of fuigo-config (P79 gate packages) and the shell's own atomic write (P17-F1).
+          cargo test --locked --no-fail-fast -p fuigo-hooks 2>&1 | tee macos-receipts/fuigo-hooks.log || failed=1
+          cargo test --locked -p fuigo-shell --features test-support,config-docs --lib -- config::atomic_write session::prompt_history claude_import 2>&1 | tee macos-receipts/fuigo-shell.log || failed=1
+          cargo test --locked -p fuigo-pager-render --lib -- appearance::config 2>&1 | tee macos-receipts/fuigo-pager-render.log || failed=1
+          # P05a crash slots and symbolication.
+          cargo test --locked --no-fail-fast -p fuigo-crash-handler 2>&1 | tee macos-receipts/fuigo-crash-handler.log || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-receipts
+          path: macos-receipts/
+          if-no-files-found: error

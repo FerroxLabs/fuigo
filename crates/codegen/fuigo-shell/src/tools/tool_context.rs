@@ -21,6 +21,10 @@ struct TaskOutputTokenBudgetState {
     total: Option<u64>,
     spent: u64,
     incomplete: bool,
+    /// A request reported no usage, so `spent` was set to the grant pessimistically: the grant is
+    /// closed because usage is unknown, not because it was measured as spent (Contract D.4 reports
+    /// the two as different rules).
+    usage_unknown: bool,
 }
 impl TaskOutputTokenBudget {
     pub fn limited(total: u64) -> Self {
@@ -30,6 +34,7 @@ impl TaskOutputTokenBudget {
                 total: Some(total),
                 spent: 0,
                 incomplete: false,
+                usage_unknown: false,
             })),
         }
     }
@@ -58,6 +63,7 @@ impl TaskOutputTokenBudget {
     pub(crate) fn mark_incomplete_and_exhaust(&self) {
         let mut state = self.inner.lock();
         state.incomplete = true;
+        state.usage_unknown = true;
         if let Some(total) = state.total {
             state.spent = state.spent.max(total);
         }
@@ -276,6 +282,28 @@ impl ToolContext {
             },
             None => Ok(configured),
         }
+    }
+    /// The workflow child's spent output grant as the typed budget denial (Contract D.4), or `None`
+    /// while it has room. The grant is the child's output-token budget; it is checked before the
+    /// durable execution's own mirror of it, so it reports the same denial.
+    pub(crate) fn task_output_budget_denial(&self) -> Option<crate::acp_error::ExecutionBudgetDenial> {
+        let budget = self.task_output_token_budget.as_ref()?;
+        if budget.remaining()? != 0 {
+            return None;
+        }
+        let state = budget.inner.lock();
+        Some(crate::acp_error::ExecutionBudgetDenial {
+            rule: if state.usage_unknown {
+                crate::acp_error::ExecutionBudgetRule::TokenUsageUnknown
+            } else {
+                crate::acp_error::ExecutionBudgetRule::OutputTokensExhausted
+            },
+            total_token_limit: None,
+            total_tokens_used: 0,
+            output_token_limit: state.total,
+            output_tokens_used: state.spent,
+            unknown_usage: state.usage_unknown,
+        })
     }
     pub(crate) fn record_task_model_output(&self, output_tokens: u64) {
         if let Some(budget) = self.task_output_token_budget.as_ref() {

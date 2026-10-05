@@ -1136,6 +1136,10 @@ impl ScrollbackState {
     /// Called after dirty height updates or lazy viewport measurement.
     /// Recomputes gap_after (because display_mode changes affect the pairwise gap rule) and then rebuilds virtual_y.
     pub(super) fn rebuild_virtual_y_from_heights(&mut self) {
+        #[cfg(test)]
+        {
+            self.virtual_y_rebuilds += 1;
+        }
         let Some(cache) = self.layout_cache.as_mut() else {
             return;
         };
@@ -1249,7 +1253,8 @@ impl ScrollbackState {
         // Update prompt_descriptors y_virtual values for affected prompts
         for pd in cache.prompt_descriptors.iter_mut() {
             if pd.entry_idx > earliest_idx {
-                pd.y_virtual = (pd.y_virtual as i64 + total_delta as i64) as usize;
+                // Its own row's patched position: shifting by the TOTAL delta would also count growth below the prompt
+                pd.y_virtual = cache.virtual_y[pd.entry_idx];
             } else if pd.entry_idx == earliest_idx {
                 // The prompt itself didn't move, but its full_height may have changed
                 // Update from the cache, which update_dirty_entry_heights already patched
@@ -1390,6 +1395,10 @@ impl ScrollbackState {
     ///
     /// Reuses existing Vec allocations when possible to avoid repeated allocations.
     fn rebuild_layout_cache(&mut self, width: u16) {
+        #[cfg(test)]
+        {
+            self.layout_cache_builds += 1;
+        }
         let theme = Theme::current();
         let entry_area_width = self.entry_area_width(width);
 

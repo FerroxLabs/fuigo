@@ -231,7 +231,8 @@ pub fn persist_manifest(session_dir: &Path, entries: Vec<BackgroundTaskManifestE
     let path = session_dir.join(MANIFEST_FILENAME);
     match serde_json::to_vec(&entries) {
         Ok(data) => {
-            if let Err(e) = std::fs::write(&path, data) {
+            // A session file (the commands left running): owner-only (P150, S14).
+            if let Err(e) = fuigo_config::write_file_owner_only(&path, data) {
                 tracing::warn!(%e, "failed to write background task manifest");
             }
         }
@@ -533,6 +534,17 @@ mod tests {
             make_manifest_entry("task-b", 120),
         ];
         persist_manifest(dir.path(), entries);
+        // P150 (S14): the manifest is a session file, owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.path().join(MANIFEST_FILENAME))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
 
         let loaded = load_and_clear_manifest(dir.path());
         assert_eq!(loaded.len(), 2);

@@ -1,0 +1,31 @@
+# Astra (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null), P74 round 1
+# raw transcript sha256 (not committed: contains the tool session log): b2c2582ccb223d9fa6e3a38cb2dcee9963ec92f023aa080781c164ec480fa800
+## Brief
+You are auditing packet P74 of the Fuigo 1.0.21 strike (a Rust workspace). Repository: the current directory (git worktree, branch strike/p74). Review ONLY the diff `git diff bc739009 HEAD` (also saved at /tmp/p74/diff.patch). Read surrounding code as needed. Do not modify files.
+
+Scope of the packet:
+1. crates/build/fuigo-proto-build/src/lib.rs: `emit_rerun_if_changed` used to print `cargo:rerun-if-changed=protoc` when protoc came from PATH (find_protoc returns the bare PathBuf "protoc"), a relative path that never exists next to the package, so cargo considered the build script stale on every invocation and rebuilt fuigo-tools-api and all dependents. New `protoc_rerun_path` resolves a bare name through PATH to an absolute path, keeps paths with a directory part as given, and emits nothing when unresolvable. Check correctness (Component logic, Windows .exe, empty PATH entries, relative PATH entries, symlinks, whether cargo would now miss a needed rerun e.g. when PATH changes to a different protoc — judge severity honestly), and the new unit tests.
+2. crates/codegen/fuigo-pager-pty-harness/src/env.rs: `pager_binary()` local fallback now builds once per process (OnceLock latch of Result), `--locked --message-format=json-render-diagnostics`, and returns the executable from cargo's compiler-artifact message instead of a guessed <CARGO_TARGET_DIR>/debug path. Port of fuigo-test-support/src/env.rs (P69). Check parity, error handling, latch semantics, any regression for callers (benches, bins, tests listed by grep pager_binary).
+3. scripts/strike/final-gate.sh: `--network none` inner command now `export CARGO_NET_OFFLINE=true` before `exec cargo test --offline`. Check shell correctness.
+4. .github/workflows/binary-driven-tests.yml: new CI job, intentionally no paths filter. Check YAML/action correctness, security (no untrusted interpolation), whether the cargo commands are right (`--test '*_acp'` glob, --include-ignored freshness probe works in a CI checkout incl. pull_request merge refs), timeouts, caching.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, each with file:line and a concrete reason. End with exactly one line: `VERDICT: PASS` or `VERDICT: PASS WITH LOWS -- <reason>` or `VERDICT: FAIL -- <reason>` (FAIL iff any BLOCKER or HIGH).
+## Final answer
+Reviewed `bc739009..b233110d`. No BLOCKER, HIGH, or MEDIUM findings.
+
+- **LOW — [crates/build/fuigo-proto-build/src/lib.rs:169](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:169): PATH changes do not invalidate code generation.** After tracking `/a/protoc`, switching PATH to select `/b/protoc` leaves Cargo watching `/a/protoc`. Unchanged inputs can therefore retain generation from the previous compiler. Emit `rerun-if-env-changed=PATH` for bare-name resolution. This is an incremental-build edge case, not a release blocker. [Cargo invalidation rules](https://doc.rust-lang.org/cargo/reference/build-scripts.html#change-detection)
+
+- **LOW — [crates/build/fuigo-proto-build/src/lib.rs:59](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:59): Lookup can track a different file from the executable used.** On Unix, empty PATH entries mean the current directory, but these are discarded. Additionally, line 61 accepts non-executable regular files: with non-executable `/a/protoc` preceding executable `/b/protoc`, execution uses `/b/protoc` while Cargo watches `/a/protoc`. Preserve current-directory semantics and check executable eligibility. The new tests use empty regular files and miss these cases.
+
+- **LOW — [crates/build/fuigo-proto-build/src/lib.rs:173](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:173): Non-UTF-8 PATH directories introduce a build failure.** A working protoc beneath such a Unix directory previously produced the UTF-8 string `protoc`; the resolved absolute path now fails `to_str()`, aborting the build. Handle this uncommon case without making successful compiler discovery fatal.
+
+Otherwise, the component classification handles ordinary explicit paths, Windows `.exe` lookup covers the usual PATH installation, relative PATH entries become absolute, and symlink paths remain intact rather than being canonicalized away.
+
+The pager implementation preserves P69’s artifact selection, failure handling, and success/error latch semantics. Overrides retain precedence; I found no caller regression. Its tests cover alternate artifact locations and malformed or unsuccessful build outcomes.
+
+The workflow passes `actionlint`. The quoted test glob and `--include-ignored` are valid; the freshness probe and version stamp both derive their commit from checkout `HEAD`, including PR merge commits. No untrusted shell interpolation or concrete caching defect found. The 120-minute timeout is bounded; actual runtime remains unverified. [Cargo selection](https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection), [libtest selection](https://doc.rust-lang.org/rustc/tests/index.html#selection-options)
+
+`bash -n` passed, and a read-only shell probe confirmed the offline variable survives `exec`. Rust tests and CI were not executed under the read-only constraint. No files modified.
+
+VERDICT: PASS WITH LOWS -- protoc tracking has PATH invalidation, lookup-fidelity, and non-UTF-8 edge cases
+exit=0

@@ -24,6 +24,7 @@ pub mod metrics;
 mod prewarm;
 pub mod retry;
 pub mod sampling_log;
+pub(crate) mod sent_credentials;
 mod shared_http;
 pub mod stream;
 pub mod subscription;
@@ -33,7 +34,7 @@ pub mod types;
 pub use actor::SamplerActor;
 pub use actor::request_task::CompletionResult;
 pub use attribution::{
-    Auth401AttributionCallback, BEARER_SUFFIX_LEN, SamplingConsumer, SharedAttributionCallback,
+    Auth401AttributionCallback, BearerFingerprint, SamplingConsumer, SharedAttributionCallback,
 };
 pub use client::{ApiBackend, SamplingClient, user_agent_string_for};
 pub use config::{

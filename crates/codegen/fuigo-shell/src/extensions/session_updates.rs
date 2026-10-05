@@ -522,6 +522,10 @@ mod tests {
 
     #[tokio::test]
     async fn handle_tail_request_matches_expected_tail_window() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-equivalence";
@@ -561,6 +565,10 @@ mod tests {
 
     #[tokio::test]
     async fn handle_tail_request_with_rewind_returns_only_live_timeline() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-rewind-filter";
@@ -605,6 +613,10 @@ mod tests {
     /// A subagent whose cwd differs from the caller's must resolve by id, not by the caller's parent cwd.
     #[tokio::test]
     async fn handle_falls_back_to_id_lookup_for_divergent_cwd() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         // The transcript lives under the subagent's own cwd
         let child_cwd_tmp = tempfile::TempDir::new().unwrap();
         let child_cwd = child_cwd_tmp.path().to_string_lossy().to_string();
@@ -612,12 +624,30 @@ mod tests {
         let parent_cwd_tmp = tempfile::TempDir::new().unwrap();
         let parent_cwd = parent_cwd_tmp.path().to_string_lossy().to_string();
 
-        let session_id = "divergent-cwd-fallback-019f19fe07ea";
+        // The id fallback scans the whole sessions root under `fuigo_dirs::fuigo_home()` and
+        // treats an id present under more than one cwd as ambiguous, i.e. not found. With a
+        // fixed id and the real home this test's verdict was a function of HISTORY: every run
+        // that panicked or was killed before its cleanup left a `sessions/<cwd>/<id>` behind
+        // (dozens had accumulated on the shared build box), after which every later run failed
+        // with `totalCount == 0`. Two independent defences now hold: the `FuigoHome` above gives
+        // this test an empty sessions root of its own (effective since `fuigo_home()` follows
+        // `$FUIGO_HOME` instead of pinning its first value), and a unique id cannot collide with
+        // a leftover even if that home were ever shared. The guard below cleans up even when an
+        // assertion panics.
+        let session_id = format!("divergent-cwd-fallback-{}", uuid::Uuid::now_v7().simple());
+        let session_id = session_id.as_str();
         let child_info = crate::session::info::Info {
             id: acp::SessionId::new(session_id),
             cwd: child_cwd.clone(),
         };
         let child_dir = crate::session::persistence::session_dir(&child_info);
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = RemoveOnDrop(child_dir.clone());
         std::fs::create_dir_all(&child_dir).unwrap();
         std::fs::write(child_dir.join("summary.json"), "{}").unwrap();
         std::fs::write(
@@ -653,9 +683,6 @@ mod tests {
             "id fallback should resolve the divergent-cwd transcript"
         );
         assert_eq!(json["updates"].as_array().unwrap().len(), 2);
-
-        // Clean up the dir written under the real fuigo home.
-        let _ = std::fs::remove_dir_all(&child_dir);
     }
 
     fn capturing_gateway() -> (
@@ -704,6 +731,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_sends_correct_chunks() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "stream-chunks";
@@ -754,6 +785,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_empty_session_returns_metadata_shape() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "stream-empty";
@@ -826,6 +861,10 @@ mod tests {
 
     #[tokio::test]
     async fn turn_index_returns_last_n_turns() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-prompts-basic";
@@ -866,6 +905,10 @@ mod tests {
 
     #[tokio::test]
     async fn turn_index_exceeding_turns_returns_all() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-prompts-exceed";
@@ -894,6 +937,10 @@ mod tests {
 
     #[tokio::test]
     async fn turn_index_with_rewinds() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-prompts-rewind";
@@ -938,6 +985,10 @@ mod tests {
 
     #[tokio::test]
     async fn turn_index_ignored_when_offset_set() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "tail-prompts-offset-priority";
@@ -970,6 +1021,10 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_starts_included_in_regular_response() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "prompt-starts-regular";
@@ -995,6 +1050,10 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_starts_in_streamed_metadata() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let cwd_tmp = tempfile::TempDir::new().unwrap();
         let cwd = cwd_tmp.path().to_string_lossy().to_string();
         let session_id = "prompt-starts-stream";

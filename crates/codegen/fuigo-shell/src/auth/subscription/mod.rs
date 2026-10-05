@@ -1,6 +1,9 @@
 //! Fuigo-owned subscription sessions. No external credential imports.
 //! Protocol constants adapted from Ferrox Labs Wayland Core oauth/chatgpt.rs,
 //! oauth/xai.rs and Wayland xaiOAuthCore.ts (Apache-2.0, Copyright 2026 Ferrox Labs).
+// CLI printer: stdout goes through `fuigo_tty_utils::cli_println!` (a raw `println!` aborts the
+// process when stdout's reader is gone, R060).
+#![deny(clippy::print_stdout)]
 mod flow;
 pub(crate) mod inference;
 mod manual;
@@ -78,8 +81,23 @@ pub enum SubscriptionError {
     InvalidCredentials,
     #[error("subscription token request failed (HTTP {0}); no provider fallback was attempted")]
     Http(u16),
-    #[error("subscription token request failed or timed out")]
+    #[error("subscription token request was not sent to the provider")]
     Network,
+    /// This machine's TLS configuration stopped the request before any bytes were sent:
+    /// the HTTPS client could not be built, or the provider's certificate did not verify
+    /// against a configured extra CA bundle. Retrying cannot help until the named file (or
+    /// trust store) is fixed. The detail names a local file path only, never response or
+    /// token content.
+    #[error(
+        "subscription local TLS/CA configuration error: {0}; no request was sent, and \
+         retrying will not help until it is fixed"
+    )]
+    LocalTls(String),
+    /// The provider accepted the request but its outcome was lost (the response body
+    /// failed mid-read after a success status, or the bounded exchange timed out).
+    /// A rotated single-use refresh token may already have been consumed.
+    #[error("subscription token exchange outcome is unknown; the token may already be rotated")]
+    AmbiguousExchange,
     #[error("subscription callback rejected")]
     Callback,
     #[error("subscription login cancelled")]
@@ -92,6 +110,44 @@ pub enum SubscriptionError {
     Terminal,
 }
 pub type Result<T> = std::result::Result<T, SubscriptionError>;
+
+impl SubscriptionError {
+    /// Whether a failed token exchange may have left the provider holding a rotated
+    /// (therefore consumed) refresh token. `true` means the durable `refresh_pending`
+    /// marker must stay set and only a fresh login can recover; `false` means the
+    /// provider issued nothing, so the marker must be cleared or a transient failure
+    /// would permanently sign the user out.
+    ///
+    /// Only meaningful for errors returned by the refresh exchange itself.
+    pub(super) fn may_have_consumed_refresh_token(&self) -> bool {
+        match self {
+            // A non-success status is returned by `read_json_response` before the body is
+            // read: the provider refused outright. 4xx other than 429 means it rejected the
+            // token itself, so a re-login is genuinely required; 429, 5xx and any other
+            // non-success status mean it never processed the token.
+            Self::Http(code) => (400..500).contains(code) && *code != 429,
+            // The request never left this host: egress denial, DNS, connect or TLS
+            // handshake failure (`flow::exchange_send_error` reports anything later as
+            // `AmbiguousExchange`).
+            Self::Network => false,
+            // No client existed, or the handshake failed before the request was written.
+            Self::LocalTls(_) => false,
+            // Raised around persistence, not around the exchange.
+            Self::Storage | Self::LockTimeout => false,
+            // The provider answered, or may have answered, and we lost the reply.
+            Self::AmbiguousExchange => true,
+            // A malformed or mis-bound token response: the provider did issue something.
+            Self::InvalidCredentials => true,
+            // Not produced by the exchange; fail closed rather than guess.
+            Self::LoginRequired
+            | Self::Callback
+            | Self::Cancelled
+            | Self::Timeout
+            | Self::Listener
+            | Self::Terminal => true,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Credential {
@@ -127,6 +183,7 @@ pub struct SubscriptionAccess {
     pub account: String,
     pub expires_at: u64,
     token: String,
+    unpersisted: bool,
 }
 impl std::fmt::Debug for SubscriptionAccess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,6 +196,15 @@ impl SubscriptionAccess {
             return Err(SubscriptionError::LoginRequired);
         }
         Ok(&self.token)
+    }
+    /// True when this credential came from a successful refresh the store could not save.
+    /// It works for this process only; the user should fix the disk before restarting.
+    pub fn is_unpersisted(&self) -> bool {
+        self.unpersisted
+    }
+    fn unpersisted(mut self) -> Self {
+        self.unpersisted = true;
+        self
     }
 }
 fn now() -> u64 {
@@ -179,6 +245,7 @@ impl Credential {
             account: self.account.clone(),
             expires_at: self.expires_at,
             token: self.access_token.clone(),
+            unpersisted: false,
         })
     }
 }
@@ -187,11 +254,11 @@ pub async fn cli_status(provider: SubscriptionProvider) -> Result<()> {
     let store = default_store()?;
     let statuses = store.status(provider).await?;
     if statuses.is_empty() {
-        println!("{}: signed out", provider.name());
+        fuigo_tty_utils::cli_println!("{}: signed out", provider.name());
     }
     for status in statuses {
         // JSON escaping prevents account metadata from injecting terminal controls.
-        println!(
+        fuigo_tty_utils::cli_println!(
             "{}",
             serde_json::to_string(&status).map_err(|_| SubscriptionError::Storage)?
         );

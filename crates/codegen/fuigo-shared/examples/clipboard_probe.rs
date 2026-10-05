@@ -13,6 +13,9 @@
 //! ```
 //!
 //! Exits non-zero when the read errors so hyperfine aborts loudly instead of averaging failures.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 fn main() -> anyhow::Result<()> {
     let started = std::time::Instant::now();

@@ -101,7 +101,7 @@ pub enum McpCommand {
 }
 
 // Everything `mcp add` accepts, before validation; `resolve_add` turns it into a transport config
-#[derive(Debug, clap::Args, Clone)]
+#[derive(clap::Args, Clone)]
 #[command(after_help = ADD_AFTER_HELP)]
 pub struct AddArgs {
     /// Server name
@@ -146,6 +146,39 @@ pub struct AddArgs {
     transport_type: Option<String>,
 }
 
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. `fuigo mcp add` arguments may carry keys (`-e KEY=value`, `-H "Authorization: …"`, a URL query), so only counts print.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for AddArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            command_or_url,
+            args,
+            transport,
+            scope,
+            env,
+            header,
+            command,
+            legacy_args,
+            url,
+            transport_type,
+        } = self;
+        f.debug_struct("AddArgs")
+            .field("name", name)
+            .field("command_or_url", &command_or_url.as_ref().map(|_| "<redacted>"))
+            .field("args", &format_args!("<{} args redacted>", args.len()))
+            .field("transport", transport)
+            .field("scope", scope)
+            .field("env", &format_args!("<{} args redacted>", env.len()))
+            .field("header", &format_args!("<{} args redacted>", header.len()))
+            .field("command", &command.as_ref().map(|_| "<redacted>"))
+            .field("legacy_args", &format_args!("<{} args redacted>", legacy_args.len()))
+            .field("url", &url.as_ref().map(|_| "<redacted>"))
+            .field("transport_type", transport_type)
+            .finish()
+    }
+}
+
 pub async fn run(mcp_args: McpArgs) -> Result<()> {
     match mcp_args.command {
         McpCommand::List { json } => run_list(json),
@@ -179,9 +212,9 @@ fn run_list(json: bool) -> Result<()> {
                 entry
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        fuigo_tty_utils::cli_println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if servers.is_empty() {
-        println!("No MCP servers configured. Run `fuigo mcp add --help` to get started.");
+        fuigo_tty_utils::cli_println!("No MCP servers configured. Run `fuigo mcp add --help` to get started.");
     } else {
         for (name, (config, scope)) in &servers {
             let transport = match &config.transport {
@@ -204,7 +237,7 @@ fn run_list(json: bool) -> Result<()> {
             } else {
                 ""
             };
-            println!("  {name}: {transport}{status}{scope_note}");
+            fuigo_tty_utils::cli_println!("  {name}: {transport}{status}{scope_note}");
         }
     }
     Ok(())
@@ -221,7 +254,7 @@ struct ResolvedAdd {
 async fn run_add(args: AddArgs) -> Result<()> {
     let resolved = resolve_add(&args)?;
     for warning in &resolved.warnings {
-        eprintln!("{warning}");
+        fuigo_tty_utils::cli_eprintln!("{warning}");
     }
 
     let name = &args.name;
@@ -257,12 +290,13 @@ async fn run_add(args: AddArgs) -> Result<()> {
         tool_timeout_sec: None,
         tool_timeouts: None,
         expose_image_base64: None,
+        untrusted_source: false,
     };
 
     let path = scope_target(args.scope);
     fuigo_shell::util::config::save_mcp_server_config_at(&path, name, &config).await?;
-    println!("Added {summary} to {} config", args.scope.label());
-    println!("File modified: {}", scope_display(args.scope, &path));
+    fuigo_tty_utils::cli_println!("Added {summary} to {} config", args.scope.label());
+    fuigo_tty_utils::cli_println!("File modified: {}", scope_display(args.scope, &path));
     Ok(())
 }
 
@@ -483,7 +517,7 @@ fn looks_like_env_pair(s: &str) -> bool {
 /// Current working directory, exiting loudly when it cannot be determined.
 fn current_dir_or_exit() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("Cannot determine working directory: {e}");
+        fuigo_tty_utils::cli_eprintln!("Cannot determine working directory: {e}");
         std::process::exit(1);
     })
 }
@@ -580,7 +614,7 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
         bail!("Server name cannot be empty.");
     }
     if is_gateway_cli_toggle_name(name) {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Gateway connectors (e.g. managed_gateway:…) cannot be toggled via CLI; use Space in /mcps."
         );
         std::process::exit(1);
@@ -588,12 +622,12 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
     let cwd = current_dir_or_exit();
 
     if !mcp_server_is_known(name, &cwd) {
-        eprintln!("No MCP server named '{name}'.");
+        fuigo_tty_utils::cli_eprintln!("No MCP server named '{name}'.");
         let available = available_mcp_server_names(&cwd);
         if !available.is_empty() {
-            eprintln!("Available servers: {}", available.join(", "));
+            fuigo_tty_utils::cli_eprintln!("Available servers: {}", available.join(", "));
         } else {
-            eprintln!("No MCP servers configured. Run `fuigo mcp add --help` to get started.");
+            fuigo_tty_utils::cli_eprintln!("No MCP servers configured. Run `fuigo mcp add --help` to get started.");
         }
         std::process::exit(1);
     }
@@ -607,34 +641,34 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
     let now_enabled = !now_disabled;
 
     if enabled && now_disabled {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Warning: '{name}' is still disabled after enable (check project-scoped config)."
         );
         std::process::exit(1);
     }
     if !enabled && now_enabled {
-        eprintln!("Warning: '{name}' is still enabled after disable.");
+        fuigo_tty_utils::cli_eprintln!("Warning: '{name}' is still enabled after disable.");
         std::process::exit(1);
     }
 
     if was_disabled == now_disabled {
         let state = if now_enabled { "enabled" } else { "disabled" };
-        println!("MCP server '{name}' is already {state}.");
+        fuigo_tty_utils::cli_println!("MCP server '{name}' is already {state}.");
     } else if now_enabled {
-        println!("Enabled MCP server '{name}'.");
+        fuigo_tty_utils::cli_println!("Enabled MCP server '{name}'.");
     } else {
-        println!("Disabled MCP server '{name}'.");
+        fuigo_tty_utils::cli_println!("Disabled MCP server '{name}'.");
     }
 
     let user_config = fuigo_shell::util::config::user_config_path();
     for path in &modified {
         if path == &user_config {
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "File modified: {}",
                 display_user_fuigo_path(fuigo_config::USER_CONFIG_FILENAME)
             );
         } else {
-            println!("File modified: {}", path.display());
+            fuigo_tty_utils::cli_println!("File modified: {}", path.display());
         }
     }
     Ok(())
@@ -661,17 +695,17 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
         Ok(site) => site,
         Err(RemoveError::NotFound) => {
             let searched = requested_scope.map_or("user or project", McpScope::label);
-            eprintln!("No MCP server named '{name}' in {searched} config");
+            fuigo_tty_utils::cli_eprintln!("No MCP server named '{name}' in {searched} config");
             std::process::exit(1);
         }
         Err(RemoveError::Ambiguous { project_path }) => {
-            eprintln!("MCP server '{name}' exists in multiple scopes:");
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!("MCP server '{name}' exists in multiple scopes:");
+            fuigo_tty_utils::cli_eprintln!(
                 "  user: {}",
                 display_user_fuigo_path(fuigo_config::USER_CONFIG_FILENAME)
             );
-            eprintln!("  project: {}", project_path.display());
-            eprintln!("Specify which one to remove, e.g.: fuigo mcp remove {name} --scope project");
+            fuigo_tty_utils::cli_eprintln!("  project: {}", project_path.display());
+            fuigo_tty_utils::cli_eprintln!("Specify which one to remove, e.g.: fuigo mcp remove {name} --scope project");
             std::process::exit(1);
         }
     };
@@ -679,19 +713,19 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
     let existed = delete_mcp_server_config_at(&path, name).await?;
     if !existed {
         // Race guard: the entry vanished between the existence check and the delete.
-        eprintln!("No MCP server named '{name}' in {} config", scope.label());
+        fuigo_tty_utils::cli_eprintln!("No MCP server named '{name}' in {} config", scope.label());
         std::process::exit(1);
     }
 
-    println!("Removed MCP server '{name}' from {} config", scope.label());
-    println!("File modified: {}", scope_display(scope, &path));
+    fuigo_tty_utils::cli_println!("Removed MCP server '{name}' from {} config", scope.label());
+    fuigo_tty_utils::cli_println!("File modified: {}", scope_display(scope, &path));
 
     // A scoped delete can leave the name defined in the other scope or an ancestor .fuigo/config.toml, where it still resolves for sessions
     let still_user_defined = mcp_server_defined_at(&user_config_path(), name);
     if let Some((survivor_scope, remaining)) =
         surviving_definition(still_user_defined, find_project_site())
     {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "note: '{name}' is still defined in {}",
             scope_display(survivor_scope, &remaining)
         );
@@ -707,15 +741,15 @@ async fn run_doctor(json: bool, name: Option<String>) -> Result<()> {
     if let Some(ref filter) = name
         && report.servers.is_empty()
     {
-        eprintln!("MCP server '{}' not found.", filter);
+        fuigo_tty_utils::cli_eprintln!("MCP server '{}' not found.", filter);
         if !report.all_server_names.is_empty() {
-            eprintln!("Available servers: {}", report.all_server_names.join(", "));
+            fuigo_tty_utils::cli_eprintln!("Available servers: {}", report.all_server_names.join(", "));
         }
         std::process::exit(1);
     }
 
     if json {
-        println!(
+        fuigo_tty_utils::cli_println!(
             "{}",
             serde_json::to_string_pretty(&report).unwrap_or_default()
         );

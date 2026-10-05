@@ -1661,9 +1661,12 @@ async fn a_server_that_publishes_is_not_second_guessed_with_a_pull() {
         let text = format!("const y = {round};\n");
         std::fs::write(&file, &text).unwrap();
         mgr.lock().await.notify_file_changed(&file, &text);
-        let summary = drain_lsp_diagnostics(&mgr, std::time::Duration::from_secs(2)).await;
+        // The push arrives on the mock's own schedule; a single fixed-deadline
+        // drain flaked on a loaded host, so poll drains up to the suite deadline.
+        let summary =
+            drain_until_reported(&mgr, "the check that only the push channel runs").await;
         assert!(
-            summary.is_some_and(|s| s.text.contains("the check that only the push channel runs")),
+            summary.contains("the check that only the push channel runs"),
             "round {round}: the pushed report is what the reader gets"
         );
     }
@@ -2272,6 +2275,91 @@ fn read_json(path: &Path) -> serde_json::Value {
     let text =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}\n{text}", path.display()))
+}
+
+/// The file-watch mock's `dump` must never show a reader a file it has not
+/// finished: the test below finds each dump by polling for the file's existence
+/// and parses it at once.
+///
+/// The writer is held at the exact point the flake came through — its output
+/// is open and nothing has been written yet — and the destination is checked
+/// there. With a plain `open(dest, "w")` the destination exists and is empty at
+/// that point, which is the "EOF while parsing" the loaded gate runs reported.
+#[test]
+fn dump_never_shows_a_reader_a_partial_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("dump_probe.py");
+    let probe = r#"
+import time
+_real_dump = json.dump
+
+def _held_dump(obj, f):
+    # `dump` has opened its output and written nothing: tell the test, then
+    # stay here until it has looked.
+    open(os.path.join(HERE, "writing"), "w").close()
+    while not os.path.exists(os.path.join(HERE, "go")):
+        time.sleep(0.005)
+    _real_dump(obj, f)
+
+json.dump = _held_dump
+dump("out.json", {"answer": 42})
+"#;
+    std::fs::write(&script, [ATOMIC_DUMP_PY, probe].concat()).unwrap();
+    /// Kills and reaps the probe on every way out of the test, so a failed assertion cannot leave it polling for `go`.
+    struct Probe(std::process::Child);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    #[allow(clippy::disallowed_methods)] // test probe; `Probe` kills and reaps it on every exit
+    let mut probe = Probe(
+        std::process::Command::new("python3")
+            .arg("-u")
+            .arg(&script)
+            .spawn()
+            .expect("spawn python3"),
+    );
+
+    let out = dir.path().join("out.json");
+    let writing = dir.path().join("writing");
+    // The writer stays parked until `go` exists, so nothing here races it.
+    // The deadline only turns a python that never gets there into a failure.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !writing.exists() {
+        if let Some(status) = probe.0.try_wait().unwrap() {
+            panic!("the probe exited ({status}) before it started writing");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe never started writing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let seen_mid_write = out.exists();
+    std::fs::write(dir.path().join("go"), "").unwrap();
+    let status = loop {
+        if let Some(status) = probe.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe never finished its dump after being released"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert!(status.success(), "the probe failed: {status}");
+
+    assert!(
+        !seen_mid_write,
+        "the dump was visible while its writer had written nothing: a reader polling for it parses an empty file"
+    );
+    assert_eq!(read_json(&out), serde_json::json!({"answer": 42}));
+    assert!(
+        !dir.path().join("out.json.part").exists(),
+        "the staging file was renamed into place, not left behind"
+    );
 }
 
 /// The handshake that stops Roslyn from creating a FileSystemWatcher per

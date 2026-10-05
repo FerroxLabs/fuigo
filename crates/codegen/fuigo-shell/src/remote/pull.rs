@@ -196,7 +196,8 @@ pub(crate) mod hydrate {
         use std::io::Write;
 
         let path = dir.join(UPDATES_FILE);
-        let file = std::fs::File::create(&path).map_err(|e| io_err(&path, e))?;
+        // Pulled session files are owner-only like local ones (P150, S14).
+        let file = fuigo_config::create_file_owner_only(&path).map_err(|e| io_err(&path, e))?;
         let mut w = std::io::BufWriter::new(file);
 
         for msg in messages {
@@ -204,9 +205,20 @@ pub(crate) mod hydrate {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            if is_compaction_checkpoint(&parsed) {
+                if let Some(line) = restore_checkpoint(dir, &parsed) {
+                    let _ = w.write_all(line.as_bytes());
+                    let _ = w.write_all(b"\n");
+                }
+                continue;
+            }
             if !is_session_update(&parsed) {
                 continue;
             }
+            let parsed = match sanitize_pulled_marker(parsed) {
+                Some(p) => p,
+                None => continue,
+            };
             if let Some(line) = to_envelope_line(&parsed) {
                 let _ = w.write_all(line.as_bytes());
                 let _ = w.write_all(b"\n");
@@ -217,8 +229,8 @@ pub(crate) mod hydrate {
     }
 
     fn write_remote_origin_marker(dir: &Path) {
-        let _ = std::fs::write(
-            dir.join(".remote_origin"),
+        let _ = fuigo_config::write_file_owner_only(
+            &dir.join(".remote_origin"),
             format!("pulled_at={}\n", chrono::Utc::now().to_rfc3339()),
         );
     }
@@ -231,6 +243,79 @@ pub(crate) mod hydrate {
             .get("method")
             .and_then(|v| v.as_str())
             .is_some_and(|m| REPLAYABLE_METHODS.contains(&m))
+    }
+
+    fn is_compaction_checkpoint(json_rpc: &serde_json::Value) -> bool {
+        json_rpc.get("method").and_then(|v| v.as_str())
+            == Some(crate::session::export::COMPACTION_CHECKPOINT_METHOD)
+    }
+
+    /// A pulled `_fuigo/session/update` compaction marker names a file inside the session dir. The remote is not
+    /// trusted: with a plain-token id the path is rewritten to `compaction_checkpoints/<id>.json`; any other marker
+    /// (a path, dots, an absolute path as id) is dropped so nothing outside the session dir is ever named.
+    fn sanitize_pulled_marker(mut json_rpc: serde_json::Value) -> Option<serde_json::Value> {
+        use crate::extensions::notification::{SessionNotification, SessionUpdate};
+        if json_rpc.get("method").and_then(|v| v.as_str()) != Some("_fuigo/session/update") {
+            return Some(json_rpc);
+        }
+        let Some(params) = json_rpc.get("params") else {
+            return Some(json_rpc);
+        };
+        let Ok(mut note) = serde_json::from_value::<SessionNotification>(params.clone()) else {
+            return Some(json_rpc);
+        };
+        let SessionUpdate::CompactionCheckpoint(info) = &mut note.update else {
+            return Some(json_rpc);
+        };
+        if !is_safe_checkpoint_id(&info.checkpoint_id) {
+            tracing::warn!("Pull: dropping a compaction marker with an unsafe checkpoint id");
+            return None;
+        }
+        info.checkpoint_file = format!("compaction_checkpoints/{}.json", info.checkpoint_id);
+        json_rpc["params"] = serde_json::to_value(&note).ok()?;
+        Some(json_rpc)
+    }
+
+    /// A checkpoint id becomes a file name, so only a plain token is accepted; anything else (a path, dots) is refused.
+    fn is_safe_checkpoint_id(id: &str) -> bool {
+        !id.is_empty()
+            && id.len() <= 128
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    /// Write the uploaded checkpoint file under `compaction_checkpoints/` and return the `updates.jsonl` line for its
+    /// marker, with the marker's file path rewritten to the local file (the remote path is never trusted). A malformed
+    /// or unsafe message yields `None`: the pull continues and that compaction degrades to the summary-less resume.
+    fn restore_checkpoint(dir: &Path, json_rpc: &serde_json::Value) -> Option<String> {
+        use crate::extensions::notification::{
+            CompactionCheckpointFile, SessionNotification, SessionUpdate,
+        };
+        let params = json_rpc.get("params")?;
+        let file: CompactionCheckpointFile =
+            serde_json::from_value(params.get("checkpoint")?.clone()).ok()?;
+        let mut marker: SessionNotification =
+            serde_json::from_value(params.get("marker")?.clone()).ok()?;
+        let SessionUpdate::CompactionCheckpoint(info) = &mut marker.update else {
+            return None;
+        };
+        if !is_safe_checkpoint_id(&file.checkpoint_id) || info.checkpoint_id != file.checkpoint_id {
+            tracing::warn!("Pull: ignoring a compaction checkpoint with an unsafe or mismatched id");
+            return None;
+        }
+        let rel = format!("compaction_checkpoints/{}.json", file.checkpoint_id);
+        let sub = dir.join("compaction_checkpoints");
+        crate::util::fuigo_home::create_dir_all_owner_only(&sub).ok()?;
+        let bytes = serde_json::to_vec_pretty(&file).ok()?;
+        // Owner-only like every session file (P120): the summary is conversation text.
+        crate::session::storage::owner_only::write(&dir.join(&rel), bytes).ok()?;
+        info.checkpoint_file = rel;
+        let marker = serde_json::to_value(&marker).ok()?;
+        serde_json::to_string(&serde_json::json!({
+            "timestamp": 0u64,
+            "method": "_fuigo/session/update",
+            "params": marker,
+        }))
+        .ok()
     }
 
     fn to_envelope_line(json_rpc: &serde_json::Value) -> Option<String> {
@@ -252,7 +337,7 @@ pub(crate) mod hydrate {
     }
 
     fn write_file(path: &Path, data: &[u8]) -> Result<(), BackendError> {
-        std::fs::write(path, data).map_err(|e| io_err(path, e))
+        fuigo_config::write_file_owner_only(path, data).map_err(|e| io_err(path, e))
     }
 
     fn remote_title_is_manual(meta: Option<&serde_json::Value>) -> bool {
@@ -272,6 +357,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn hydrated_summary_stamps_worktree_identity_for_worktree_cwd() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let home = tempfile::TempDir::new().unwrap();
         let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
         let cwd = home.path().join("worktrees").join("fuigo").join("fix-bug");
@@ -702,5 +790,172 @@ mod tests {
             summary.manual_title_opt().as_deref(),
             Some(expected.as_str())
         );
+    }
+
+    fn checkpoint_response(messages: Vec<LoadedMessage>) -> crate::remote::client::LoadDataResponse {
+        crate::remote::client::LoadDataResponse {
+            messages: Some(messages),
+            session: Some(crate::remote::client::SessionInfo {
+                session_id: "cp-pull".into(),
+                title: None,
+                cwd: Some("/tmp".into()),
+                status: None,
+                created_at: None,
+                updated_at: None,
+                metadata: None,
+            }),
+        }
+    }
+
+    fn acp_msg(user: bool, text: &str) -> LoadedMessage {
+        use agent_client_protocol::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text.to_string())));
+        let update = if user { SessionUpdate::UserMessageChunk(chunk) } else { SessionUpdate::AgentMessageChunk(chunk) };
+        let n = agent_client_protocol::SessionNotification::new(agent_client_protocol::SessionId::new("cp-pull"), update);
+        LoadedMessage { id: "x".into(), content: crate::session::export::ExportedMessage::from_notification(&n).content, timestamp: None }
+    }
+
+    fn checkpoint_msg(id: &str, text: &str) -> LoadedMessage {
+        let (marker, file) = crate::session::export::checkpoint_upload_tests::marker_and_file(id, text);
+        let exported = crate::session::export::ExportedMessage::compaction_checkpoint(&marker, &file).unwrap();
+        LoadedMessage { id: "c".into(), content: exported.content, timestamp: None }
+    }
+
+    fn chat_texts(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("chat_history.jsonl")).unwrap()
+    }
+
+    #[test]
+    fn pulled_compacted_session_resumes_with_its_summary() {
+        let data = checkpoint_response(vec![
+            acp_msg(true, "old question"),
+            acp_msg(false, "old answer"),
+            checkpoint_msg("11111111-1111-1111-1111-111111111111", "SUMMARY-OF-OLD-WORK"),
+            acp_msg(true, "new question"),
+            acp_msg(false, "new answer"),
+        ]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        let chat = chat_texts(&dir);
+        assert!(chat.contains("SUMMARY-OF-OLD-WORK"), "summary missing: {chat}");
+        assert!(!chat.contains("old question"), "pre-compaction turns must be replaced by the summary");
+        assert!(chat.contains("new question") && chat.contains("new answer"));
+        assert!(dir.join("compaction_checkpoints/11111111-1111-1111-1111-111111111111.json").is_file());
+    }
+
+    /// P132: the restored checkpoint holds the compaction summary (conversation text), so it is owner-only like every
+    /// other session file, including when an older, looser file is already there.
+    #[cfg(unix)]
+    #[test]
+    fn pulled_checkpoint_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let id = "33333333-3333-3333-3333-333333333333";
+        let data = checkpoint_response(vec![acp_msg(true, "q"), checkpoint_msg(id, "SUMMARY-PRIVATE")]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        let file = dir.join(format!("compaction_checkpoints/{id}.json"));
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600, "pulled checkpoint file must be 0600");
+        // A pull over an existing loose file tightens it.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        assert_eq!(mode(&file), 0o600, "an existing loose checkpoint file must be tightened");
+    }
+
+    #[test]
+    fn pulled_session_without_checkpoint_is_unchanged() {
+        let data = checkpoint_response(vec![acp_msg(true, "q"), acp_msg(false, "a")]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        assert!(chat_texts(&dir).contains('q'));
+        assert!(!dir.join("compaction_checkpoints").exists());
+    }
+
+    #[test]
+    fn hostile_checkpoint_id_cannot_escape_the_session_dir() {
+        let data = checkpoint_response(vec![
+            acp_msg(true, "q"),
+            checkpoint_msg("../../escaped", "SUMMARY"),
+            acp_msg(true, "after"),
+        ]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("a/b/s");
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        assert!(!tmp.path().join("a/escaped.json").exists());
+        assert!(!tmp.path().join("escaped.json").exists());
+        let entries: Vec<_> = walk(tmp.path());
+        assert!(entries.iter().all(|p| p.starts_with(&dir)), "files outside session dir: {entries:?}");
+    }
+
+    fn walk(p: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(p).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() { out.extend(walk(&path)); } else { out.push(path); }
+        }
+        out
+    }
+
+    #[test]
+    fn malformed_checkpoint_message_is_skipped_not_fatal() {
+        let bad = LoadedMessage { id: "c".into(), content: r#"{"method":"_fuigo/compaction_checkpoint","params":{"nope":1}}"#.into(), timestamp: None };
+        let data = checkpoint_response(vec![acp_msg(true, "q"), bad, acp_msg(false, "a")]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        assert!(chat_texts(&dir).contains('a'));
+    }
+
+    #[test]
+    fn remote_marker_file_path_is_never_trusted() {
+        let id = "22222222-2222-2222-2222-222222222222";
+        let mut msg = checkpoint_msg(id, "SUMMARY-X");
+        msg.content = msg.content.replace(&format!("compaction_checkpoints/{id}.json"), "../../../outside.json");
+        assert!(msg.content.contains("../../../outside.json"));
+        let data = checkpoint_response(vec![acp_msg(true, "q"), msg, acp_msg(true, "after")]);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("a/b/s");
+        super::hydrate::write_to_dir(&dir, &data).unwrap();
+        assert!(chat_texts(&dir).contains("SUMMARY-X"));
+        let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
+        assert!(!updates.contains("outside.json"), "marker kept the remote path: {updates}");
+    }
+
+    fn marker_update_msg(id: &str, file: &str) -> LoadedMessage {
+        let (mut marker, _) = crate::session::export::checkpoint_upload_tests::marker_and_file(id, "x");
+        if let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) = &mut marker.update {
+            info.checkpoint_file = file.into();
+        }
+        let m = crate::session::export::ExportedMessage::from_fuigo_notification(&marker);
+        LoadedMessage { id: "m".into(), content: m.content, timestamp: None }
+    }
+
+    #[test]
+    fn pulled_session_update_marker_path_is_rewritten_to_the_local_file() {
+        let id = "33333333-3333-3333-3333-333333333333";
+        for hostile in ["../../../etc/passwd", "/etc/passwd", "C:\\x\\y.json"] {
+            let data = checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(id, hostile)]);
+            let tmp = tempfile::TempDir::new().unwrap();
+            let dir = tmp.path().join("a/b/s");
+            super::hydrate::write_to_dir(&dir, &data).unwrap();
+            let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
+            assert!(!updates.contains(hostile.replace('\\', "\\\\").as_str()) && !updates.contains("passwd"), "{hostile}: {updates}");
+            assert!(updates.contains(&format!("compaction_checkpoints/{id}.json")), "{updates}");
+        }
+    }
+
+    #[test]
+    fn pulled_session_update_marker_with_unsafe_id_is_dropped() {
+        for bad in ["../../escape", "/abs/path", "a/b", ""] {
+            let data = checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(bad, "compaction_checkpoints/x.json")]);
+            let tmp = tempfile::TempDir::new().unwrap();
+            let dir = tmp.path().join("s");
+            super::hydrate::write_to_dir(&dir, &data).unwrap();
+            let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
+            assert!(!updates.contains("compaction_checkpoint"), "{bad:?} kept: {updates}");
+        }
     }
 }

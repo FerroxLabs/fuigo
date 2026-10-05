@@ -203,10 +203,7 @@ async fn drain_interjection_expands_skill_slash_reference() {
                 ..Default::default()
             };
             actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
+                .tool_bridge_handle()
                 .seed_skill_discovery(
                     Some(std::path::PathBuf::from("/tmp")),
                     None,
@@ -633,10 +630,7 @@ async fn promoted_parent_message_resolves_slashes_through_the_model_authored_pat
                 ..Default::default()
             };
             actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
+                .tool_bridge_handle()
                 .seed_skill_discovery(
                     Some(std::path::PathBuf::from("/tmp")),
                     None,

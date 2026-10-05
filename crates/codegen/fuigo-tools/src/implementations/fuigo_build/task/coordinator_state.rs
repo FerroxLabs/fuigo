@@ -133,12 +133,16 @@ pub struct ChildCompletion<D> {
 /// Associated future types intentionally carry no unconditional `Send` bound.
 /// A local runner may return non-`Send` futures, while a multithreaded runner
 /// may return `Send` futures.
-pub trait ChildRunner: 'static {
+///
+/// Neither the runner nor the futures it returns need be `'static` (P122): the coordinator drives them in place
+/// (`FuturesUnordered`), never spawning them, so a runner may borrow, for instance the shell's lifetime-branded
+/// `LocalRef`. The futures must not borrow from `&self` itself.
+pub trait ChildRunner {
     type Control: ChildControl;
     type CompletionData: Default + 'static;
-    type RunFuture: Future<Output = ChildRunOutput<Self::CompletionData>> + 'static;
-    type ValidateFuture: Future<Output = SubagentValidateTypeOutcome> + 'static;
-    type DescribeFuture: Future<Output = SubagentDescribeOutcome> + 'static;
+    type RunFuture: Future<Output = ChildRunOutput<Self::CompletionData>>;
+    type ValidateFuture: Future<Output = SubagentValidateTypeOutcome>;
+    type DescribeFuture: Future<Output = SubagentDescribeOutcome>;
 
     fn run(&self, request: ChildRunRequest<Self::Control>) -> Self::RunFuture;
 

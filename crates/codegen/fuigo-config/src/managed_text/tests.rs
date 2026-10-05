@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use super::transaction::{TransactionObserver, TransactionPhase};
@@ -227,15 +227,19 @@ fn invalid_inputs_and_all_marker_shapes_are_refused() {
         vec![b'x'; super::source::MAX_CONFIG_BYTES as usize + 1],
     )
     .unwrap();
-    let nul = temp.path().join("nul");
+    // Not named `nul`: on Windows that is the NUL device in every directory,
+    // so no such file is ever created and the plan fails on the device instead.
+    let nul = temp.path().join("nul-byte");
     fs::write(&nul, b"a\0b").unwrap();
     let non_utf8 = temp.path().join("non-utf8");
     fs::write(&non_utf8, [0xff]).unwrap();
     for path in [&oversize, &nul, &non_utf8] {
-        assert!(matches!(
-            ManagedConfig::plan(request(path, &[("item", "body")])),
-            Err(ManagedConfigError::UnsafePath { .. })
-        ));
+        let refused = ManagedConfig::plan(request(path, &[("item", "body")])).map(|_| ());
+        assert!(
+            matches!(refused, Err(ManagedConfigError::UnsafePath { .. })),
+            "{}: {refused:?}",
+            path.display()
+        );
     }
 
     let cases = [
@@ -566,15 +570,26 @@ fn failed_validator_cleans_reserved_backup_and_temp() {
 
 #[test]
 fn transaction_lock_blocks_second_apply_then_stale_revalidation_wins() {
+    // Every wait on the applies is bounded and a thread that ends early
+    // disconnects its channel, so a first apply that never reaches the lock
+    // (on Windows it once failed to open the parent directory, long before)
+    // fails this test at once instead of leaving it waiting forever on a
+    // barrier. The threads are joined only after both results are in.
+    const WAIT: Duration = Duration::from_secs(60);
+
     struct BlockAfterLock {
-        reached: Arc<Barrier>,
-        release: Arc<Barrier>,
+        reached: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
     }
     impl TransactionObserver for BlockAfterLock {
         fn phase(&self, phase: TransactionPhase, _: &ManagedConfigPlan) -> io::Result<()> {
             if phase == TransactionPhase::AfterLock {
-                self.reached.wait();
-                self.release.wait();
+                self.reached.send(()).map_err(io::Error::other)?;
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(WAIT)
+                    .map_err(io::Error::other)?;
             }
             Ok(())
         }
@@ -585,33 +600,219 @@ fn transaction_lock_blocks_second_apply_then_stale_revalidation_wins() {
     fs::write(&path, "original\n").unwrap();
     let first = ManagedConfig::plan(request(&path, &[("one", "one")])).unwrap();
     let second = ManagedConfig::plan(request(&path, &[("two", "two")])).unwrap();
-    let reached = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
+    let (reached, reached_here) = mpsc::channel();
+    let (release, release_there) = mpsc::channel();
     let observer = BlockAfterLock {
-        reached: reached.clone(),
-        release: release.clone(),
+        reached,
+        release: Mutex::new(release_there),
     };
-    let first_thread =
-        std::thread::spawn(move || ManagedConfig::apply_with_observer(first, &observer));
-    reached.wait();
-
-    let result = Arc::new(Mutex::new(None));
-    let result_thread = result.clone();
-    let second_thread = std::thread::spawn(move || {
-        *result_thread.lock().unwrap() = Some(ManagedConfig::apply(second));
+    let (first_result, first_result_here) = mpsc::channel();
+    let first_thread = std::thread::spawn(move || {
+        let _ = first_result.send(ManagedConfig::apply_with_observer(first, &observer));
     });
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(
-        result.lock().unwrap().is_none(),
-        "second apply must block on lock"
-    );
-    release.wait();
-    assert!(first_thread.join().unwrap().is_ok());
+    match reached_here.recv_timeout(WAIT) {
+        Ok(()) => {}
+        // The observer (and its sender) is gone: the apply returned early, and
+        // its result is already in the channel.
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+            "first apply ended before it held the lock: {:?}",
+            first_result_here.recv_timeout(WAIT)
+        ),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("first apply did not reach the lock within {WAIT:?}")
+        }
+    }
+
+    let (started, started_here) = mpsc::channel();
+    let (result, result_here) = mpsc::channel();
+    let second_thread = std::thread::spawn(move || {
+        let _ = started.send(());
+        let _ = result.send(ManagedConfig::apply(second));
+    });
+    // The 50 ms are counted from when the second thread is running, so a
+    // slow thread start cannot stand in for a held lock.
+    started_here
+        .recv_timeout(WAIT)
+        .expect("second apply did not start");
+    match result_here.recv_timeout(Duration::from_millis(50)) {
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
+        early => panic!("second apply must block on lock, got {early:?}"),
+    }
+    release.send(()).unwrap();
+    let first_result = first_result_here
+        .recv_timeout(WAIT)
+        .expect("first apply did not finish after it was released");
+    assert!(first_result.is_ok(), "{first_result:?}");
+    let second_result = result_here
+        .recv_timeout(WAIT)
+        .expect("second apply did not finish after the lock was released");
+    first_thread.join().unwrap();
     second_thread.join().unwrap();
+    assert!(
+        matches!(second_result, Err(ManagedConfigError::StalePlan(_))),
+        "{second_result:?}"
+    );
+}
+
+/// Other writers create entries beside the file and in the directories above
+/// it all the time (the transaction's own backup and temp files among them).
+/// That is not a changed parent: the plan stays valid and applies.
+#[test]
+fn new_entries_in_the_parent_directories_do_not_change_the_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("outer/inner/config.rc");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "original\n").unwrap();
+    let plan = ManagedConfig::plan(request(&path, &[("item", "body")])).unwrap();
+
+    // A directory's modified time moves with each of these.
+    fs::write(temp.path().join("beside-outer"), "x").unwrap();
+    fs::create_dir(temp.path().join("outer/beside-inner")).unwrap();
+    fs::write(temp.path().join("outer/inner/beside-config"), "x").unwrap();
+    fs::remove_file(temp.path().join("outer/inner/beside-config")).unwrap();
+
+    ManagedConfig::verify_unchanged(&plan).unwrap();
+    let outcome = ManagedConfig::apply(plan).unwrap();
+    assert_eq!(outcome.status, ManagedConfigStatus::Applied);
+    assert!(fs::read_to_string(&path).unwrap().starts_with("original\n"));
+}
+
+fn set_directory_modified(directory: &Path, modified: std::time::SystemTime) {
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(directory)
+            .unwrap()
+    };
+    #[cfg(not(windows))]
+    let handle = fs::File::open(directory).unwrap();
+    handle.set_modified(modified).unwrap();
+}
+
+/// The plan names the file it read, not one that merely looks the same: a
+/// replacement with the same bytes, length and modified time is stale, and so
+/// is a parent directory replaced by an empty one made in the same instant.
+#[test]
+fn a_look_alike_replacement_of_the_file_or_its_parent_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("parent/config.rc");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "original\n").unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let plan = ManagedConfig::plan(request(&path, &[("item", "body")])).unwrap();
+
+    let twin = temp.path().join("parent/twin");
+    fs::write(&twin, "original\n").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&twin)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    // The original stays on disk (renamed), so its identity cannot be reused.
+    fs::rename(&path, temp.path().join("parent/moved-away")).unwrap();
+    fs::rename(&twin, &path).unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(fs::read(&path).unwrap(), b"original\n");
     assert!(matches!(
-        result.lock().unwrap().take().unwrap(),
+        ManagedConfig::verify_unchanged(&plan),
         Err(ManagedConfigError::StalePlan(_))
     ));
+    assert!(matches!(
+        ManagedConfig::apply(plan),
+        Err(ManagedConfigError::StalePlan(_))
+    ));
+    assert_eq!(fs::read(&path).unwrap(), b"original\n");
+
+    // The parent: a missing target in a directory that is swapped for a twin.
+    let missing = temp.path().join("swapped/config.rc");
+    let parent = missing.parent().unwrap();
+    fs::create_dir(parent).unwrap();
+    let parent_modified = fs::metadata(parent).unwrap().modified().unwrap();
+    let plan = ManagedConfig::plan(request(&missing, &[("item", "body")])).unwrap();
+    fs::rename(parent, temp.path().join("swapped-away")).unwrap();
+    fs::create_dir(parent).unwrap();
+    set_directory_modified(parent, parent_modified);
+    assert_eq!(
+        fs::metadata(parent).unwrap().modified().unwrap(),
+        parent_modified
+    );
+    assert!(matches!(
+        ManagedConfig::verify_unchanged(&plan),
+        Err(ManagedConfigError::ParentChanged(_))
+    ));
+    assert!(matches!(
+        ManagedConfig::apply(plan),
+        Err(ManagedConfigError::ParentChanged(_))
+    ));
+    assert!(!missing.exists());
+}
+
+/// `nul` (like `con`, `aux`, ...) names a device in every directory. Such a
+/// path is refused at plan time; nothing is planned for a device.
+#[cfg(windows)]
+#[test]
+fn a_reserved_device_name_is_refused_at_plan_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let refused = ManagedConfig::plan(request(&temp.path().join("nul"), &[("item", "body")]));
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+/// Windows has two kinds of directory link. A junction needs no privilege to
+/// create, so it is the one this test can always make; both are refused as a
+/// parent the same way a Unix symlink is.
+#[cfg(windows)]
+#[test]
+fn a_junction_parent_is_resolved_at_plan_time_and_refused_when_swapped_in() {
+    use super::source::windows_tests::junction;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(temp.path()).unwrap();
+    let real_parent = root.join("real-parent");
+    fs::create_dir(&real_parent).unwrap();
+    let linked_parent = root.join("linked-parent");
+    junction(&linked_parent, &real_parent);
+    assert!(
+        fs::symlink_metadata(&linked_parent)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    // Planned through the junction: the plan is for the real directory.
+    let plan =
+        ManagedConfig::plan(request(&linked_parent.join("rc"), &[("item", "body")])).unwrap();
+    assert_eq!(plan.target_path().parent(), Some(real_parent.as_path()));
+    ManagedConfig::apply(plan).unwrap();
+    assert!(real_parent.join("rc").exists());
+
+    // The captured chain refuses a junction outright.
+    assert!(matches!(
+        super::source::ParentPlan::capture(&linked_parent),
+        Err(ManagedConfigError::UnsafePath { .. })
+    ));
+
+    // Planned on a real directory that is then swapped for a junction to the
+    // very same directory: same files behind the path, still a changed parent.
+    let path = root.join("swap/config.rc");
+    fs::create_dir(path.parent().unwrap()).unwrap();
+    fs::write(&path, "original\n").unwrap();
+    let plan = ManagedConfig::plan(request(&path, &[("item", "body")])).unwrap();
+    let moved = root.join("swap-moved");
+    fs::rename(path.parent().unwrap(), &moved).unwrap();
+    junction(path.parent().unwrap(), &moved);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
+    assert!(matches!(
+        ManagedConfig::apply(plan),
+        Err(ManagedConfigError::ParentChanged(_))
+    ));
+    assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
 }
 
 #[test]
@@ -622,11 +823,18 @@ fn validator_timeout_is_bounded() {
     let mut request = request(&path, &[("item", "body")]);
     request.validator = Some(SyntaxValidator {
         program: "/bin/sh".into(),
-        args: vec!["-c".into(), "sleep 5".into()],
+        args: vec!["-c".into(), "sleep 60".into()],
         timeout: Duration::from_millis(20),
     });
     let started = Instant::now();
     assert!(ManagedConfig::apply(ManagedConfig::plan(request).unwrap()).is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // "Bounded" means cut off at the timeout rather than waited out: the validator would run 60 s,
+    // so any bound below that discriminates. 1 s (against a 5 s sleep) failed on a loaded host,
+    // where spawning `sh` and tearing its group down alone can take longer.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "validator was not cut off: {elapsed:?}"
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
 }

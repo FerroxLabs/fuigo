@@ -26,9 +26,7 @@ impl SessionActor {
         // Read the current TodoState (no mutation).
         let (entries, stale_count) = {
             let res = self
-                .agent
-                .borrow()
-                .tool_bridge()
+                .tool_bridge_handle()
                 .read_resource::<State<TodoState>>()
                 .await;
             let Some(state) = res else {
@@ -411,7 +409,15 @@ impl SessionActor {
             if !active_goal || !succeeded || state.as_ref().is_ok_and(|s| crate::session::execution_state::should_terminalize(active_goal, succeeded, s.phase)) {
                 let terminal = async {
                     execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await?;
-                    execution.terminal(succeeded).await
+                    // P89: a cancelled turn whose future was dropped ends here. Only the ACP stop is
+                    // known, and `--max-turns` maps to `Cancelled` too; the record's own counters
+                    // keep a spent `--max-turns` from reading as an interruption.
+                    let end = match mapped {
+                        Ok(acp::StopReason::EndTurn) => crate::session::execution_state::TurnEnd::Succeeded,
+                        Ok(_) => crate::session::execution_state::TurnEnd::Interrupted,
+                        Err(err) => super::turn::turn_end_of_error(err),
+                    };
+                    execution.terminal_after(end).await
                 }.await;
                 match terminal {
                     Ok(receipt) => {
@@ -422,8 +428,6 @@ impl SessionActor {
                 }
             }
         }
-        let (stop_reason, agent_result, error_kind) =
-            crate::sampling::error::prompt_complete_fields(mapped);
         if let Some(t) = cancel_trigger {
             extra.insert("cancelTrigger".to_string(), serde_json::json!(t));
         }
@@ -434,15 +438,12 @@ impl SessionActor {
             extra.insert("cancellationContext".to_string(), ctx);
         }
         let extra_meta = (!extra.is_empty()).then_some(extra);
+        // P119: the helper stamps the typed verdicts from the error as it stands now, before credentials are replaced in the text
+        let update = crate::session::turn_completion::turn_completed_for_result(
+            prompt_id, mapped, usage, elapsed_ms,
+        );
         self.send_fuigo_notification_with_extra_meta(
-            crate::session::turn_completion::build_turn_completed(
-                prompt_id,
-                stop_reason,
-                agent_result,
-                error_kind,
-                usage,
-                elapsed_ms,
-            ),
+            update,
             extra_meta,
             crate::session::storage::jsonl::AppendDurability::Durable,
         )
@@ -538,6 +539,9 @@ impl SessionActor {
     }
 
     pub(super) async fn apply_infra_pause_after_turn_err(&self, message: String) -> bool {
+        // P70b display sink: the pause text goes out as an agent message and into the goal snapshot. The turn error
+        // was classified (infrastructure or not) by the caller; from here on the text is only shown and stored.
+        let message = fuigo_telemetry::sent_credentials::scrub_owned(message);
         let slash_detail = match message.strip_prefix("Turn failed: ") {
             Some(rest) => rest.to_owned(),
             None => message.clone(),

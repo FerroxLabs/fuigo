@@ -66,6 +66,29 @@ pub(crate) fn human_duration(d: std::time::Duration) -> String {
     format!("{}h{}m", mins / 60, mins % 60)
 }
 
+/// The real wait for a paced delay (auth retry ladder, uncharged park pace, rate-limit waits).
+///
+/// Production: the delay itself. `cfg(test)` only: divided by [`TEST_PACE_DIVISOR`], a process-wide factor
+/// (default 1) that only fresh-process timing tests set. They then run the real ladders on a real clock in a
+/// fraction of the time, with every decision, count and budget unchanged — only the sleeps shrink.
+pub(crate) fn paced(delay: std::time::Duration) -> std::time::Duration {
+    #[cfg(test)]
+    {
+        delay / TEST_PACE_DIVISOR
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1)
+    }
+    #[cfg(not(test))]
+    {
+        delay
+    }
+}
+
+/// See [`paced`]. Never set outside a fresh child process.
+#[cfg(test)]
+pub(crate) static TEST_PACE_DIVISOR: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1);
+
 /// Decision for one post-recovery 401 (see [`AuthRetrySchedule::on_recovered_401`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthRetryDecision {

@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use fuigo_shell::agent::key_discovery::{self, Provider};
 
-use crate::provider_config_edit::{ProviderWrite, ProviderWriteOutcome, write_provider};
+use crate::provider_config_edit::{ProviderWrite, ProviderWriteOutcome, write_provider_at};
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
 
 pub struct ProviderCommand;
@@ -126,7 +126,7 @@ fn list_providers() -> String {
 ///
 /// `provider` has already been resolved by [`known_provider`], so an unknown id
 /// never reaches here.
-fn apply(provider: &Provider, model_id: &str) -> CommandResult {
+fn apply(provider: &'static Provider, model_id: &str) -> CommandResult {
     // FluxRouter is the configured endpoint, not a third party. Its key belongs
     // in the single-credential path (`auth.json` / `FUIGO_API_KEY`), which is
     // what the first-run key prompt uses. Writing it as a `model_provider`
@@ -155,22 +155,80 @@ fn apply(provider: &Provider, model_id: &str) -> CommandResult {
         ));
     };
 
-    let entry = ProviderWrite {
-        id: provider.id,
-        base_url: provider.base_url,
-        env_key,
-        api_backend: Some(provider.api_backend),
-        auth_scheme: Some(provider.auth_scheme),
-        extra_headers: provider.extra_headers,
-        models: &[model_id],
-    };
-    match write_provider(&entry) {
-        Ok(outcome) => render_outcome(provider, model_id, env_key, &user_config_path(), outcome),
-        Err(e) => CommandResult::Error(format!("Could not write config.toml: {e}")),
+    request_write(provider, model_id, env_key)
+}
+
+/// The write waits for `config.toml.lock`, so it runs as an effect off the
+/// input thread (P49); its result is reported where the command was typed.
+fn request_write(provider: &'static Provider, model_id: &str, env_key: &'static str) -> CommandResult {
+    CommandResult::Action(crate::app::actions::Action::WriteProviderConfig(
+        ProviderWriteRequest {
+            provider,
+            model_id: model_id.to_owned(),
+            env_key,
+            // Resolved now, not when the queued write runs: a relative
+            // `FUIGO_HOME` must not follow a later `/cd`.
+            config_path: absolute_config_path(user_config_path()),
+        },
+    ))
+}
+
+/// A resolved `/provider` write: everything [`apply`] checked, ready to run.
+/// Built on the input thread, run by `Effect::WriteProviderConfig` on the
+/// blocking pool.
+#[derive(Debug, Clone)]
+pub struct ProviderWriteRequest {
+    pub(crate) provider: &'static Provider,
+    pub(crate) model_id: String,
+    /// Environment VARIABLE NAME, from the provider's own list.
+    pub(crate) env_key: &'static str,
+    /// The `config.toml` to write, made absolute when the command was accepted.
+    pub(crate) config_path: PathBuf,
+}
+
+/// `path` made absolute against the current directory now (unchanged if that fails).
+pub(crate) fn absolute_config_path(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+impl ProviderWriteRequest {
+    /// Write the provider entry and the model binding, and render what the
+    /// user sees: `Ok` for a message, `Err` for an error. Blocking.
+    pub(crate) fn run(&self) -> Result<String, String> {
+        self.run_at(&self.config_path)
+    }
+
+    /// [`Self::run`] against an explicit `config.toml` (tests).
+    fn run_at(&self, config_path: &Path) -> Result<String, String> {
+        let entry = ProviderWrite {
+            id: self.provider.id,
+            base_url: self.provider.base_url,
+            env_key: self.env_key,
+            api_backend: Some(self.provider.api_backend),
+            auth_scheme: Some(self.provider.auth_scheme),
+            extra_headers: self.provider.extra_headers,
+            max_completion_tokens: self.provider.max_completion_tokens,
+            models: &[self.model_id.as_str()],
+        };
+        let rendered = match write_provider_at(config_path, &entry) {
+            Ok(outcome) => render_outcome(
+                self.provider,
+                &self.model_id,
+                self.env_key,
+                config_path,
+                outcome,
+            ),
+            Err(e) => CommandResult::Error(format!("Could not write config.toml: {e}")),
+        };
+        match rendered {
+            CommandResult::Message(m) => Ok(m),
+            CommandResult::Error(e) => Err(e),
+            other => Err(format!("unexpected /provider result: {other:?}")),
+        }
     }
 }
 
-/// The config file `write_provider` targets, for naming in messages.
+/// The config file `/provider` writes, for naming in messages.
 fn user_config_path() -> PathBuf {
     fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME)
 }
@@ -246,7 +304,9 @@ fn render_outcome(
         out.push_str(&format!(
             "Warning: Fuigo's egress guard refuses to resolve {host}, so requests \
              to this provider will fail with a resolver error. Set \
-             {ENV_ALLOW_UPSTREAM_HOSTS}=1 in the environment to lift the block.\n"
+             {ENV_ALLOW_UPSTREAM_HOSTS}=1 in the environment to lift the block; \
+             it lifts it for every connection this Fuigo process makes, \
+             telemetry hosts included.\n"
         ));
     }
     out.push_str(&format!("Restart fuigo, then `/model {model_id}`."));
@@ -573,6 +633,11 @@ mod tests {
         assert!(out.contains("api.x.ai"), "{out}");
         assert!(out.contains("FUIGO_ALLOW_UPSTREAM_HOSTS=1"), "{out}");
         assert!(out.contains("egress guard"), "{out}");
+        // P87: the hint says what the variable really unlocks (process-wide).
+        assert!(
+            out.contains("every connection this Fuigo process makes"),
+            "{out}"
+        );
     }
 
     /// F6 (negative, guard lifted): the config now works, so there is nothing
@@ -641,5 +706,54 @@ mod tests {
             fuigo_shell::session::PAGER_COMMAND_KEYS.contains(&ProviderCommand.name()),
             "/provider must be reserved, or a skill could take the name"
         );
+    }
+
+    /// P49: `/provider` no longer writes on the input thread. It returns the
+    /// resolved write as an action; nothing touches `config.toml` yet.
+    #[test]
+    fn a_valid_provider_command_returns_the_write_as_an_action() {
+        let provider = provider_named("anthropic");
+        let result = request_write(provider, "claude-x", provider.env_vars[0]);
+        let CommandResult::Action(crate::app::actions::Action::WriteProviderConfig(req)) = result
+        else {
+            panic!("expected a deferred write");
+        };
+        assert_eq!(req.provider.id, "anthropic");
+        assert_eq!(req.model_id, "claude-x");
+        assert_eq!(req.env_key, provider.env_vars[0]);
+        assert!(req.config_path.is_absolute(), "{}", req.config_path.display());
+        assert!(req.config_path.ends_with(fuigo_config::USER_CONFIG_FILENAME));
+    }
+
+    /// The destination is fixed when the command is accepted: a relative
+    /// `FUIGO_HOME` is resolved against the directory current THEN.
+    #[test]
+    fn a_relative_config_path_is_made_absolute_at_acceptance() {
+        let p = absolute_config_path(PathBuf::from(".fuigo/config.toml"));
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(p.ends_with(".fuigo/config.toml"));
+    }
+
+    /// The deferred write, run, writes the binding and renders the message the
+    /// synchronous command used to return.
+    #[test]
+    fn the_deferred_write_writes_and_renders_the_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let provider = provider_named("anthropic");
+        let req = ProviderWriteRequest {
+            provider,
+            model_id: "claude-x".into(),
+            env_key: provider.env_vars[0],
+            config_path: path.clone(),
+        };
+        let msg = req.run().expect("written");
+        assert!(msg.starts_with("Wrote [model_providers.anthropic]"), "{msg}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[model.claude-x]") || text.contains("claude-x"), "{text}");
+
+        std::fs::write(&path, "this is = = not toml").unwrap();
+        let err = req.run().expect_err("unparseable config");
+        assert!(err.contains("Nothing was written"), "{err}");
     }
 }

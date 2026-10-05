@@ -44,6 +44,7 @@
                     name: "alpha".into(),
                     display_name: None,
                     status: McpServerDisplayStatus::Initializing,
+                    status_reason: None,
                     tool_count: 0,
                     auth_required: false,
                     setup_required: false,
@@ -116,6 +117,21 @@
         let progress = app.agents[&AgentId(0)].mcp_init_progress.as_ref().unwrap();
         assert_eq!(progress.total, 3);
         assert_eq!(progress.connected, 1);
+    }
+
+    /// P152 (e2e lanes M #5 and A1): after a leader relaunch the new leader re-runs MCP init for the reloaded session.
+    /// A `total == 0` progress there means "no servers to start", not "the session is starting": it must not raise the
+    /// "Starting session…" indicator on an idle, already-running session (it stayed under a completed reply for 30 s).
+    #[test]
+    fn p152_zero_server_progress_without_a_seed_raises_no_starting_session_indicator() {
+        let mut app = make_app_with_agent("sess-1");
+        assert!(app.agents[&AgentId(0)].mcp_init_progress.is_none());
+        let _ = handle_ext_notification(&make_mcp_init_progress_notif(0, 0), &mut app);
+        let progress = app.agents[&AgentId(0)].mcp_init_progress.as_ref();
+        assert!(
+            progress.is_none_or(|p| !(p.total == 0 && p.is_visible())),
+            "a zero-server progress must not show \"Starting session…\": {progress:?}"
+        );
     }
 
     #[test]
@@ -498,6 +514,7 @@
                     name: "beta".into(),
                     display_name: None,
                     status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
+                    status_reason: None,
                     tool_count: 0,
                     auth_required: false,
                     setup_required: false,

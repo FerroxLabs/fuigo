@@ -13,9 +13,36 @@ use std::path::Path;
 /// other table in it, cleanly.
 #[must_use]
 pub(crate) fn read_config_document_for_edit(path: &Path) -> Option<toml_edit::DocumentMut> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let read = match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    };
+    match &read {
+        Ok(bytes) => config_document_for_edit(path, Ok(bytes.as_deref())),
+        Err(e) => config_document_for_edit(path, Err(e)),
+    }
+}
+
+/// [`read_config_document_for_edit`] on contents already read (by
+/// `fuigo_config::fs_atomic::edit_locked`); `path` is for messages only.
+#[must_use]
+pub(crate) fn config_document_for_edit(
+    path: &Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
+) -> Option<toml_edit::DocumentMut> {
+    let content = match current {
+        Ok(None) => String::new(),
+        Ok(Some(bytes)) => match String::from_utf8(bytes.to_vec()) {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "config.toml is not valid UTF-8; refusing to overwrite it"
+                );
+                return None;
+            }
+        },
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
@@ -52,9 +79,11 @@ pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io
 
 /// Core of [`set_hint`]; takes the path so tests can point it at a temp dir.
 ///
-/// The read and the write both happen under `fuigo_config::fs_atomic`'s
-/// `config.toml.lock`, so a concurrent writer that also takes that lock cannot
-/// read the same original and rename its own document over this change.
+/// The read-modify-write goes through `fuigo_config::fs_atomic::edit_locked`:
+/// the rename happens under `config.toml.lock` and only if the file is still the
+/// version that was read, so a concurrent writer that also takes that lock
+/// cannot have its change renamed over. The temp is filled and synced outside
+/// the lock.
 /// Writers that do not take the lock still can; see `lock_config_for_write`.
 ///
 /// The write itself is a temp-file-plus-rename rather than the `fs::write` this
@@ -66,17 +95,25 @@ fn set_hint_at(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> st
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    fuigo_config::fs_atomic::locked_read_modify_write(path, || {
-        let Some(mut doc) = read_config_document_for_edit(path) else {
-            return Ok(());
-        };
-        doc["hints"][key] = toml_edit::value(value);
-        fuigo_config::fs_atomic::write_atomically(
-            path,
-            &doc.to_string(),
-            fuigo_config::fs_atomic::replacement_mode(path, 0o600),
-        )
-    })?
+    use fuigo_config::fs_atomic::Edit;
+    let value: toml_edit::Value = value.into();
+    fuigo_config::fs_atomic::edit_locked(
+        path,
+        |bytes| {
+            fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600)
+        },
+        |current| {
+            let Some(mut doc) = config_document_for_edit(path, current) else {
+                return Ok::<_, std::io::Error>(Edit::Keep(()));
+            };
+            doc["hints"][key] = toml_edit::value(value.clone());
+            Ok(Edit::Replace {
+                contents: doc.to_string().into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(std::io::Error::from)
 }
 
 #[cfg(test)]
@@ -194,7 +231,7 @@ mod tests {
     /// write drops the earlier hint.
     #[test]
     fn concurrent_set_hint_at_writes_do_not_lose_each_other() {
-        let dir = tempdir().unwrap();
+        let dir = crate::test_util::memory_backed_tempdir();
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
         let keys: Vec<String> = (0..8).map(|n| format!("hint_{n}")).collect();
@@ -276,3 +313,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "config_toml_edit_p61_tests.rs"]
+mod p61_tests;

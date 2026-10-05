@@ -1,0 +1,34 @@
+Independent security/correctness audit, read-only (do not build, do not run cargo, do not modify files).
+Repo: this worktree (/Volumes/Mando/WaylandBots/Fuigo/wt-p90), branch codex/fuigo-p90. Diff to audit: fc3ccb94..HEAD
+(7ba7a187 = original Codex build-lane output, 75ea29ef = reviewer fixes on top). Rust, crates/codegen/.
+Packet P90 hardens subscription (ChatGPT / xAI OAuth) sign-in. Claims to verify:
+F2 (crates/codegen/fuigo-shell/src/auth/subscription/flow.rs `callback`, `read_callback`): a callback request with
+ wrong/missing/duplicate state, or malformed / non-GET / wrong-path / unfinished, is answered (400/404) and ignored,
+ never aborts the login and is never counted; only this attempt's state ends the wait (code -> exchange; state but
+ error/missing code -> abort). Connections are read concurrently (32 at once, 5 s read timeout each) so a client that
+ connects and never sends a request line cannot block the real callback. Overall 600 s deadline unchanged.
+F3 (`bind_callback_listeners`): ChatGPT (redirect host `localhost`) binds 127.0.0.1:1455 and [::1]:1455; IPv6
+ EADDRNOTAVAIL / EAFNOSUPPORT -> continue IPv4-only; EADDRINUSE or any other IPv6 error, or any IPv4 failure -> abort.
+ xAI (redirect 127.0.0.1) binds IPv4 only.
+F5 (storage.rs `logout_all`, fuigo-pager-bin/src/main.rs plain `logout`, fuigo-pager/src/app/cli.rs help,
+ fuigo-pager/docs/user-guide/02-authentication.md): plain `fuigo logout` deletes all local subscription credentials
+ under the same cross-process lock refresh holds (no refresh can write tokens back afterwards), deletes nothing outside
+ $FUIGO_HOME/subscriptions (credentials.json + orphan .tmp* regular files), does not revoke at the provider, and the
+ help text and guide say exactly that.
+F6 (agent/config.rs `stamp_session_local_sampler_fields`, `HelperModelChoice`; config/mod.rs `ExplicitHelperModels`;
+ call sites agent_ops.rs build_summary_client, prompt_build.rs transcribe_user_images, sampler_turn.rs auto classifier;
+ util/config/resolve/auto_mode.rs): during a subscription session a DEFAULT helper model (compiled default or remote
+ settings) is replaced by the subscription config; a helper the user EXPLICITLY configured (config-file key, env var,
+ CLI flag) keeps its own route. Check provenance is right at every source and reload path, and that the explicit
+ path cannot leak the subscription bearer to another endpoint or send a paid key where none was chosen.
+Also review the tests in auth/subscription/tests.rs, storage.rs stash_tests, agent/config_tests.rs, config/tests.rs,
+fuigo-pager-bin/tests/subscription_logout.rs: do they exercise the production path, and would they fail if each fix
+were reverted?
+Find defects. For each: severity BLOCKER/HIGH/MEDIUM/LOW, file:line, a concrete scenario, and whether a test catches
+it. End with one verdict line: LAND / LAND-WITH-FOLLOWUPS / DO-NOT-LAND.
+
+ROUND 2. HEAD is now 69a98f62 (on top of 75ea29ef). Round 1 found: H1 explicit keyless helper rerouted to the gateway
+with a paid key or to the subscription; H2 image helper slug (spawn-time) paired with reloaded provenance; H3 campaign
+patches counted as explicit; M4 default helper on another subscription kept it; M5 malformed request head with the
+correct state acted on; L6 unfinished requests got no 400. 69a98f62 claims to fix all six (see its commit message):
+check each fix is correct and complete, then audit the whole diff fc3ccb94..HEAD again for anything new.

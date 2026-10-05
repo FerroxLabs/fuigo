@@ -15,6 +15,11 @@ pub enum Event {
         schema_version: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         redirect_kind: Option<RedirectKind>,
+        /// The prompt this turn runs. Crash recovery names the lost turn by it: the session summary's
+        /// `request_id` is set when a prompt is *received*, so with a prompt queued behind a running turn it
+        /// names the queued prompt, not the one that was running.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     PhaseChanged {
         phase: Phase,
@@ -420,6 +425,8 @@ pub enum TurnOutcomeLabel {
     Completed,
     Cancelled,
     Error,
+    /// Written at session load for a `turn_started` the previous process never closed.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -569,10 +576,12 @@ mod tests {
             session_relationship: SessionRelationship::Primary,
             schema_version: EVENT_SCHEMA_VERSION.into(),
             redirect_kind: Some(RedirectKind::QueuedAfterCancel),
+            prompt_id: Some("p-2".into()),
         })
         .unwrap();
         assert_eq!(with_kind["type"], "turn_started");
         assert_eq!(with_kind["redirect_kind"], "queued_after_cancel");
+        assert_eq!(with_kind["prompt_id"], "p-2");
 
         let normal = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
@@ -583,8 +592,10 @@ mod tests {
             session_relationship: SessionRelationship::Primary,
             schema_version: EVENT_SCHEMA_VERSION.into(),
             redirect_kind: None,
+            prompt_id: None,
         })
         .unwrap();
+        assert!(normal.get("prompt_id").is_none());
         assert!(
             normal.get("redirect_kind").is_none(),
             "redirect_kind must be omitted on a normal turn, got {normal}"

@@ -446,8 +446,10 @@ mod tests {
 
     #[test]
     fn preamble_uses_primary_text_color_for_description() {
-        // Pin theme to avoid races with parallel tests that call `cache::set`.
-        crate::theme::cache::set(crate::theme::ThemeKind::FuigoNight);
+        // Pin theme to avoid races with parallel tests that call `cache::set`: `pin_theme` takes the
+        // shared theme test lock (a bare `cache::set` here used to overwrite another test's pinned
+        // theme mid-assertion).
+        let _theme = crate::theme::cache::pin_theme();
         let block =
             BgTaskBlock::started("ls", "t1").with_description(Some("List the files".into()));
         let text = block.preamble(&test_ctx()).expect("preamble");

@@ -247,6 +247,19 @@ impl ChatStateHandle {
         self.send_replace(items, false);
     }
 
+    /// Replace conversation history only once the replacement is stored (see
+    /// [`ChatStateCommand::ReplaceConversationPersisted`]). On `Err` the conversation is unchanged.
+    pub async fn replace_conversation_persisted(
+        &self,
+        items: Vec<ConversationItem>,
+    ) -> std::io::Result<()> {
+        self.query("ReplaceConversationPersisted", |reply| {
+            ChatStateCommand::ReplaceConversationPersisted { items, reply }
+        })
+        .await
+        .unwrap_or_else(|| Err(std::io::Error::other("chat-state actor unavailable")))
+    }
+
     /// Replace conversation history for compaction.
     /// Sets `compaction_occurred` on the active turn capture.
     pub fn replace_conversation_for_compaction(&self, items: Vec<ConversationItem>) {

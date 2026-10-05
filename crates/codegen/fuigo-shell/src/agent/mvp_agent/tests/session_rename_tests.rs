@@ -54,6 +54,9 @@ async fn seed_session(info: &Info) {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_enqueues_manual_title_on_resident_persistence_tx() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/rename-resident";
     let sid = acp::SessionId::new("rename-resident-sid");
@@ -99,6 +102,9 @@ async fn rename_enqueues_manual_title_on_resident_persistence_tx() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_non_resident_updates_summary_without_panic() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/rename-dormant";
     let sid = acp::SessionId::new("rename-dormant-sid");
@@ -126,6 +132,9 @@ async fn rename_non_resident_updates_summary_without_panic() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_strips_ascii_controls_before_persist_and_enqueue() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/rename-sanitize";
     let sid = acp::SessionId::new("rename-sanitize-sid");
@@ -168,6 +177,9 @@ async fn rename_strips_ascii_controls_before_persist_and_enqueue() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_rejects_title_over_max_scalars() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::session::persistence::MAX_TITLE_SCALARS;
 
     let _home = isolate_fuigo_home();
@@ -226,6 +238,9 @@ async fn rename_rejects_title_over_max_scalars() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_counts_scalars_after_control_strip() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::session::persistence::MAX_TITLE_SCALARS;
 
     let _home = isolate_fuigo_home();
@@ -261,6 +276,9 @@ async fn rename_counts_scalars_after_control_strip() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_rejects_overlong_after_control_strip() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::session::persistence::MAX_TITLE_SCALARS;
 
     let _home = isolate_fuigo_home();
@@ -297,6 +315,9 @@ async fn rename_rejects_overlong_after_control_strip() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_rejects_title_over_max_bytes_before_strip() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::session::persistence::{MAX_TITLE_BYTES, MAX_TITLE_SCALARS};
 
     let _home = isolate_fuigo_home();
@@ -355,6 +376,9 @@ async fn rename_rejects_title_over_max_bytes_before_strip() {
 #[tokio::test]
 #[serial_test::serial]
 async fn rename_fanout_stamps_title_is_manual_meta() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;
@@ -437,6 +461,9 @@ async fn drive_reset(
 #[tokio::test]
 #[serial_test::serial]
 async fn reset_enqueues_reset_title_to_auto_on_resident_persistence_tx() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/reset-resident";
     let sid = acp::SessionId::new("reset-resident-sid");
@@ -486,6 +513,9 @@ async fn reset_enqueues_reset_title_to_auto_on_resident_persistence_tx() {
 #[tokio::test]
 #[serial_test::serial]
 async fn reset_non_resident_updates_summary_without_panic() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/reset-dormant";
     let sid = acp::SessionId::new("reset-dormant-sid");
@@ -517,6 +547,9 @@ async fn reset_non_resident_updates_summary_without_panic() {
 #[tokio::test]
 #[serial_test::serial]
 async fn reset_rejects_nonempty_title() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/reset-nonempty";
     let sid = acp::SessionId::new("reset-nonempty-sid");
@@ -566,6 +599,9 @@ async fn reset_rejects_nonempty_title() {
 #[tokio::test]
 #[serial_test::serial]
 async fn reset_rejects_chat_kind() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolate_fuigo_home();
     let cwd = "/tmp/reset-chat";
     let sid = acp::SessionId::new("reset-chat-sid");
@@ -611,6 +647,9 @@ async fn reset_rejects_chat_kind() {
 #[tokio::test]
 #[serial_test::serial]
 async fn reset_fanout_stamps_title_is_manual_false() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;
@@ -700,6 +739,9 @@ async fn reset_fanout_stamps_title_is_manual_false() {
 #[tokio::test]
 #[serial_test::serial]
 async fn reset_already_auto_is_idempotent_and_skips_persistence_msg() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     use crate::extensions::notification::TITLE_IS_MANUAL_META_KEY;

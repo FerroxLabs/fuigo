@@ -166,6 +166,14 @@ pub enum ChatStateCommand {
         is_compaction: bool,
     },
 
+    /// Replace conversation history only once the replacement is stored: the history is persisted first (disk
+    /// acknowledged) and applied in memory on success; on failure the conversation is left as it was and the error
+    /// is replied.
+    ReplaceConversationPersisted {
+        items: Vec<ConversationItem>,
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
+
     /// Out-of-band history repair (`fuigo/session/repair`): run
     /// [`crate::compaction_utils::repair_history`] and persist when changed;
     /// `dry_run` only reports.

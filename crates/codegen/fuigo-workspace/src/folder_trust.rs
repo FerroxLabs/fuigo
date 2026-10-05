@@ -943,6 +943,9 @@ mod tests {
 
     #[test]
     fn local_build_ignores_remote_rollout() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A local/dev build never gates (auto-trust): even a remote rollout enable is ignored
         // The feature stays off and resolves Trusted with repo configs present and interactive
         // (Env/config isolated to unset so the remote flag is unambiguously the only enable being dropped here.)
@@ -966,6 +969,9 @@ mod tests {
 
     #[test]
     fn release_build_keeps_gate_when_enabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A release-stamped build (is_local_build=false) honors the remote enable
         // Isolate config so neither on-disk user/managed config nor an ambient env flag can override it
         // That means an empty FUIGO_HOME (no config.toml/managed_config.toml) and FUIGO_FOLDER_TRUST unset
@@ -990,6 +996,9 @@ mod tests {
 
     #[test]
     fn local_build_ignores_explicit_env_optin() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Auto-trust is absolute on a local build: even an explicit FUIGO_FOLDER_TRUST=1 does NOT enable the feature
         // A self-built fuigo therefore never prompts
         // FUIGO_HOME is isolated so on-disk config can't influence it
@@ -1003,6 +1012,9 @@ mod tests {
 
     #[test]
     fn release_build_defaults_on() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A release-stamped build with no env/config/managed/remote signal defaults the feature ON
         // An empty FUIGO_HOME (no config.toml/managed config) and FUIGO_FOLDER_TRUST unset leave only the default
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1031,6 +1043,9 @@ mod tests {
 
     #[test]
     fn store_io_is_noop_on_local_build() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // On a local/dev build the whole feature is inert
         // Both halves pin a guard via a UNIQUE per-repo key (never store-file existence) so they hold under single-process `cargo test` too
         // Assert ONLY when compiled unstamped (mirrors `is_local_build_honors_test_version_override`)
@@ -1078,6 +1093,9 @@ mod tests {
 
     #[test]
     fn revoke_folder_trust_store_persists_untrust_for_trusted_folder() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // This tests the store half of revoke directly (not just via the shell wrapper)
         // A previously-trusted folder reports was_trusted=true AND gets an explicit `set_untrusted` persisted, so it is untrusted on reload
         // FUIGO_HOME is isolated so the seed/deny hit a temp store, not the real file
@@ -1104,6 +1122,9 @@ mod tests {
 
     #[test]
     fn revoke_folder_trust_store_writes_no_deny_for_never_trusted_folder() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set("FUIGO_HOME", home.path());
@@ -1124,6 +1145,9 @@ mod tests {
 
     #[test]
     fn grant_folder_trust_skips_rewrite_when_already_trusted_but_flips_untrust() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Already-trusted grant must not rewrite the store; an explicit untrust record must still persist `--trust`
         // FUIGO_HOME is isolated so the seed hits a temp store, not the real file
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1170,6 +1194,9 @@ mod tests {
 
     #[test]
     fn grant_folder_trust_records_process_local_grant_when_persist_denied() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
@@ -1217,6 +1244,9 @@ mod tests {
 
     #[test]
     fn decide_inputs_flags_home_key_unrecordable() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Case-2 wiring: cwd == $HOME, git-init'd so workspace_key discovers it as the home git root
         // The gather flags key_recordable=false and decide() trusts it despite configs and interactive
         // Pin HOME and USERPROFILE so fuigo_dirs::home_dir() sees the tempdir on Windows

@@ -1934,8 +1934,21 @@ mod tests {
     }
 
     #[test]
+    // `describe_requirements_file` -> `load_config_file` -> `apply_version_overrides_with_registered`,
+    // which applies the overrides only when `fuigo_version::installed_semver()` is Ok -- and that
+    // reads the process-global `FUIGO_TEST_VERSION`. When another test has it pinned to a
+    // non-semver value, the overrides are SILENTLY STRIPPED and the loader returns Ok, so this
+    // test read "empty" where it asserts "parse error". Measured at 8e11724 as well as here, so
+    // it is not new; ~20 tests in this crate pin that variable, all in the unnamed `#[serial]`
+    // group, which this test was not in. It now pins a valid version of its own AND joins that
+    // group. (`FUIGO_TEST_VERSION` deliberately does NOT join `PROCESS_ANCHORS`: twelve tests
+    // hold a `FUIGO_HOME` guard and a `FUIGO_TEST_VERSION` guard at the same time, and the
+    // anchor lock is one lock for all anchors, so that would deadlock them.)
+    #[serial_test::serial]
     fn describe_requirements_file_flags_invalid_version_overrides_as_parse_error() {
         // Valid TOML but invalid `[[version_overrides]]` is rejected by the real loader, so it must read "parse error", not "empty"
+        let _version =
+            fuigo_test_support::EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "1.0.0");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("requirements.toml");
         std::fs::write(&path, "[[version_overrides]]\nminimum_version = \"nope\"\n").unwrap();

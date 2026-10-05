@@ -10,6 +10,7 @@ description = "Actor-based sampling/inference layer for Ferrox Labs fuigo (HTTP 
 fuigo-auth = { workspace = true }
 fuigo-extra-ca = { workspace = true }
 fuigo-sampling-types = { path = "../fuigo-sampling-types" }
+fuigo-secrets = { workspace = true }
 fuigo-version = { workspace = true }
 
 # External

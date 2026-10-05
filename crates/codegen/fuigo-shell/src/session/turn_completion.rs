@@ -29,7 +29,34 @@ pub(crate) fn build_turn_completed(
         error_kind: error_kind.map(|k| k.as_str().to_string()),
         usage,
         elapsed_ms,
+        verdicts: None,
     }
+}
+
+/// The `TurnCompleted` of a finished turn, from the session's own `mapped` result: the terminal fields from
+/// [`crate::sampling::error::prompt_complete_fields`] plus, for a failed turn while this process holds sent credentials, the typed
+/// verdicts (P119 / P70c) computed from the error text BEFORE `prompt_complete_fields` replaced credentials in the `agent_result` it reports.
+/// A client decides on the verdicts and only displays `agent_result`.
+pub(crate) fn turn_completed_for_result(
+    prompt_id: String,
+    mapped: &std::result::Result<agent_client_protocol::StopReason, agent_client_protocol::Error>,
+    usage: Option<crate::extensions::notification::PromptUsage>,
+    elapsed_ms: Option<u64>,
+) -> SessionUpdate {
+    let (stop_reason, agent_result, error_kind) =
+        crate::sampling::error::prompt_complete_fields(mapped);
+    let mut update = build_turn_completed(
+        prompt_id,
+        stop_reason,
+        agent_result,
+        error_kind,
+        usage,
+        elapsed_ms,
+    );
+    if let (SessionUpdate::TurnCompleted { verdicts, .. }, Err(err)) = (&mut update, mapped) {
+        *verdicts = crate::sampling::error_verdicts::verdicts_for_turn_error(err);
+    }
+    update
 }
 
 /// Base `fuigo/session/prompt_complete` payload shared by every producer (live prompt, chat bridge, gateway remote turn).
@@ -66,6 +93,62 @@ fn json_to_string(value: serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// P119 / P70c: a failed turn's `TurnCompleted` carries the verdicts read from the text as it arrived, so a sent credential
+    /// that overlaps the status marker cannot change what the client decides.
+    #[test]
+    fn a_failed_turn_carries_verdicts_computed_before_the_credential_is_replaced() {
+        // The credential contains the status marker: scrubbed, the text no longer names a status
+        const CRED: &str = "p119b-turn-cred-7f3a status 503";
+        fuigo_telemetry::sent_credentials::record(CRED);
+        let err = agent_client_protocol::Error::internal_error()
+            .data(serde_json::json!({ "message": format!("upstream said {CRED} and stopped") }));
+        let update = turn_completed_for_result("p-v".into(), &Err(err), None, Some(5));
+        let SessionUpdate::TurnCompleted {
+            agent_result,
+            verdicts,
+            ..
+        } = update
+        else {
+            panic!("expected TurnCompleted");
+        };
+        let text = agent_result.expect("failed turn has a result");
+        assert!(!text.contains("p119b-turn-cred-7f3a"), "{text}");
+        assert_eq!(
+            crate::sampling::error_verdicts::parse_http_status(&text),
+            None,
+            "the scrubbed text must no longer name the status (premise of the test): {text}"
+        );
+        assert_eq!(
+            verdicts.expect("verdicts are stamped while credentials are held").http_status,
+            Some(503)
+        );
+    }
+
+    /// Wire compatibility: the field is optional both ways.
+    #[test]
+    fn turn_completed_verdicts_are_optional_on_the_wire() {
+        let ok = turn_completed_for_result(
+            "p-ok".into(),
+            &Ok(agent_client_protocol::StopReason::EndTurn),
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&ok).unwrap();
+        assert!(json.get("verdicts").is_none(), "{json}");
+        let old = r#"{"sessionUpdate":"turn_completed","prompt_id":"p","stop_reason":"error"}"#;
+        let parsed: SessionUpdate = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            parsed,
+            SessionUpdate::TurnCompleted { verdicts: None, .. }
+        ));
+        let with = r#"{"sessionUpdate":"turn_completed","prompt_id":"p","stop_reason":"error","verdicts":{"httpStatus":503,"newerField":1}}"#;
+        let parsed: SessionUpdate = serde_json::from_str(with).unwrap();
+        assert!(matches!(
+            parsed,
+            SessionUpdate::TurnCompleted { verdicts: Some(v), .. } if v.http_status == Some(503)
+        ));
+    }
+
     #[test]
     fn maps_ok_end_turn_pair() {
         // The exact pair `prompt_complete_fields(&Ok(EndTurn))` produces.
@@ -86,6 +169,7 @@ mod tests {
                 error_kind: None,
                 usage: None,
                 elapsed_ms: Some(1500),
+                verdicts: None,
             }
         );
     }
@@ -110,6 +194,7 @@ mod tests {
                 error_kind: None,
                 usage: None,
                 elapsed_ms: Some(0),
+                verdicts: None,
             }
         );
     }
@@ -152,6 +237,7 @@ mod tests {
                 error_kind: None,
                 usage: None,
                 elapsed_ms: Some(7),
+                verdicts: None,
             }
         );
     }

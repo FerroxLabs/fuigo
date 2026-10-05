@@ -337,7 +337,7 @@ impl ImageGenClient {
 
 /// `Enabled` means the client may be constructed; credentials can come from a
 /// live provider at operation time. Each tool has its own gate.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub enum ImageGenConfig {
     #[default]
     Disabled,
@@ -361,6 +361,27 @@ pub enum ImageGenConfig {
         /// API-key / workspace callers.
         tier_restricted: bool,
     },
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ImageGenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("Disabled"),
+            Self::Enabled { api_key: _, base_url, extra_headers, image_gen_enabled, image_edit_enabled, model_override, edit_model_override, tier_restricted } => f
+                .debug_struct("Enabled")
+                .field("api_key", &"<redacted>")
+                .field("base_url", &fuigo_auth::redact_url(base_url))
+                .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+                .field("image_gen_enabled", image_gen_enabled)
+                .field("image_edit_enabled", image_edit_enabled)
+                .field("model_override", model_override)
+                .field("edit_model_override", edit_model_override)
+                .field("tier_restricted", tier_restricted)
+                .finish(),
+        }
+    }
 }
 
 /// Session-id header attached to imagine API requests; matches the header

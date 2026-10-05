@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 /// Configuration for spawning a PTY session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PtyConfig {
     /// Command and arguments to run.
     pub command: Vec<String>,
@@ -20,6 +20,27 @@ pub struct PtyConfig {
     pub cwd: Option<PathBuf>,
     /// Additional environment variables.
     pub env: HashMap<String, String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for PtyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            command,
+            cols,
+            rows,
+            cwd,
+            env,
+        } = self;
+        f.debug_struct("PtyConfig")
+            .field("command", &command.first().map(|program| (program, format!("<{} args redacted>", command.len() - 1))))
+            .field("cols", cols)
+            .field("rows", rows)
+            .field("cwd", cwd)
+            .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// Handle to a running PTY session.

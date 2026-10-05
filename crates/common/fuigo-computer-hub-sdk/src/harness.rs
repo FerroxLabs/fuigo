@@ -2379,6 +2379,7 @@ fn client_error_to_tool_error(err: ClientError) -> ToolError {
         ClientError::BackpressureError(message) => ToolError::custom("backpressure", message),
         ClientError::Serde(message) => ToolError::custom("serde", message),
         ClientError::InvalidConfig(message) => ToolError::custom("invalid_config", message),
+        ClientError::DestinationRefused(message) => ToolError::permission_denied(message),
         ClientError::Wire(wire) => tool_error_from_wire(wire),
         ClientError::Closed(message) => ToolError::network_error(message),
         ClientError::InsecureScheme { url } => ToolError::custom(

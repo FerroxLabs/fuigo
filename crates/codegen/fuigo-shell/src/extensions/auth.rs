@@ -15,7 +15,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "fuigo/auth/getBearerToken" => handle_get_bearer_token(agent).await,
         "fuigo/getApiKey" => handle_get_api_key(),
-        "fuigo/setApiKey" => handle_set_api_key(args),
+        "fuigo/setApiKey" => handle_set_api_key(agent, args).await,
         "fuigo/auth/submit_code" => handle_submit_code(agent, args),
         "fuigo/auth/get_url" => handle_get_url(agent).await,
         "fuigo/auth/cancel" => handle_cancel(agent, args),
@@ -56,40 +56,58 @@ async fn handle_get_bearer_token(agent: &MvpAgent) -> ExtResult {
             .current_wire_valid()
             .map(|a| a.key)
             .or_else(|| agent.auth_manager.static_api_key_for_export()),
-    };
+    }
+    // A key a client supplied in `authenticate` (P08) is never handed back over the wire, whichever branch found it.
+    .filter(|key| !crate::agent::auth_method::is_runtime_api_key(key));
     ExtMethodResult::success(serde_json::json!({ "token": token }))
         .to_ext_response()
         .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
 fn handle_get_api_key() -> ExtResult {
-    let key = crate::agent::auth_method::read_fuigo_api_key_env().ok();
+    // The environment or saved key only: a runtime key a client supplied in `authenticate` is never echoed back (P08).
+    let key = crate::agent::auth_method::read_fuigo_api_key_echoable().ok();
     ExtMethodResult::success(serde_json::json!({ "key": key }))
         .to_ext_response()
         .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
 
-fn handle_set_api_key(args: &acp::ExtRequest) -> ExtResult {
+async fn handle_set_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let params: serde_json::Value = parse_params(args)?;
     let key = params.get("key").and_then(|v| v.as_str());
     let fuigo_home = crate::util::fuigo_home::fuigo_home();
     if let Some(k) = key {
         if k.is_empty() {
-            crate::auth::clear_api_key(&fuigo_home)
+            crate::auth::clear_api_key_async(&fuigo_home)
+                .await
                 .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
-            // SAFETY: ext_method is single-threaded per agent
-            unsafe { std::env::remove_var("FUIGO_API_KEY") };
+            crate::agent::auth_method::apply_set_api_key(None);
         } else {
-            crate::auth::store_api_key(&fuigo_home, k)
+            crate::auth::store_api_key_async(&fuigo_home, k)
+                .await
                 .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
-            // SAFETY: ext_method is single-threaded per agent
-            unsafe { std::env::set_var("FUIGO_API_KEY", k) };
+            // P70: held in memory, ahead of the env key exactly as the `set_var` it replaces overwrote it, but never
+            // in the agent's environment, so no child process inherits it.
+            crate::agent::auth_method::apply_set_api_key(Some(k));
         }
     } else {
-        crate::auth::clear_api_key(&fuigo_home)
+        crate::auth::clear_api_key_async(&fuigo_home)
+            .await
             .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
-        // SAFETY: ext_method is single-threaded per agent
-        unsafe { std::env::remove_var("FUIGO_API_KEY") };
+        crate::agent::auth_method::apply_set_api_key(None);
+    }
+    // P08: only once the write succeeded (a failed set keeps the working credential), and with no await between the
+    // two steps: an explicit set or clear supersedes a runtime key from `authenticate`, which would otherwise shadow
+    // it, and drops the agent's copy of that key so the next `authenticate` re-resolves from the current sources.
+    if let Some(previous) = crate::agent::auth_method::set_runtime_api_key(None) {
+        let mut sampling_config = agent.sampling_config.borrow_mut();
+        if sampling_config.api_key.as_deref() == Some(previous.as_str()) {
+            sampling_config.api_key = None;
+        }
+        drop(sampling_config);
+        // The AuthManager's process static key may hold the same key through a model `env_key = "FUIGO_API_KEY"`
+        // mapping; re-derive it from the now-current sources so `getBearerToken` cannot hand the cleared key out.
+        agent.sync_process_static_api_key(None);
     }
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()

@@ -886,6 +886,7 @@ fn verb_group_hidden_thinking_is_transparent() {
 
 #[test]
 fn verb_group_leading_thought_anchors_run_and_expands() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut state = verb_state();
     crate::appearance::cache::set_show_thinking_blocks(true);
     let thought = push_thought(&mut state, "planned the reads");
@@ -939,16 +940,25 @@ fn verb_group_leading_thought_anchors_run_and_expands() {
     crate::appearance::cache::set_show_thinking_blocks(false);
 }
 
-/// Retargeted from the hooked-member variant: the attach step pinned removed machinery; the fold-range half is live.
 #[test]
-fn group_range_covers_every_folded_member() {
+fn group_range_keeps_hooked_members_in_rendered_fold() {
     let mut state = verb_state();
-    push_reads(&mut state, 2);
+    let ids = push_reads(&mut state, 2);
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
     assert_eq!(state.group_range_of(0, true), 0..2);
+
+    state.attach_hooks(
+        ids[1],
+        crate::scrollback::blocks::tool::HookPhase::Post,
+        Vec::new(),
+    );
+    assert_eq!(state.group_range_of(0, true), 0..2);
+
+    state.prepare_layout(80, 40);
+    assert!(verb_header_at(&state, 0));
     assert_eq!(state.group_range_of(1, true), 0..2);
-    assert_eq!(cached_height_at(&state, 1), 0, "the second member stays folded");
+    assert_eq!(cached_height_at(&state, 1), 0, "hooked member stays folded");
 }
 
 #[test]
@@ -1131,6 +1141,332 @@ fn verb_group_refolds_when_clear_all_resolves_pending_input() {
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 1), 0, "cleared row refolds");
+}
+
+#[test]
+fn verb_group_stays_folded_on_attach_hooks() {
+    let _theme = crate::theme::cache::pin_theme();
+    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+
+    let mut state = verb_state();
+    let ids = push_reads(&mut state, 3);
+    state.prepare_layout(80, 40);
+    assert_eq!(cached_height_at(&state, 2), 0);
+
+    state.attach_hooks(
+        ids[2],
+        HookPhase::Post,
+        vec![HookRunEntry {
+            name: "fmt".to_owned(),
+            status: HookRunStatus::Success {
+                elapsed: std::time::Duration::from_millis(1),
+            },
+            output: None,
+        }],
+    );
+    // A hidden member's height belongs to the fold: no remeasure (it would revive the row) and no fold pass are scheduled
+    assert!(!state.gaps_may_be_dirty, "no fold pass for a hidden member");
+    assert!(
+        !state.dirty_heights.contains(&ids[2]),
+        "a hidden member is never remeasured"
+    );
+    state.prepare_layout(80, 40);
+    assert!(verb_header_at(&state, 0));
+    assert_eq!(header_count_at(&mut state, 0), 3);
+    assert_eq!(cached_height_at(&state, 2), 0, "hooked row remains folded");
+    // Expanding runs the full rebuild, which measures the member with its hooks
+    state.set_selected(Some(0));
+    assert!(state.toggle_group_expansion());
+    state.prepare_layout(80, 40);
+    let cache = state.layout_cache.as_ref().unwrap();
+    let hooked = EntryRenderer::new(state.entries.get_index(2).unwrap().1, &Theme::current())
+        .with_appearance_ref(&state.appearance)
+        .desired_height(state.entry_area_width(80));
+    assert_eq!(
+        cache.entries[2].height, hooked,
+        "expanded member shows its hooks"
+    );
+}
+
+fn one_hook_run(name: &str) -> Vec<crate::scrollback::blocks::tool::HookRunEntry> {
+    use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
+    vec![HookRunEntry {
+        name: name.to_owned(),
+        status: HookRunStatus::Failed {
+            elapsed: std::time::Duration::from_millis(1),
+            error: "exit 1\nsecond line".to_owned(),
+        },
+        output: Some("line a\nline b\nline c".to_owned()),
+    }]
+}
+
+/// virtual_y must be the running sum of height + gap, and total_height must close the sum (pin reserve aside).
+fn assert_virtual_y_consistent(state: &ScrollbackState) {
+    let cache = state.layout_cache.as_ref().unwrap();
+    let mut y = 0usize;
+    for (i, info) in cache.entries.iter().enumerate() {
+        assert_eq!(cache.virtual_y[i], y, "virtual_y[{i}]");
+        y += info.height as usize + info.gap_after as usize;
+    }
+    assert_eq!(
+        state.total_height.saturating_sub(state.pin_reserve_pad),
+        y,
+        "total height closes the sum"
+    );
+}
+
+fn fresh_height(state: &ScrollbackState, idx: usize) -> u16 {
+    EntryRenderer::new(state.entries.get_index(idx).unwrap().1, &Theme::current())
+        .with_appearance_ref(&state.appearance)
+        .desired_height(state.entry_area_width(80))
+}
+
+/// One history of `pairs` (agent message, expanded command) rows, laid out and settled; returns the command rows.
+fn hooked_history(pairs: usize) -> (ScrollbackState, Vec<EntryId>) {
+    let mut state = verb_state();
+    // Every frame re-probes for ffmpeg (a process spawn, ~100 ms) while none was found; that constant would swamp the layout cost
+    state.ffmpeg_available_snapshot = true;
+    let mut rows = Vec::new();
+    for i in 0..pairs {
+        state.push_block(RenderBlock::agent_message(format!("step {i}")));
+        let row = state.push_block(RenderBlock::execute(format!("cargo test -p crate{i}")));
+        // Expanded rows render their hook detail, so a batch really changes the row's height
+        state
+            .get_by_id_mut(row)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        rows.push(row);
+    }
+    state.prepare_layout(80, 40);
+    state.prepare_layout(80, 40);
+    (state, rows)
+}
+
+/// Lay out `batches` hook batches, one per recent command row (each call gets its own batch, as live), plus one mid-history.
+/// Returns (full fold/gap passes, full cache builds, layout time per batch in microseconds).
+fn hook_batch_layout_cost(pairs: usize, batches: usize) -> (usize, usize, f64) {
+    let (mut state, rows) = hooked_history(pairs);
+    let passes_before = state.virtual_y_rebuilds;
+    let builds_before = state.layout_cache_builds;
+    let mut layout_time = std::time::Duration::ZERO;
+    for b in 0..batches {
+        let target = if b % 10 == 9 {
+            rows[pairs / 2 + b]
+        } else {
+            rows[pairs - 1 - b]
+        };
+        let before_h = cached_height_at(&state, state.entries.get_index_of(&target).unwrap());
+        state.attach_hooks(
+            target,
+            crate::scrollback::blocks::tool::HookPhase::Post,
+            one_hook_run(&format!("plugin/p/h{b}")),
+        );
+        let t = std::time::Instant::now();
+        state.prepare_layout(80, 40);
+        layout_time += t.elapsed();
+        let idx = state.entries.get_index_of(&target).unwrap();
+        assert_eq!(
+            cached_height_at(&state, idx),
+            fresh_height(&state, idx),
+            "batch {b}: exact height"
+        );
+        assert!(
+            cached_height_at(&state, idx) > before_h,
+            "batch {b}: the row grew, so the patch path ran"
+        );
+    }
+    assert_virtual_y_consistent(&state);
+    (
+        state.virtual_y_rebuilds - passes_before,
+        state.layout_cache_builds - builds_before,
+        layout_time.as_secs_f64() * 1e6 / batches as f64,
+    )
+}
+
+/// Astra MEDIUM: each hook batch forced a full fold/gap/virtual_y pass over the whole history (O(history) per batch).
+/// A batch on an ordinary row now remeasures that row and patches the rows below it: no full pass, and the per-batch cost
+/// stays flat as the history grows. `--nocapture` prints the cost line; the mutant restoring the structural mark prints "before".
+#[test]
+fn hook_batches_do_not_rebuild_the_whole_history() {
+    const BATCHES: usize = 50;
+    let costs: Vec<_> = [500, 4000]
+        .into_iter()
+        .map(|pairs| {
+            let (passes, builds, per_batch_us) = hook_batch_layout_cost(pairs, BATCHES);
+            eprintln!(
+                "HOOK-LAYOUT-COST entries={} batches={BATCHES} full_passes={passes} cache_builds={builds} layout_per_batch_us={per_batch_us:.1}",
+                pairs * 2
+            );
+            (passes, builds)
+        })
+        .collect();
+    for (passes, builds) in costs {
+        assert_eq!(builds, 0, "no batch rebuilds the cache");
+        assert_eq!(
+            passes, 0,
+            "a hook batch on an ordinary row needs no full pass"
+        );
+    }
+}
+
+#[test]
+fn hook_batch_on_expanded_verb_header_keeps_its_header_row() {
+    let mut state = verb_state();
+    push_reads(&mut state, 3);
+    state.prepare_layout(80, 40);
+    state.set_selected(Some(0));
+    assert!(state.toggle_group_expansion());
+    state.prepare_layout(80, 40);
+    state.prepare_layout(80, 40);
+    // `rebuild_layout` (the toggle) leaves the flag set although its full build already applied folds and gaps; Case 3 never
+    // clears it. Clear it so the batch's own work is what is counted (with it set, the batch defers to the pending pass).
+    state.gaps_may_be_dirty = false;
+    let id0 = *state.entries.get_index(0).unwrap().0;
+    let before = state.virtual_y_rebuilds;
+    state.attach_hooks(
+        id0,
+        crate::scrollback::blocks::tool::HookPhase::Pre,
+        one_hook_run("plugin/p/pre"),
+    );
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        state.virtual_y_rebuilds, before,
+        "member 0 remeasures alone"
+    );
+    let cache = state.layout_cache.as_ref().unwrap();
+    assert!(cache.entries[0].is_expanded_verb_header());
+    assert_eq!(
+        cache.entries[0].height,
+        fresh_height(&state, 0) + 1,
+        "remeasure keeps the synthetic header row"
+    );
+    assert_virtual_y_consistent(&state);
+}
+
+/// Astra (round 2): in SingleTurn, a batch on a row of a turn not shown must not inflate the shown turn's scroll extent.
+/// `total_height` sums the shown range only; the height-only fast path would add the hidden row's growth to it.
+#[test]
+fn hook_batch_outside_the_shown_turn_keeps_its_scroll_extent() {
+    let mut state = verb_state();
+    state.ffmpeg_available_snapshot = true;
+    let mut rows = Vec::new();
+    for t in 0..2 {
+        state.push_block(RenderBlock::user_prompt(format!("turn {t}")));
+        let row = state.push_block(RenderBlock::execute(format!("cargo test {t}")));
+        state
+            .get_by_id_mut(row)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        rows.push(row);
+    }
+    state.view_mode = ViewMode::SingleTurn;
+    state.current_turn = Some(0);
+    state.prepare_layout(80, 40);
+    state.prepare_layout(80, 40);
+    let shown = state.visible_entry_range();
+    let hidden_idx = state.entries.get_index_of(&rows[1]).unwrap();
+    assert!(
+        !shown.contains(&hidden_idx),
+        "fixture: the second turn is not shown"
+    );
+    let total_before = state.total_height;
+    let hidden_before = cached_height_at(&state, hidden_idx);
+
+    state.attach_hooks(
+        rows[1],
+        crate::scrollback::blocks::tool::HookPhase::Post,
+        one_hook_run("plugin/p/other-turn"),
+    );
+    state.prepare_layout(80, 40);
+    assert!(
+        cached_height_at(&state, hidden_idx) > hidden_before,
+        "fixture: the hidden row grew"
+    );
+    assert_eq!(
+        state.total_height, total_before,
+        "the shown turn's extent is unchanged"
+    );
+    // virtual_y stays global and consistent
+    let cache = state.layout_cache.as_ref().unwrap();
+    let mut y = 0usize;
+    for (i, info) in cache.entries.iter().enumerate() {
+        assert_eq!(cache.virtual_y[i], y, "virtual_y[{i}]");
+        y += info.height as usize + info.gap_after as usize;
+    }
+}
+
+/// Astra (round 3): two batches on either side of a prompt before one frame. The fast path moved every later prompt's sticky
+/// descriptor by the TOTAL delta, counting growth below the prompt too; each descriptor must sit at its own row.
+#[test]
+fn hook_batches_around_a_prompt_keep_its_sticky_position() {
+    let mut state = verb_state();
+    state.ffmpeg_available_snapshot = true;
+    let mut rows = Vec::new();
+    for t in 0..3 {
+        state.push_block(RenderBlock::user_prompt(format!("turn {t}")));
+        let row = state.push_block(RenderBlock::execute(format!("cargo test {t}")));
+        state
+            .get_by_id_mut(row)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        rows.push(row);
+    }
+    state.prepare_layout(80, 40);
+    state.prepare_layout(80, 40);
+    let passes = state.virtual_y_rebuilds;
+    for &row in &rows[..2] {
+        state.attach_hooks(
+            row,
+            crate::scrollback::blocks::tool::HookPhase::Post,
+            one_hook_run("plugin/p/around"),
+        );
+    }
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        state.virtual_y_rebuilds, passes,
+        "fixture: the fast path ran"
+    );
+    let cache = state.layout_cache.as_ref().unwrap();
+    assert_eq!(cache.prompt_descriptors.len(), 3);
+    for pd in &cache.prompt_descriptors {
+        assert_eq!(
+            pd.y_virtual, cache.virtual_y[pd.entry_idx],
+            "prompt at {} sits at its own row",
+            pd.entry_idx
+        );
+    }
+    assert_virtual_y_consistent(&state);
+}
+
+#[test]
+fn hook_batch_on_thought_still_reapplies_folds() {
+    // A thought's fold claim reads `hook_data`, so a batch on one must re-run the fold pass
+    let mut state = verb_state();
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    push_reads(&mut state, 1);
+    let thought = push_thought(&mut state, "midway");
+    push_reads(&mut state, 1);
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        cached_height_at(&state, 1),
+        0,
+        "thought claimed into the fold"
+    );
+    let before = state.virtual_y_rebuilds;
+    state.attach_hooks(
+        thought,
+        crate::scrollback::blocks::tool::HookPhase::Post,
+        one_hook_run("plugin/p/t"),
+    );
+    assert!(state.gaps_may_be_dirty);
+    state.prepare_layout(80, 40);
+    assert!(state.virtual_y_rebuilds > before, "fold pass re-ran");
+    assert!(
+        cached_height_at(&state, 1) > 0,
+        "a hooked thought is no longer claimable and surfaces"
+    );
+    assert_virtual_y_consistent(&state);
+    crate::appearance::cache::set_show_thinking_blocks(false);
 }
 
 #[test]

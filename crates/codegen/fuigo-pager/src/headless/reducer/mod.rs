@@ -6,7 +6,7 @@ use agent_client_protocol as proto;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::headless::OutputFormat;
+use crate::headless::{HeadlessDenial, OutputFormat};
 
 mod acp;
 mod messages;
@@ -112,6 +112,10 @@ pub(crate) enum Lifecycle {
     ImageCompressed {
         message: String,
     },
+    /// A config source was refused a reference to the saved API key (P133).
+    ConfigNotice {
+        message: String,
+    },
     MemoryFlushStarted,
     MemoryFlushCompleted {
         result: String,
@@ -139,6 +143,7 @@ impl Lifecycle {
             Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
             Lifecycle::AutoContinue { .. } => "Resumed after compaction.".to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
+            Lifecycle::ConfigNotice { message } => format!("warning: {message}"),
             Lifecycle::MemoryFlushStarted => "Memory flush started.".to_string(),
             Lifecycle::MemoryFlushCompleted { result, path } => match path {
                 Some(path) => format!("Memory flush {result}: {path}"),
@@ -379,6 +384,15 @@ pub(crate) trait Reducer {
 
     fn finish(&mut self, end: &TurnEnd<'_>) -> Vec<Value>;
 
+    /// Contract D.2.2: a permission denial the terminal line must carry as data.
+    ///
+    /// Called by the emitter immediately before [`Self::finish`] or [`Self::error`], with the run's
+    /// first latched denial. `ended_run` is true only when the turn ended at that refusal, which is
+    /// when the process exits with the dedicated code. Required, not defaulted: a new wire format
+    /// has to decide how it represents a denial, or it would silently drop one — the defect
+    /// Contract D exists to fix.
+    fn permission_denied(&mut self, denial: &HeadlessDenial, ended_run: bool);
+
     /// Terminal error line(s). `stop_reason` is a Messages-only override (e.g. `max_tokens`); `None` keeps the fallback.
     fn error(
         &mut self,
@@ -392,7 +406,7 @@ pub(crate) trait Reducer {
 /// The reducer for `format`, or `None` for `plain`/`json` (rendered directly).
 pub(crate) fn reducer_for(format: OutputFormat) -> Option<Box<dyn Reducer>> {
     match format {
-        OutputFormat::StreamingJson => Some(Box::new(AcpReducer)),
+        OutputFormat::StreamingJson => Some(Box::new(AcpReducer::default())),
         OutputFormat::StreamingMessagesJson => Some(Box::new(MessagesReducer::new())),
         OutputFormat::Plain | OutputFormat::Json => None,
     }

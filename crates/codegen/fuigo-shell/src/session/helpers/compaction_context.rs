@@ -307,6 +307,7 @@ mod tests {
 
     fn ctx_with_running_subagents() -> CompactionStateContext {
         CompactionStateContext {
+            images: Default::default(),
             cwd_generation: 0,
             destination_project_instructions: None,
             agent_message_anchor: None,
@@ -350,6 +351,7 @@ mod tests {
     #[test]
     fn system_reminder_includes_mcp_server_section() {
         let ctx = CompactionStateContext {
+            images: Default::default(),
             cwd_generation: 0,
             destination_project_instructions: None,
             agent_message_anchor: None,
@@ -391,6 +393,7 @@ mod tests {
     #[test]
     fn running_task_ids_render_verbatim() {
         let ctx = CompactionStateContext {
+            images: Default::default(),
             cwd_generation: 0,
             destination_project_instructions: None,
             agent_message_anchor: None,
@@ -436,6 +439,7 @@ mod tests {
 
     fn ctx_with_todos(todos: Vec<TodoSummary>) -> CompactionStateContext {
         CompactionStateContext {
+            images: Default::default(),
             cwd_generation: 0,
             destination_project_instructions: None,
             agent_message_anchor: None,
@@ -520,6 +524,7 @@ mod tests {
     #[test]
     fn system_reminder_places_workflows_below_skills() {
         let ctx = CompactionStateContext {
+            images: Default::default(),
             cwd_generation: 0,
             destination_project_instructions: None,
             agent_message_anchor: None,
@@ -558,6 +563,7 @@ mod tests {
     #[test]
     fn system_reminder_includes_scheduled_loops_and_live_workflows() {
         let ctx = CompactionStateContext {
+            images: Default::default(),
             cwd_generation: 0,
             destination_project_instructions: None,
             agent_message_anchor: None,

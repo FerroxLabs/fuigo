@@ -1,0 +1,27 @@
+You are an independent adversarial code auditor. Read-only: do not build, run tests or modify files.
+Repository: the git worktree in the current directory. Audit 84569ea8..HEAD (branch strike/p89), round 3.
+
+Context and the change: docs/strike/audits/p89-astra-brief-r1.txt. Earlier reports:
+docs/strike/audits/p89-astra-r1.txt, docs/strike/audits/p89-astra-r2.txt.
+
+Since round 2:
+- r2 finding 1 (HIGH, optional attempts): `exhaustion()` now refuses to reopen a terminal record under a
+  token budget while ANY attempt is pending, optional or not. The refusal is lifted when a late settlement
+  reports the usage (Settle has no phase check); a test pins both. Verify, and look for any remaining
+  token-budgeted reopen with usage the record never saw.
+- r2 findings 2 (superseded attempts settled with no usage do not set `unknown_usage`) and 3 (a
+  `RewindIfNoOutput` cancel never terminalizes, so its dispatched attempt stays pending on the goal's Working
+  record): the author's position is that both are PRE-EXISTING accounting gaps of the bounded-execution layer,
+  present identically before this change for every goal turn that continues after a successful turn (a
+  goal's Working record has always been shared across turns), and that this change neither introduces nor
+  widens them; they are proposed as a separate packet rather than fixed here. `supersede_attempt`'s
+  no-usage behaviour is deliberate and pinned (`empty_replies_leave_the_execution_token_budget_usable`).
+  Check that position against the code at 84569ea8 versus HEAD: does P89 make either gap reachable where it
+  was not, or worse? If yes, say exactly how.
+- r2 finding 4 (LOW): the output-only budget clause now has a test; the lock-order race and a real dropped
+  prompt future remain untested (no deterministic harness); say whether that leaves a real risk.
+
+Then re-audit the whole change once more for anything not yet reported. Report BLOCKER / HIGH / MEDIUM /
+LOW with file:line and a concrete scenario, distinguishing "introduced or widened by this change" from
+"pre-existing". End with a one-line verdict: whether any BLOCKER/HIGH introduced or widened by this change
+remains.

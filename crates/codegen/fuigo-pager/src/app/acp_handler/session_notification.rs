@@ -1,5 +1,5 @@
 use super::*;
-use fuigo_shell::sampling::error::format_rate_limited_user_message;
+use fuigo_shell::sampling::error::format_rate_limited_user_message_with;
 /// The one scrollback line a failed run gets; success gets none and a deny is already annotated by the shell.
 /// "ignored" is literal (fail-open); a config-tier source has no name worth showing, so its line names only the event.
 pub(super) fn failed_hook_line(
@@ -26,6 +26,88 @@ pub(super) fn failed_hook_line(
     } else {
         format!("{subject} failed, ignored: {error}")
     })
+}
+/// Whether a hook run came from a plugin: plugin hook specs are named `plugin/<plugin>/...` by the shell's plugin adapter.
+fn is_plugin_hook_run(run: &fuigo_shell::extensions::notification::HookRunEntryDto) -> bool {
+    run.name.starts_with("plugin/")
+}
+
+/// Apply one `HookExecution` batch to a view (the root agent or a subagent's child view), live or replayed.
+///
+/// Every source keeps F045: success and skip leave no trace, a non-blocking failure gets its one "failed, ignored" line, and a
+/// deny is left to the shell's own annotation. Plugin-origin runs (except denies) are additionally shown as a badge: on their
+/// tool call's row for `pre_tool_use` / `post_tool_use` / `post_tool_use_failure` (found by the batch's `tool_call_id`, never
+/// by position), or on a lifecycle row of their own for every other event. A tool batch without a `tool_call_id` (an older
+/// shell) gets no badge rather than a guessed row.
+pub(crate) fn apply_hook_execution(
+    session: &mut AgentSession,
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    event_name: &str,
+    tool_call_id: Option<&str>,
+    runs: &[fuigo_shell::extensions::notification::HookRunEntryDto],
+    plugins_ui_disabled: bool,
+) -> bool {
+    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+    use fuigo_shell::extensions::notification::HookRunStatusDto;
+    if plugins_ui_disabled {
+        return false;
+    }
+    let mut redraw = false;
+    for line in runs.iter().filter_map(|r| failed_hook_line(event_name, r)) {
+        scrollback.push_block(RenderBlock::session_event(SessionEvent::HookOutcome {
+            message: line,
+        }));
+        redraw = true;
+    }
+    let plugin_runs: Vec<HookRunEntry> = runs
+        .iter()
+        .filter(|r| is_plugin_hook_run(r))
+        .filter_map(|r| {
+            let status = match &r.status {
+                HookRunStatusDto::Success { elapsed_ms } => HookRunStatus::Success {
+                    elapsed: std::time::Duration::from_millis(*elapsed_ms),
+                },
+                HookRunStatusDto::Failed {
+                    error,
+                    elapsed_ms,
+                    blocked: false,
+                } => HookRunStatus::Failed {
+                    error: error.clone(),
+                    elapsed: std::time::Duration::from_millis(*elapsed_ms),
+                },
+                // A deny is reported once, by the shell's annotation; a skip did not run
+                HookRunStatusDto::Failed { blocked: true, .. } | HookRunStatusDto::Skipped => {
+                    return None;
+                }
+            };
+            Some(HookRunEntry {
+                name: r.name.clone(),
+                status,
+                output: r.output.clone(),
+            })
+        })
+        .collect();
+    if plugin_runs.is_empty() {
+        return redraw;
+    }
+    let phase = match event_name {
+        "pre_tool_use" => Some(HookPhase::Pre),
+        "post_tool_use" | "post_tool_use_failure" => Some(HookPhase::Post),
+        _ => None,
+    };
+    match (phase, tool_call_id) {
+        (Some(phase), Some(id)) => {
+            redraw |= session
+                .tracker
+                .attach_tool_hooks(scrollback, id, phase, plugin_runs);
+        }
+        (Some(_), None) => {}
+        (None, _) => {
+            scrollback.push_lifecycle_hooks(event_name.to_string(), plugin_runs);
+            redraw = true;
+        }
+    }
+    redraw
 }
 pub(super) fn refresh_context_used(view: &mut AgentView, used: u64) {
     let total = view.session.models.get_context_window().unwrap_or(0);
@@ -123,6 +205,7 @@ fn synthesize_replay_turn_marker(
     stop_reason: &str,
     agent_result: Option<&str>,
     error_kind: Option<crate::app::error_display::WireErrorType>,
+    verdicts: Option<&fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
     elapsed_ms: Option<u64>,
     meta: Option<&serde_json::Value>,
     is_api_key_auth: bool,
@@ -160,12 +243,14 @@ fn synthesize_replay_turn_marker(
             cancellation_category,
             error_kind,
             error_banner_present: banner,
+            verdicts,
         })
     };
     marker.or_else(|| {
         paint_rate_limit_failure.then(|| {
             super::prompt_origin::rate_limited_wake_failure_event(
                 agent_result,
+                verdicts,
                 elapsed_ms.map(std::time::Duration::from_millis),
                 is_api_key_auth,
             )
@@ -223,9 +308,12 @@ pub(super) fn handle_session_notification_with_origin(
         .expect("find_session_match returned an existing AgentId");
     if matches!(matched, SessionMatch::Child(_)) {
         let child_sid: &str = session_notif.session_id.0.as_ref();
+        let child_meta =
+            NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
         let changed = handle_child_session_notification(
             session_notif.update,
             child_sid,
+            child_meta.event_id.as_deref(),
             agent,
             is_api_key_auth,
         );
@@ -294,6 +382,8 @@ pub(super) fn handle_session_notification_with_origin(
         | FuigoSessionUpdate::AutoCompactCancelled { .. }
         | FuigoSessionUpdate::RetryState(_)
         | FuigoSessionUpdate::ImageDropped { .. }
+        | FuigoSessionUpdate::HistoryRepaired { .. }
+        | FuigoSessionUpdate::ConfigNotice { .. }
         | FuigoSessionUpdate::MemoryFlushCompleted { .. }
         | FuigoSessionUpdate::MemoryDreamCompleted { .. }
         | FuigoSessionUpdate::MemorySessionSaved { .. }) => {
@@ -340,6 +430,7 @@ pub(super) fn handle_session_notification_with_origin(
             agent_result,
             error_kind,
             elapsed_ms,
+            verdicts,
             ..
         } => {
             let error_kind = crate::app::error_display::wire_error_kind(error_kind.as_deref());
@@ -353,6 +444,7 @@ pub(super) fn handle_session_notification_with_origin(
                         stop_reason.as_str(),
                         agent_result.as_deref(),
                         error_kind,
+                        verdicts.as_ref(),
                         elapsed_ms,
                         session_notif.meta.as_ref(),
                         is_api_key_auth,
@@ -385,6 +477,7 @@ pub(super) fn handle_session_notification_with_origin(
                             let event = if stop_reason == "rate_limit" {
                                 super::prompt_origin::rate_limited_wake_failure_event(
                                     agent_result.as_deref(),
+                                    verdicts.as_ref(),
                                     None,
                                     is_api_key_auth,
                                 )
@@ -392,6 +485,7 @@ pub(super) fn handle_session_notification_with_origin(
                                 crate::app::turn_completion::failed_turn_event(
                                     error_kind,
                                     agent_result.as_deref(),
+                                    verdicts.as_ref(),
                                     None,
                                 )
                             };
@@ -418,6 +512,7 @@ pub(super) fn handle_session_notification_with_origin(
                             ),
                             error_kind,
                             is_api_key_auth,
+                            verdicts: verdicts.as_ref(),
                         },
                     );
                     true
@@ -455,6 +550,7 @@ pub(super) fn handle_session_notification_with_origin(
                                 m.get(super::super::turn_completion::CANCELLATION_CONTEXT_KEY)
                             }),
                             error_kind,
+                            verdicts: verdicts.as_ref(),
                         },
                     ));
                 false
@@ -879,22 +975,17 @@ pub(super) fn handle_session_notification_with_origin(
         FuigoSessionUpdate::HookExecution {
             event_name,
             tool_name: _tool_name,
+            tool_call_id,
             prompt_id: _prompt_id,
             runs,
-        } => {
-            // Successful and skipped runs leave no trace; a deny is already annotated by the shell.
-            if app.appearance.disable_plugins {
-                return false;
-            }
-            let mut redraw = false;
-            for line in runs.iter().filter_map(|r| failed_hook_line(&event_name, r)) {
-                agent.scrollback.push_block(RenderBlock::session_event(
-                    SessionEvent::HookOutcome { message: line },
-                ));
-                redraw = true;
-            }
-            redraw
-        }
+        } => apply_hook_execution(
+            &mut agent.session,
+            &mut agent.scrollback,
+            &event_name,
+            tool_call_id.as_deref(),
+            &runs,
+            app.appearance.disable_plugins,
+        ),
         FuigoSessionUpdate::HooksChanged {
             hooks,
             project_trusted,
@@ -1296,10 +1387,19 @@ pub(super) fn handle_session_notification_with_origin(
 pub(super) fn handle_child_session_notification(
     update: FuigoSessionUpdate,
     child_sid: &str,
+    event_id: Option<&str>,
     agent: &mut AgentView,
     is_api_key_auth: bool,
 ) -> bool {
     match update {
+        // A subagent's hook runs belong in its own view, exactly as the root's do in the root's
+        FuigoSessionUpdate::HookExecution { .. } | FuigoSessionUpdate::HookAnnotation { .. } => {
+            agent
+                .child_view_for_live_update_mut(child_sid)
+                .is_some_and(|child_view| {
+                    apply_child_view_session_event(child_view, &update, event_id, is_api_key_auth)
+                })
+        }
         FuigoSessionUpdate::AutoCompactStarted { .. }
         | FuigoSessionUpdate::AutoCompactCompleted { .. }
         | FuigoSessionUpdate::AutoCompactFailed { .. }
@@ -1310,7 +1410,8 @@ pub(super) fn handle_child_session_notification(
         | FuigoSessionUpdate::MemorySessionSaved { .. } => {
             let mut changed = false;
             if let Some(child_view) = agent.child_view_for_live_update_mut(child_sid) {
-                changed = apply_child_view_session_event(child_view, &update, is_api_key_auth);
+                changed =
+                    apply_child_view_session_event(child_view, &update, None, is_api_key_auth);
             }
             if let FuigoSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update
                 && let Some(info) = agent.subagent_sessions.get_mut(child_sid)
@@ -1363,8 +1464,48 @@ pub(super) fn handle_child_session_notification(
 pub(crate) fn apply_child_view_session_event(
     child_view: &mut AgentView,
     update: &FuigoSessionUpdate,
+    event_id: Option<&str>,
     is_api_key_auth: bool,
 ) -> bool {
+    if matches!(
+        update,
+        FuigoSessionUpdate::HookAnnotation { .. } | FuigoSessionUpdate::HookExecution { .. }
+    ) && let Some(id) = event_id
+        && !child_view.applied_hook_event_ids.insert(id.to_owned())
+    {
+        // Already shown: re-delivered live, or replayed from disk by a hydration and then delivered live (see `applied_hook_event_ids`)
+        return false;
+    }
+    if let FuigoSessionUpdate::HookAnnotation { message } = update {
+        // A deny's explanation (the one report F045 leaves to the shell) belongs in the child's own view
+        if child_view.scrollback.appearance().disable_plugins {
+            return false;
+        }
+        child_view.scrollback.push_block(RenderBlock::session_event(
+            SessionEvent::HookAnnotation {
+                message: message.clone(),
+            },
+        ));
+        return true;
+    }
+    if let FuigoSessionUpdate::HookExecution {
+        event_name,
+        tool_call_id,
+        runs,
+        ..
+    } = update
+    {
+        // A child view's scrollback carries the parent's appearance, including the plugins-UI switch
+        let plugins_ui_disabled = child_view.scrollback.appearance().disable_plugins;
+        return apply_hook_execution(
+            &mut child_view.session,
+            &mut child_view.scrollback,
+            event_name,
+            tool_call_id.as_deref(),
+            runs,
+            plugins_ui_disabled,
+        );
+    }
     let changed = apply_session_event(
         update,
         &mut child_view.session,
@@ -1460,6 +1601,17 @@ pub(super) fn apply_session_event(
             scrollback.push_block(RenderBlock::system(message));
             true
         }
+        FuigoSessionUpdate::HistoryRepaired { message } => {
+            tracing::warn!("{message}");
+            scrollback.push_block(RenderBlock::system(message.clone()));
+            true
+        }
+        // A refused reference to the saved API key (P133): shown once, as a plain system note.
+        FuigoSessionUpdate::ConfigNotice { message } => {
+            tracing::warn!("{message}");
+            scrollback.push_block(RenderBlock::system(message.clone()));
+            true
+        }
         _ => false,
     }
 }
@@ -1510,18 +1662,23 @@ pub(super) fn apply_retry_state(
     let mut is_credit_limit = false;
     let mut is_reauth = false;
     use fuigo_shell::extensions::notification::RetryState;
+    // P119: every decision below reads the shell's typed verdicts, computed before it replaced any credential in the
+    // text. Only a state without verdicts (an older shell, whose text is unscrubbed) is judged by its words.
+    let verdicts = retry.verdicts();
     match retry {
         RetryState::Retrying {
             attempt,
             max_retries,
             reason,
             error_type,
+            ..
         } => {
             session.set_retry_activity(Some(TurnActivity::Retrying {
                 attempt: *attempt,
                 max_retries: *max_retries,
                 reason: reason.clone(),
                 error_type: error_type.clone(),
+                verdicts: verdicts.cloned(),
             }));
         }
         RetryState::Exhausted {
@@ -1529,6 +1686,7 @@ pub(super) fn apply_retry_state(
             reason,
             is_rate_limited: rate_limited,
             error_type,
+            ..
         } => {
             session.set_retry_activity(None);
             session.rate_limited = *rate_limited;
@@ -1543,19 +1701,31 @@ pub(super) fn apply_retry_state(
                     attempts: *attempts,
                 });
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
+            is_credit_limit = verdicts.map_or_else(
+                || super::super::dispatch::is_credit_limit_error(None, reason),
+                |v| v.credit_limit,
+            );
             let is_free_usage = *rate_limited
-                && fuigo_shell::sampling::error::is_free_usage_exhausted_error(reason);
+                && verdicts.map_or_else(
+                    || fuigo_shell::sampling::error::is_free_usage_exhausted_error(reason),
+                    |v| v.free_usage,
+                );
             if is_credit_limit {
                 session.credit_limit_blocked = true;
             } else if is_free_usage {
                 session.free_usage_blocked = true;
-            } else if !*rate_limited && is_reauthable_failure(None, reason) {
+            } else if !*rate_limited
+                && verdicts.map_or_else(|| is_reauthable_failure(None, reason), |v| v.reauth)
+            {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if *rate_limited {
                 let error = crate::app::effects::sanitize_user_error(
-                    &format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth),
+                    &format_rate_limited_user_message_with(
+                        Some(reason.as_str()),
+                        is_api_key_auth,
+                        verdicts,
+                    ),
                 );
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
                     error,
@@ -1565,10 +1735,11 @@ pub(super) fn apply_retry_state(
                 // An exhaustion names the kind that ran out of budget when the shell sent one,
                 // so an empty-response exhaustion still headlines "Empty response" here.
                 scrollback.push_block(RenderBlock::session_event(
-                    crate::app::error_display::format_request_failure(
+                    crate::app::error_display::format_request_failure_typed(
                         None,
                         crate::app::error_display::wire_error_kind(error_type.as_deref()),
                         reason,
+                        verdicts,
                     )
                     .into_session_event(),
                 ));
@@ -1577,16 +1748,23 @@ pub(super) fn apply_retry_state(
         RetryState::Failed {
             error_type,
             message,
+            ..
         } => {
             session.set_retry_activity(None);
             let wire = crate::app::error_display::WireErrorType::parse(Some(error_type.as_str()));
             if wire == crate::app::error_display::WireErrorType::EncryptedContentMismatch {
                 session.model_incompatible = true;
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
+            is_credit_limit = verdicts.map_or_else(
+                || super::super::dispatch::is_credit_limit_error(None, message),
+                |v| v.credit_limit,
+            );
             if is_credit_limit {
                 session.credit_limit_blocked = true;
-            } else if is_reauthable_failure(Some(error_type.as_str()), message) {
+            } else if verdicts.map_or_else(
+                || is_reauthable_failure(Some(error_type.as_str()), message),
+                |v| v.reauth,
+            ) {
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if wire == crate::app::error_display::WireErrorType::DiskFull {
@@ -1607,8 +1785,13 @@ pub(super) fn apply_retry_state(
                 }));
             } else {
                 scrollback.push_block(RenderBlock::session_event(
-                    crate::app::error_display::format_request_failure(None, Some(wire), message)
-                        .into_session_event(),
+                    crate::app::error_display::format_request_failure_typed(
+                        None,
+                        Some(wire),
+                        message,
+                        verdicts,
+                    )
+                    .into_session_event(),
                 ));
             }
         }

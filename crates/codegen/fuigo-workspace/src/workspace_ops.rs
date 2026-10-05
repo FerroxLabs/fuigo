@@ -1877,6 +1877,9 @@ mod tests {
     }
     #[test]
     fn repos_manifest_search_dirs_stops_at_sandbox_workspace_root() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _lock = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1894,6 +1897,9 @@ mod tests {
     }
     #[test]
     fn repos_manifest_search_dirs_keeps_sandbox_root_when_home_unset() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _lock = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1911,6 +1917,9 @@ mod tests {
     }
     #[test]
     fn repos_manifest_search_dirs_skips_user_global_fuigo_home() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _lock = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1930,6 +1939,9 @@ mod tests {
     /// The test is sync and uses `block_on` so `ENV_TEST_LOCK` is not held across `.await` (clippy `await_holding_lock`).
     #[test]
     fn repos_list_does_not_load_user_global_manifest() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _lock = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());

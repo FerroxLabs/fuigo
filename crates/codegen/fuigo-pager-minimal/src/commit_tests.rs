@@ -553,6 +553,7 @@ fn assert_committed_fits_entry(label: &str, entry: &ScrollbackEntry, width: u16)
 
 #[test]
 fn committed_block_uses_owning_session_cwd_for_tool_paths() {
+    let _theme = fuigo_pager::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
 
     let cwd = std::path::Path::new("/alternate/worktree");
@@ -718,6 +719,7 @@ fn terminal_native_lock_paints_only_native_colors() {
 
 #[test]
 fn large_commit_is_capped_with_footer() {
+    let _theme = fuigo_pager::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -757,6 +759,7 @@ fn large_commit_is_capped_with_footer() {
 
 #[test]
 fn small_commit_is_not_capped() {
+    let _theme = fuigo_pager::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -868,6 +871,7 @@ fn committed_edit_keeps_diff_line_backgrounds() {
 /// One column is the whole cost of the rail, which is why restoring it is height-safe.
 #[test]
 fn only_thinking_spends_the_accent_column() {
+    let _theme = fuigo_pager::theme::cache::pin_theme();
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
     let chrome = |entry: &ScrollbackEntry| {
@@ -1105,6 +1109,7 @@ fn collapse_thinking_toggle_flips_only_reasoning() {
 
 #[test]
 fn collapsed_thinking_commit_is_one_advertised_row() {
+    let _theme = fuigo_pager::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 

@@ -10,6 +10,9 @@
 //!
 //! Run with:
 //! `cargo test -p fuigo-pager --test pty_auto_mode -- --ignored --nocapture`
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::PathBuf;
 use std::time::Duration;

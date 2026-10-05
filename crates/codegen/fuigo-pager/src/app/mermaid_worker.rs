@@ -2025,6 +2025,8 @@ mod tests {
     /// Once the worker lands the result, the action runs and `pending` drains so `mermaid_needs_tick()` flips back to false (the settle invariant).
     #[test]
     fn mermaid_view_miss_dispatches_then_settles() {
+        // the pending key is compared against a key re-derived from the live theme; pin it so a concurrent set_theme cannot split the two reads
+        let _theme = crate::theme::cache::pin_theme();
         let mut agent = agent_with_session("miss");
         let src = "flowchart LR\nA-->B\n".to_string();
 
@@ -2067,9 +2069,30 @@ mod tests {
         );
     }
 
-    /// Disk hit at the live theme/width: the click runs the action immediately, dispatches no render, and never even spins up the worker runtime.
-    #[test]
-    fn mermaid_view_disk_hit_runs_action_without_dispatch() {
+    /// Try to flip the process-global theme the way a concurrent `set_theme` test does, without ever blocking.
+    /// It takes the shared theme test lock with `try_lock`, so it flips only if the calling test is NOT holding [`pin_theme`].
+    /// Returns whether the flip happened.
+    /// Run inline (no thread, no sleep), so the interleaving is forced rather than left to scheduler luck.
+    ///
+    /// [`pin_theme`]: crate::theme::cache::pin_theme
+    fn try_flip_theme_like_a_concurrent_test() -> bool {
+        match crate::theme::cache::test_lock().try_lock() {
+            Ok(_held) => {
+                crate::theme::cache::set(ThemeKind::FuigoDay);
+                true
+            }
+            Err(std::sync::TryLockError::Poisoned(p)) => {
+                let _held = p.into_inner();
+                crate::theme::cache::set(ThemeKind::FuigoDay);
+                true
+            }
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        }
+    }
+
+    /// The disk-hit scenario, with `between` run at the exact point where the race lived: after the test derived the cache path from the theme and before the click re-reads the live theme.
+    /// Panics if the click did not take the disk-hit path.
+    fn run_disk_hit_scenario(between: impl FnOnce()) {
         let mut agent = agent_with_session("hit");
         let src = "flowchart LR\nA-->B\n".to_string();
         let theme = crate::theme::cache::current_kind();
@@ -2081,6 +2104,8 @@ mod tests {
         image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
             .save(&out_path)
             .unwrap();
+
+        between();
 
         agent.request_mermaid_render(src, MermaidClickAction::CopyPath);
         // CopyPath ran now (clipboard toast), no render pending, no runtime built.
@@ -2102,10 +2127,49 @@ mod tests {
         );
     }
 
+    /// Disk hit at the live theme/width: the click runs the action immediately, dispatches no render, and never even spins up the worker runtime.
+    ///
+    /// The cache path is keyed by the process-global theme, which the test reads once to seed the PNG and the click reads again.
+    /// Concurrent `set_theme` tests mutate that global, so an unpinned theme could change between the two reads and turn the hit into a miss.
+    /// That was the intermittent failure; the product reads the theme once per click, so the race was test-side.
+    /// Holding [`pin_theme`] for the whole test removes it among tests that take the shared theme lock.
+    /// The non-blocking flip in the middle asserts that this test owns that lock (it flips only if the lock were free), so removing the pin fails the test whenever no sibling happens to hold the lock (the probe shows the lock is held, not by whom).
+    ///
+    /// [`pin_theme`]: crate::theme::cache::pin_theme
+    #[test]
+    fn mermaid_view_disk_hit_runs_action_without_dispatch() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut flipped = true;
+        run_disk_hit_scenario(|| flipped = try_flip_theme_like_a_concurrent_test());
+        assert!(
+            !flipped,
+            "a concurrent theme change must be excluded while the theme is pinned",
+        );
+    }
+
+    /// The mechanism behind the original flake, asserted directly (no global mutation, so it cannot perturb sibling tests): the same diagram under a different theme maps to a different cache path.
+    /// A PNG seeded for one theme is therefore not a hit for a click that reads another, which is why the disk-hit test must pin the theme.
+    #[test]
+    fn mermaid_cache_path_depends_on_theme() {
+        let agent = agent_with_session("themepath");
+        let src = "flowchart LR\nA-->B\n";
+        let cols = agent.mermaid_content_cols();
+        let (night_key, night_path) = agent
+            .mermaid_render_target(src, ThemeKind::FuigoNight, cols, MermaidRenderQuality::Open)
+            .unwrap();
+        let (day_key, day_path) = agent
+            .mermaid_render_target(src, ThemeKind::FuigoDay, cols, MermaidRenderQuality::Open)
+            .unwrap();
+        assert_ne!(night_key, day_key);
+        assert_ne!(night_path, day_path);
+    }
+
     /// Regression: when the PNG lands on disk while an action is still pending, a second identical click must take the `has_pending` guard.
     /// Taking the disk-hit fast path instead would run the action now AND again when the poll resolves the pending entry (two opens / two copies).
     #[test]
     fn mermaid_view_pending_dedup_wins_over_disk_hit_race() {
+        // the process-global theme is mutated by concurrent set_theme tests; hold the shared lock so every read in this test sees one theme
+        let _theme = crate::theme::cache::pin_theme();
         let mut agent = agent_with_session("race");
         let src = "flowchart LR\nA-->B\n".to_string();
 

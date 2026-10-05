@@ -6,6 +6,7 @@ edition.workspace = true
 description = "Core host-local workspace library (FS, VCS, execution, discovery) for fuigo-shell and remote sampler"
 
 [dependencies]
+fuigo-secrets = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 dunce = { workspace = true }
@@ -137,13 +138,20 @@ default-bazel = [
     ]
 
 [dev-dependencies]
+fuigo-secrets = { workspace = true, features = ["test-support"] }
+# P71 test seam: loopback mocks stand in for a FluxRouter-operated proxy. Dev-dependency ONLY (upload_gate_guard pins it).
+fuigo-file-utils = { path = "../fuigo-file-utils", features = ["test-loopback-operator"] }
 tempfile = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 fuigo-test-utils = { path = "../../common/fuigo-test-utils" }
+# `rerun_in_own_process` and the shared-process write guard for tests that write HOME / FUIGO_HOME.
+fuigo-test-support = { workspace = true }
 # Decode tar.gz archives produced by workspace upload helpers in tests.
 flate2 = { workspace = true }
 tar = { workspace = true }
+# `write_through`'s fault seams, for the worktree-apply replacement tests.
+fuigo-config = { workspace = true, features = ["test-seams"] }
 
 [package.metadata.cargo-shear]
 ignored = ["tokio-tungstenite"]

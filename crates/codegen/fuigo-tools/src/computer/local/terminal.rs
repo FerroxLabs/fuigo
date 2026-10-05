@@ -568,6 +568,12 @@ struct LocalTerminalActor {
     #[cfg(unix)]
     shell_state: Option<shell_state::ShellState>,
 
+    /// The credential denylist generation `shell_state` was initialized under (P86). When the
+    /// denylist has grown since, the snapshot may re-export a credential that is denied now, so
+    /// it is thrown away and the shell re-initialized before the next command.
+    #[cfg(unix)]
+    shell_state_generation: u64,
+
     #[cfg(unix)]
     static_shell: Option<super::static_shell::StaticShellSnapshot>,
 
@@ -620,6 +626,8 @@ impl LocalTerminalActor {
             search_shadows,
             #[cfg(unix)]
             shell_state: None,
+            #[cfg(unix)]
+            shell_state_generation: 0,
             #[cfg(unix)]
             static_shell: None,
             #[cfg(unix)]
@@ -772,20 +780,69 @@ impl LocalTerminalActor {
 
     #[cfg(unix)]
     async fn ensure_persistent_shell_initialized(&mut self, cwd: &std::path::Path) {
-        if self.shell_state.is_some() {
-            return;
-        }
+        // Read BEFORE the init spawns anything: a name registered while init runs then still
+        // forces another re-init next time.
+        let generation = crate::util::shell_env_policy::credential_denylist_generation();
+        // A snapshot from an older denylist generation may re-export a credential that is denied
+        // now (a config reload added an `env_key`): discard it -- exports, functions and aliases
+        // the session built up go with it -- and start over in the shell's last directory.
+        let previous_cwd = match self.shell_state.take() {
+            Some(state) if self.shell_state_generation == generation => {
+                self.shell_state = Some(state);
+                return;
+            }
+            Some(state) => {
+                tracing::info!(
+                    "credential denylist grew; re-initializing the persistent shell so its snapshot cannot replay a denied variable"
+                );
+                Some(state.cwd).filter(|dir| dir.is_dir())
+            }
+            None => None,
+        };
+        let init_cwd = previous_cwd.as_deref().unwrap_or(cwd);
+        self.shell_state_generation = generation;
         let shell = shell_state::ShellKind::detect();
-        match shell_state::ShellState::init(shell, cwd, self.shell_env_policy.as_ref()).await {
-            Ok(state) => self.shell_state = Some(state),
+        match shell_state::ShellState::init(shell, init_cwd, self.shell_env_policy.as_ref()).await {
+            Ok(mut state) => {
+                // A re-initialization keeps the directory the session was in, even if a login
+                // startup file `cd`s elsewhere.
+                if let Some(dir) = previous_cwd.clone() {
+                    state.cwd = dir;
+                }
+                self.shell_state = Some(state);
+            }
             Err(e) => {
                 tracing::warn!("persistent shell init failed, using empty state: {e}");
                 self.shell_state = Some(shell_state::ShellState {
-                    cwd: cwd.to_path_buf(),
+                    cwd: init_cwd.to_path_buf(),
                     snapshot: String::new(),
                     shell,
                 });
             }
+        }
+    }
+
+    /// Take a finished foreground command's dump back as the persistent shell's state (P86): only
+    /// a dump from a command that ran on the CURRENT state and under the current credential
+    /// denylist generation is installed whole. Otherwise (the denylist grew since, or the state
+    /// was re-initialized meanwhile) only the dump's directory is kept.
+    #[cfg(unix)]
+    fn install_persistent_dump(&mut self, tagged: &str) {
+        let state_generation = self.shell_state_generation;
+        let Some(state) = self.shell_state.as_mut() else {
+            return;
+        };
+        match untag_dump_generation(tagged) {
+            Some((generation, dump))
+                if generation == state_generation
+                    && generation
+                        == crate::util::shell_env_policy::credential_denylist_generation() =>
+            {
+                state.update_from_dump(dump);
+            }
+            // A foreground command's directory change stands whatever happened to the snapshot.
+            Some((_, dump)) => state.update_cwd_from_dump(dump),
+            None => tracing::debug!("untagged persistent-shell dump discarded"),
         }
     }
 
@@ -800,16 +857,28 @@ impl LocalTerminalActor {
     ) -> Result<SpawnResult, ComputerError> {
         use command_fds::CommandFdExt;
 
-        self.ensure_persistent_shell_initialized(cwd).await;
-
-        let shell_state = self.shell_state.as_ref().unwrap();
-        let tracked_cwd_alive = match tokio::fs::metadata(&shell_state.cwd).await {
-            Ok(m) => m.is_dir(),
-            Err(e) => !matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ),
+        // Re-checked after the last await before the spawn, under the denylist fence held until
+        // the spawn returns (P86): a name registered meanwhile, on any thread, would otherwise
+        // let a snapshot from the older denylist be replayed.
+        let (tracked_cwd_alive, denylist_fence) = loop {
+            self.ensure_persistent_shell_initialized(cwd).await;
+            let tracked_cwd = self.shell_state.as_ref().unwrap().cwd.clone();
+            let alive = match tokio::fs::metadata(&tracked_cwd).await {
+                Ok(m) => m.is_dir(),
+                Err(e) => !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ),
+            };
+            let fence = crate::util::shell_env_policy::credential_denylist_fence();
+            if crate::util::shell_env_policy::credential_denylist_generation()
+                == self.shell_state_generation
+            {
+                break (alive, fence);
+            }
+            drop(fence);
         };
+        let shell_state = self.shell_state.as_ref().unwrap();
         let (cwd_override, spawn_notice): (Option<&std::path::Path>, Option<String>) =
             if tracked_cwd_alive {
                 (None, None)
@@ -859,7 +928,9 @@ impl LocalTerminalActor {
         fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
 
         #[allow(clippy::disallowed_methods)] // attached to a process group below
-        let child = cmd.spawn().map_err(|e| {
+        let spawned = cmd.spawn();
+        drop(denylist_fence);
+        let child = spawned.map_err(|e| {
             ComputerError::io_with_kind(
                 format!("spawn shell in {}: {e}", prep.cwd.display()),
                 e.kind(),
@@ -884,10 +955,13 @@ impl LocalTerminalActor {
             }
         });
 
-        let dump_handle =
-            tokio::spawn(
-                async move { shell_state::read_dump_from_pipe(prep.state_out_read).await },
-            );
+        // The dump carries the denylist generation its command ran under, checked when it is
+        // taken back as the shell's state (see `install_persistent_dump`).
+        let spawn_generation = self.shell_state_generation;
+        let dump_handle = tokio::spawn(async move {
+            let dump = shell_state::read_dump_from_pipe(prep.state_out_read).await?;
+            Ok(tag_dump_generation(spawn_generation, &dump))
+        });
 
         Ok(SpawnResult {
             child,
@@ -1552,11 +1626,7 @@ impl LocalTerminalActor {
                 };
                 if let Some(handle) = handle {
                     match handle.await {
-                        Ok(Ok(dump)) => {
-                            if let Some(ref mut state) = self.shell_state {
-                                state.update_from_dump(&dump);
-                            }
-                        }
+                        Ok(Ok(dump)) => self.install_persistent_dump(&dump),
                         Ok(Err(e)) => {
                             tracing::debug!("failed to read shell state dump: {e}");
                         }
@@ -1628,6 +1698,8 @@ impl LocalTerminalActor {
                 while i < waiters.len() {
                     if now >= waiters[i].deadline {
                         let waiter = waiters.swap_remove(i);
+                        #[cfg(test)]
+                        actor_trace::record(actor_trace::Event::DeadlineReply, &task_id);
                         let _ = waiter.reply.send(snapshot.clone());
                         timed_out_tasks.push(task_id.clone());
                     } else {
@@ -2262,6 +2334,19 @@ pub struct LocalTerminalBackend {
     cancel_token: CancellationToken,
 }
 
+/// Prefix a persistent-shell dump with the credential denylist generation its command ran under.
+#[cfg(unix)]
+fn tag_dump_generation(generation: u64, dump: &str) -> String {
+    format!("{generation}\n{dump}")
+}
+
+/// Split a [`tag_dump_generation`] dump back into its generation and the dump.
+#[cfg(unix)]
+fn untag_dump_generation(tagged: &str) -> Option<(u64, &str)> {
+    let (generation, dump) = tagged.split_once('\n')?;
+    Some((generation.parse().ok()?, dump))
+}
+
 /// Grouped inputs for [`LocalTerminalBackend::new_inner`]; constructors override
 /// only the fields they vary via `..Default::default()`.
 struct LocalTerminalConfig {
@@ -2756,6 +2841,39 @@ fn send_sigkill_to_group(process: &mut ProcessState) {
     let _ = process.child.start_kill();
 }
 
+/// Test-only, actor-side timestamps of events a test must order exactly (a test
+/// timing its own receipt of a reply cannot tell when the actor sent it). Keyed by
+/// task id, first occurrence wins. Compiled out of non-test builds.
+#[cfg(test)]
+mod actor_trace {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub(super) enum Event {
+        /// The actor handed a task's post-exit drain off (or, if serialised, began it).
+        DrainStart,
+        /// The actor sent a completion waiter its deadline (timeout) reply.
+        DeadlineReply,
+    }
+
+    static EVENTS: Mutex<Option<HashMap<(Event, String), Instant>>> = Mutex::new(None);
+
+    pub(super) fn record(event: Event, task_id: &str) {
+        let mut events = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
+        events
+            .get_or_insert_with(HashMap::new)
+            .entry((event, task_id.to_owned()))
+            .or_insert_with(Instant::now);
+    }
+
+    pub(super) fn get(event: Event, task_id: &str) -> Option<Instant> {
+        let events = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
+        events.as_ref()?.get(&(event, task_id.to_owned())).copied()
+    }
+}
+
 /// Drains the taken pipes off the actor, then hands the output and the
 /// already-determined exit status back as a [`TerminalCommand::DrainedOutput`].
 fn spawn_detached_drain(
@@ -2765,6 +2883,8 @@ fn spawn_detached_drain(
     stderr: Option<tokio::process::ChildStderr>,
     status: ExitStatus,
 ) {
+    #[cfg(test)]
+    actor_trace::record(actor_trace::Event::DrainStart, &task_id);
     tokio::spawn(async move {
         let mut output = Vec::new();
         let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
@@ -2990,16 +3110,56 @@ async fn finalize_process(process: &mut ProcessState, status: Option<std::proces
 
 #[tracing::instrument(name = "fs.open_output_file", skip_all)]
 async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
+    // A command's output log lives in `<session>/terminal/` and holds whatever the command printed (P150, D6, S14):
+    // owner-only on Unix like the other session files. The folder is created 0700 and the log 0600, and an existing
+    // log or folder left looser by an older version is tightened (best effort: a filesystem without modes must not
+    // stop the command). Windows keeps the session folder's ACL here.
     if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            let mut builder = tokio::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder.create(parent).await?;
+            // Only the session's own `terminal/` folder is tightened; a caller-chosen folder elsewhere keeps its mode.
+            if parent.file_name().is_some_and(|name| name == "terminal") {
+                tighten_owner_only(parent, 0o700).await;
+            }
+        }
+        #[cfg(not(unix))]
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // On the open descriptor (no path race); only an existing log can have another mode.
+        if let Ok(meta) = file.metadata().await
+            && meta.permissions().mode() & 0o777 != 0o600
+            && let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)).await
+        {
+            tracing::debug!(path = %path.display(), %error, "terminal output: could not restrict to owner-only");
+        }
+    }
+    Ok(file)
+}
+
+/// Set `path` to `mode` when it has any other mode (Unix). Best effort: logged, never fatal.
+#[cfg(unix)]
+async fn tighten_owner_only(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let result = match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.permissions().mode() & 0o777 == mode => Ok(()),
+        Ok(_) => tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await,
+        Err(e) => Err(e),
+    };
+    if let Err(error) = result {
+        tracing::debug!(path = %path.display(), %error, "terminal output: could not restrict to owner-only");
+    }
 }
 
 #[cfg(unix)]
@@ -3396,6 +3556,142 @@ mod tests {
         assert_eq!(result.combined_output.trim(), "function-ok");
     }
 
+    /// P86 (CB-1), the bash tool: the credentials sit in the agent's OWN environment and the
+    /// command runs through every route the tool has (plain, login-shell capture with an rc file
+    /// that exports `FLUX_API_KEY`, persistent shell), foreground and background, child and
+    /// grandchild. A user's explicit `[shell_environment_policy] set` still delivers a key.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p86_bash_tool_children_never_see_parent_credentials() {
+        if crate::util::shell_env_policy::p86_parent_env(
+            "p86_bash_tool_children_never_see_parent_credentials",
+        ) {
+            return;
+        }
+        let check = crate::util::shell_env_policy::P86_CHILD_CHECK;
+        for route in 0..3 {
+            // Routes 1 (login capture) and 2 (persistent login shell) read the rc file: its
+            // sentinel must arrive and its rc-only credential must not.
+            let rc = if route == 0 {
+                String::new()
+            } else {
+                " && test \"$P86_RC_BENIGN\" = kept && test -z \"${GROQ_API_KEY+x}\"".to_string()
+            };
+            let probe = format!("{check}{rc} && /bin/sh -c '{check}{rc}' && printf absent");
+            let backend = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+                persistent_shell: route == 2,
+                login_shell_capture: route == 1,
+                ..Default::default()
+            });
+            let result = backend.run(make_request(&probe)).await.unwrap();
+            assert_eq!(result.exit_code, Some(0), "route {route}");
+            assert_eq!(result.combined_output.trim(), "absent", "route {route}");
+            let task = backend.run_background(make_request(&probe)).await.unwrap();
+            assert!(
+                poll_until_task_completed(&backend, &task.task_id, Duration::from_secs(10)).await
+            );
+            let task = backend.get_task(&task.task_id).await.unwrap();
+            assert_eq!(task.exit_code, Some(0), "route {route} (background)");
+        }
+        // A user-exported key does not survive into the next command of a persistent shell.
+        let persistent = LocalTerminalBackend::with_persistent_shell();
+        let export = persistent
+            .run(make_request(
+                "export FLUX_API_KEY=fake-p86-user; export P86_CORP_KEY=fake-p86-user",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(export.exit_code, Some(0));
+        let replay = persistent
+            .run(make_request(
+                "test -z \"${FLUX_API_KEY+x}${P86_CORP_KEY+x}\" && printf absent",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.combined_output.trim(), "absent");
+        // The user's explicit choice is honoured, on the plain and the persistent backend (twice:
+        // the second command runs from the first one's snapshot).
+        for persistent_shell in [false, true] {
+            let selected = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+                persistent_shell,
+                shell_env_policy: Some(crate::util::ShellEnvironmentPolicy {
+                    set: HashMap::from([("FLUX_API_KEY".into(), "fake-p86-selected".into())]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            for attempt in 0..2 {
+                let result = selected
+                    .run(make_request(
+                        "test \"$FLUX_API_KEY\" = fake-p86-selected && test -z \"${ANTHROPIC_AUTH_TOKEN+x}\" && printf selected",
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.combined_output.trim(),
+                    "selected",
+                    "persistent={persistent_shell} attempt {attempt}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn p86_dump_generation_tag_round_trips() {
+        let dump = "__FUIGO_BASH_STATE_START__\n/tmp\nexport A=1\n__FUIGO_BASH_STATE_END__\n";
+        assert_eq!(
+            untag_dump_generation(&tag_dump_generation(42, dump)),
+            Some((42, dump))
+        );
+        assert_eq!(untag_dump_generation(dump), None);
+    }
+
+    /// P86 (Astra r1 #1): a name registered AFTER a persistent shell took its snapshot (a config
+    /// reload adding an `env_key`) is dropped from the next command, even though the snapshot
+    /// re-exports it and restores a dump function carrying the old denylist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p86_persistent_shell_drops_a_name_registered_after_it_started() {
+        if crate::util::shell_env_policy::p86_parent_env(
+            "p86_persistent_shell_drops_a_name_registered_after_it_started",
+        ) {
+            return;
+        }
+        let backend = LocalTerminalBackend::with_persistent_shell();
+        let workdir = tempfile::tempdir().unwrap();
+        let before = backend
+            .run(make_request(&format!(
+                "cd '{}' && export P86_USER_MARK=1 && printf %s \"${{P86_LATE_KEY:+set}}\"",
+                workdir.path().display()
+            )))
+            .await
+            .unwrap();
+        assert_eq!(
+            before.combined_output.trim(),
+            "set",
+            "the snapshot must start out holding the variable, or this test proves nothing"
+        );
+        crate::util::shell_env_policy::register_credential_env_names(["P86_LATE_KEY"]);
+        let probe = "test -z \"${P86_LATE_KEY+x}\" && /bin/sh -c 'test -z \"${P86_LATE_KEY+x}\"' && printf absent";
+        for attempt in 0..2 {
+            let result = backend.run(make_request(probe)).await.unwrap();
+            assert_eq!(result.combined_output.trim(), "absent", "attempt {attempt}");
+        }
+        // The old snapshot was discarded, not scrubbed: the session's own exports went with it
+        // (the documented cost), its directory was kept.
+        let after = backend
+            .run(make_request(
+                "printf '%s|' \"${P86_USER_MARK:-gone}\"; pwd",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            after.combined_output.trim(),
+            format!("gone|{}", workdir.path().display())
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn t05_compatibility_and_diagnostics() {
@@ -3417,6 +3713,76 @@ mod tests {
         let result = cmd.output().await.unwrap();
         assert_eq!(result.status.code(), Some(7));
         assert!(result.stdout.is_empty() && result.stderr.is_empty());
+    }
+
+    /// A child a test command deliberately leaves behind with `cmd &`. Once the
+    /// shell is reaped the backend drops its process group (pid-reuse safety), so
+    /// nothing in the product ends such a child: the test must, or the release
+    /// gate's survivor scan finds it alive after `cargo test` exits (P59).
+    ///
+    /// The child is a loop that runs only while `hold` exists, so ending it needs
+    /// no pid and no signal (no pid-reuse hazard): [`LeftBehindChild::reap`]
+    /// removes `hold` and asserts the loop has finished, and on a panic the
+    /// `TempDir` drop removes `hold` the same way. If the test binary is killed
+    /// outright the loop still gives up after ~60 s, like the `sleep 60` it replaces.
+    #[cfg(unix)]
+    struct LeftBehindChild {
+        dir: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl LeftBehindChild {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir for the hold file");
+            std::fs::write(dir.path().join("hold"), b"").expect("create hold file");
+            Self { dir }
+        }
+
+        /// The tempdir entry `name`.
+        fn path(&self, name: &str) -> PathBuf {
+            self.dir.path().join(name)
+        }
+
+        /// The tempdir entry `name` as one single-quoted POSIX-shell word.
+        fn quoted(&self, name: &str) -> String {
+            let path = self.path(name);
+            let path = path.to_str().expect("tempdir path is UTF-8");
+            format!("'{}'", path.replace('\'', "'\\''"))
+        }
+
+        /// A subshell that holds the command's inherited stdout/stderr until
+        /// released; the caller backgrounds it (`{} &`).
+        fn shell(&self) -> String {
+            format!(
+                "(: > {started}; n=0; while [ -e {hold} ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n+1)); done; : > {done})",
+                started = self.quoted("started"),
+                hold = self.quoted("hold"),
+                done = self.quoted("done"),
+            )
+        }
+
+        /// Release the left-behind child and wait for its loop to finish (the
+        /// subshell exits right after writing `done`): the regression check that
+        /// this test leaves no process for the gate to find.
+        fn reap(self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !self.dir.path().join("started").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the backgrounded child never ran, so the test did not exercise it"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::remove_file(self.dir.path().join("hold")).expect("remove hold file");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !self.dir.path().join("done").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "backgrounded child still running after the test's cleanup: it would survive `cargo test`"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     fn make_request(command: &str) -> TerminalRunRequest {
@@ -3610,6 +3976,42 @@ mod tests {
         let result = backend.run(make_request("exit 42")).await.unwrap();
 
         assert_eq!(result.exit_code, Some(42));
+    }
+
+    /// P150 (D6, S14): a command's output log in `<session>/terminal/` is owner-only: the folder 0700 and the log
+    /// 0600, foreground and background, and a folder or log left looser (an older version, a backup) is tightened.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p150_terminal_output_folder_and_logs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let session = tempfile::tempdir().unwrap();
+        let terminal = session.path().join("terminal");
+        let backend = LocalTerminalBackend::new();
+
+        let mut request = make_request("echo p150-fg");
+        request.output_file = terminal.join("call-1.log");
+        backend.run(request).await.unwrap();
+        assert_eq!(mode(&terminal), 0o700, "terminal/ must be created owner-only");
+        assert_eq!(mode(&terminal.join("call-1.log")), 0o600, "a foreground log must be owner-only");
+
+        let mut request = make_request("echo p150-bg");
+        request.output_file = terminal.join("call-2.log");
+        let handle = backend.run_background(request).await.unwrap();
+        assert_eq!(mode(&terminal.join("call-2.log")), 0o600, "a background log must be owner-only");
+        let _ = backend
+            .wait_for_completion(&handle.task_id, Some(Duration::from_secs(10)))
+            .await;
+
+        std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(terminal.join("call-1.log"), b"old").unwrap();
+        std::fs::set_permissions(terminal.join("call-1.log"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let mut request = make_request("echo p150-again");
+        request.output_file = terminal.join("call-1.log");
+        backend.run(request).await.unwrap();
+        assert_eq!(mode(&terminal), 0o700, "a looser terminal/ is tightened");
+        assert_eq!(mode(&terminal.join("call-1.log")), 0o600, "a looser log is tightened");
     }
 
     #[tokio::test]
@@ -4450,12 +4852,14 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_background_child_with_inherited_pipe_does_not_block() {
-        // `sleep 300 &` inherits the pipe — without drain timeout this blocks forever.
+        // A backgrounded child inherits the pipe — without drain timeout this blocks forever.
+        let left_behind = LeftBehindChild::new();
         let backend = LocalTerminalBackend::new();
         let request = TerminalRunRequest {
-            command: "sleep 300 &\nsleep 1\necho done".to_string(),
+            command: format!("{} &\nsleep 1\necho done", left_behind.shell()),
             working_directory: PathBuf::from("/tmp"),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
@@ -4475,7 +4879,11 @@ mod tests {
         };
 
         let start = Instant::now();
-        let result = backend.run(request).await.unwrap();
+        // Bounded: a drain regression must fail here, not hang with the child held.
+        let result = tokio::time::timeout(Duration::from_secs(20), backend.run(request))
+            .await
+            .expect("foreground run must not block on the backgrounded child's pipe")
+            .unwrap();
         let elapsed = start.elapsed();
 
         assert!(
@@ -4489,6 +4897,7 @@ mod tests {
             "Output should contain 'done', got: {:?}",
             result.combined_output
         );
+        left_behind.reap();
     }
 
     #[tokio::test]
@@ -4496,13 +4905,56 @@ mod tests {
         let backend = std::sync::Arc::new(LocalTerminalBackend::new_with_tick_interval(
             Duration::from_millis(20),
         ));
+        // The kill must land while the shell is already reaped and only the
+        // backgrounded `sleep` still holds the pipe (the drain phase). A fixed
+        // 500ms sleep raced the shell's own startup under load, so the kill hit
+        // a still-running shell and reported "cancelled". Have the shell record
+        // its pid, and wait until that pid has been reaped: the actor reaps via
+        // `try_wait` and flips `draining` in the same step, so by the time the
+        // pid is gone the kill below is queued behind that step.
+        let pid_file = std::env::temp_dir().join(format!(
+            "terminal-test-drain-kill-pid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let command = format!("echo $$ > '{}'\nsleep 5 &\necho done", pid_file.display());
         let run = tokio::spawn({
             let backend = backend.clone();
-            async move { backend.run(make_request("sleep 5 &\necho done")).await }
+            async move { backend.run(make_request(&command)).await }
         });
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "shell never wrote its pid");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // `kill -0` exits 0 while the pid exists (a zombie counts) and non-zero
+        // (ESRCH) once it is reaped. A missing `kill` binary must fail the test
+        // loudly rather than read as "reaped".
+        while std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("spawn `kill -0` to probe the shell pid")
+            .success()
+        {
+            assert!(Instant::now() < deadline, "shell {pid} never exited");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The reap and the drain flag are set within one actor step; one more
+        // round trip through the actor guarantees that step has completed.
+        let _ = backend.list_tasks().await;
         backend.kill_foreground_commands().await;
+        let _ = std::fs::remove_file(&pid_file);
 
         let result = run.await.unwrap().expect("run returns a result");
         assert_eq!(result.exit_code, Some(0), "signal={:?}", result.signal);
@@ -5258,35 +5710,81 @@ mod tests {
         );
     }
 
+    /// A due deadline must fire on time WHILE another task's post-exit drain is in
+    /// flight. The drainer's left-behind child keeps the pipe, so its drain runs the
+    /// full DRAIN_TIMEOUT. Ordered by actor-side timestamps ([`actor_trace`]), the
+    /// actor must send the deadline reply after handing the drain off and before
+    /// that drain could have ended. A drain run on the actor blocks the reply for
+    /// the drain's whole span, so the reply lands either before the drain started
+    /// or after it ended, and one of the two checks fails.
     #[cfg(unix)]
     #[tokio::test]
     async fn due_deadline_beats_unrelated_drain_work() {
+        use actor_trace::Event;
+        const DEADLINE: Duration = Duration::from_millis(800);
         let backend = LocalTerminalBackend::new_with_tick_interval(Duration::from_millis(100));
+        let left_behind = LeftBehindChild::new();
+        // The shell waits for `go`, bounded on its own (~12 s, or once `hold` is gone).
         let drainer = backend
-            .run_background(make_request("(sleep 60 &); exit 0"))
+            .run_background(make_request(&format!(
+                "({} &); n=0; while [ ! -e {go} ] && [ -e {hold} ] && [ $n -lt 1200 ]; do sleep 0.01; n=$((n+1)); done; exit 0",
+                left_behind.shell(),
+                go = left_behind.quoted("go"),
+                hold = left_behind.quoted("hold"),
+            )))
             .await
             .expect("spawn drainer");
+        // A sleeper that also ends with `hold`, so a failing assertion (whose unwind
+        // skips the kill_task below) cannot leave it running.
         let sleeper = backend
-            .run_background(make_request("sleep 60"))
+            .run_background(make_request(&format!(
+                "n=0; while [ -e {hold} ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n+1)); done",
+                hold = left_behind.quoted("hold"),
+            )))
             .await
             .expect("spawn sleeper");
 
         let started = Instant::now();
-        let snap = tokio::time::timeout(
-            Duration::from_secs(5),
-            backend.wait_for_completion(&sleeper.task_id, Some(Duration::from_millis(300))),
-        )
+        let wait = backend.wait_for_completion(&sleeper.task_id, Some(DEADLINE));
+        let release = async {
+            // Let the waiter register first, then let the drainer's shell exit.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(left_behind.path("go"), b"").expect("release the drainer");
+        };
+        let (snap, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(wait, release)
+        })
         .await
-        .expect("deadline must fire on time despite drain work")
-        .expect("timeout snapshot");
-        assert!(!snap.completed);
-        let waited = started.elapsed();
+        .expect("deadline must fire despite drain work");
+        let snap = snap.expect("timeout snapshot");
+        assert!(!snap.completed, "the sleeper must still be running");
+
+        let replied = actor_trace::get(Event::DeadlineReply, &sleeper.task_id)
+            .expect("the actor sent the sleeper a deadline reply");
+        let drain_start = actor_trace::get(Event::DrainStart, &drainer.task_id)
+            .expect("the actor drained the drainer");
+        let sent_after = replied - started;
         assert!(
-            waited < Duration::from_secs(1),
-            "due deadline queued behind another task's drain: waited {waited:?}"
+            sent_after >= DEADLINE - Duration::from_millis(50),
+            "timeout fired early: {sent_after:?}"
+        );
+        assert!(
+            drain_start < replied,
+            "the drain started {:?} after the deadline reply: no overlap was exercised",
+            drain_start - replied
+        );
+        assert!(
+            replied < drain_start + DRAIN_TIMEOUT,
+            "the deadline reply was sent {:?} after the drain started: it waited out the drain",
+            replied - drain_start
+        );
+        assert!(
+            sent_after < DEADLINE + Duration::from_millis(600),
+            "due deadline fired late: {sent_after:?}"
         );
         let _ = backend.kill_task(&drainer.task_id).await;
         let _ = backend.kill_task(&sleeper.task_id).await;
+        left_behind.reap();
     }
 
     #[tokio::test]

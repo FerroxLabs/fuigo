@@ -33,6 +33,10 @@ pub(super) fn handle_mcp_init_progress(notif: &acp::ExtNotification, app: &mut A
     if let Some(ref mut progress) = agent.mcp_init_progress {
         progress.total = payload.total;
         progress.connected = payload.connected;
+    } else if payload.total == 0 {
+        // P152: "no servers to start" on a session that is already up (an MCP re-init, e.g. after a leader relaunch)
+        // is nothing to show; creating a seed here raised a stale "Starting session…" under a finished reply.
+        return false;
     } else {
         agent.mcp_init_progress = Some(super::super::agent_view::McpInitProgress {
             total: payload.total,

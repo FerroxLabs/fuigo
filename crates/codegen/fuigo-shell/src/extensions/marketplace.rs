@@ -306,7 +306,8 @@ async fn handle_update(
 
     match update_result {
         Ok(result) => {
-            let (_, post_warnings) = crate::config::post_install_plugin(&result.repo_key);
+            let (_, post_warnings) =
+                crate::config::post_install_plugin_off_reactor(&result.repo_key).await;
             for w in &post_warnings {
                 tracing::warn!("{w}");
             }
@@ -418,7 +419,8 @@ async fn handle_install(
         ) {
             Ok(installer::MarketplaceInstallResult::Installed { repo_key }) => {
                 // Auto-enable installed plugin so it's active after reload.
-                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key);
+                let (_, post_warnings) =
+                    crate::config::post_install_plugin_off_reactor(&repo_key).await;
                 for w in &post_warnings {
                     tracing::warn!("{w}");
                 }
@@ -535,7 +537,8 @@ async fn handle_install(
         match install_result {
             Ok(installer::MarketplaceInstallResult::Installed { repo_key }) => {
                 // Auto-enable installed plugin so it's active after reload.
-                let (_, post_warnings) = crate::config::post_install_plugin(&repo_key);
+                let (_, post_warnings) =
+                    crate::config::post_install_plugin_off_reactor(&repo_key).await;
                 for w in &post_warnings {
                     tracing::warn!("{w}");
                 }
@@ -952,28 +955,39 @@ async fn handle_add_source(url: &str) -> fuigo_hooks_plugins_types::ActionOutcom
 /// That is a different lock from `.config-init.lock`, which the callers hold for their own first-run
 /// auto-registration semantics and which no other config writer takes. Neither is nested inside the other's
 /// scope here: this is the only place in this path that takes the file lock.
-fn add_marketplace_source(
+pub(crate) fn add_marketplace_source(
     config_path: &std::path::Path,
     name: &str,
     source: &crate::plugin::MarketplaceAddInput,
     set_official_flag: bool,
 ) -> std::io::Result<()> {
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
-        add_marketplace_source_locked(config_path, name, source, set_official_flag)
-    })?
+    crate::util::config::edit_config_file_blocking(config_path, |current| {
+        let existing = crate::util::config::current_str(current)?.unwrap_or_default();
+        let updated = add_marketplace_source_to(existing, name, source, set_official_flag)?;
+        Ok(fuigo_config::fs_atomic::Edit::Replace {
+            contents: updated.into_bytes(),
+            value: (),
+        })
+    })
+    .map_err(anyhow_into_io)
 }
 
-/// Body of [`add_marketplace_source`]; the caller holds the `config.toml` write lock.
-fn add_marketplace_source_locked(
-    config_path: &std::path::Path,
+/// An `anyhow` error from the shared config writer as the `std::io::Error`
+/// these callers return (an I/O error inside is passed through unchanged).
+fn anyhow_into_io(e: anyhow::Error) -> std::io::Error {
+    match e.downcast::<std::io::Error>() {
+        Ok(io) => io,
+        Err(e) => std::io::Error::other(e.to_string()),
+    }
+}
+
+/// Body of [`add_marketplace_source`]: `existing` with the source added.
+fn add_marketplace_source_to(
+    existing: &str,
     name: &str,
     source: &crate::plugin::MarketplaceAddInput,
     set_official_flag: bool,
-) -> std::io::Result<()> {
-    let existing = crate::util::config::read_to_string_or_empty(config_path)?;
+) -> std::io::Result<String> {
     let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1039,7 +1053,7 @@ fn add_marketplace_source_locked(
         marketplace["official_marketplace_auto_installed"] = toml_edit::value(true);
     }
 
-    crate::util::config::atomic_write_string(config_path, &doc.to_string())
+    Ok(doc.to_string())
 }
 
 /// Remove a marketplace source from `~/.fuigo/config.toml` and uninstall all
@@ -1077,25 +1091,36 @@ fn remove_source_from_config(
     source_url_or_path: &str,
     is_official: bool,
 ) -> Result<bool, String> {
-    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
-        let content = crate::util::config::read_to_string_or_empty(config_path)
-            .map_err(|e| format!("Failed to read config: {e}"))?;
-        let Some(removed) =
-            crate::plugin::remove_toml_marketplace_block(&content, source_url_or_path)
-        else {
-            return Ok(false);
-        };
-        let final_content = if is_official {
-            set_official_flag_in_toml(&removed)
-                .map_err(|e| format!("Failed to update config: {e}"))?
-        } else {
-            removed
-        };
-        crate::util::config::atomic_write_string(config_path, &final_content)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
-        Ok(true)
+    use fuigo_config::fs_atomic::{Edit, EditError};
+    crate::util::config::edit_config_file_raw(
+        config_path,
+        fuigo_config::fs_atomic::stage_atomically_keeping_mode,
+        |current| {
+            let content = crate::util::config::current_str(current)
+                .map_err(|e| anyhow::anyhow!("Failed to read config: {e}"))?
+                .unwrap_or_default();
+            let Some(removed) =
+                crate::plugin::remove_toml_marketplace_block(content, source_url_or_path)
+            else {
+                return Ok(Edit::Keep(false));
+            };
+            let final_content = if is_official {
+                set_official_flag_in_toml(&removed)
+                    .map_err(|e| anyhow::anyhow!("Failed to update config: {e}"))?
+            } else {
+                removed
+            };
+            Ok(Edit::Replace {
+                contents: final_content.into_bytes(),
+                value: true,
+            })
+        },
+    )
+    .map_err(|e| match e {
+        EditError::Lock(e) => format!("Failed to lock config: {e}"),
+        EditError::Write(e) => format!("Failed to write config: {e}"),
+        EditError::Edit(e) => e.to_string(),
     })
-    .map_err(|e| format!("Failed to lock config: {e}"))?
 }
 
 /// Sync body of [`handle_remove_source`], run on a blocking thread.
@@ -1202,11 +1227,15 @@ fn set_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> std::i
     if let Some(parent) = config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
-        let existing = crate::util::config::read_to_string_or_empty(config_path)?;
-        let updated = set_marketplace_bool_flag_in_toml(&existing, key)?;
-        crate::util::config::atomic_write_string(config_path, &updated)
-    })?
+    crate::util::config::edit_config_file_blocking(config_path, |current| {
+        let existing = crate::util::config::current_str(current)?.unwrap_or_default();
+        let updated = set_marketplace_bool_flag_in_toml(existing, key)?;
+        Ok(fuigo_config::fs_atomic::Edit::Replace {
+            contents: updated.into_bytes(),
+            value: (),
+        })
+    })
+    .map_err(anyhow_into_io)
 }
 
 fn read_marketplace_bool_flag(config_path: &std::path::Path, key: &str) -> bool {

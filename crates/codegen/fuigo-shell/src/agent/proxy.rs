@@ -199,30 +199,60 @@ async fn tls_wrap(
     Ok(tls_stream)
 }
 
-/// Parse a proxy URL into (host, port).
+/// Parse a proxy URL into (host, port). The host never holds userinfo.
 ///
 /// Accepted formats:
 /// - `http://host:port`
 /// - `http://host` (defaults to port 80)
 /// - `host:port`
-fn parse_proxy_url(url: &str) -> anyhow::Result<(String, u16)> {
+/// - any of these with `user:password@` before the host, and a path after it
+///
+/// P113 (CIE-03): an authenticated `HTTPS_PROXY` (`http://user:password@proxy:3128`) used to leave the userinfo in
+/// the host, so the dial address that is logged and put into errors held the password, and a URL without a port
+/// failed with an error quoting the whole URL. Now the authority ends at the first `/`, `?` or `#` and its userinfo
+/// at its last `@`, as the URL standard has it, and no error quotes the URL: they name the host at most. A URL with
+/// an `@` after one of those is refused (Astra r1 #6, r2 #5): `http://user:pa/ss@proxy` (a password with an unencoded `/`) and
+/// `http://proxy/path@other` cannot be told apart, and either guess would dial the wrong host and could log a piece
+/// of the password. This tunnel sends no `Proxy-Authorization`; the userinfo is dropped, not used.
+pub(crate) fn parse_proxy_url(url: &str) -> anyhow::Result<(String, u16)> {
     // Strip scheme if present.
     let without_scheme = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
 
-    // Strip trailing path/slash.
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    // The authority ends at the first `/`, `?` or `#` (Astra r2 #5: a query or fragment is not part of the host).
+    let (authority, rest) = without_scheme
+        .find(['/', '?', '#'])
+        .map_or((without_scheme, ""), |at| without_scheme.split_at(at));
+    if rest.contains('@') {
+        anyhow::bail!(
+            "Unsupported proxy URL: it has an '@' after a '/', '?' or '#'. Write those characters in a proxy user \
+             name or password percent-encoded (%2F, %3F, %23, %40)"
+        );
+    }
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
 
-    if let Some((host, port_str)) = authority.rsplit_once(':') {
+    if let Some((host, port_str)) = host_port.rsplit_once(':')
+        && !port_str.ends_with(']')
+    {
         let port: u16 = port_str
             .parse()
-            .map_err(|_| anyhow::anyhow!("Invalid proxy port in '{url}'"))?;
+            .map_err(|_| anyhow::anyhow!("Invalid proxy port for proxy host '{host}'"))?;
         Ok((host.to_string(), port))
     } else {
         // No port: default to 80 for HTTP proxies
-        Ok((authority.to_string(), 80))
+        Ok((host_port.to_string(), 80))
+    }
+}
+
+/// How a proxy URL is shown in a log line: the address it dials (`host:port`), never its userinfo, path or query.
+pub(crate) fn proxy_address_for_log(url: &str) -> String {
+    match parse_proxy_url(url) {
+        Ok((host, port)) => format!("{host}:{port}"),
+        Err(_) => "<unusable proxy URL>".to_owned(),
     }
 }
 
@@ -547,5 +577,124 @@ mod tests {
             err_msg.contains("Failed to connect to proxy"),
             "Error should mention proxy connection failure: {err_msg}"
         );
+    }
+
+    /// Every log line written while `f` runs on this thread (TRACE and up).
+    #[derive(Clone, Default)]
+    struct P113Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for P113Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for P113Capture {
+        type Writer = P113Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    impl P113Capture {
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::TRACE)
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .finish(),
+            )
+        }
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    const P113_PASSWORD: &str = "p113-FAKE-proxy-pw";
+
+    /// P113 (CIE-03): an authenticated `HTTPS_PROXY` (`http://user:password@host:port`) is dialled at `host:port`, and
+    /// neither the user name nor the password reaches the debug log or an error, whichever way the connection goes.
+    #[tokio::test]
+    async fn p113_proxy_userinfo_never_reaches_the_log_or_an_error() {
+        let capture = P113Capture::default();
+        let _guard = capture.install();
+
+        // Reachable proxy: the tunnel opens (the userinfo is not part of the address dialled).
+        let addr = spawn_mock_proxy("HTTP/1.1 200 OK\r\n\r\n").await;
+        let url = format!("http://p113user:{P113_PASSWORD}@{addr}");
+        open_connect_tunnel(&url, "example.com", 443)
+            .await
+            .expect("the tunnel opens through an authenticated proxy URL");
+
+        // Unreachable proxy, a malformed port, a password holding `/` and `@`: errors name the host only.
+        let mut errors = Vec::new();
+        for url in [
+            format!("http://p113user:{P113_PASSWORD}@127.0.0.1:1"),
+            format!("http://p113user:{P113_PASSWORD}@proxy.p113.invalid:notaport"),
+            format!("https://p113user:{P113_PASSWORD}/x@y@127.0.0.1:1/path"),
+            format!("p113user:{P113_PASSWORD}@127.0.0.1:1"),
+        ] {
+            let err = open_connect_tunnel(&url, "example.com", 443)
+                .await
+                .expect_err("control: this proxy cannot be reached");
+            errors.push(format!("{err:#}"));
+        }
+        let logged = capture.text();
+        assert!(logged.contains("Opening TCP to proxy"), "control: the dial is logged: {logged}");
+        for text in errors.iter().chain([&logged]) {
+            assert!(!text.contains(P113_PASSWORD) && !text.contains("p113user"), "userinfo disclosed: {text}");
+        }
+    }
+
+    /// P113 (CIE-03): the address parsed from a proxy URL never holds userinfo, with or without a port.
+    #[test]
+    fn p113_parse_proxy_url_drops_userinfo() {
+        for (url, host, port) in [
+            ("http://u:pw-p113@proxy.example.com:3128", "proxy.example.com", 3128),
+            ("http://u:pw-p113@proxy.example.com", "proxy.example.com", 80),
+            ("u:pw-p113@proxy.example.com:8080", "proxy.example.com", 8080),
+            ("http://u:pw-p113@proxy.example.com:3128/some/path", "proxy.example.com", 3128),
+            ("http://u:pw-p113@proxy.example.com?token=q-p113", "proxy.example.com", 80),
+            ("http://u:pw-p113@proxy.example.com:3128#frag-p113", "proxy.example.com", 3128),
+            ("http://u%40corp:pw-p113@[::1]:3128", "[::1]", 3128),
+        ] {
+            assert_eq!(parse_proxy_url(url).unwrap(), (host.to_string(), port), "{url}");
+        }
+        let err = parse_proxy_url("http://u:pw-p113@proxy.example.com:bad").unwrap_err().to_string();
+        assert!(!err.contains("pw-p113") && err.contains("proxy.example.com"), "{err}");
+        // Astra r1 #6: an `@` after a `/` is refused, so neither reading dials a guessed host.
+        for url in [
+            "http://u:pw/p113-secret@proxy.example.com:3128",
+            "http://proxy.example.com:3128/path@other.example:8080",
+            "http://proxy.example.com:3128?x=@other.example:8080",
+            "http://proxy.example.com:3128#x@other.example:8080",
+        ] {
+            let err = parse_proxy_url(url).unwrap_err().to_string();
+            assert!(!err.contains("p113-secret") && !err.contains("other.example"), "{err}");
+        }
+    }
+
+    /// Astra r1 #5: the relay's "Using HTTP CONNECT proxy" line shows the dial address only, for every spelling of an
+    /// authenticated proxy URL, including a password with an unencoded `/` that `redact_url` reads as a path.
+    #[test]
+    fn p113_relay_proxy_log_holds_no_userinfo() {
+        let capture = P113Capture::default();
+        let _guard = capture.install();
+        for proxy in [
+            format!("http://p113user:{P113_PASSWORD}@proxy.example:3128"),
+            format!("http://p113user:1234/{P113_PASSWORD}@proxy.example:3128"),
+            format!("http://p113user:{P113_PASSWORD}@proxy.example"),
+            format!("http://p113user:{P113_PASSWORD}@proxy.example:3128?token=q{P113_PASSWORD}"),
+        ] {
+            let chosen = crate::agent::relay::relay_proxy_for("wss://relay.example/ws", |_| Some(proxy.clone()));
+            assert_eq!(chosen.as_deref(), Some(proxy.as_str()), "control: the URL handed on is unchanged");
+        }
+        let logged = capture.text();
+        assert!(logged.contains("Using HTTP CONNECT proxy"), "control: {logged}");
+        for fragment in [P113_PASSWORD, "p113user", "1234"] {
+            assert!(!logged.contains(fragment), "the relay log holds {fragment:?}: {logged}");
+        }
     }
 }

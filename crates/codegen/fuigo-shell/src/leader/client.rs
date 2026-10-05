@@ -62,6 +62,12 @@ impl LeaderRegistration {
             .as_ref()
             .is_some_and(|c| c.relaunch_v1)
     }
+    /// Whether the connected leader advertises the `StopForDowngrade` control (P124).
+    pub fn supports_downgrade_stop(&self) -> bool {
+        self.leader_capabilities
+            .as_ref()
+            .is_some_and(|c| c.downgrade_stop_v1)
+    }
 }
 
 type ControlResponse = Result<ControlPayload, ControlError>;

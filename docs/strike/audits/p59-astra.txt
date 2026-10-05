@@ -1,0 +1,140 @@
+# P59 Astra audits: codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+# Per round: the brief, then Astra's final message verbatim (exec traces omitted).
+
+================================================================
+BRIEF:
+You are auditing packet P59 of the Fuigo 1.0.21 strike (repo at /Volumes/Mando/WaylandBots/Fuigo/wt-p59, diff at /tmp/p59.diff, base c2d0de14). Context: the full-workspace release gate (cgroup-scoped) was INADMISSIBLE with GATE_ORPHANS=1. A per-binary cgroup-scope probe of the whole workspace found exactly one leaking binary: fuigo-tools lib, which left 'sleep 300' (from test_background_child_with_inherited_pipe_does_not_block, command 'sleep 300 &') and 'sleep 60' (from due_deadline_beats_unrelated_drain_work, command '(sleep 60 &); exit 0'), both ppid=1 in the shell's session. Root cause claim: once the shell leader is reaped, LocalTerminalBackend drops its ProcessGroup Arc (pid-reuse safety), so user-backgrounded children are never killed; the tests deliberately create such children. The fix is test-only: a LeftBehindChild guard records the pid via 'echo $! > file', SIGKILLs it in reap() (asserting it is gone within 5s, the regression check) and in Drop. Review crates/codegen/fuigo-tools/src/computer/local/terminal.rs changes. Check: correctness (races, pid file timing, zombies, pid reuse, quoting), whether the test semantics (pipe inheritance / drain) are preserved, whether classifying this as test-hygiene rather than a product bug is sound, portability (non-unix cfg), clippy concerns. Report findings with severity BLOCKER/HIGH/MEDIUM/LOW and end with a one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+Reviewed `3990b104` against `c2d0de14`; the actual diff matches `/tmp/p59.diff`. **Changes are required before acceptance.**
+
+1. **BLOCKER — macOS test compilation breaks.**  
+   The new [`libc` calls](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3467>) compile under `cfg(unix)`, but [`Cargo.toml`](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/Cargo.toml:100>) declares `libc` only for Linux. There is no imported re-export in scope. macOS test builds therefore have unresolved `libc` references. Use the existing Unix `nix` dependency, its `libc` re-export, or an appropriately scoped direct dependency.
+
+2. **HIGH — successful cleanup sends another SIGKILL to a potentially recycled PID.**  
+   [`reap(self)`](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3489>) kills and waits for disappearance, then automatically invokes [`Drop`](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3513>), which rereads the PID file and kills again. Once disappearance has been observed, that PID is available for reuse; the second signal can target an unrelated process. Disarm the guard after successful cleanup. More generally, a recorded PID alone does not retain process identity if the child exits naturally or another cleanup path kills it before the guard acts.
+
+3. **MEDIUM — panic cleanup has no PID-publication handshake.**  
+   [`kill()`](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3475>) reads the file once and silently does nothing if it is missing, empty, or unreadable. A panic after spawn but before `echo` finishes can therefore miss the child and remove its PID directory. The five-second retry exists only in normal `reap()`. Establish ownership/readiness before later fallible operations; retain a cleanup mechanism during publication. The claimed panic-path guarantee is currently stronger than the implementation.
+
+4. **MEDIUM — the PID filename is not correctly shell-escaped.**  
+   [`pid_file_arg()`](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3444>) wraps the path in apostrophes without escaping embedded apostrophes. A valid `TMPDIR` such as `/tmp/Sean's` breaks the command. I confirmed the generated command fails `bash -n` with that path. `display()` also loses non-UTF-8 path bytes. Prefer passing the path through an environment variable and using a quoted expansion, or use an established escaping helper. [Bash quoting rules](https://www.gnu.org/software/bash/manual/html_node/Single-Quotes.html).
+
+5. **MEDIUM — non-Unix cleanup verification is vacuous.**  
+   The [first affected test](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:4550>) remains unconditional, but non-Unix `kill()` does nothing and `alive()` always returns false. If PID parsing succeeds, the new assertion proves no cleanup occurred. The command also assumes POSIX `$!` semantics, while Windows shell selection supports PowerShell and CMD. Scope the helper and applicable test path to Unix, or implement real platform-specific verification. Existing shell-portability problems should remain distinguished from this newly added false cleanup proof.
+
+6. **LOW — existence-check errors are treated as successful disappearance.**  
+   [`alive()`](</Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3457>) treats every failed `kill(pid, 0)` as absence, including `EPERM`; signal-delivery errors are also ignored. Only `ESRCH` establishes absence. Unexpected errors should fail the check. [Linux `kill(2)` documentation](https://man7.org/linux/man-pages/man2/kill.2.html).
+
+The **pipe/drain semantics are preserved on the normal Unix path**: only `echo` is redirected, both sleeps still inherit the output pipes, `$!` is captured in the correct shell/subshell, and cleanup follows the original timing assertions.
+
+The Linux zombie check establishes **termination, not reaping**. A PID-1-owned zombie cannot be reaped by this guard. Whether that satisfies `GATE_ORPHANS=0` depends on the gate’s zombie policy; this assertion cannot replace the cgroup-scoped gate.
+
+**Test-hygiene is a defensible scope for P59**, because these fixtures deliberately create surviving children. It does **not** establish that production behavior is correct: the same leader-reap path also loses control of real user-backgrounded descendants. Calling that intentional requires an accepted lifecycle contract, especially for session teardown.
+
+No separate definite Clippy violation emerged from inspection. Cargo tests, Clippy, and the release gate were not run in this read-only environment.
+
+**VERDICT: REJECT AS WRITTEN — fix the macOS compilation blocker and cleanup safety defects before requalification.**
+
+================================================================
+BRIEF:
+Re-audit (round 2) of packet P59, Fuigo 1.0.21 strike. Repo /Volumes/Mando/WaylandBots/Fuigo/wt-p59, full diff vs base c2d0de14 at /tmp/p59.diff (tip 4bc0b105). Round 1 (your earlier review of 3990b104, a pid/SIGKILL guard) found: BLOCKER libc not available on macOS for fuigo-tools; HIGH Drop re-signalling a recycled pid; MEDIUM panic path misses pid; MEDIUM unescaped single quotes; MEDIUM vacuous non-unix verification; LOW kill(0) error handling. The guard is now redesigned: the backgrounded child is a POSIX-shell loop '(: > started; while [ -e hold ]; do sleep 0.05; done; : > done)' that runs only while a hold file in a TempDir exists; reap() waits for 'started', removes 'hold', and asserts 'done' appears within 5s; on panic the TempDir drop removes 'hold' and the loop ends. Paths are single-quoted with ' escaped as '\''. Helper and the inherited-pipe test are now cfg(unix) (fuigo-tools lib tests are not run on Windows CI; see .github/workflows/windows-process-check.yml). Context: the leak was found by a per-test-binary cgroup-scope probe of the whole workspace: only fuigo-tools lib left survivors (sleep 300, sleep 60, ppid=1). Verify each round-1 finding is resolved, look for new defects (does the test still exercise the inherited-pipe drain semantics in both tests? races? anything that could still survive cargo test?), and judge the test-hygiene vs product classification. Severity BLOCKER/HIGH/MEDIUM/LOW, end with one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+**Round 2: the six original findings are resolved in source, but two MEDIUM test issues remain.** Verified HEAD `4bc0b105` and the full diff against `c2d0de14`. No production code changed.
+
+| Round-1 finding | Assessment |
+|---|---|
+| BLOCKER — macOS `libc` dependency | Resolved: the helper no longer uses `libc`. |
+| HIGH — Drop signals recycled PID | Resolved: no PID storage or signalling remains. |
+| MEDIUM — panic misses PID | Resolved for ordinary unwinding: `TempDir` removes `hold`, including when the child has not started yet. |
+| MEDIUM — unescaped single quotes | Resolved: the `'\''` substitution correctly preserves a literal quote inside a shell argument. |
+| MEDIUM — vacuous non-Unix verification | Resolved: helper and both affected tests are Unix-only. The cited Windows workflow does not run fuigo-tools lib tests. |
+| LOW — `kill(0)` error handling | Resolved by removing that mechanism. |
+
+Remaining findings:
+
+1. **MEDIUM — The replacement makes the foreground regression test unbounded on the failure it tests.** At [terminal.rs:4543](/Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:4543), `backend.run(...).await` has no external timeout. If drain completion regresses, execution never reaches the elapsed assertion, `reap()`, or guard destruction. The request’s 30-second timeout does not rescue a process already marked `draining`, because polling returns early for that state. Previously, `sleep 300` eventually closed the pipe; this loop has no independent expiry. Killing only the hung test binary leaves `hold` behind and can leave the loop running indefinitely. Add an outer test timeout; a generous independent fixture lifetime would also bound survival after abrupt termination.
+
+2. **MEDIUM — The deadline test still does not establish overlap with drain work.** At [terminal.rs:5375](/Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:5375), the drainer starts before the sleeper, but timing begins only after the sleeper’s spawn response. A regressed actor that drains synchronously can spend its entire drain timeout **before responding to the sleeper spawn**, then pass the measured 300-ms wait. The later `started` check establishes that the fixture ran, not when draining overlapped the waiter. This is an **inherited coverage weakness**, not a newly introduced product defect. Register the waiter before releasing a controlled parent-shell exit, with evidence that the intended ordering occurred.
+
+3. **LOW — `done` proves loop completion, not process exit or reaping.** At [terminal.rs:3475](/Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3475), the marker becomes visible while the shell is still executing its final redirection/builtin. `reap()` can return before that shell exits. This is a small race, not evidence of a persistent successful-run leak, but the “prove it has ended” claim is too strong. Keep an actual exit/survivor check as the acceptance evidence.
+
+Both replacement commands preserve inherited stdout/stderr: redirecting `:` to marker files does not permanently redirect the surrounding subshell. The foreground test therefore retains its drain stimulus; the deadline test retains the stimulus but lacks reliable timing proof.
+
+**Classification: test hygiene and regression-test reliability.** The reported `sleep 300`/`sleep 60` survivors match deliberately orphaned fixtures. This patch does not demonstrate a production cleanup fix or establish broader product ownership guarantees.
+
+Source review and `git diff --check` completed. Builds, runtime tests, panic injection, and the cgroup survivor probe were not rerun because this session is read-only.
+
+**VERDICT: REQUEST CHANGES — original BLOCKER/HIGH findings resolved; bound the new fixture’s failure path and make deadline/drain overlap deterministic.**
+
+================================================================
+BRIEF:
+Re-audit (round 3) of packet P59, Fuigo 1.0.21 strike. Repo /Volumes/Mando/WaylandBots/Fuigo/wt-p59, full diff vs base c2d0de14 at /tmp/p59.diff (tip a85865aa). Your round 2 (tip 4bc0b105) said: original BLOCKER/HIGH resolved; MEDIUM-1 foreground test unbounded on drain regression and fixture has no independent expiry; MEDIUM-2 the deadline test does not establish drain/waiter overlap (you called it an inherited coverage weakness, not newly introduced); LOW-3 'done' marker proves loop completion not process exit. Changes since: the loop now also stops after 1200 iterations of sleep 0.05 (~60 s, matching the sleep 60 it replaced), and backend.run in the inherited-pipe test is wrapped in tokio::time::timeout(20 s). Doc for reap() now says it waits for the loop to finish (the subshell exits right after writing done). MEDIUM-2 is pre-existing coverage of a different property (actor deadline scheduling) and out of this packet's scope (P59 = process survivors); it will be filed as a proposal. Confirm MEDIUM-1 is resolved, check for any new defect, and give severities BLOCKER/HIGH/MEDIUM/LOW and a one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+Reviewed `a85865aa` against `c2d0de14`, including the changes since `4bc0b105`. No new in-scope defect found.
+
+- **BLOCKER:** None.
+- **HIGH:** None. Original resolutions remain intact.
+- **MEDIUM:** **MEDIUM-1 resolved.** The 20-second timeout bounds the foreground drain regression; the 1,200-iteration limit gives the fixture independent expiry at approximately 60 seconds, plus scheduling overhead. Panic cleanup still removes the hold file through `TempDir` drop. MEDIUM-2 remains an inherited actor-deadline coverage weakness, excluded from P59 and deferred to the proposed follow-up.
+- **LOW:** LOW-3’s documentation is corrected: `done` establishes loop completion, not independently observed process exit. That evidence limitation remains accurately stated; no new LOW defect.
+
+Source review only; tests and the survivor scan were not rerun in this read-only session. `git diff --check` passed.
+
+**VERDICT: PASS for P59 round-3 source re-audit — MEDIUM-1 resolved; no new in-scope findings.**
+
+================================================================
+BRIEF:
+Short audit (round 4) of packet P59, Fuigo 1.0.21 strike. Repo /Volumes/Mando/WaylandBots/Fuigo/wt-p59. The branch was rebased onto 6492c803; the new commit f158b650 (diff at /tmp/p59-r4.diff, in crates/codegen/fuigo-tools/src/computer/local/terminal.rs) closes your round-2 MEDIUM-2: due_deadline_beats_unrelated_drain_work did not prove the wait overlapped the drainer's drain. Now: the drainer shell backgrounds the hold-file child (holds the pipe so the detached drain runs the full DRAIN_TIMEOUT=2s), then polls for a 'go' file; the waiter (800 ms deadline) is polled first inside tokio::join!, the release future sleeps 100 ms, writes 'go', and records when the shell's 'exited' marker appears. Asserts: exit seen before the deadline fired; the drainer task is NOT completed when the deadline fired (drain in flight); waited in [750 ms, 1400 ms). Mutant M2 makes spawn_detached_drain async and awaits it on the actor (serialised) -- the test must fail. Check: does this deterministically prove overlap, can it flake (current-thread tokio runtime; actor spawned on it; get_task answered by the actor), is the mutant caught, anything that could leave a process behind? Severity BLOCKER/HIGH/MEDIUM/LOW, short, end with one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+Reviewed `f158b650`. **No BLOCKER/HIGH; two MEDIUM findings remain.** Source review only; tests and M2 were not executed in this read-only session.
+
+1. **MEDIUM — overlap is still not deterministic; M2 is not guaranteed to fail.** At [terminal.rs:5395](/Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:5395), `exited` is written **before** shell exit, which itself precedes actor detection and drain start. At [terminal.rs:5441](/Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:5441), `!completed` also includes a still-running shell or an unprocessed `DrainedOutput`.
+
+   A permitted M2 schedule: observe the marker; delay shell exit until the deadline sweep; the actor sends the timeout reply first, then starts its awaited drain. The waiter records approximately 800 ms and queues `GetTask`. After draining, `GetTask` can precede `DrainedOutput`, return `!completed`, and pass every assertion. Normally M2 should fail around 2.1 seconds, but that is scheduling-dependent.
+
+   **Flake:** healthy code can record an on-time deadline, then receive the snapshot after drain completion and fail. The current-thread runtime does not make separate actor operations atomic; [`join!` multiplexes its branches](https://docs.rs/tokio/latest/tokio/macro.join.html). First polling enqueues the waiter; registration happens in the actor. Use test-only drain-start/end observations and compare those timestamps with `fired_at`.
+
+2. **MEDIUM — the new `go` loop has no independent expiry.** At [terminal.rs:5395](/Volumes/Mando/WaylandBots/Fuigo/wt-p59/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:5395), killing the test binary before `go` is written can leave the parent shell polling forever. The hold-child’s 1,200-iteration bound does not bound this separate loop. Make it stop on hold removal **and** an independent iteration limit. Normal successful cleanup retains the existing limitation: `done` proves loop completion, not independently observed process exit.
+
+**VERDICT: REQUEST CHANGES — stronger coverage, but deterministic overlap/M2 rejection remains unproven and the new gate loop reintroduces an unbounded survivor path.**
+
+================================================================
+BRIEF:
+Short audit (round 5) of packet P59, Fuigo 1.0.21 strike. Repo /Volumes/Mando/WaylandBots/Fuigo/wt-p59, tip 9de6b05b; diff since your round-3 PASS at /tmp/p59-r5.diff (test-only, crates/codegen/fuigo-tools/src/computer/local/terminal.rs, test due_deadline_beats_unrelated_drain_work). Your round 4 (on f158b650) raised two MEDIUMs: (1) overlap not deterministic: 'exited' marker precedes actual exit/drain start, and the at-fire get_task !completed check was order-dependent (could flake on healthy code and could pass under M2); (2) the go-loop had no expiry. Now: (1) no at-fire get_task; the proof uses bounds: the drain lasts >= DRAIN_TIMEOUT (left-behind child holds the pipe until reap) and cannot start before go_at (shell cannot exit before 'go' is written); drained = first time the drainer reads completed (polled after fire; an upper bound on drain end). Asserts drained - DRAIN_TIMEOUT < fired (drain started before fire) and fired < go + DRAIN_TIMEOUT (drain not ended), plus fired on time in [750 ms, 1400 ms). Mutant M2 runs the drain awaited on the actor, blocking deadlines for its whole span, so a fire must either precede the drain (first assert fails) or follow it (second fails). (2) go loop now also stops when hold is removed or after 1200x0.01s. Check these claims, residual flake risk on healthy code, and anything left running. Severity BLOCKER/HIGH/MEDIUM/LOW, short, end with one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+Reviewed `9de6b05b`. **No BLOCKER/HIGH; one MEDIUM remains.**
+
+- **MEDIUM — M2 can still pass because `fired` timestamps receipt, not actor dispatch.** [The waiter](crates/codegen/fuigo-tools/src/computer/local/terminal.rs:5414) records time after receiving the reply. [The actor](crates/codegen/fuigo-tools/src/computer/local/terminal.rs:1423) expires waiters **before** polling processes. It can therefore send the timeout, enter M2’s awaited drain, then yield so the waiter records `fired` during that drain.
+
+  A permitted schedule, seconds relative to `started`: `go=.100`, reply sent `.801`, drain starts `.802`, waiter records `.850`, drain ends `2.803`, completion observed `2.810`. All assertions pass: `.810 < .850 < 2.100`, and `.850` meets the deadline window. The bounds establish overlap with **receipt**, but do not prove the actor serviced a deadline during draining. Use an actor-side reply timestamp plus a drain-start observation.
+
+- **LOW — residual healthy-code flake sensitivity.** The first inequality is sufficient, not necessary. With drain start around `.110` and `fired=.800`, completion-observation delay of roughly `.690` seconds can fail it despite genuine overlap and timely delivery. Its failure message therefore overstates the diagnosis. Also, the independent go-loop expiry means “cannot start before go” is conditional on release preceding expiry.
+
+- **Resolved — unbounded go-loop survivor.** Hold removal and the 1,200-iteration limit close that path. Bounds are approximately 12/60 seconds plus scheduling overhead. The existing `done` marker still proves loop completion rather than actual process exit; no new persistent survivor path found.
+
+Source review only: tests/M2 were not executed, and the sandbox denied `ps`, so current survivors remain unverified.
+
+**VERDICT: REQUEST CHANGES — expiry fixed; deterministic M2 rejection remains unproven.**
+
+================================================================
+BRIEF:
+Short audit (round 6) of packet P59, Fuigo 1.0.21 strike. Repo /Volumes/Mando/WaylandBots/Fuigo/wt-p59, tip 0da8e4ba; diff since your round-3 PASS at /tmp/p59-r6.diff (crates/codegen/fuigo-tools/src/computer/local/terminal.rs). Round 5 (on 9de6b05b) left one MEDIUM: test-side receipt time cannot prove when the actor sent the deadline reply, so serialised-drain mutant M2 could pass; plus a LOW on healthy-code flake sensitivity. Now: a #[cfg(test)]-only actor_trace module records Instant::now() (first occurrence per task id) when the actor enters spawn_detached_drain (DrainStart, recorded before tokio::spawn, so also before an awaited drain under M2) and when expire_timed_out_waiters sends a deadline reply (DeadlineReply). due_deadline_beats_unrelated_drain_work asserts: reply - started in [750 ms, 1400 ms); drain_start < replied; replied < drain_start + DRAIN_TIMEOUT. M2 (spawn_detached_drain made async and awaited on the actor) blocks the actor for the whole drain, so the reply is sent either before drain_start or at/after drain_start + DRAIN_TIMEOUT. Check: is that now deterministic, any residual flake on healthy code (exit detection latency is the child-exit wake / 100 ms tick, release happens ~700 ms before the deadline), is the cfg(test) hook truly test-only and harmless, any process left running? Severity BLOCKER/HIGH/MEDIUM/LOW, short, one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+- **BLOCKER/HIGH/MEDIUM: none.** Round-5 MEDIUM is resolved: actor-side timestamps eliminate receipt-time ambiguity. Given the fixture holds the pipes open, M2 cannot satisfy both ordering assertions: its reply precedes `DrainStart` or follows the two-second drain.
+- **LOW:** healthy-code timing remains load-sensitive, not absolutely deterministic. Child-exit wake/100 ms polling comfortably fits the nominal 700 ms margin; substantial scheduler starvation can still break overlap or the 1,400 ms bound.
+- **Hook:** module and both call sites are `#[cfg(test)]`; no production impact. UUID task IDs isolate first-occurrence records. The brief mutex operation introduces negligible normal overhead.
+- **Processes:** cleanup remains present, including hold-file removal on unwinding. Live survivor status is **unverified**: sandbox rejected `ps`. No tests or background jobs were launched during this audit.
+
+**VERDICT: PASS — source audit of `0da8e4ba`; MEDIUM closed, LOW scheduling sensitivity remains; runtime/survivor checks not rerun.**
+
+================================================================
+BRIEF:
+Short audit (round 7) of packet P59, repo /Volumes/Mando/WaylandBots/Fuigo/wt-p59. Your round 6 PASSed 0da8e4ba. One follow-up commit 61c4a0f2 (diff at /tmp/p59-r7.diff): mutant M2 runs showed the test's sleeper ('sleep 60') surviving a failing run because the assertion's unwind skipped kill_task; the sleeper is now a shell loop bound to the same hold file (ends when the TempDir drop removes it, or after ~60 s), and the overlap assertions were moved before the on-time upper bound. Runtime evidence for this commit is being collected separately. Check only this commit for defects (does the sleeper still stay running past the 800 ms deadline in the healthy path; any process that can now survive). Severity BLOCKER/HIGH/MEDIUM/LOW, very short, one-line VERDICT.
+
+ASTRA FINAL MESSAGE:
+VERDICT: PASS — 61c4a0f2 introduces no defects found. Hold remains present past 800 ms; unwind removes it, ending the sleeper after its current 50 ms sleep. Assertion reorder preserves coverage. Source review only; runtime survivor proof pending.

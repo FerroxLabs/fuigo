@@ -481,14 +481,8 @@ fn dropping_the_guard_silences_the_heartbeat_before_anyone_else_can_hold_the_loc
         file,
     });
 
-    let mut second = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&lock_path)
-        .unwrap();
-    second.try_lock_exclusive().unwrap();
+    let mut second = lock_once_released(&lock_path, RELEASE_DEADLINE);
+    second.set_len(0).unwrap();
     write!(second, "sentinel").unwrap();
     second.sync_all().unwrap();
     std::thread::sleep(StdDuration::from_millis(30));
@@ -497,6 +491,156 @@ fn dropping_the_guard_silences_the_heartbeat_before_anyone_else_can_hold_the_loc
         "sentinel",
         "a heartbeat surviving the guard drop would stamp the re-acquired lock"
     );
+}
+
+/// A guard that was dropped must release its lock; how long another thread waits for that.
+/// A release that never comes fails with a named diagnosis rather than blocking forever.
+#[cfg(unix)]
+const RELEASE_DEADLINE: StdDuration = StdDuration::from_secs(10);
+
+/// Take the exclusive lock on `path` once every holder of its open file description is gone.
+///
+/// Not a retry loop and not a wider timeout: `flock` locks belong to the open file
+/// *description*, and any concurrent `fork` in this test process (every test that spawns a
+/// subprocess) hands the child a copy of every open descriptor until its `exec`. So for that
+/// window a lock whose guard was dropped is still held, and a non-blocking `try_lock_exclusive`
+/// fails with `WouldBlock` although nothing is wrong (see
+/// `a_forked_child_transiently_keeps_a_dropped_lock_held`). A blocking acquire waits for exactly
+/// that copy to close, and still fails, loudly, if the guard's own release is the bug.
+#[cfg(unix)]
+fn lock_once_released(path: &Path, deadline: StdDuration) -> File {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("lock-once-released".into())
+        .spawn(move || {
+            let acquired = file.lock_exclusive().map(|()| file);
+            let _ = tx.send(acquired);
+        })
+        .unwrap();
+    match rx.recv_timeout(deadline) {
+        Ok(Ok(file)) => file,
+        Ok(Err(e)) => panic!("blocking exclusive lock on {} failed: {e}", path.display()),
+        Err(_) => panic!(
+            "the lock on {} was still held {deadline:?} after its guard was dropped: the guard \
+             did not release it (a concurrent fork's transient descriptor copy lasts \
+             microseconds, not seconds)",
+            path.display()
+        ),
+    }
+}
+
+/// A child parked between `fork` and `exec`, holding a copy of every descriptor this process has
+/// open: what any concurrent `Command::spawn` is for a few microseconds. `pre_exec` runs in
+/// exactly that window. No timing is involved: the child announces it is parked over one pipe
+/// and stays parked until told to go over another. `Command::spawn` only returns once the child
+/// has exec'd, so it runs on its own thread.
+#[cfg(unix)]
+struct ParkedForkChild {
+    release: libc::c_int,
+    spawned: std::thread::JoinHandle<std::process::Child>,
+}
+
+#[cfg(unix)]
+impl ParkedForkChild {
+    /// Returns once the child is parked in the fork-to-exec window.
+    fn park() -> Self {
+        use std::os::unix::process::CommandExt;
+        fn pipe() -> (libc::c_int, libc::c_int) {
+            let mut fds = [0 as libc::c_int; 2];
+            // SAFETY: `fds` is a valid two-element buffer.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            (fds[0], fds[1])
+        }
+        let (ready_rx, ready_tx) = pipe();
+        let (go_rx, go_tx) = pipe();
+        let spawned = std::thread::spawn(move || {
+            let mut command = std::process::Command::new("true");
+            // SAFETY: the closure only calls `write` and `read`, which are async-signal-safe.
+            unsafe {
+                command.pre_exec(move || {
+                    let byte = 1u8;
+                    libc::write(ready_tx, (&raw const byte).cast(), 1);
+                    let mut go = 0u8;
+                    libc::read(go_rx, (&raw mut go).cast(), 1);
+                    Ok(())
+                });
+            }
+            #[allow(clippy::disallowed_methods)] // test fixture; reaped by `let_go_and_reap`
+            let child = command.spawn().unwrap();
+            // SAFETY: these are this thread's own pipe ends, closed exactly once.
+            unsafe {
+                libc::close(ready_tx);
+                libc::close(go_rx);
+            }
+            child
+        });
+        let mut byte = 0u8;
+        // SAFETY: valid one-byte buffer; blocks until the child is parked.
+        assert_eq!(
+            unsafe { libc::read(ready_rx, (&raw mut byte).cast(), 1) },
+            1
+        );
+        // SAFETY: closed exactly once.
+        unsafe { libc::close(ready_rx) };
+        Self {
+            release: go_tx,
+            spawned,
+        }
+    }
+
+    /// Let the child exec (closing its descriptor copies) and reap it.
+    fn let_go_and_reap(self) {
+        let byte = 1u8;
+        // SAFETY: a valid one-byte buffer, then the pipe end is closed exactly once.
+        unsafe {
+            libc::write(self.release, (&raw const byte).cast(), 1);
+            libc::close(self.release);
+        }
+        let mut child = self.spawned.join().unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_forked_child_transiently_keeps_a_dropped_lock_held() {
+    let dir = TempDir::new().unwrap();
+    let lock_path = dir.path().join("auth.json.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .unwrap();
+    file.try_lock_exclusive().unwrap();
+
+    let child = ParkedForkChild::park();
+    drop(file);
+
+    // The guard is gone, yet the lock is held by the parked child's inherited copy: this is the
+    // spurious WouldBlock that made the dropped-guard test fail once per few full runs.
+    let probe = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    let err = probe
+        .try_lock_exclusive()
+        .expect_err("the forked child's descriptor copy must still hold the lock");
+    assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    drop(probe);
+
+    // Once the child execs its copy closes, and the blocking acquire gets the lock.
+    child.let_go_and_reap();
+    drop(lock_once_released(&lock_path, RELEASE_DEADLINE));
 }
 
 #[cfg(unix)]
@@ -662,4 +806,33 @@ async fn blocking_wait_wakes_promptly_when_holder_releases() {
 
     release_handle.join().unwrap();
     let _ = child.wait();
+}
+
+/// P150 (D6): `auth.json.lock` sits beside `auth.json` and is created owner-only by every acquire path, and one an
+/// older version left 0644 is tightened when it is next taken.
+#[cfg(unix)]
+#[test]
+fn p150_auth_lock_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = TempDir::new().unwrap();
+    let path = auth_json_path(&dir);
+    let lock_path = path.with_file_name(LOCK_FILE_NAME);
+
+    drop(try_lock_auth_file_nonblocking(&path).expect("uncontended non-blocking acquire"));
+    assert_eq!(mode(&lock_path), 0o600, "non-blocking acquire must create it owner-only");
+
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    match lock_auth_file_blocking(&path, StdDuration::from_secs(5)) {
+        LockAcquire::Acquired(lock) => drop(lock),
+        _ => panic!("uncontended blocking acquire"),
+    }
+    assert_eq!(mode(&lock_path), 0o600, "a looser auth.json.lock is tightened");
+
+    std::fs::remove_file(&lock_path).unwrap();
+    match lock_auth_file_blocking(&path, StdDuration::from_secs(5)) {
+        LockAcquire::Acquired(lock) => drop(lock),
+        _ => panic!("uncontended blocking acquire"),
+    }
+    assert_eq!(mode(&lock_path), 0o600, "blocking acquire must create it owner-only");
 }

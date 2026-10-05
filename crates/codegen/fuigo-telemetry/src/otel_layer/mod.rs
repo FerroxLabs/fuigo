@@ -47,7 +47,7 @@ pub struct OtelClientInfo {
     pub app_entrypoint: &'static str,
 }
 /// OTLP trace-export transport settings, resolved from the `OTEL_*` env vars or managed config.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct OtelExporterConfig {
     /// Full OTLP traces endpoint URL (e.g. `https://cli-chat-proxy.grok.com/v1/traces`).
     pub traces_url: String,
@@ -59,6 +59,27 @@ pub struct OtelExporterConfig {
     pub timeout: Option<std::time::Duration>,
     /// `false` when `OTEL_TRACES_EXPORTER=none`: spans are created but never exported.
     pub enabled: bool,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for OtelExporterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            traces_url,
+            extra_headers,
+            export_interval,
+            timeout,
+            enabled,
+        } = self;
+        f.debug_struct("OtelExporterConfig")
+            .field("traces_url", &fuigo_auth::redact_url(traces_url))
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("export_interval", export_interval)
+            .field("timeout", timeout)
+            .field("enabled", enabled)
+            .finish()
+    }
 }
 /// Creates the layer that bridges `tracing` spans to OpenTelemetry, enabling trace context propagation and OTLP export to the cli-chat-proxy.
 ///
@@ -81,7 +102,7 @@ where
         std::env::var(ENV_OTEL_FILTER).unwrap_or_else(|_| DEFAULT_OTEL_FILTER.to_string());
     let otel_filter = tracing_subscriber::filter::EnvFilter::try_new(&otel_filter)
         .unwrap_or_else(|e| {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "[otel] Invalid FUIGO_OTEL_FILTER '{}': {}. Using default '{}'.",
                 otel_filter, e, DEFAULT_OTEL_FILTER
             );
@@ -130,19 +151,28 @@ impl std::fmt::Debug for RefreshableSpanExporter {
             .finish_non_exhaustive()
     }
 }
+/// P43: the identity-class headers (`x-userid`, `x-teamid`, and the static
+/// `x-fuigo-client-version`) go only to a FluxRouter-operated `endpoint`. Headers the operator
+/// configured (`extra_headers`) are theirs and are applied unchanged, after the gate.
 fn build_export_headers(
+    endpoint: &str,
     static_headers: &std::collections::HashMap<String, String>,
     token: &str,
     token_auth_header: Option<&str>,
     extra_headers: &[(String, String)],
     snapshot: &fuigo_auth::CredentialSnapshot,
 ) -> std::collections::HashMap<String, String> {
+    let identity = fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(endpoint);
     let mut headers = static_headers.clone();
+    headers.retain(|name, _| identity.allows_header(name));
     for (name, value) in [
         ("x-userid", &snapshot.user_id),
         ("x-teamid", &snapshot.team_id),
     ] {
-        match value.as_deref().filter(|v| !v.is_empty()) {
+        match value
+            .as_deref()
+            .filter(|v| !v.is_empty() && identity.is_permitted())
+        {
             Some(v) => {
                 headers.insert(name.to_string(), v.to_string());
             }
@@ -170,6 +200,7 @@ fn build_otlp_exporter(
     snapshot: &fuigo_auth::CredentialSnapshot,
 ) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError> {
     let headers = build_export_headers(
+        endpoint,
         static_headers,
         token,
         token_auth_header,
@@ -193,26 +224,59 @@ async fn export_batch(
     exporter.set_resource(resource);
     exporter.export(batch).await
 }
+/// The resource attributes that name the tenant or the account (P54 body identity).
+const TENANT_RESOURCE_KEYS: [&str; 5] = [
+    "deployment.id",
+    "api_key.id",
+    "organization.id",
+    "team.id",
+    "user.id",
+];
 /// Stamp `deployment.id`/`api_key.id`/`organization.id`/`team.id`/`user.id` per-export.
 /// The ids are only known after auth is wired; stamping at init would leave them blank for a session that authenticates mid-run.
+///
+/// P54: these attributes are identity carried in the OTLP request BODY, so they follow the same
+/// decision as the identity headers on the same request (`build_export_headers`, P43): only a
+/// FluxRouter-operated `endpoint` receives them. Any other endpoint (an operator's own collector,
+/// a loopback agent, a cleartext downgrade) gets the resource without them; tracing there needs
+/// no stable account key, so nothing is substituted.
 fn resource_with_tenant_id(
+    endpoint: &str,
     base: opentelemetry_sdk::Resource,
     snapshot: &fuigo_auth::CredentialSnapshot,
 ) -> opentelemetry_sdk::Resource {
-    let tenant_attrs: Vec<opentelemetry::KeyValue> = [
-        ("deployment.id", &snapshot.deployment_id),
-        ("api_key.id", &snapshot.api_key_id),
-        ("organization.id", &snapshot.organization_id),
-        ("team.id", &snapshot.team_id),
-        ("user.id", &snapshot.user_id),
-    ]
-    .into_iter()
-    .filter_map(|(key, val)| {
-        val.as_deref()
-            .filter(|v| !v.is_empty())
-            .map(|v| opentelemetry::KeyValue::new(key, v.to_string()))
-    })
-    .collect();
+    let identity = fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(endpoint);
+    if !identity.is_permitted() {
+        if !base
+            .iter()
+            .any(|(k, _)| TENANT_RESOURCE_KEYS.contains(&k.as_str()))
+        {
+            return base;
+        }
+        let kept: Vec<opentelemetry::KeyValue> = base
+            .iter()
+            .filter(|(k, _)| !TENANT_RESOURCE_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| opentelemetry::KeyValue::new(k.clone(), v.clone()))
+            .collect();
+        return opentelemetry_sdk::Resource::builder_empty()
+            .with_attributes(kept)
+            .build();
+    }
+    let tenant_attrs: Vec<opentelemetry::KeyValue> = TENANT_RESOURCE_KEYS
+        .into_iter()
+        .zip([
+            &snapshot.deployment_id,
+            &snapshot.api_key_id,
+            &snapshot.organization_id,
+            &snapshot.team_id,
+            &snapshot.user_id,
+        ])
+        .filter_map(|(key, val)| {
+            val.as_deref()
+                .filter(|v| !v.is_empty())
+                .map(|v| opentelemetry::KeyValue::new(key, v.to_string()))
+        })
+        .collect();
     if tenant_attrs.is_empty() {
         return base;
     }
@@ -231,12 +295,123 @@ fn resource_with_tenant_id(
 struct ExportInputs {
     one_shot: Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError>,
     resource: opentelemetry_sdk::Resource,
+    /// The batch as it goes on the wire: redacted, and with identity withheld for this endpoint (P54).
+    batch: Vec<opentelemetry_sdk::trace::SpanData>,
     credentials: Arc<dyn AuthCredentialProvider>,
     endpoint: Arc<str>,
     static_headers: Arc<std::collections::HashMap<String, String>>,
     token_header_value: Arc<str>,
     http_client: crate::otlp_http::BlockingOtlpClient,
     extra_headers: Arc<Vec<(String, String)>>,
+    /// P47: the bearer may not go to `endpoint`; the batch is not exported.
+    refused: Option<String>,
+}
+/// P47: `Some(reason)` when `token` is non-empty and the provider's destination rule refuses `endpoint`.
+/// The exporter then sends nothing: not the batch with the bearer, and not the batch without it.
+fn bearer_refused_for(
+    credentials: &dyn AuthCredentialProvider,
+    endpoint: &str,
+    token: &str,
+) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    let refusal = match reqwest::Url::parse(endpoint) {
+        Ok(url) => credentials.bearer_may_reach(&url, token).err().map(|r| r.0),
+        // Never the raw endpoint: it can carry userinfo or a query token. The sanitized refusal names no part of it.
+        Err(_) => Some(
+            fuigo_extra_ca::service_trust::session_may_reach_service(endpoint, None, |_| false)
+                .err()
+                .map_or_else(|| "the OTLP endpoint is not a valid URL".to_string(), |r| r.to_string()),
+        ),
+    };
+    if let Some(reason) = &refusal {
+        tracing::warn!(%reason, "otel export skipped: the session credential may not go to the OTLP endpoint");
+    }
+    refusal
+}
+/// Span, event and link attribute keys that name the account or tenant (P54). `user_id` is the
+/// one the redaction allowlist admits today (`redact::ALLOWED_STRING_KEYS`, recorded by the agent
+/// at session start); the rest close the same door for any future attribute.
+const SPAN_IDENTITY_KEYS: [&str; 13] = [
+    "user_id",
+    "user.id",
+    "user_email",
+    "user.email",
+    "email",
+    "team_id",
+    "team.id",
+    "organization_id",
+    "organization.id",
+    "deployment_id",
+    "deployment.id",
+    "api_key.id",
+    "principal",
+];
+/// P54: withhold identity-bearing attributes from every span, span event and link in the batch
+/// unless `endpoint` is FluxRouter-operated. Runs before the first attempt, so the refresh retry
+/// (which resends a clone of this batch) is covered too.
+fn withhold_span_identity(endpoint: &str, batch: &mut [opentelemetry_sdk::trace::SpanData]) {
+    if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(endpoint).is_permitted() {
+        return;
+    }
+    let keep = |kv: &opentelemetry::KeyValue| !SPAN_IDENTITY_KEYS.contains(&kv.key.as_str());
+    for span in batch.iter_mut() {
+        span.attributes.retain(keep);
+        for event in &mut span.events.events {
+            event.attributes.retain(keep);
+        }
+        for link in &mut span.links.links {
+            link.attributes.retain(keep);
+        }
+    }
+}
+impl RefreshableSpanExporter {
+    /// Everything one export sends, decided on this exporter's OWN endpoint (P54): the headers
+    /// (P43), the resource (tenant attributes) and the span batch (identity attributes). Kept
+    /// synchronous and network-free so the production wiring is testable.
+    fn export_inputs(&self, mut batch: Vec<opentelemetry_sdk::trace::SpanData>) -> ExportInputs {
+        let snapshot = self.credentials.snapshot();
+        let token = snapshot.token.clone().unwrap_or_else(|| {
+            tracing::debug!("auth: otel credential snapshot has no token, using cached last_token");
+            self.last_token.lock().clone()
+        });
+        *self.last_token.lock() = token.clone();
+        // P47: decided on the same snapshot token this export would send. A refusal sends nothing
+        // (`export()` returns before any request); otherwise P54's identity withholding applies.
+        let refused = bearer_refused_for(self.credentials.as_ref(), &self.endpoint, &token);
+        let token = if refused.is_some() { String::new() } else { token };
+        let token_auth = self
+            .credentials
+            .needs_token_auth_header()
+            .then(|| Arc::clone(&self.token_header_value));
+        redact::redact_batch(&mut batch);
+        withhold_span_identity(&self.endpoint, &mut batch);
+        ExportInputs {
+            one_shot: build_otlp_exporter(
+                &self.endpoint,
+                &self.static_headers,
+                &token,
+                token_auth.as_deref(),
+                &self.extra_headers,
+                self.http_client.clone(),
+                &snapshot,
+            ),
+            resource: resource_with_tenant_id(
+                &self.endpoint,
+                self.resource.lock().clone(),
+                &snapshot,
+            ),
+            batch,
+            credentials: Arc::clone(&self.credentials),
+            endpoint: Arc::clone(&self.endpoint),
+            static_headers: Arc::clone(&self.static_headers),
+            token_header_value: Arc::clone(&self.token_header_value),
+            http_client: self.http_client.clone(),
+            extra_headers: Arc::clone(&self.extra_headers),
+            refused,
+        }
+    }
 }
 impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
     fn export(
@@ -245,52 +420,26 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
     ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send {
         let prepared = (crate::client::is_session_metrics_enabled()
             && self.credentials.has_usable_credential())
-        .then(|| {
-            let snapshot = self.credentials.snapshot();
-            let token = snapshot.token.clone().unwrap_or_else(|| {
-                tracing::debug!(
-                    "auth: otel credential snapshot has no token, using cached last_token"
-                );
-                self.last_token.lock().clone()
-            });
-            *self.last_token.lock() = token.clone();
-            let token_auth = self
-                .credentials
-                .needs_token_auth_header()
-                .then(|| Arc::clone(&self.token_header_value));
-            ExportInputs {
-                one_shot: build_otlp_exporter(
-                    &self.endpoint,
-                    &self.static_headers,
-                    &token,
-                    token_auth.as_deref(),
-                    &self.extra_headers,
-                    self.http_client.clone(),
-                    &snapshot,
-                ),
-                resource: resource_with_tenant_id(self.resource.lock().clone(), &snapshot),
-                credentials: Arc::clone(&self.credentials),
-                endpoint: Arc::clone(&self.endpoint),
-                static_headers: Arc::clone(&self.static_headers),
-                token_header_value: Arc::clone(&self.token_header_value),
-                http_client: self.http_client.clone(),
-                extra_headers: Arc::clone(&self.extra_headers),
-            }
-        });
+        .then(|| self.export_inputs(batch));
         async move {
             let Some(ExportInputs {
                 one_shot,
                 resource,
+                batch,
                 credentials,
                 endpoint,
                 static_headers,
                 token_header_value,
                 http_client,
                 extra_headers,
+                refused,
             }) = prepared
             else {
                 return Ok(());
             };
+            if let Some(reason) = refused {
+                return Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(reason));
+            }
             let mut exporter = match one_shot {
                 Ok(e) => e,
                 Err(e) => {
@@ -299,8 +448,6 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
                     ));
                 }
             };
-            let mut batch = batch;
-            redact::redact_batch(&mut batch);
             let batch_for_retry = tokio::runtime::Handle::try_current()
                 .is_ok()
                 .then(|| batch.clone());
@@ -321,6 +468,9 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
                 tracing::warn!("token refresh reported success but snapshot returned no token");
                 return result;
             }
+            if bearer_refused_for(credentials.as_ref(), &endpoint, &new_token).is_some() {
+                return result;
+            }
             let retry_token_auth = credentials
                 .needs_token_auth_header()
                 .then(|| token_header_value.as_ref());
@@ -334,7 +484,8 @@ impl opentelemetry_sdk::trace::SpanExporter for RefreshableSpanExporter {
                 &retry_snapshot,
             ) {
                 Ok(mut retry_exporter) => {
-                    let retry_resource = resource_with_tenant_id(resource, &retry_snapshot);
+                    let retry_resource =
+                        resource_with_tenant_id(&endpoint, resource, &retry_snapshot);
                     export_batch(&mut retry_exporter, &retry_resource, batch_for_retry)
                         .await
                         .or(result)
@@ -454,6 +605,41 @@ pub fn otel_guard() -> OtelGuard {
 mod tests {
     use super::*;
     use fuigo_auth::CredentialSnapshot;
+    /// P47: the exporter consults the provider's destination rule before it builds headers; a refused endpoint
+    /// exports nothing. An empty token is never refused (no bearer goes out), and an admitted endpoint passes.
+    #[test]
+    fn p47_bearer_refused_for_follows_the_provider_rule() {
+        let checked = fuigo_auth::StaticAuthCredentialProvider::new(
+            Box::new(NoAuth),
+            Some("p47-session".into()),
+            fuigo_auth::BearerDestination::Checked(Arc::new(|url: &reqwest::Url| {
+                fuigo_extra_ca::service_trust::session_may_reach_service(url.as_str(), None, |_| false)
+                    .map_err(|r| fuigo_auth::BearerDestinationRefused(r.to_string()))
+            })),
+        );
+        let refused = bearer_refused_for(&checked, "http://127.0.0.1:4318/v1/traces", "p47-session")
+            .expect("loopback cleartext OTLP endpoint is refused");
+        assert!(refused.contains("The request was not made"), "{refused}");
+        assert!(bearer_refused_for(&checked, "https://evil.example/v1/traces", "p47-session").is_some());
+        assert!(bearer_refused_for(&checked, "not a url", "p47-session").is_some());
+        // A malformed endpoint carrying secrets: refused, and none of it is echoed.
+        let malformed = bearer_refused_for(
+            &checked,
+            "https://user:hunter2@collector.example:99999/v1/traces?token=s3cr3t",
+            "p47-session",
+        )
+        .expect("an unparseable endpoint is refused");
+        assert!(!malformed.contains("hunter2") && !malformed.contains("s3cr3t"), "{malformed}");
+        assert!(malformed.contains("The request was not made"), "{malformed}");
+        assert_eq!(bearer_refused_for(&checked, "https://api.fluxrouter.ai/v1/traces", "p47-session"), None);
+        assert_eq!(bearer_refused_for(&checked, "http://127.0.0.1:4318/v1/traces", ""), None);
+    }
+    struct NoAuth;
+    impl fuigo_auth::HttpAuth for NoAuth {
+        fn apply(&self, b: reqwest::RequestBuilder, _: &str) -> reqwest::RequestBuilder {
+            b
+        }
+    }
     #[test]
     fn build_export_headers_tracks_snapshot_and_respects_overrides() {
         let static_headers = std::collections::HashMap::new();
@@ -465,7 +651,14 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let headers = build_export_headers(&static_headers, "tok", None, &[], &snapshot);
+            let headers = build_export_headers(
+                "https://api.fluxrouter.ai/v1/traces",
+                &static_headers,
+                "tok",
+                None,
+                &[],
+                &snapshot,
+            );
             assert!(!headers.contains_key("x-userid"));
             assert!(!headers.contains_key("x-teamid"));
         }
@@ -475,10 +668,232 @@ mod tests {
             ..Default::default()
         };
         let extra = vec![("Authorization".to_string(), "Bearer custom".to_string())];
-        let headers = build_export_headers(&static_headers, "auto-token", None, &extra, &snapshot);
+        let headers = build_export_headers(
+            "https://api.fluxrouter.ai/v1/traces",
+            &static_headers,
+            "auto-token",
+            None,
+            &extra,
+            &snapshot,
+        );
         assert_eq!(headers["x-userid"], "u1");
         assert_eq!(headers["x-teamid"], "t9");
         assert_eq!(headers["Authorization"], "Bearer custom");
+    }
+    /// P43 hostile: an OTLP endpoint that is not FluxRouter-operated (an operator's own
+    /// collector, a loopback agent, a cleartext downgrade) gets none of the identity-class
+    /// headers, while the bearer and operator-configured headers still go; FluxRouter keeps them.
+    #[test]
+    fn export_headers_withhold_identity_from_a_non_fluxrouter_endpoint() {
+        let mut static_headers = std::collections::HashMap::new();
+        static_headers.insert("x-fuigo-client-version".to_string(), "1.0.21".to_string());
+        let snapshot = CredentialSnapshot {
+            user_id: Some("acct-1".into()),
+            team_id: Some("team-9".into()),
+            ..Default::default()
+        };
+        let extra = vec![("x-operator".to_string(), "kept".to_string())];
+        for endpoint in [
+            "https://collector.example/v1/traces",
+            "http://127.0.0.1:4318/v1/traces",
+            "http://api.fluxrouter.ai/v1/traces",
+        ] {
+            let headers =
+                build_export_headers(endpoint, &static_headers, "tok", None, &extra, &snapshot);
+            for name in ["x-userid", "x-teamid", "x-fuigo-client-version"] {
+                assert!(!headers.contains_key(name), "{endpoint} received {name}");
+            }
+            assert_eq!(headers["Authorization"], "Bearer tok");
+            assert_eq!(headers["x-operator"], "kept");
+        }
+        let headers = build_export_headers(
+            "https://api.fluxrouter.ai/v1/traces",
+            &static_headers,
+            "tok",
+            None,
+            &extra,
+            &snapshot,
+        );
+        assert_eq!(headers["x-userid"], "acct-1");
+        assert_eq!(headers["x-teamid"], "team-9");
+        assert_eq!(headers["x-fuigo-client-version"], "1.0.21");
+    }
+    const FLUX_TRACES: &str = "https://api.fluxrouter.ai/v1/traces";
+    struct IdentityCredentials;
+    impl fuigo_auth::HttpAuth for IdentityCredentials {
+        fn apply(&self, builder: reqwest::RequestBuilder, _base_url: &str) -> reqwest::RequestBuilder {
+            builder
+        }
+    }
+    #[async_trait::async_trait]
+    impl AuthCredentialProvider for IdentityCredentials {
+        fn snapshot(&self) -> CredentialSnapshot {
+            CredentialSnapshot {
+                token: Some("tok".into()),
+                user_id: Some("acct-1".into()),
+                team_id: Some("team-9".into()),
+                deployment_id: Some("dep-7b97".into()),
+                api_key_id: Some("ak-0c2b".into()),
+                organization_id: Some("org-abc".into()),
+            }
+        }
+        async fn refresh_after_unauthorized(&self) -> bool {
+            false
+        }
+        /// P47: the production service rule, so these P54 tests also run the merged refusal.
+        fn bearer_may_reach(
+            &self,
+            url: &reqwest::Url,
+            _bearer: &str,
+        ) -> Result<(), fuigo_auth::BearerDestinationRefused> {
+            fuigo_extra_ca::service_trust::session_may_reach_service(url.as_str(), None, |_| false)
+                .map_err(|r| fuigo_auth::BearerDestinationRefused(r.to_string()))
+        }
+    }
+    fn identity_span() -> opentelemetry_sdk::trace::SpanData {
+        let mut events = opentelemetry_sdk::trace::SpanEvents::default();
+        events.events.push(opentelemetry::trace::Event::new(
+            "e",
+            std::time::SystemTime::now(),
+            vec![
+                opentelemetry::KeyValue::new("user_id", "acct-1"),
+                opentelemetry::KeyValue::new("session_id", "sess-1"),
+            ],
+            0,
+        ));
+        opentelemetry_sdk::trace::SpanData {
+            span_context: opentelemetry::trace::SpanContext::empty_context(),
+            parent_span_id: opentelemetry::trace::SpanId::INVALID,
+            parent_span_is_remote: false,
+            span_kind: opentelemetry::trace::SpanKind::Internal,
+            name: "session".into(),
+            start_time: std::time::SystemTime::now(),
+            end_time: std::time::SystemTime::now(),
+            attributes: vec![
+                opentelemetry::KeyValue::new("user_id", "acct-1"),
+                opentelemetry::KeyValue::new("session_id", "sess-1"),
+            ],
+            dropped_attributes_count: 0,
+            events,
+            links: opentelemetry_sdk::trace::SpanLinks::default(),
+            status: opentelemetry::trace::Status::Unset,
+            instrumentation_scope: opentelemetry::InstrumentationScope::default(),
+        }
+    }
+    fn exporter_for(endpoint: &str) -> RefreshableSpanExporter {
+        let mut exporter = RefreshableSpanExporter {
+            endpoint: Arc::from(endpoint),
+            static_headers: Arc::new(std::collections::HashMap::new()),
+            credentials: Arc::new(IdentityCredentials),
+            last_token: parking_lot::Mutex::new(String::new()),
+            http_client: crate::otlp_http::build_blocking_client(std::time::Duration::from_secs(1), &[])
+                .expect("blocking client"),
+            resource: parking_lot::Mutex::new(opentelemetry_sdk::Resource::builder_empty().build()),
+            token_header_value: Arc::from("xai-grok-cli"),
+            extra_headers: Arc::new(Vec::new()),
+        };
+        use opentelemetry_sdk::trace::SpanExporter as _;
+        exporter.set_resource(
+            &opentelemetry_sdk::Resource::builder_empty()
+                .with_attributes([opentelemetry::KeyValue::new("client.name", "fuigo-pager")])
+                .build(),
+        );
+        exporter
+    }
+    /// P54 hostile, at the exporter's production wiring: what `export()` sends to a collector
+    /// that is not FluxRouter-operated carries the account id neither in the resource nor in any
+    /// span or span-event attribute (the redaction allowlist admits `user_id`), and the batch the
+    /// refresh retry resends is this same withheld batch. FluxRouter still receives both.
+    #[test]
+    fn export_inputs_withhold_identity_from_spans_and_resource_for_a_non_fluxrouter_collector() {
+        use opentelemetry::Key;
+        for endpoint in [
+            "https://collector.example/v1/traces",
+            "http://127.0.0.1:4318/v1/traces",
+            "http://api.fluxrouter.ai/v1/traces",
+        ] {
+            let inputs = exporter_for(endpoint).export_inputs(vec![identity_span()]);
+            // P47 merged with P54: none of these may carry the session, so the export is refused
+            // (nothing is sent) and the batch is withheld regardless.
+            assert!(
+                inputs.refused.as_deref().is_some_and(|r| r.contains("The request was not made")),
+                "{endpoint}: {:?}",
+                inputs.refused
+            );
+            let span = &inputs.batch[0];
+            assert!(span.attributes.iter().all(|kv| kv.key.as_str() != "user_id"), "{endpoint}");
+            assert!(span.attributes.iter().any(|kv| kv.key.as_str() == "session_id"));
+            assert!(
+                span.events.events[0].attributes.iter().all(|kv| kv.key.as_str() != "user_id"),
+                "{endpoint}: event attribute"
+            );
+            for key in TENANT_RESOURCE_KEYS {
+                assert!(inputs.resource.get(&Key::from(key)).is_none(), "{endpoint} {key}");
+            }
+            assert!(inputs.resource.get(&Key::from("client.name")).is_some());
+            let wire = format!("{:?} {:?}", inputs.batch, inputs.resource);
+            for secret in ["acct-1", "team-9", "dep-7b97", "ak-0c2b", "org-abc"] {
+                assert!(!wire.contains(secret), "{endpoint}: {secret}");
+            }
+        }
+        let inputs = exporter_for(FLUX_TRACES).export_inputs(vec![identity_span()]);
+        assert_eq!(inputs.refused, None, "FluxRouter is a trusted service origin");
+        assert!(inputs.batch[0].attributes.iter().any(|kv| kv.key.as_str() == "user_id"));
+        assert_eq!(
+            inputs.resource.get(&Key::from("user.id")).map(|v| v.to_string()),
+            Some("acct-1".to_string())
+        );
+    }
+    /// P54 hostile: the tenant/account resource attributes ride in the OTLP request BODY, so an
+    /// endpoint that is not FluxRouter-operated receives none of them (and the snapshot's values
+    /// appear nowhere in the resource), while FluxRouter still receives every one.
+    #[test]
+    fn resource_withholds_tenant_identity_from_a_non_fluxrouter_endpoint() {
+        use opentelemetry::Key;
+        let snap = CredentialSnapshot {
+            deployment_id: Some("dep-7b97".into()),
+            api_key_id: Some("ak-0c2b".into()),
+            organization_id: Some("org-abc".into()),
+            team_id: Some("team-9".into()),
+            user_id: Some("user-42".into()),
+            ..Default::default()
+        };
+        let base = opentelemetry_sdk::Resource::builder_empty()
+            .with_attributes([
+                opentelemetry::KeyValue::new("client.name", "fuigo-pager"),
+                opentelemetry::KeyValue::new("user.id", "stale-base-user"),
+            ])
+            .build();
+        for endpoint in [
+            "https://collector.example/v1/traces",
+            "http://127.0.0.1:4318/v1/traces",
+            "http://api.fluxrouter.ai/v1/traces",
+            "https://api.fluxrouter.ai.evil.example/v1/traces",
+        ] {
+            let r = resource_with_tenant_id(endpoint, base.clone(), &snap);
+            for key in TENANT_RESOURCE_KEYS {
+                assert!(r.get(&Key::from(key)).is_none(), "{endpoint} received {key}");
+            }
+            let values: Vec<String> = r.iter().map(|(_, v)| v.to_string()).collect();
+            for secret in ["dep-7b97", "ak-0c2b", "org-abc", "team-9", "user-42", "stale-base-user"] {
+                assert!(!values.iter().any(|v| v.contains(secret)), "{endpoint}: {secret} in {values:?}");
+            }
+            assert_eq!(
+                r.get(&Key::from("client.name")).map(|v| v.to_string()),
+                Some("fuigo-pager".to_string()),
+                "non-identity resource attributes still go"
+            );
+        }
+        let r = resource_with_tenant_id(FLUX_TRACES, base, &snap);
+        for (key, want) in [
+            ("deployment.id", "dep-7b97"),
+            ("api_key.id", "ak-0c2b"),
+            ("organization.id", "org-abc"),
+            ("team.id", "team-9"),
+            ("user.id", "user-42"),
+        ] {
+            assert_eq!(r.get(&Key::from(key)).map(|v| v.to_string()), Some(want.to_string()), "{key}");
+        }
     }
     #[test]
     fn resource_injects_tenant_id_attrs() {
@@ -486,14 +901,14 @@ mod tests {
         let base = opentelemetry_sdk::Resource::builder_empty()
             .with_attributes([opentelemetry::KeyValue::new("user.id", "")])
             .build();
-        let plain = resource_with_tenant_id(base.clone(), &CredentialSnapshot::default());
+        let plain = resource_with_tenant_id(FLUX_TRACES, base.clone(), &CredentialSnapshot::default());
         assert!(plain.get(&Key::from("deployment.id")).is_none());
         assert!(plain.get(&Key::from("api_key.id")).is_none());
         let snap = CredentialSnapshot {
             deployment_id: Some("dep-7b97".into()),
             ..Default::default()
         };
-        let r = resource_with_tenant_id(base.clone(), &snap);
+        let r = resource_with_tenant_id(FLUX_TRACES, base.clone(), &snap);
         assert_eq!(
             r.get(&Key::from("deployment.id")).map(|v| v.to_string()),
             Some("dep-7b97".to_string())
@@ -506,7 +921,7 @@ mod tests {
             api_key_id: Some("ak-0c2b".into()),
             ..Default::default()
         };
-        let r = resource_with_tenant_id(base.clone(), &snap);
+        let r = resource_with_tenant_id(FLUX_TRACES, base.clone(), &snap);
         assert_eq!(
             r.get(&Key::from("api_key.id")).map(|v| v.to_string()),
             Some("ak-0c2b".to_string())
@@ -515,7 +930,7 @@ mod tests {
             organization_id: Some("org-abc".into()),
             ..Default::default()
         };
-        let r = resource_with_tenant_id(base.clone(), &snap);
+        let r = resource_with_tenant_id(FLUX_TRACES, base.clone(), &snap);
         assert_eq!(
             r.get(&Key::from("organization.id")).map(|v| v.to_string()),
             Some("org-abc".to_string())
@@ -524,7 +939,7 @@ mod tests {
             user_id: Some("user-42".into()),
             ..Default::default()
         };
-        let r = resource_with_tenant_id(base.clone(), &snap);
+        let r = resource_with_tenant_id(FLUX_TRACES, base.clone(), &snap);
         assert_eq!(
             r.get(&Key::from("user.id")).map(|v| v.to_string()),
             Some("user-42".to_string())
@@ -537,7 +952,11 @@ mod tests {
             ..Default::default()
         };
         let r =
-            resource_with_tenant_id(opentelemetry_sdk::Resource::builder_empty().build(), &snap);
+            resource_with_tenant_id(
+                FLUX_TRACES,
+                opentelemetry_sdk::Resource::builder_empty().build(),
+                &snap,
+            );
         assert!(r.get(&Key::from("user.id")).is_none());
         assert!(r.get(&Key::from("organization.id")).is_none());
         assert!(r.get(&Key::from("team.id")).is_none());

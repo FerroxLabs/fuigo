@@ -125,7 +125,7 @@ async fn auth_escalation_reannounces_once() {
     local
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             {
                 let mut state = actor.mcp_state.lock().await;
@@ -286,7 +286,7 @@ async fn handshaking_and_init_windows_defer_announcements() {
     local
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             {
                 let mut state = actor.mcp_state.lock().await;
@@ -342,7 +342,7 @@ async fn rewind_rearms_failed_server_announcements() {
     local
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
             let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot");
@@ -398,7 +398,7 @@ async fn rearm_reannounces_still_failed_servers() {
     local
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             {
                 let mut state = actor.mcp_state.lock().await;
@@ -425,7 +425,7 @@ async fn recovery_rearms_the_announcement() {
     local
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             {
                 let mut state = actor.mcp_state.lock().await;
@@ -466,7 +466,7 @@ async fn removing_the_server_from_config_ends_the_episode() {
     local
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             {
                 let mut state = actor.mcp_state.lock().await;

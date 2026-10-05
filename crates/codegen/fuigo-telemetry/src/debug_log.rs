@@ -57,6 +57,23 @@ pub const ACP_UPDATE_PAYLOAD_TARGET: &str = "acp_update_payload";
 /// Re-check on rmcp bump.
 pub const RMCP_SSE_NOISE_TARGET: &str = "rmcp::transport::common::client_side_sse";
 
+/// Module path of the ACP SDK's raw JSON-RPC line logger (`agent-client-protocol` 0.10.4 `src/rpc.rs`:
+/// `log::trace!("recv: {}", line)` / `"send: {}"`). It writes every message verbatim, including credentials a client
+/// sends (`authenticate` `_meta["fuigo/apiKey"]`, `fuigo/setApiKey`). Re-check on an ACP SDK bump.
+pub const ACP_RAW_WIRE_TARGET: &str = "agent_client_protocol::rpc";
+
+/// Global filter that drops every event from [`ACP_RAW_WIRE_TARGET`], at every level, for every layer (P08).
+///
+/// The target logs whole client messages: `trace` for each line, and `error` for a malformed line or a rejected
+/// notification, so a per-layer level cap is not enough and no `RUST_LOG` / `FUIGO_LOG_FILE` / `FUIGO_OTEL_FILTER`
+/// setting may re-enable it. Installed as a registry-level layer by [`install_firehose`], which every Fuigo subscriber
+/// goes through. Everything else passes untouched: per-layer filters still decide.
+pub fn acp_raw_wire_filter() -> tracing_subscriber::filter::Targets {
+    tracing_subscriber::filter::Targets::new()
+        .with_default(LevelFilter::TRACE)
+        .with_target(ACP_RAW_WIRE_TARGET, LevelFilter::OFF)
+}
+
 // Broad firehose filter for the routing and FUIGO_DEBUG_LOG sources
 // Capture our crates at debug regardless of a narrowing RUST_LOG, with deps at info so they don't flood
 // Curated first-party allowlist: new fuigo crates default to `info` until added here
@@ -77,12 +94,26 @@ fn firehose_filter() -> EnvFilter {
 fn default_file_filter() -> EnvFilter {
     EnvFilter::builder()
         .with_default_directive(LevelFilter::DEBUG.into())
-        .from_env_lossy()
+        .parse_lossy(valid_directives(
+            &std::env::var(EnvFilter::DEFAULT_ENV).unwrap_or_default(),
+        ))
         .add_directive(
             "sampling_log=off"
                 .parse()
                 .expect("static directive is valid"),
         )
+}
+
+/// The directives of `spec` that parse, in order; invalid ones are dropped.
+/// `EnvFilter`'s own lossy parse (`from_env_lossy`, `parse_lossy`) reports each invalid directive
+/// with a raw `eprintln!`, which panics when fd 2 is a dead pipe or a full disk (SIGABRT under
+/// `panic = "abort"`, R077): `RUST_LOG='[[[bad' FUIGO_LOG_FILE=… fuigo logout 2>&-`-style runs
+/// aborted. Pre-filtering leaves it nothing to report.
+fn valid_directives(spec: &str) -> String {
+    spec.split(',')
+        .filter(|d| !d.is_empty() && d.parse::<tracing_subscriber::filter::Directive>().is_ok())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // Open `path` as a non-blocking flat `fmt` layer with `filter`; ansi off, target on.
@@ -347,6 +378,8 @@ where
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
+    // P08: before any sink can see it, drop the ACP SDK's raw-wire log (client credentials ride in it).
+    let registry = registry.with(acp_raw_wire_filter());
     match resolve_debug_target() {
         Some(DebugTarget::PerSession { dir }) => {
             let layer = RoutingLayer::new(dir, role.to_owned(), std::process::id())
@@ -360,7 +393,7 @@ where
                 DebugSource::FuigoLogFile => default_file_filter(),
                 DebugSource::FuigoDebugLog => firehose_filter(),
             };
-            match build_file_layer::<S>(&path, filter) {
+            match build_file_layer(&path, filter) {
                 Ok(layer) => registry.with(layer).init(),
                 Err(e) => {
                     registry.init();
@@ -489,6 +522,16 @@ fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invalid_rust_log_directives_are_dropped_before_envfilter_sees_them() {
+        assert_eq!(
+            super::valid_directives("[[[bad,fuigo_shell=trace,,info"),
+            "fuigo_shell=trace,info"
+        );
+        assert_eq!(super::valid_directives(""), "");
+        assert_eq!(super::valid_directives("[[[bad"), "");
+    }
+
     use super::*;
 
     // Routing tests drive real non-blocking writers whose worker guards are parked in a process-lifetime static; flushing drains all of them
@@ -683,6 +726,36 @@ mod tests {
             "fallback file: {fallback:?}"
         );
         assert!(!fallback.contains("inside session"));
+    }
+
+    /// P70b: the per-session debug log is a log sink. Error text echoing a credential the sampler sent lands with the
+    /// credential replaced, whether it is logged as the message, a `%` field or a `?` field.
+    #[test]
+    fn a_credential_sent_upstream_is_scrubbed_from_the_debug_log() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let _lock = flush_test_lock();
+        let cred = "p70b-debuglog-cred-0123456789";
+        fuigo_secrets::sent_credentials::record(cred);
+        let dir = tempfile::tempdir().unwrap();
+        let layer = RoutingLayer::new(dir.path().to_path_buf(), "agent".to_owned(), 4343);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let upstream = format!("API error (status 400): key {cred} is not valid");
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info_span!("session", session_id = %"sess-p70b").in_scope(|| {
+                tracing::error!(target: "fuigo_shell", error = %upstream, debug = ?upstream, "failed: {upstream}");
+            });
+        });
+        crate::appender::flush_file_log_guards();
+
+        let log = std::fs::read_to_string(dir.path().join("sess-p70b.txt")).unwrap();
+        assert!(log.contains("failed: API error"), "log: {log:?}");
+        assert!(!log.contains(cred), "log: {log:?}");
+        assert_eq!(
+            log.matches("key <redacted> is not valid").count(),
+            3,
+            "log: {log:?}"
+        );
     }
 
     #[test]
@@ -914,5 +987,38 @@ mod tests {
             Path::new("/no/such/fuigo/debug/dir"),
             std::time::Duration::from_secs(1),
         );
+    }
+}
+
+#[cfg(test)]
+mod acp_raw_wire_filter_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// Records the target of every event that reaches it.
+    struct Recorder(Arc<Mutex<Vec<String>>>);
+    impl<S: Subscriber> Layer<S> for Recorder {
+        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            self.0.lock().unwrap().push(event.metadata().target().to_owned());
+        }
+    }
+
+    /// P08: the ACP SDK's raw-wire target is dropped at every level (it logs malformed client lines at ERROR),
+    /// while every other target still reaches the layers, however verbose they ask to be.
+    #[test]
+    fn acp_raw_wire_filter_drops_only_the_raw_wire_target() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(acp_raw_wire_filter())
+            .with(Recorder(seen.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "agent_client_protocol::rpc", "unhandled line: p08-FAKE");
+            tracing::trace!(target: "agent_client_protocol::rpc", "recv: p08-FAKE");
+            tracing::trace!(target: "agent_client_protocol::other", "kept");
+            tracing::trace!(target: "fuigo_shell::auth", "kept");
+        });
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen, vec!["agent_client_protocol::other", "fuigo_shell::auth"]);
     }
 }

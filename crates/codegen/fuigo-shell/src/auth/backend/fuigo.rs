@@ -29,7 +29,8 @@ impl AuthBackend for FuigoAuthBackend {
         true
     }
 
-    /// The session bearer goes only to a configured first-party origin.
+    /// The session bearer goes only to a user-configured API origin (credential delivery;
+    /// identity disclosure is a separate, compiled class: `fuigo_extra_ca::fluxrouter`).
     ///
     /// This used to return `true` for every URL, with the reasoning that "some
     /// customers run their own gateway and sign in there with the session we

@@ -149,6 +149,13 @@ async fn make_actor_parts_with_method_and_credentials(
     let mut actor = create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
     actor.auth_manager = auth_manager;
     actor.auth_method_id = test_auth_method_id(auth_method_id);
+    // P42: these tests exercise session refresh/recovery mechanics, so the destination must be one that may
+    // receive the session token. The shared fixture's `http://localhost` only qualified under the broad matcher.
+    crate::agent::config::Config::install_test_trusted_origins();
+    if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+        cfg.base_url = P42_CONFIGURED_ORIGIN.to_string();
+        actor.chat_state_handle.update_sampling_config(cfg);
+    }
     actor
         .chat_state_handle
         .update_credentials(fuigo_chat_state::Credentials {
@@ -1198,15 +1205,14 @@ fn session_token_auth_gate_truth_table() {
         assert!(!gate(false, ModelByok::NotByok, fp));
         assert!(!gate(false, ModelByok::Byok, fp));
         assert!(!gate(false, ModelByok::Unknown, fp));
-        // Session method: a definite classification ignores the endpoint
-        // NotByok always refreshes (it only ever routes to the session endpoint); a genuine per-model Byok never does
-        assert!(gate(true, ModelByok::NotByok, fp));
+        // A genuine per-model Byok never uses the session token.
         assert!(!gate(true, ModelByok::Byok, fp));
+        // P42: NotByok decides only that the session token is wanted; the destination decides whether it may go.
+        // It used to be unconditionally `true`, and a model absent from the catalogue is classed NotByok.
+        assert_eq!(gate(true, ModelByok::NotByok, fp), fp);
     }
-    // Session method and Unknown BYOK: refresh only against a first-party Ferrox Labs host
+    // Session method and Unknown BYOK: refresh only where the destination may receive the session
     // That way a transiently-unclassifiable config can't demote a live session (the stale-token 401 regression)
-    // The session token still never leaks to a third-party BYOK endpoint
-    // This arm was unconditionally `false` before the fix
     assert!(gate(true, ModelByok::Unknown, true));
     assert!(!gate(true, ModelByok::Unknown, false));
 }
@@ -2013,4 +2019,241 @@ async fn subscription_acp_reconstruction_uses_native_resolver_without_session_ke
         assert_eq!(sampling.subscription,Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt));
         assert!(sampling.subscription_resolver.is_some());assert!(sampling.api_key.is_none());assert!(sampling.bearer_resolver.is_none());assert!(sampling.attribution_callback.is_none());
     }).await;
+}
+
+/// P42: a 401 on a request the session token was withheld from (its destination may not receive it) is
+/// terminal, typed `auth_destination_refused`, and names the `[endpoints]` remedy — not a self-healing blip.
+#[tokio::test(flavor = "current_thread")]
+async fn p42_withheld_session_401_is_terminal_with_the_endpoints_remedy() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (_dir, am) = auth_manager_with_valid_token("p42-terminal-session");
+            for (base, withheld) in [
+                ("http://127.0.0.1:9/v1", true),
+                ("http://api.fluxrouter.ai/v1", true),
+                ("https://api.fluxrouter.ai:8443/v1", true),
+                (P42_CONFIGURED_ORIGIN, false),
+            ] {
+                let (actor, _rx) =
+                    make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
+                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                cfg.base_url = base.to_string();
+                cfg.model = String::new();
+                actor.chat_state_handle.update_sampling_config(cfg);
+                let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
+                assert_eq!(actor.session_withheld_401(&error, "", base), withheld, "{base}");
+                if withheld {
+                    let result = actor
+                        .handle_sampling_failure(error, 0, transient_state(0, true), false, TurnParkState::Fresh)
+                        .await;
+                    let err = result.err().unwrap_or_else(|| panic!("{base}: must be terminal"));
+                    let data = format!("{:?}", err.data);
+                    assert!(data.contains("[endpoints]"), "{base}: remedy must name [endpoints]: {data}");
+                    assert!(!data.contains("temporarily unavailable"), "{base}: {data}");
+                    assert!(
+                        data.contains("auth_destination_refused") && !data.contains("\"auth\""),
+                        "{base}: the returned error_kind must not invite a sign-in: {data}"
+                    );
+                    p42_assert_refused_destination_wire(base, err.data.as_ref().expect("typed data"));
+                }
+            }
+            // The pager's banner decision: never a re-auth prompt for a refused destination, even though the
+            // message still carries the sampler's "Unauthorized (401)" text.
+            assert!(!crate::extensions::notification::is_reauthable_failure(
+                Some(crate::extensions::notification::AUTH_DESTINATION_REFUSED_ERROR_TYPE),
+                "Unauthorized (401) from http://127.0.0.1:9/v1/responses"
+            ));
+            // A request that DID carry a credential is a real rejection, not a withheld session.
+            let (actor, _rx) = make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
+            assert!(!actor.session_withheld_401(
+                &auth_error_with_credential(fuigo_sampling_types::SentCredential::Sent),
+                "",
+                "http://127.0.0.1:9/v1"
+            ));
+        })
+        .await;
+}
+
+/// P149 (S12, live lane C2 D4): a refused destination whose base URL carries userinfo and a query secret is named by
+/// location only in the turn error (`Endpoint:` line): the password and the query value never reach a client,
+/// the headless `Error:` line or a log.
+#[tokio::test(flavor = "current_thread")]
+async fn p149_refused_destination_is_named_by_location_only() {
+    const PASS: &str = "fuigo-p149-SYNTH-urlpass";
+    const QUERY: &str = "fuigo-p149-SYNTH-urlquery";
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (_dir, am) = auth_manager_with_valid_token("p149-userinfo-session");
+            let base = format!("https://p149u:{PASS}@gw.p149.invalid/v1?key={QUERY}");
+            let (actor, _rx) =
+                make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = base.clone();
+            cfg.model = String::new();
+            actor.chat_state_handle.update_sampling_config(cfg);
+            let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
+            assert!(actor.session_withheld_401(&error, "", &base), "control: the destination is refused");
+            let result = actor
+                .handle_sampling_failure(error, 0, transient_state(0, true), false, TurnParkState::Fresh)
+                .await;
+            let err = result.err().expect("terminal");
+            let message = err.data.as_ref().and_then(|d| d["message"].as_str()).expect("message").to_owned();
+            assert!(!message.contains(PASS), "the password was shown: {message}");
+            assert!(!message.contains(QUERY), "the query secret was shown: {message}");
+            assert!(!message.contains("p149u"), "the user name was shown: {message}");
+            assert!(
+                message.contains("  Endpoint:  https://<redacted>@gw.p149.invalid/v1?key=<redacted>"),
+                "control: the location is kept: {message}"
+            );
+        })
+        .await;
+}
+
+/// P42 (audit round 6, M1/M2): the shell composes a refused destination's whole message — the `[endpoints]`
+/// remedy first, one plain sentence, then the `Model:` diagnostics — and sends no `http_status`. A client cuts
+/// its banner at `Model:` (so the remedy survives) and keys its sign-in prompt and post-login resubmit off a 401
+/// status or text (so neither may appear).
+fn p42_assert_refused_destination_wire(base: &str, data: &serde_json::Value) {
+    use crate::extensions::notification::{
+        AUTH_DESTINATION_REFUSED_REMEDY, AUTH_DESTINATION_REFUSED_SENTENCE,
+    };
+    assert!(data.get("http_status").is_none(), "{base}: no http_status may be sent: {data}");
+    let message = data["message"].as_str().expect("message");
+    assert!(
+        message.starts_with(AUTH_DESTINATION_REFUSED_REMEDY),
+        "{base}: the remedy must lead the message: {message}"
+    );
+    let sentence = message.find(AUTH_DESTINATION_REFUSED_SENTENCE).expect("the plain sentence");
+    let model = message.find("\n\n  Model:").expect("the diagnostics block");
+    assert!(
+        AUTH_DESTINATION_REFUSED_REMEDY.len() < sentence && sentence < model,
+        "{base}: remedy, sentence, then diagnostics: {message}"
+    );
+    assert!(message.contains(&format!("  Endpoint:  {base}")), "{base}: {message}");
+    for needle in ["(401)", "Unauthorized (", "status 401", "Unauthorized"] {
+        assert!(!message.contains(needle), "{base}: {needle:?} must not appear: {message}");
+    }
+}
+
+/// P42 (audit round 5, M2): a native subscription attaches its own credential at dispatch, after the sampler
+/// recorded `Missing`. Its 401 is a real rejection at the subscription endpoint, never a withheld session, even
+/// when the catalogue entry for the same wire slug is credential-less (`NotByok`).
+#[tokio::test(flavor = "current_thread")]
+async fn p42_subscription_401_is_not_classified_as_a_withheld_session() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (_dir, am) = auth_manager_with_valid_token("p42-subscription-session");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                fuigo_chat_state::AuthType::SessionToken,
+                String::new(),
+            )
+            .await;
+            const SUBSCRIPTION_URL: &str = "https://chatgpt.com/backend-api/codex";
+            let provider = crate::auth::AuthProviderRef::new(
+                "native-test".into(),
+                crate::auth::AuthProviderConfig {
+                    subscription: Some(crate::auth::subscription::SubscriptionProvider::Chatgpt),
+                    account: Some("account-a".into()),
+                    ..Default::default()
+                },
+            );
+            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
+                model_id: String::new(),
+                facts: crate::agent::config::ModelAuthFacts {
+                    byok: crate::agent::auth_method::ModelByok::NotByok,
+                    auth_scheme: Default::default(),
+                },
+                provider: Some(provider),
+            }));
+            let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
+            assert!(
+                !actor.session_withheld_401(&error, "", SUBSCRIPTION_URL),
+                "a subscription 401 must not be reported as a refused session destination"
+            );
+        })
+        .await;
+}
+
+/// P42 (audit round 6, LOW): the subscription exclusion must hold when it comes from CONFIGURATION, with
+/// no provider in the memo. Two catalogue entries share one wire slug: a credential-less entry and a
+/// subscription entry at the ChatGPT backend. The memo says `NotByok` with provider `None`, so only
+/// `selected_for_endpoint` (the endpoint-aware lookup `reconstruct_full_config` uses) can tell that the
+/// 401 at the subscription endpoint is a real rejection. The same slug at loopback is still a withheld
+/// session (positive control: the selection is by endpoint, not by slug).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn p42_subscription_selected_by_endpoint_is_not_a_withheld_session() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = tempfile::tempdir().expect("fuigo home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"
+[auth_provider.chatgpt]
+subscription = "chatgpt"
+account = "account-a"
+[model.chatgpt]
+model = "p42-shared-slug"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_provider = "chatgpt"
+[model.plain]
+model = "p42-shared-slug"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+    )
+    .expect("write config.toml");
+    let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+    const SUBSCRIPTION_URL: &str = "https://chatgpt.com/backend-api/codex";
+    const LOOPBACK_URL: &str = "http://127.0.0.1:9/v1";
+    // Precondition: configuration alone selects the subscription for this endpoint, and only for it.
+    assert!(
+        crate::auth::subscription::inference::selected_for_endpoint("p42-shared-slug", SUBSCRIPTION_URL)
+            .and_then(|p| p.subscription_provider())
+            .is_some(),
+        "the fixture config must select the subscription at its endpoint"
+    );
+    assert!(
+        crate::auth::subscription::inference::selected_for_endpoint("p42-shared-slug", LOOPBACK_URL)
+            .is_none()
+    );
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (_dir, am) = auth_manager_with_valid_token("p42-subscription-by-endpoint");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                fuigo_chat_state::AuthType::SessionToken,
+                String::new(),
+            )
+            .await;
+            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
+                model_id: "p42-shared-slug".into(),
+                facts: crate::agent::config::ModelAuthFacts {
+                    byok: crate::agent::auth_method::ModelByok::NotByok,
+                    auth_scheme: Default::default(),
+                },
+                provider: None,
+            }));
+            let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
+            assert!(
+                !actor.session_withheld_401(&error, "p42-shared-slug", SUBSCRIPTION_URL),
+                "a subscription selected by endpoint must not be reported as a refused session destination"
+            );
+            assert!(
+                actor.session_withheld_401(&error, "p42-shared-slug", LOOPBACK_URL),
+                "positive control: the same slug at loopback is a withheld session"
+            );
+        })
+        .await;
 }

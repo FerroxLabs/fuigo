@@ -58,6 +58,32 @@ Upstream:   https://github.com/huggingface/nfsserve (v0.11.0)
 Copyright:  Copyright (c) 2023, XetData; Copyright (c) 2025, Hugging Face
 
 --------------------------------------------------------------------------------
+tiff (modified)
+--------------------------------------------------------------------------------
+Path:       third_party/tiff-0.11.3/
+License:    MIT
+License file: third_party/tiff-0.11.3/LICENSE
+Upstream:   https://github.com/image-rs/image-tiff
+Version:    0.11.3
+crates.io:  https://crates.io/crates/tiff/0.11.3
+Copyright:  Copyright (c) 2018 PistonDevelopers
+Modified:   src/decoder/ifd.rs — a `dbg!` around `TiffError::LimitsExceeded` removed (R077).
+            Replaces the crates.io package through [patch.crates-io] in the root Cargo.toml.
+
+--------------------------------------------------------------------------------
+usvg (modified)
+--------------------------------------------------------------------------------
+Path:       third_party/usvg-0.47.0/
+License:    Apache-2.0 OR MIT
+License files: third_party/usvg-0.47.0/LICENSE-APACHE, third_party/usvg-0.47.0/LICENSE-MIT
+Upstream:   https://github.com/linebender/resvg (crates/usvg)
+Version:    0.47.0
+crates.io:  https://crates.io/crates/usvg/0.47.0
+Copyright:  Copyright 2017 the Resvg Authors
+Modified:   src/text/colr.rs — two `println!("Warning: ...")` replaced with `log::warn!` (R077).
+            Replaces the crates.io package through [patch.crates-io] in the root Cargo.toml.
+
+--------------------------------------------------------------------------------
 End of notices for vendored third_party/ crates.
 
 Full product notices (all crates.io / git dependencies shipped with the Grok

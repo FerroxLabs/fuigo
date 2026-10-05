@@ -4,6 +4,9 @@
 //! export FUIGO_API_KEY=...
 //! cargo run -p fuigo-voice --bin voice-probe -- --seconds 5
 //! ```
+// Dev/benchmark tool: never shipped (not linked into `fuigo-pager`), run by hand on a terminal.
+// Printing is its whole interface, so the workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::PathBuf;
 

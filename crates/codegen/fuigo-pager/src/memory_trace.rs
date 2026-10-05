@@ -343,23 +343,29 @@ struct PurgeInfo<'a> {
     duration: Duration,
 }
 
+/// The sink events go to: in a test build the calling thread's scoped sink if it installed one, else the process-global sink.
+/// The thread-local scope keeps unrelated tests that purge memory on other threads out of a test's trace file.
+fn current_sink() -> Option<std::sync::Arc<Sink>> {
+    #[cfg(test)]
+    if let Some(sink) = test_support::THREAD_SINK.with(|c| c.borrow().clone()) {
+        return Some(sink);
+    }
+    match SINK.read() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
 fn with_sink(f: impl FnOnce(&Sink)) {
-    let guard = match SINK.read() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if let Some(sink) = guard.as_ref() {
-        f(sink);
+    if let Some(sink) = current_sink() {
+        f(&sink);
     }
 }
 
 /// Whether a trace sink is installed ([`start`] ran and `FUIGO_MEMTRACE` is not disabled, or a test sink is scoped in).
 /// Lets callers skip gauge sampling entirely when tracing is off.
 pub(crate) fn is_active() -> bool {
-    match SINK.read() {
-        Ok(g) => g.is_some(),
-        Err(p) => p.into_inner().is_some(),
-    }
+    current_sink().is_some()
 }
 
 /// Record a completed purge, attributed to its memory cliff.
@@ -476,13 +482,22 @@ pub fn start(dir: PathBuf) {
 /// Appends without taking the sink's write lock.
 /// A panic raised while that lock is held therefore cannot hang the hook before the process reports the panic.
 pub fn record_crash_sample() {
-    let Ok(sink) = SINK.try_read() else {
-        return;
+    #[cfg(test)]
+    let scoped = test_support::THREAD_SINK.with(|c| c.borrow().as_ref().map(|s| s.path.clone()));
+    #[cfg(not(test))]
+    let scoped: Option<PathBuf> = None;
+    let path = match scoped {
+        Some(path) => path,
+        None => {
+            let Ok(sink) = SINK.try_read() else {
+                return;
+            };
+            let Some(path) = sink.as_ref().map(|s| s.path.clone()) else {
+                return;
+            };
+            path
+        }
     };
-    let Some(path) = sink.as_ref().map(|s| s.path.clone()) else {
-        return;
-    };
-    drop(sink);
 
     let mem = sample_process_memory();
     let Ok(line) = serde_json::to_string(&TraceEvent {
@@ -638,32 +653,31 @@ pub fn collect_for_export(dir: &Path, limits: ExportLimits) -> Vec<ExportedTrace
 pub(crate) mod test_support {
     use super::*;
 
-    /// Install a scoped sink writing to `path` (tiny rotation cap, high thresholds).
-    /// Returns a guard restoring the previous sink on drop.
-    /// Tests using this must serialize on the `MEMTRACE_SINK` serial key; the sink is process-global.
+    thread_local! {
+        /// The calling thread's scoped test sink; see `current_sink`.
+        pub(super) static THREAD_SINK: std::cell::RefCell<Option<std::sync::Arc<Sink>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Install a sink writing to `path` (tiny rotation cap, high thresholds) for THIS thread only.
+    /// Returns a guard restoring the previous scope on drop.
+    /// The sink is thread-scoped, so purges and samples from tests running on other threads never land in it.
     pub(crate) struct SinkGuard(Option<std::sync::Arc<Sink>>);
 
     impl Drop for SinkGuard {
         fn drop(&mut self) {
-            let mut guard = match SINK.write() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            *guard = self.0.take();
+            let prev = self.0.take();
+            THREAD_SINK.with(|c| *c.borrow_mut() = prev);
         }
     }
 
     pub(crate) fn install_test_sink(path: PathBuf, rotate_bytes: u64) -> SinkGuard {
-        let mut guard = match SINK.write() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let prev = guard.take();
-        *guard = Some(std::sync::Arc::new(Sink::new(
+        let sink = std::sync::Arc::new(Sink::new(
             path,
             rotate_bytes,
             u64::MAX >> 1, // never fire thresholds unless a test asks
-        )));
+        ));
+        let prev = THREAD_SINK.with(|c| c.borrow_mut().replace(sink));
         SinkGuard(prev)
     }
 
@@ -733,6 +747,24 @@ mod tests {
                 assert!(v["ts_ms"].as_u64().unwrap() > 0);
             }
         }
+    }
+
+    /// A purge on another test's thread must not land in this thread's trace file: that cross-talk made
+    /// `sample_events_are_valid_jsonl_and_rotate` see `purge` lines among its samples.
+    #[test]
+    fn a_scoped_test_sink_ignores_purges_from_other_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scoped.jsonl");
+        let _guard = test_support::install_test_sink(path.clone(), 1 << 20);
+
+        std::thread::spawn(|| crate::memory_release::release_retained_memory("other-thread"))
+            .join()
+            .unwrap();
+        test_support::record_sample_for_tests();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("other-thread"), "foreign purge leaked: {body}");
+        assert_eq!(body.lines().count(), 1, "only this thread's sample: {body}");
     }
 
     #[test]

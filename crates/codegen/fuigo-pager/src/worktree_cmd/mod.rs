@@ -236,12 +236,12 @@ async fn cmd_rm(
             Ok(r) => {
                 let path = r.resolved_path.as_deref().unwrap_or(id_or_path);
                 if dry_run {
-                    println!("  would remove: {path}");
+                    fuigo_tty_utils::cli_println!("  would remove: {path}");
                 } else if r.removed {
-                    println!("  removed: {path}");
+                    fuigo_tty_utils::cli_println!("  removed: {path}");
                 }
             }
-            Err(e) => eprintln!("  error removing {id_or_path}: {e}"),
+            Err(e) => fuigo_tty_utils::cli_eprintln!("  error removing {id_or_path}: {e}"),
         }
     }
     Ok(())
@@ -284,7 +284,7 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
                 path: String,
             }
             let resp: PathResp = ext_call(tx, "fuigo/git/worktree/db/path", &()).await?;
-            println!("{}", resp.path);
+            fuigo_tty_utils::cli_println!("{}", resp.path);
             Ok(())
         }
         WorktreeDbCommand::Rebuild => {

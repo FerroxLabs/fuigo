@@ -186,10 +186,28 @@ fn finalize_overlay(
     source_label: &str,
     source: OverlaySource,
 ) -> Option<(toml::Value, OverlaySource, Vec<String>)> {
+    // P118 round 3 (N6): the inline value is the user's own environment; a file named by FUIGO_CONFIG_PATH is judged
+    // like any other file (an allowlisted user-level file, or untrusted), and an untrusted one may not name the saved key.
+    let untrusted_file = match &source {
+        OverlaySource::Path(p) => Some(p.display().to_string()).filter(|_| !crate::key_naming::source_may_name_saved_key(p)),
+        OverlaySource::Inline => None,
+    };
+    if let Some(label) = &untrusted_file {
+        let refused = crate::key_naming::refuse_key_references_in_toml(&mut overlay, label);
+        crate::key_naming::report_refusals(&refused);
+    }
     expand_env_vars_in_toml(&mut overlay);
+    if let Some(label) = &untrusted_file {
+        let refused = crate::key_naming::refuse_key_references_in_toml(&mut overlay, label);
+        crate::key_naming::report_refusals(&refused);
+    }
     if let Err(e) = apply_version_overrides_with_registered(&mut overlay) {
         tracing::warn!(source = source_label, error = %e, "config overlay `version_overrides` failed to apply; ignoring this overlay candidate");
         return None;
+    }
+    if let Some(label) = &untrusted_file {
+        let refused = crate::key_naming::refuse_key_references_in_toml(&mut overlay, label);
+        crate::key_naming::report_refusals(&refused);
     }
     let _ = crate::campaigns::take_campaign_entries(&mut overlay, "env_overlay");
     if let Some(table) = overlay.as_table_mut() {

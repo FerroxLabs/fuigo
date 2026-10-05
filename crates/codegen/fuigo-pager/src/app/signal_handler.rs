@@ -248,7 +248,7 @@ fn flush_telemetry_and_exit(exit_code: i32) -> ! {
     // Flush the --debug firehose on TUI signal exit (this path bypasses main's flush).
     fuigo_telemetry::debug_log::flush();
     if let Some(path) = fuigo_telemetry::span_profile::finalize() {
-        eprintln!("fuigo: span profile written to {}", path.display());
+        fuigo_tty_utils::cli_eprintln!("fuigo: span profile written to {}", path.display());
     }
     std::process::exit(exit_code);
 }

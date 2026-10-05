@@ -371,6 +371,17 @@ impl WorkspaceSessionContextFactory {
         dir
     }
 }
+/// P47: `Some(refusal)` when the session token may not go to the configured proxy base `url` (it is logged here).
+fn service_bearer_refused(url: &str) -> Option<String> {
+    let refused =
+        fuigo_extra_ca::service_trust::session_may_reach_service(url, Some(url), |_| false).err()?;
+    tracing::warn!(
+        origin = %refused.origin,
+        reason = refused.reason_label(),
+        "workspace: image/video generation and web search disabled: {refused}"
+    );
+    Some(refused.to_string())
+}
 impl SessionContextFactory for WorkspaceSessionContextFactory {
     fn build_session_context(
         &self,
@@ -390,6 +401,19 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             if let (Some(auth), Some(url)) = (&self.auth, &self.api_base_url) {
                 let cred = auth.current();
                 match cred {
+                    // P47: the hub bearer is the session token; it becomes the image/video/web-search key only when
+                    // the service-endpoint trust class admits the configured proxy base (`wss`/`https`, not
+                    // loopback). Otherwise those tools stay disabled and the reason is logged with its remedy.
+                    fuigo_computer_hub_sdk::AuthCredential::Bearer { .. }
+                        if service_bearer_refused(url).is_some() =>
+                    {
+                        (
+                            ImageGenConfig::default(),
+                            VideoGenConfig::default(),
+                            WebSearchConfig::default(),
+                            AppBuilderDeployerConfig::default(),
+                        )
+                    }
                     fuigo_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
                         let headers = build_proxy_headers(url);
                         (
@@ -486,11 +510,15 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         "user-agent".to_string(),
         format!("fuigo-workspace/{version}"),
     );
-    headers.insert("x-fuigo-client-version".to_string(), version.to_string());
-    headers.insert(
-        "x-fuigo-client-identifier".to_string(),
-        std::env::var("FUIGO_CLIENT_NAME").unwrap_or_else(|_| "fuigo-shell".to_string()),
-    );
+    // P43: the client version and identifier are identity-class (P15); only a
+    // FluxRouter-operated destination gets them.
+    if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(base_url).is_permitted() {
+        headers.insert("x-fuigo-client-version".to_string(), version.to_string());
+        headers.insert(
+            "x-fuigo-client-identifier".to_string(),
+            std::env::var("FUIGO_CLIENT_NAME").unwrap_or_else(|_| "fuigo-shell".to_string()),
+        );
+    }
     if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
         headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
         headers.insert(
@@ -633,6 +661,25 @@ pub mod test_support {
 }
 #[cfg(test)]
 mod tests {
+    /// P43 hostile: the workspace tool headers (image, video, web search) carry the
+    /// identity-class client labels only to a FluxRouter-operated `api_base_url`.
+    #[test]
+    fn build_proxy_headers_withhold_identity_from_a_non_fluxrouter_destination() {
+        for url in [
+            "https://gateway.example/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://api.fluxrouter.ai/v1",
+        ] {
+            let headers = super::build_proxy_headers(url);
+            for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
+                assert!(!headers.contains_key(name), "{url} got {name}");
+            }
+            assert!(headers.contains_key("user-agent"));
+        }
+        let headers = super::build_proxy_headers("https://api.fluxrouter.ai/v1");
+        assert_eq!(headers["x-fuigo-client-version"], fuigo_version::VERSION);
+        assert!(headers.contains_key("x-fuigo-client-identifier"));
+    }
     use super::*;
     use crate::config::SessionContextFactory;
     use std::collections::HashMap;

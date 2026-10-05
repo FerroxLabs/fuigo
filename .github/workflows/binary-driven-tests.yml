@@ -1,0 +1,65 @@
+# Binary-driven tests: the test targets that spawn a real `fuigo-pager` (fuigo-shell `*_acp`
+# integration tests through fuigo-test-support's ACP client, fuigo-pager-bin's process tests, and
+# the P69 binary-freshness probe). No other workflow runs them.
+#
+# Deliberately NO `paths:` filter: a path-filtered workflow can never be a required check (it
+# never reports on a PR that misses the filter, which then blocks forever), and these tests
+# exercise the whole binary, so any change can break them.
+name: binary-driven tests
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: binary-driven-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  binary-driven:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '4'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare pinned protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: binary-driven
+          cache-on-failure: true
+      # Each test process still rebuilds fuigo-pager itself (P69: a binary already in the target
+      # dir is never trusted); building it here first makes that nested build a no-op.
+      - name: Build fuigo-pager from this checkout
+        shell: bash
+        run: cargo build --locked -p fuigo-pager-bin --bin fuigo-pager
+      - name: Run binary-driven tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p binary-driven-receipts
+          failed=0
+          cargo test --locked --no-fail-fast -p fuigo-shell --test '*_acp' 2>&1 | tee binary-driven-receipts/fuigo-shell-acp.log || failed=1
+          cargo test --locked --no-fail-fast -p fuigo-pager-bin --tests 2>&1 | tee binary-driven-receipts/fuigo-pager-bin.log || failed=1
+          cargo test --locked -p fuigo-test-support --lib env::local_binary_tests -- --include-ignored 2>&1 | tee binary-driven-receipts/binary-freshness.log || failed=1
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binary-driven-receipts
+          path: binary-driven-receipts/
+          if-no-files-found: error

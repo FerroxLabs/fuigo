@@ -73,6 +73,8 @@ pub use parent_death_windows::PARENT_DEATH_EXIT_CODE;
 pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub mod runtime;
+pub mod best_effort_stderr;
+pub mod best_effort_stdout;
 
 /// Win32 `CreateProcess` creation-flag values, spelled out so a spawn policy can
 /// be computed and pinned by tests on every host (the `windows` crate only
@@ -1124,6 +1126,24 @@ pub const GIT_AUTH_SUPPRESSION_ENVS: [(&str, &str); 4] = [
     ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
 ];
 
+/// Remove FUIGO's own secrets (its API keys, `FUIGO_AGENT_SECRET`, `FUIGO_AUTH`, the OTLP and telemetry keys:
+/// [`fuigo_secrets::child_env::is_fuigo_owned_secret`]) from the environment `cmd` will inherit. For a child that runs
+/// code the user or a repository supplies (a git hook, a `.envrc`, a configured command, `$EDITOR`) on the user's own
+/// behalf and otherwise keeps the user's whole environment. It does NOT remove a name a config registered as a
+/// credential (`GITHUB_TOKEN` as an MCP bearer variable): that is the user's own credential and git's credential
+/// helpers read it. Call it BEFORE setting any explicit variable: an `env_remove` after an `env` would drop the
+/// explicit value too (P120).
+pub fn remove_fuigo_owned_secrets(cmd: &mut std::process::Command) {
+    fuigo_secrets::child_env::remove_fuigo_owned_secrets(cmd);
+}
+
+/// [`remove_fuigo_owned_secrets`] for a [`tokio::process::Command`].
+pub fn remove_fuigo_owned_secrets_tokio(cmd: &mut tokio::process::Command) {
+    for name in fuigo_secrets::child_env::inherited_fuigo_owned_secret_names() {
+        cmd.env_remove(name);
+    }
+}
+
 /// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`.
 ///
 /// Respects `GIT_BIN_PATH` for hermetic git in Bazel test sandboxes.
@@ -1169,6 +1189,7 @@ fn git_command_base() -> std::process::Command {
         Err(_) => "git".to_string(),
     };
     let mut cmd = std::process::Command::new(&git);
+    remove_fuigo_owned_secrets(&mut cmd);
     detach_std_command(&mut cmd);
     cmd.stdin(std::process::Stdio::null());
     cmd.envs(pager_env());
@@ -2915,5 +2936,43 @@ mod tests {
             "with {PARENT_DEATH_DISABLE_ENV} set the binding still armed a \
              parent-death signal: {report:?}"
         );
+    }
+}
+
+/// P120: the git this crate spawns can run repository hooks; a hook is user code and must not inherit Fuigo's secrets.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[test]
+    fn p120_git_hooks_do_not_inherit_fuigo_secrets() {
+        const NAME: &str = "p120_tests::p120_git_hooks_do_not_inherit_fuigo_secrets";
+        // The user's own credential, registered by a config as an MCP bearer variable: git keeps it.
+        const REGISTERED: &str = "GITHUB_TOKEN";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_secrets::child_env::register_credential_env_names([REGISTERED]);
+        let dir = probe::scratch_dir("p120-tty-git");
+        let out = dir.join("hook-env.txt");
+        for (label, command) in [("locking", git_command_locking as fn() -> std::process::Command), ("readers", git_command)] {
+            let _ = std::fs::remove_file(&out);
+            let run = |args: &[&str]| {
+                let mut cmd = command();
+                cmd.current_dir(&dir).args(args);
+                let output = cmd.output().unwrap();
+                assert!(output.status.success(), "{label}: git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            };
+            if !dir.join(".git").exists() {
+                run(&["init", "-q"]);
+            }
+            probe::write_env_dump_script(&dir.join(".git/hooks/pre-commit"), &out);
+            run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"]);
+            let dump = std::fs::read_to_string(&out).expect("the pre-commit hook ran");
+            probe::assert_clean(&dump, &[]);
+            probe::assert_kept(&dump, REGISTERED);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

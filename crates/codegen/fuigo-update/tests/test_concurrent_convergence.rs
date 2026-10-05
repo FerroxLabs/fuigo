@@ -90,8 +90,13 @@ fn fake_managed_install(version: &str) {
 /// Fake `gh` that logs argv to `<dir>/gh-args.log`.
 /// It answers `release list --exclude-pre-releases` from `<dir>/gh-stable-only-stdout`.
 /// For `release download ... --output <path>` it writes an executable `exit 0` script to the output path.
+/// For `--pattern SHA256SUMS` it writes the release's checksum file, listing that script under the
+/// asset name of the requested tag (R110: the gh-release installer verifies the download against it).
 fn fake_gh_serving_releases(dir: &std::path::Path) -> String {
     let dq = format!("'{}'", dir.to_string_lossy().replace('\'', "'\\''"));
+    let platform = host_platform();
+    // sha256 of `#!/bin/sh\nexit 0\n` ([`small_good_artifact`]).
+    let sha = "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb";
     format!(
         r#"#!/bin/sh
 echo "$@" >> {dq}/gh-args.log
@@ -101,12 +106,17 @@ case "$*" in
     ;;
   *"release download"*)
     out=""
+    pat=""
     prev=""
     for a in "$@"; do
       if [ "$prev" = "--output" ]; then out="$a"; fi
+      if [ "$prev" = "--pattern" ]; then pat="$a"; fi
       prev="$a"
     done
-    if [ -n "$out" ]; then
+    if [ "$pat" = "SHA256SUMS" ]; then
+      tag="$3"
+      printf '%s  fuigo-%s-{platform}\n' {sha} "${{tag#v}}" > "$out"
+    elif [ -n "$out" ]; then
       printf '#!/bin/sh\nexit 0\n' > "$out"
       chmod +x "$out"
     fi
@@ -121,7 +131,7 @@ exit 0
 fn gh_download_count(g: &FakeBinGuard) -> usize {
     g.args_log()
         .iter()
-        .filter(|l| l.contains("release download"))
+        .filter(|l| l.contains("release download") && !l.contains("SHA256SUMS"))
         .count()
 }
 

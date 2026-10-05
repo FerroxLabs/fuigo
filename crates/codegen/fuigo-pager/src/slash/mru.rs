@@ -9,12 +9,13 @@
 //!
 //! Persistence: a `touch` only marks the store dirty (never blocks the UI on disk).
 //! When a command is recorded, the controller hands an owned [`MruSnapshot`] to [`persist_async`].
-//! That function serializes writes through one long-lived background thread (atomic temp file and rename).
+//! That function serializes writes through one long-lived background thread; each write MERGES the snapshot into the
+//! file under the shared state-file lock (later `last_used` wins), so pagers running at once keep each other's records.
 //! The `Rc<RefCell>` itself never crosses a thread boundary; only the `Send` snapshot does.
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Sender};
@@ -196,15 +197,10 @@ impl SlashMru {
         if !self.persist_enabled || !self.dirty {
             return None;
         }
-        let file = MruFile {
-            by_command: self.by_command.clone(),
-            by_prefix: HashMap::new(),
-        };
-        let bytes = serde_json::to_vec(&file).ok()?;
         self.dirty = false;
         Some(MruSnapshot {
             path: Self::store_path(),
-            bytes,
+            by_command: self.by_command.clone(),
         })
     }
 
@@ -231,29 +227,82 @@ impl SlashMru {
 #[derive(Debug)]
 pub struct MruSnapshot {
     path: PathBuf,
-    bytes: Vec<u8>,
+    by_command: HashMap<String, u64>,
+}
+
+/// `ours` merged into what is on disk: per command the later `last_used`
+/// wins, then the map is cut back to the [`MAX_ENTRIES`] most recent. A
+/// legacy per-prefix file is collapsed first (as [`SlashMru::ensure_loaded`]
+/// does); a corrupt one counts as empty.
+fn merge_into_disk(disk: &[u8], ours: &HashMap<String, u64>) -> HashMap<String, u64> {
+    let mut merged = match serde_json::from_slice::<MruFile>(disk) {
+        Ok(file) if file.by_command.is_empty() => {
+            let mut collapsed: HashMap<String, u64> = HashMap::new();
+            for bucket in file.by_prefix.values() {
+                for (cmd, ts) in bucket {
+                    let e = collapsed.entry(cmd.clone()).or_insert(0);
+                    *e = (*e).max(*ts);
+                }
+            }
+            collapsed
+        }
+        Ok(file) => file.by_command,
+        Err(_) => HashMap::new(),
+    };
+    for (cmd, ts) in ours {
+        let e = merged.entry(cmd.clone()).or_insert(0);
+        *e = (*e).max(*ts);
+    }
+    if merged.len() > MAX_ENTRIES {
+        let mut entries: Vec<(String, u64)> = merged.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.truncate(MAX_ENTRIES);
+        merged = entries.into_iter().collect();
+    }
+    merged
 }
 
 impl MruSnapshot {
-    /// Atomic write: temp file, `fsync`, then rename. Returns `true` on success.
-    /// Safe to call from a worker thread.
+    /// Merge this snapshot into the file and replace it atomically. Returns
+    /// `true` on success. Safe to call from a worker thread.
+    ///
+    /// A merge, not an overwrite (P72): each pager holds its own copy of the
+    /// map, and writing it whole dropped every command another pager had
+    /// recorded since this one loaded the file. The read-modify-write is the
+    /// shared helper's (`fuigo_config::fs_atomic::edit_state_file`), serialized
+    /// across processes; the temp name is unique (the fixed `slash-mru.json.tmp`
+    /// let two pagers rename each other's half-written temp).
     fn write(&self) -> bool {
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        let write_ok = (|| -> io::Result<()> {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&self.bytes)?;
-            f.sync_all()?;
-            fs::rename(&tmp, &self.path)?;
-            Ok(())
-        })();
-        match write_ok {
+        use fuigo_config::fs_atomic::Edit;
+        let written = fuigo_config::fs_atomic::edit_state_file(
+            &self.path,
+            |bytes| {
+                fuigo_config::write_through::stage_file_atomically_with(
+                    &self.path,
+                    bytes,
+                    fuigo_config::write_through::NewFileMode::Default,
+                )
+            },
+            |current| {
+                let disk = match current {
+                    Ok(bytes) => bytes.unwrap_or_default(),
+                    // Never replace a file that could not be read.
+                    Err(e) => return Err(io::Error::new(e.kind(), e.to_string())),
+                };
+                let file = MruFile {
+                    by_command: merge_into_disk(disk, &self.by_command),
+                    by_prefix: HashMap::new(),
+                };
+                Ok(Edit::Replace {
+                    contents: serde_json::to_vec(&file).map_err(io::Error::other)?,
+                    value: (),
+                })
+            },
+        );
+        match written {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!(error = %e, "slash MRU: persist failed");
-                let _ = fs::remove_file(&tmp);
                 false
             }
         }
@@ -365,6 +414,66 @@ mod tests {
         assert!(mru.take_persist_snapshot().is_none()); // nothing to retry yet
         mru.mark_dirty();
         assert!(mru.take_persist_snapshot().is_some()); // retried
+    }
+
+    /// P72: two pagers persisting their own MRU copies at the same time keep
+    /// each other's commands (each write merges; the later `last_used` wins),
+    /// and no temp is left.
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)] // the state lock lives under the fuigo home
+    fn two_writers_persisting_at_once_keep_each_others_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slash-mru.json");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer = |tag: &'static str| {
+            let (path, barrier) = (path.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let mut mine = HashMap::new();
+                barrier.wait();
+                for i in 0..30u64 {
+                    mine.insert(format!("{tag}{i}"), 1_000 + i);
+                    let snapshot = MruSnapshot {
+                        path: path.clone(),
+                        by_command: mine.clone(),
+                    };
+                    assert!(snapshot.write(), "{tag}{i}");
+                }
+            })
+        };
+        let a = writer("a");
+        let b = writer("b");
+        a.join().unwrap();
+        b.join().unwrap();
+        let file: MruFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for tag in ["a", "b"] {
+            for i in 0..30u64 {
+                assert_eq!(file.by_command.get(&format!("{tag}{i}")), Some(&(1_000 + i)), "{tag}{i}");
+            }
+        }
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["slash-mru.json"]);
+    }
+
+    /// The merge keeps the later timestamp per command and the cap.
+    #[test]
+    fn merge_keeps_the_later_use_and_the_cap() {
+        let disk = serde_json::to_vec(&MruFile {
+            by_command: HashMap::from([("x".to_owned(), 5), ("y".to_owned(), 9)]),
+            by_prefix: HashMap::new(),
+        })
+        .unwrap();
+        let ours = HashMap::from([("x".to_owned(), 7), ("y".to_owned(), 3), ("z".to_owned(), 1)]);
+        let merged = merge_into_disk(&disk, &ours);
+        assert_eq!(merged.get("x"), Some(&7));
+        assert_eq!(merged.get("y"), Some(&9));
+        assert_eq!(merged.get("z"), Some(&1));
+        let many: HashMap<String, u64> = (0..(MAX_ENTRIES as u64 + 10)).map(|i| (format!("c{i}"), i + 1)).collect();
+        let merged = merge_into_disk(b"not json", &many);
+        assert_eq!(merged.len(), MAX_ENTRIES);
+        assert!(!merged.contains_key("c0"), "the oldest are cut");
     }
 
     #[test]

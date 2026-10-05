@@ -218,7 +218,7 @@ fn wedged_child_handle() -> (
         ),
         client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
-        initial_client_mcp_servers: vec![],
+        initial_client_mcp_servers: Default::default(),
         display_cwd: None,
         feedback_manager: std::sync::Arc::new(
             crate::session::feedback_manager::FeedbackManager::local_only("test"),
@@ -257,7 +257,7 @@ fn wedged_child_handle() -> (
         managed_mcp_proxy_base_url: String::new(),
         session_default_agent_profile: None,
         allowed_subagent_types: None,
-        hook_registry: None,
+        hook_registry: Default::default(),
         workspace_ops: fuigo_workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
         tools_notification_handle: None,
@@ -2677,6 +2677,7 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> fuigo_chat_state::ChatState
     )
 }
 mod rest;
+mod p42_session_delivery;
 #[tokio::test]
 async fn join_worker_task_resumes_worker_panics() {
     let inner = super::worker_runtime()

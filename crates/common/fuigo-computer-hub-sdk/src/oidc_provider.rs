@@ -13,11 +13,28 @@ use crate::auth::{AuthCredential, AuthIdentity, AuthProvider};
 
 pub type OnRefreshCallback = Arc<dyn Fn(&RefreshEvent) + Send + Sync>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RefreshEvent {
     pub access_token: String,
     pub new_refresh_token: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for RefreshEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            access_token: _,
+            new_refresh_token,
+            expires_at,
+        } = self;
+        f.debug_struct("RefreshEvent")
+            .field("access_token", &"<redacted>")
+            .field("new_refresh_token", &new_refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_at", expires_at)
+            .finish()
+    }
 }
 
 struct TokenState {
@@ -45,6 +62,96 @@ pub struct OidcAuthProvider {
 }
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
+
+/// The one built-in split-host identity provider (P99). Google's issuer is
+/// `https://accounts.google.com` and its discovery document names a token endpoint on
+/// `https://oauth2.googleapis.com`. This is a single exact, directed pair of https
+/// origins on the default port, compiled in. It is not a list and it is not configurable.
+const SPLIT_HOST_ISSUER_HOST: &str = "accounts.google.com";
+const SPLIT_HOST_TOKEN_HOST: &str = "oauth2.googleapis.com";
+
+/// True only for the issuer origin `https://accounts.google.com` paired with the token
+/// endpoint origin `https://oauth2.googleapis.com`. Host comparison is exact (the URL
+/// parser has already lowercased it): no subdomain, no suffix, no trailing dot. The
+/// caller has already refused userinfo on the token endpoint.
+fn is_builtin_split_host_pair(issuer: &reqwest::Url, token_endpoint: &reqwest::Url) -> bool {
+    let https_origin = |url: &reqwest::Url, host: &str| {
+        url.scheme() == "https"
+            && url.host_str() == Some(host)
+            && url.port_or_known_default() == Some(443)
+    };
+    issuer.username().is_empty()
+        && issuer.password().is_none()
+        && https_origin(issuer, SPLIT_HOST_ISSUER_HOST)
+        && https_origin(token_endpoint, SPLIT_HOST_TOKEN_HOST)
+}
+
+/// A credential (refresh token, authorization code) may go only to an https
+/// `token_endpoint` on the issuer's own origin (scheme, host and port), with no userinfo
+/// (P87, audit CB-3). A discovery document naming any other recipient is refused before
+/// anything is sent: a hostile or compromised discovery response must not be able to
+/// collect the credential. Used by the hub refresh (this SDK, `fuigo-workspace`) and by
+/// the shell's own OIDC login and refresh (P99).
+///
+/// One exception, built in: the exact pair in [`is_builtin_split_host_pair`]. Every other
+/// issuer whose token endpoint lives on another host is refused: the request is not sent
+/// and the stored token is kept.
+///
+/// `allow_loopback_http` admits a plain-http endpoint on a loopback host, still on
+/// the issuer's origin. It exists for in-process mock issuers: the hub callers pass
+/// `cfg!(test)`, which is never true in a shipped build. The shell passes `true` in a
+/// shipped build in one case only, its developer-only local accounts app
+/// (`FUIGO_LOCAL_AUTH`, issuer `http://localhost:22255`).
+///
+/// This binds the first hop only; the client that sends the credential must also refuse
+/// cross-origin redirects.
+pub fn check_token_endpoint(
+    issuer: &str,
+    token_endpoint: &reqwest::Url,
+    allow_loopback_http: bool,
+) -> Result<(), String> {
+    let issuer = reqwest::Url::parse(issuer.trim_end_matches('/'))
+        .map_err(|_| "OIDC issuer is not a valid URL; nothing was sent".to_string())?;
+    if !token_endpoint.username().is_empty() || token_endpoint.password().is_some() {
+        return Err("OIDC token_endpoint carries userinfo; nothing was sent".into());
+    }
+    let loopback = token_endpoint.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    let scheme_ok = token_endpoint.scheme() == "https"
+        || (allow_loopback_http && loopback && token_endpoint.scheme() == "http");
+    if !scheme_ok {
+        return Err("OIDC token_endpoint is not https; nothing was sent".into());
+    }
+    if token_endpoint.origin() != issuer.origin()
+        && !is_builtin_split_host_pair(&issuer, token_endpoint)
+    {
+        return Err("OIDC token_endpoint is not on the issuer's origin; nothing was sent".into());
+    }
+    Ok(())
+}
+
+/// Redirects for the SDK's default client: at most 10, each to the origin of the
+/// request that was redirected. An injected client (`http_transport`) brings its own
+/// policy and must be at least this strict; Fuigo injects its same-origin policy.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .last()
+            .is_some_and(|previous| previous.origin() == attempt.url().origin());
+        if attempt.previous().len() >= 10 || !same_origin {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
 
 impl std::fmt::Debug for OidcAuthProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -231,7 +338,11 @@ impl OidcAuthProvider {
         // common-layer crate; the fuigo TLS policy helper is out of reach
         let client = match &self.http_transport {
             Some(transport) => transport.client.clone(),
-            None => reqwest::Client::builder().build()?,
+            // CB-3: the token-endpoint check binds the FIRST hop only, so the default client must
+            // not follow a redirect off that origin (a 307/308 replays the refresh-token form).
+            None => reqwest::Client::builder()
+                .redirect(same_origin_redirects())
+                .build()?,
         };
 
         #[derive(serde::Deserialize)]
@@ -280,6 +391,7 @@ impl OidcAuthProvider {
         }
 
         let token_url = reqwest::Url::parse(&disc.token_endpoint)?;
+        check_token_endpoint(&self.issuer, &token_url, cfg!(test))?;
         if let Some(transport) = &self.http_transport {
             (transport.check_url)(&token_url)?;
         }
@@ -321,6 +433,349 @@ impl OidcAuthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CB-3: https on the issuer's exact origin, or nothing.
+    #[test]
+    fn token_endpoint_must_be_https_on_the_issuer_origin() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        let issuer = "https://auth.example.com/";
+        for ok in [
+            "https://auth.example.com/oauth2/token",
+            "https://auth.example.com:443/token",
+            "https://AUTH.example.com/token",
+        ] {
+            assert_eq!(
+                check_token_endpoint(issuer, &url(ok), false),
+                Ok(()),
+                "{ok}"
+            );
+        }
+        for (bad, why) in [
+            ("http://auth.example.com/token", "not https"),
+            ("https://evil.example/token", "issuer's origin"),
+            (
+                "https://auth.example.com.evil.example/token",
+                "issuer's origin",
+            ),
+            ("https://token.example.com/token", "issuer's origin"),
+            ("https://auth.example.com:8443/token", "issuer's origin"),
+            ("https://user:pw@auth.example.com/token", "userinfo"),
+        ] {
+            let error = check_token_endpoint(issuer, &url(bad), true).unwrap_err();
+            assert!(error.contains(why), "{bad}: {error}");
+            assert!(
+                !error.contains("example"),
+                "the error must not echo the URL: {error}"
+            );
+        }
+        // Loopback http only when the caller allows it (test builds), still same-origin.
+        let local = "http://127.0.0.1:8080";
+        assert!(check_token_endpoint(local, &url("http://127.0.0.1:8080/token"), true).is_ok());
+        assert!(check_token_endpoint(local, &url("http://127.0.0.1:8080/token"), false).is_err());
+        assert!(check_token_endpoint(local, &url("http://127.0.0.1:9090/token"), true).is_err());
+        assert!(
+            check_token_endpoint("http://idp.example", &url("http://idp.example/token"), true)
+                .is_err()
+        );
+        assert!(check_token_endpoint("not a url", &url("https://a.example/token"), false).is_err());
+    }
+
+    /// P99: the one built-in split-host pair. Google's issuer is `https://accounts.google.com`
+    /// and its discovery document names `https://oauth2.googleapis.com/token`.
+    #[test]
+    fn the_builtin_split_host_pair_is_admitted() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        for issuer in [
+            "https://accounts.google.com",
+            "https://accounts.google.com/",
+            "https://ACCOUNTS.google.com:443",
+        ] {
+            for endpoint in [
+                "https://oauth2.googleapis.com/token",
+                "https://oauth2.googleapis.com:443/token",
+                "https://OAUTH2.googleapis.com/token",
+            ] {
+                for allow_loopback_http in [false, true] {
+                    assert_eq!(
+                        check_token_endpoint(issuer, &url(endpoint), allow_loopback_http),
+                        Ok(()),
+                        "{issuer} -> {endpoint}"
+                    );
+                }
+            }
+        }
+        // The issuer's own origin stays admitted next to the exception.
+        assert_eq!(
+            check_token_endpoint(
+                "https://accounts.google.com",
+                &url("https://accounts.google.com/o/oauth2/token"),
+                false
+            ),
+            Ok(())
+        );
+    }
+
+    /// P99: the exception is one exact, directed pair. Every look-alike is refused.
+    #[test]
+    fn look_alikes_of_the_builtin_split_host_pair_are_refused() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        let google_issuer = "https://accounts.google.com";
+        let google_token = "https://oauth2.googleapis.com/token";
+        for (issuer, endpoint, why) in [
+            // Another issuer naming the Google token host.
+            ("https://auth.example.com", google_token, "issuer's origin"),
+            (
+                "https://oauth2.googleapis.com.evil.example",
+                google_token,
+                "issuer's origin",
+            ),
+            // The pair reversed.
+            (
+                "https://oauth2.googleapis.com",
+                "https://accounts.google.com/token",
+                "issuer's origin",
+            ),
+            // The Google issuer naming another host.
+            (
+                google_issuer,
+                "https://evil.example/token",
+                "issuer's origin",
+            ),
+            (
+                google_issuer,
+                "https://www.googleapis.com/oauth2/v4/token",
+                "issuer's origin",
+            ),
+            (
+                google_issuer,
+                "https://googleapis.com/token",
+                "issuer's origin",
+            ),
+            // Subdomain and suffix tricks, on either side.
+            (
+                google_issuer,
+                "https://evil.oauth2.googleapis.com/token",
+                "issuer's origin",
+            ),
+            (
+                google_issuer,
+                "https://oauth2.googleapis.com.evil.example/token",
+                "issuer's origin",
+            ),
+            (
+                google_issuer,
+                "https://oauth2.googleapis.com./token",
+                "issuer's origin",
+            ),
+            (
+                google_issuer,
+                "https://xoauth2.googleapis.com/token",
+                "issuer's origin",
+            ),
+            (
+                "https://evil.accounts.google.com",
+                google_token,
+                "issuer's origin",
+            ),
+            (
+                "https://accounts.google.com.evil.example",
+                google_token,
+                "issuer's origin",
+            ),
+            (
+                "https://accounts.google.com.",
+                google_token,
+                "issuer's origin",
+            ),
+            (
+                "https://xaccounts.google.com",
+                google_token,
+                "issuer's origin",
+            ),
+            // Plain http, on either side, including http on the https port.
+            (
+                google_issuer,
+                "http://oauth2.googleapis.com/token",
+                "not https",
+            ),
+            (
+                google_issuer,
+                "http://oauth2.googleapis.com:443/token",
+                "not https",
+            ),
+            (
+                "http://accounts.google.com",
+                google_token,
+                "issuer's origin",
+            ),
+            (
+                "http://accounts.google.com:443",
+                google_token,
+                "issuer's origin",
+            ),
+            // Another port, on either side.
+            (
+                google_issuer,
+                "https://oauth2.googleapis.com:8443/token",
+                "issuer's origin",
+            ),
+            (
+                "https://accounts.google.com:8443",
+                google_token,
+                "issuer's origin",
+            ),
+            // Userinfo, on either side.
+            (
+                google_issuer,
+                "https://user:pw@oauth2.googleapis.com/token",
+                "userinfo",
+            ),
+            (
+                google_issuer,
+                "https://accounts.google.com@oauth2.googleapis.com/token",
+                "userinfo",
+            ),
+            (
+                "https://user@accounts.google.com",
+                google_token,
+                "issuer's origin",
+            ),
+            (
+                "https://oauth2.googleapis.com@accounts.google.com",
+                google_token,
+                "issuer's origin",
+            ),
+        ] {
+            for allow_loopback_http in [false, true] {
+                let error = check_token_endpoint(issuer, &url(endpoint), allow_loopback_http)
+                    .expect_err(&format!("{issuer} -> {endpoint} must be refused"));
+                assert!(error.contains(why), "{issuer} -> {endpoint}: {error}");
+                assert!(
+                    !error.contains("google"),
+                    "the error must not echo the URL: {error}"
+                );
+            }
+        }
+    }
+
+    /// CB-3, behavioural: a discovery document naming a token endpoint on another
+    /// origin gets no refresh token. The other origin is never contacted, no callback
+    /// fires and the stored tokens are untouched.
+    #[allow(clippy::disallowed_methods)] // injected client only targets local test observers
+    #[tokio::test]
+    async fn discovered_token_endpoint_on_another_origin_never_receives_the_refresh_token() {
+        use axum::{Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        collector.set_nonblocking(true).unwrap();
+        let foreign = format!("http://{}/token", collector.local_addr().unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                let foreign = foreign.clone();
+                async move { axum::Json(serde_json::json!({"token_endpoint": foreign})) }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let seen = callbacks.clone();
+        for injected in [false, true] {
+            let mut builder =
+                OidcAuthProviderBuilder::new("old-access", "old-refresh", base.clone(), "client")
+                    .on_refresh(Arc::new({
+                        let seen = seen.clone();
+                        move |_| {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }));
+            if injected {
+                let client = reqwest::Client::builder().no_proxy().build().unwrap();
+                builder = builder.http_transport(client, |_| Ok(()));
+            }
+            let provider = builder.build();
+            let error = provider.do_refresh().await.unwrap_err().to_string();
+            assert!(error.contains("issuer's origin"), "{error}");
+            assert_eq!(provider.state.lock().access_token, "old-access");
+            assert_eq!(provider.state.lock().refresh_token, "old-refresh");
+        }
+        task.abort();
+        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            collector.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the foreign token endpoint was contacted"
+        );
+    }
+
+    /// CB-3 (Astra r1): an allowed token endpoint that answers 307/308 to another origin
+    /// must not get the refresh-token form replayed there by the SDK's default client.
+    #[tokio::test]
+    async fn default_client_never_follows_the_token_endpoint_off_its_origin() {
+        use axum::{
+            Router,
+            routing::{get, post},
+        };
+        for status in [
+            axum::http::StatusCode::TEMPORARY_REDIRECT,
+            axum::http::StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            collector.set_nonblocking(true).unwrap();
+            let foreign = format!("http://{}/collect", collector.local_addr().unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let token_url = format!("{base}/token");
+            // Proves the token endpoint WAS reached with the token, so a refresh that failed
+            // earlier (discovery, an environment proxy) cannot pass for a refused redirect.
+            let posted = Arc::new(Mutex::new(Vec::<String>::new()));
+            let app = Router::new()
+                .route(
+                    "/.well-known/openid-configuration",
+                    get(move || {
+                        let token_url = token_url.clone();
+                        async move { axum::Json(serde_json::json!({"token_endpoint": token_url})) }
+                    }),
+                )
+                .route(
+                    "/token",
+                    post({
+                        let posted = posted.clone();
+                        move |body: String| {
+                            let foreign = foreign.clone();
+                            posted.lock().push(body);
+                            async move { (status, [(axum::http::header::LOCATION, foreign)]) }
+                        }
+                    }),
+                );
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let provider =
+                OidcAuthProviderBuilder::new("old-access", "old-refresh", base, "client").build();
+            let result = provider.do_refresh().await;
+            task.abort();
+            assert!(
+                result.is_err(),
+                "{status}: a redirect is not a token response"
+            );
+            let posted = posted.lock().clone();
+            assert_eq!(posted.len(), 1, "{status}: {posted:?}");
+            assert!(
+                posted[0].contains("refresh_token=old-refresh"),
+                "{status}: {posted:?}"
+            );
+            assert_eq!(
+                collector.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{status}: the refresh token was replayed to another origin"
+            );
+            assert_eq!(provider.state.lock().refresh_token, "old-refresh");
+        }
+    }
 
     #[allow(clippy::disallowed_methods)] // injected client only targets local test observers
     #[tokio::test]
@@ -670,5 +1125,34 @@ mod tests {
         let debug = format!("{provider:?}");
         assert!(!debug.contains("secret-access-token"));
         assert!(!debug.contains("secret-refresh-token"));
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_event_debug_redacts_tokens() {
+        let event = RefreshEvent {
+            access_token: "p70ac-FAKE-0d1e2f3a".into(),
+            new_refresh_token: Some("p70nr-FAKE-4b5c6d7e".into()),
+            expires_at: None,
+        };
+        assert_redacted(&event, &["p70ac-FAKE-0d1e2f3a", "p70nr-FAKE-4b5c6d7e"]);
     }
 }

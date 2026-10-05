@@ -3355,6 +3355,7 @@ async fn promoter_arms_rewind_window_and_first_update_disarms_it() {
                 FuigoSessionUpdate::HookExecution {
                     event_name: "user_prompt_submit".into(),
                     tool_name: None,
+                    tool_call_id: None,
                     prompt_id: Some("m1".into()),
                     runs: vec![],
                 },
@@ -3363,6 +3364,9 @@ async fn promoter_arms_rewind_window_and_first_update_disarms_it() {
                     message: "resized".into(),
                 },
                 FuigoSessionUpdate::ImageDropped { notes: vec![] },
+                FuigoSessionUpdate::HistoryRepaired {
+                    message: "Session history repaired: test".into(),
+                },
             ] {
                 actor.send_fuigo_notification(update).await;
                 assert!(
@@ -4294,6 +4298,81 @@ async fn parent_agent_non_builtin_slash_is_still_promoted() {
                 .map(|i| i.prompt_id.as_str())
                 .collect();
             assert_eq!(order, vec!["running"]);
+        })
+        .await;
+}
+
+/// F4: a zero-turn harness rebuild swaps the agent definition, so the agent's own inline hooks swap with it.
+/// The old agent's hooks leave the registry and the new agent's arrive, in the actor and in the handle-visible copy.
+#[tokio::test]
+async fn agent_rebuild_swaps_the_agent_inline_hooks() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut rx) = build_actor().await;
+            let hooks_changed_sent =
+                |rx: &mut tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>| {
+                    let mut seen = false;
+                    while let Ok(msg) = rx.try_recv() {
+                        seen |= format!("{msg:?}").contains("hooks_changed");
+                    }
+                    seen
+                };
+            let agent_hook_names = |actor: &SessionActor| -> Vec<String> {
+                actor
+                    .hook_registry
+                    .borrow()
+                    .as_ref()
+                    .map(|r| {
+                        r.all_hooks()
+                            .iter()
+                            .filter(|s| s.name.starts_with(fuigo_hooks::config::AGENT_HOOK_PREFIX))
+                            .map(|s| s.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let live_agent_hooks = |actor: &SessionActor| -> usize {
+                actor.hook_registry_live.get().map_or(0, |r| {
+                    r.all_hooks()
+                        .iter()
+                        .filter(|s| s.name.starts_with(fuigo_hooks::config::AGENT_HOOK_PREFIX))
+                        .count()
+                })
+            };
+            let mut hooked = fuigo_agent::AgentDefinition::default_fuigo_build();
+            hooked.name = "hooked-agent".to_string();
+            let serde_json::Value::Object(map) = serde_json::json!({
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "true"}]}]
+            }) else {
+                unreachable!()
+            };
+            hooked.hooks = Some(fuigo_agent::config::HooksConfig(map));
+            actor
+                .handle_rebuild_agent_for_definition(hooked)
+                .await
+                .expect("zero-turn rebuild should succeed");
+            let names = agent_hook_names(&actor);
+            assert_eq!(
+                names.len(),
+                1,
+                "the new agent's hook is installed: {names:?}"
+            );
+            assert!(names[0].contains("hooked-agent"), "{names:?}");
+            assert_eq!(live_agent_hooks(&actor), 1, "and published for subagents");
+            assert!(hooks_changed_sent(&mut rx), "an open hooks view is told");
+
+            actor
+                .handle_rebuild_agent_for_definition(
+                    fuigo_agent::AgentDefinition::default_fuigo_build(),
+                )
+                .await
+                .expect("second rebuild should succeed");
+            assert!(
+                agent_hook_names(&actor).is_empty(),
+                "the previous agent's hook must not outlive its definition"
+            );
+            assert_eq!(live_agent_hooks(&actor), 0);
         })
         .await;
 }

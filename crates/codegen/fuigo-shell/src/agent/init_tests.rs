@@ -3,6 +3,15 @@ use super::{AgentConfig, PREFETCH_RUNS, StartupPrefetch, apply_post_gate_setting
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn post_gate_pass_spends_at_most_one_settings_budget() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = crate::agent::models::startup_prefetch::own_registry_for_test();
+    // Same reason as `startup_prefetch_tests`: this consumes the process-wide
+    // fetch, whose origin is re-resolved from the config under `$FUIGO_HOME`.
+    let _home = fuigo_test_support::FuigoHome::new();
     let runs_before = PREFETCH_RUNS.with(std::cell::Cell::get);
 
     let mut cfg = AgentConfig::default();
@@ -29,6 +38,15 @@ fn post_gate_pass_spends_at_most_one_settings_budget() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn supplied_settings_consume_the_pending_fetch() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Own the process-wide fetch registry for this test; an unrelated
+    // agent-construction test would otherwise consume and blank the cell.
+    let _registry = crate::agent::models::startup_prefetch::own_registry_for_test();
+    // Same reason as `startup_prefetch_tests`: this consumes the process-wide
+    // fetch, whose origin is re-resolved from the config under `$FUIGO_HOME`.
+    let _home = fuigo_test_support::FuigoHome::new();
     crate::agent::models::startup_prefetch::inject_for_tests(None);
     let mut cfg = AgentConfig {
         remote_settings: Some(Default::default()),

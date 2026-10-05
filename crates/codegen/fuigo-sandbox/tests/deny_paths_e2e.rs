@@ -1,5 +1,8 @@
 //! E2E path-deny and Fuigo hook write-deny (subprocess; arm64-tagged).
 //! Soft-skips when enforcement is unavailable; only `SANDBOX_E2E_REQUIRE_ENFORCEMENT` hard-requires a usable backend.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg(all(unix, feature = "enforce"))]
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -605,6 +608,27 @@ fn subprocess_devbox_marker_spoof(workspace: &Path) {
 /// Genuine devbox re-exec: with the marker fast path removed, Landlock must now also apply inside the real bwrap without breaking startup.
 fn subprocess_devbox_genuine(workspace: &Path) {
     let profile = fuigo_sandbox::ProfileName::Devbox;
+    // Devbox re-execs under bwrap only to bind an existing `/data` read-only.
+    // On a host without `/data` there is nothing for bwrap to do, and the
+    // product must NOT re-exec: assert that, then still require Landlock.
+    #[cfg(target_os = "linux")]
+    if !Path::new("/data").exists() {
+        if fuigo_sandbox::bwrap_reexec_for_profile(&profile, workspace).is_some() {
+            eprintln!("FAIL: devbox without /data must not re-exec under bwrap");
+            std::process::exit(6);
+        }
+        let mut sandbox = fuigo_sandbox::SandboxManager::new(profile, workspace);
+        if let Err(e) = sandbox.apply(workspace) {
+            eprintln!("sandbox apply failed: {e}");
+            std::process::exit(3);
+        }
+        if !sandbox.is_applied() {
+            eprintln!("FAIL: devbox must apply Landlock without /data");
+            std::process::exit(4);
+        }
+        eprintln!("OK: devbox enforcement applied without a re-exec (no /data to bind)");
+        std::process::exit(0);
+    }
     subprocess_profile_and_bwrap_reexec(&profile, workspace);
     let mut sandbox = fuigo_sandbox::SandboxManager::new(profile, workspace);
     if let Err(e) = sandbox.apply(workspace) {
@@ -1154,10 +1178,16 @@ fn devbox_genuine_reexec_applies_enforcement() {
         .output()
         .expect("failed to spawn subprocess");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The re-exec exists only to bind `/data`; which arm runs is a property of
+    // the host, and each arm has its own exact success line.
+    let expected = if Path::new("/data").exists() {
+        "OK: devbox enforcement applied inside genuine bwrap"
+    } else {
+        "OK: devbox enforcement applied without a re-exec (no /data to bind)"
+    };
     assert!(
-        output.status.success()
-            && stderr.contains("OK: devbox enforcement applied inside genuine bwrap"),
-        "genuine devbox re-exec must keep applying enforcement\nstderr: {stderr}"
+        output.status.success() && stderr.contains(expected),
+        "genuine devbox startup must keep applying enforcement (expected {expected:?})\nstderr: {stderr}"
     );
 }
 /// Hard-linked registry file must refuse sandbox startup (writable alias).

@@ -361,6 +361,7 @@ mod tests {
 
     #[test]
     fn buttons_drop_whole_when_the_row_is_too_narrow() {
+        let _theme = crate::theme::cache::pin_theme();
         let width = PRIVACY_BANNER_TITLE.len() as u16 + button_block_width(); // one short
         let h = height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, h));
@@ -382,6 +383,7 @@ mod tests {
 
     #[test]
     fn slot_below_min_height_arms_no_hit_rects() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, MIN_HEIGHT));
         let rects = render(
             Rect::new(0, 0, 100, MIN_HEIGHT - 1),

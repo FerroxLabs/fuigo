@@ -115,7 +115,8 @@ async fn permission_prompt_hook_chimes_only_on_real_wait() {
         harness.update(Duration::from_millis(100));
     }
 
-    harness.inject_keys(b"1").expect("allow once");
+    // Enter takes the preselected allow-once row (P152: a digit no longer picks the always-approve row 1).
+    harness.inject_keys(b"\r").expect("allow once");
     harness
         .wait_for_text(EDIT_DONE, Duration::from_secs(90))
         .expect("turn settles after allow");

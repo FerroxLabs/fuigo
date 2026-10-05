@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -81,7 +82,7 @@ fn is_loopback_base(base: &str) -> bool {
 ///
 /// Constructed once from `FuigoBuildEnvironment` at startup and threaded through the update call chain.
 /// `auto_update` and `version` never need to know about the `FuigoBuildEnvironment` enum directly.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UpdateConfig {
     /// Chat API proxy base URL (versioned `https://cli-chat-proxy.grok.com/v1` endpoint).
     pub proxy_base_url: String,
@@ -95,6 +96,29 @@ pub struct UpdateConfig {
     pub channel: String,
     /// Custom npm registry URL. When set, passed as `--registry=` to npm CLI.
     pub npm_registry: Option<String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for UpdateConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            proxy_base_url,
+            auth_scope,
+            deployment_key,
+            alpha_test_key,
+            channel,
+            npm_registry,
+        } = self;
+        f.debug_struct("UpdateConfig")
+            .field("proxy_base_url", &fuigo_auth::redact_url(proxy_base_url))
+            .field("auth_scope", auth_scope)
+            .field("deployment_key", &deployment_key.as_ref().map(|_| "<redacted>"))
+            .field("alpha_test_key", &alpha_test_key.as_ref().map(|_| "<redacted>"))
+            .field("channel", channel)
+            .field("npm_registry", &npm_registry.as_deref().map(fuigo_auth::redact_url))
+            .finish()
+    }
 }
 
 impl UpdateConfig {
@@ -187,24 +211,130 @@ async fn fetch_npm_tag(tag: &str, npm_registry: Option<&str>) -> Result<String> 
     } else {
         format!("{}@{}", NPM_PACKAGE, tag)
     };
-    let mut args = vec!["view", &pkg_spec, "version", "--json"];
-    let registry_flag;
+    npm_view_version(&pkg_spec, npm_registry, None, NPM_VIEW_TIMEOUT)
+        .await
+        .map_err(|e| anyhow::anyhow!("npm view @{tag} failed: {e:#}"))
+}
+
+/// Wall-clock bound on one `npm view` (P145). With the registry unreachable npm retried for about 70 s and then
+/// answered from its cache, so `fuigo update --check` reported a stale "latest" as success; with a blackholed host it
+/// could wait far longer. The flags in [`npm_view_args`] make npm give up after about 30 s at most; this bound is the
+/// backstop when npm itself hangs.
+pub(crate) const NPM_VIEW_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Network flags for an `npm view` that must reflect the registry now (P145):
+/// - `--cache=<empty private dir>`: npm answers a failed registry request from its cache (a stale packument), which
+///   made a down registry look like "already up to date". An empty cache has nothing to fall back to.
+/// - one retry with short back-off and a 15 s per-request timeout instead of npm's 2 retries of up to 60 s.
+pub(crate) fn npm_view_args(
+    spec: &str,
+    npm_registry: Option<&str>,
+    userconfig: Option<&Path>,
+    cache_dir: &Path,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["view", spec, "version", "--json"]
+        .iter()
+        .map(Into::into)
+        .collect();
     if let Some(registry) = npm_registry {
-        registry_flag = format!("--registry={}", registry);
-        args.push(&registry_flag);
+        args.push(format!("--registry={registry}").into());
     }
-    let mut cmd = Command::new("npm");
-    cmd.args(&args).stdin(std::process::Stdio::null());
+    for flag in [
+        // The same configuration context as `npm i -g` (Astra P145 r1 #3, r2 #4): in global mode npm reads no project
+        // .npmrc (from the cwd or any ancestor), while path-valued settings still resolve against the caller's cwd.
+        "--global",
+        "--prefer-online",
+        "--fetch-retries=1",
+        "--fetch-retry-mintimeout=1000",
+        "--fetch-retry-maxtimeout=5000",
+        "--fetch-timeout=15000",
+    ] {
+        args.push(flag.into());
+    }
+    let mut cache = std::ffi::OsString::from("--cache=");
+    cache.push(cache_dir.as_os_str());
+    args.push(cache);
+    if let Some(userconfig) = userconfig {
+        let mut flag = std::ffi::OsString::from("--userconfig=");
+        flag.push(userconfig.as_os_str());
+        args.push(flag);
+    }
+    args
+}
+
+/// A fresh private directory for one `npm view` cache, removed on drop. Created with `create_dir` (fails if the name
+/// exists, so a planted directory or symlink is never used) and 0700 on Unix.
+struct PrivateNpmCache(std::path::PathBuf);
+
+impl PrivateNpmCache {
+    fn create() -> Result<Self> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = std::env::temp_dir();
+        let mut last_err = None;
+        for _ in 0..8 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = base.join(format!("fuigo-npm-view-{}-{nanos:x}-{seq}", std::process::id()));
+            // Owner-only from the moment it exists (Unix 0700; Windows a protected, inheritable owner-only DACL given
+            // to CreateDirectoryW), and fails if the name exists (Astra P145 r1 #5, r2 #5).
+            match fuigo_secrets::owner_only::create_owner_only_dir(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "could not create a private npm cache directory under {}: {}",
+            base.display(),
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        ))
+    }
+}
+
+impl Drop for PrivateNpmCache {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `npm view <spec> version --json` against the registry as it is now, bounded by `timeout` (P145). Returns the
+/// version npm printed (the last one when it prints a list). The child is killed when the bound fires.
+pub(crate) async fn npm_view_version(
+    spec: &str,
+    npm_registry: Option<&str>,
+    userconfig: Option<&Path>,
+    timeout: Duration,
+) -> Result<String> {
+    let cache = PrivateNpmCache::create()?;
+    let mut cmd = crate::npm_command::npm_invocation()?.tokio_command();
+    cmd.args(npm_view_args(spec, npm_registry, userconfig, &cache.0))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     fuigo_tools::util::detach_command(&mut cmd);
     cmd.envs(fuigo_tools::util::pager_env());
-    let output = cmd.output().await?;
+    let output = match crate::npm_command::run_tree_bounded(&mut cmd, timeout).await? {
+        crate::npm_command::Bounded::Done(output) => output,
+        crate::npm_command::Bounded::TimedOut => anyhow::bail!(
+            "no answer from the npm registry{} within {} s",
+            npm_registry
+                .map(|r| format!(" ({})", fuigo_auth::redact_url(r)))
+                .unwrap_or_default(),
+            timeout.as_secs()
+        ),
+    };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("npm view @{} failed: {}", tag, stderr.trim());
+        anyhow::bail!("{}", npm_error_summary(&String::from_utf8_lossy(&output.stderr)));
     }
 
     let stdout = String::from_utf8(output.stdout)?;
+    if stdout.trim().is_empty() {
+        // npm prints nothing (exit 0) for a version the registry does not have.
+        anyhow::bail!("the registry has no {spec}");
+    }
     let value: Value = serde_json::from_str(stdout.trim())?;
     match value {
         Value::String(version) => Ok(version),
@@ -212,14 +342,73 @@ async fn fetch_npm_tag(tag: &str, npm_registry: Option<&str>) -> Result<String> 
             .iter()
             .rev()
             .find_map(|entry| entry.as_str().map(|item| item.to_string()))
-            .ok_or_else(|| anyhow::anyhow!("npm view @{} returned empty version list", tag)),
-        _ => anyhow::bail!("npm view @{} returned unexpected JSON", tag),
+            .ok_or_else(|| anyhow::anyhow!("returned empty version list")),
+        _ => anyhow::bail!("returned unexpected JSON"),
     }
+}
+
+/// One line from npm's multi-line error output (P145): `<code>: <first message line>`, e.g.
+/// `ECONNREFUSED: request to http://127.0.0.1:4873/fuigo failed, reason: connect ECONNREFUSED 127.0.0.1:4873`.
+/// `fuigo update --check` used to print npm's whole dump (code, syscall, errno, log-file lines). Handles npm 7-10
+/// (`npm error ...`) and older (`npm ERR! ...`); falls back to the last non-empty line; capped at 300 characters.
+pub(crate) fn npm_error_summary(stderr: &str) -> String {
+    const NOISE: &[&str] = &["syscall ", "errno ", "A complete log", "Log files were not written", "code "];
+    let mut code: Option<&str> = None;
+    let mut message: Option<&str> = None;
+    let mut last: Option<&str> = None;
+    for raw in stderr.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        last = Some(line);
+        let Some(body) = line
+            .strip_prefix("npm error ")
+            .or_else(|| line.strip_prefix("npm ERR! "))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if let Some(c) = body.strip_prefix("code ") {
+            code.get_or_insert(c.trim());
+            continue;
+        }
+        if body.is_empty() || NOISE.iter().any(|n| body.starts_with(n)) {
+            continue;
+        }
+        // `npm error 403 403 Forbidden - GET ...`: drop a leading repeat of the code.
+        let body = code
+            .and_then(|c| body.strip_prefix(c.trim_start_matches('E')))
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .unwrap_or(body);
+        message.get_or_insert(body);
+    }
+    let line = match (code, message) {
+        (Some(c), Some(m)) => format!("{c}: {m}"),
+        (Some(c), None) => c.to_string(),
+        (None, Some(m)) => m.to_string(),
+        (None, None) => last.unwrap_or("npm failed without a message").to_string(),
+    };
+    let mut out: String = line.chars().take(300).collect();
+    if out.len() < line.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// Test-only entry point: [`npm_view_version`] with an explicit bound.
+#[doc(hidden)]
+pub async fn npm_view_version_for_test(
+    spec: &str,
+    npm_registry: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
+    npm_view_version(spec, npm_registry, None, timeout).await
 }
 
 /// Fetch the latest version from GitHub Releases using `gh release list`.
 /// For alpha channel, fetches both pre-release and stable-only, returns the semver-greater.
-/// `gh release list --limit 1` orders by publication date, not semver, so we need both.
 #[doc(hidden)]
 pub async fn fetch_gh_release_version(channel: &str) -> Result<String> {
     if channel == "alpha" {
@@ -232,19 +421,33 @@ pub async fn fetch_gh_release_version(channel: &str) -> Result<String> {
     fetch_gh_release_latest(true).await
 }
 
+/// How many releases `gh release list` returns (newest created first) to pick the highest from. Large enough that
+/// a newer line is not pushed out of the window by later releases of older lines (Astra P110 r1 #5); `gh` pages
+/// the query, so a repository with few releases costs one request.
+const GH_RELEASE_LIST_LIMIT: &str = "1000";
+
+/// The highest version among the releases `gh release list` returned, not the newest created one
+/// (R110 U2): an older-line release created later (a hotfix, a backfill) must never become "latest".
+/// Drafts are excluded by the query; prereleases by the query and, when `exclude_pre`, by their
+/// semver suffix too. Tags that are not `v<semver>` are ignored.
 async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
+    let jq = if exclude_pre {
+        ".[] | select((.isDraft or .isPrerelease) | not) | .tagName"
+    } else {
+        ".[] | select(.isDraft | not) | .tagName"
+    };
     let mut args = vec![
         "release",
         "list",
         "--repo",
         GH_RELEASE_REPO,
         "--limit",
-        "1",
+        GH_RELEASE_LIST_LIMIT,
         "--exclude-drafts",
         "--json",
-        "tagName",
+        "tagName,isDraft,isPrerelease",
         "--jq",
-        ".[0].tagName",
+        jq,
     ];
     if exclude_pre {
         args.push("--exclude-pre-releases");
@@ -260,13 +463,20 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
         anyhow::bail!("gh release list failed: {}", stderr.trim());
     }
 
-    let tag = String::from_utf8(output.stdout)?.trim().to_string();
-    // Tags are formatted as "v0.1.141", strip the leading "v"
-    let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-    if version.is_empty() {
-        anyhow::bail!("No releases found in {}", GH_RELEASE_REPO);
-    }
-    Ok(version)
+    highest_release_version(&String::from_utf8(output.stdout)?, exclude_pre)
+        .ok_or_else(|| anyhow::anyhow!("No releases found in {}", GH_RELEASE_REPO))
+}
+
+/// The highest `v<semver>` tag in `tags` (one per line), without the `v`.
+pub(crate) fn highest_release_version(tags: &str, exclude_pre: bool) -> Option<String> {
+    tags.lines()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+        })
+        .filter(|version| !exclude_pre || version.pre.is_empty())
+        .max()
+        .map(|version| version.to_string())
 }
 
 /// Fetch the latest version from a public CLI channel pointer.
@@ -490,16 +700,7 @@ pub fn installed_on_disk_version() -> Option<String> {
 ///
 /// Shared by the disk-version probe above and `cleanup_old_downloads` in `auto_update`; keep it the single place that understands this naming.
 pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -> Option<String> {
-    const PLATFORM_OS: &[&str] = &["macos", "linux", "darwin", "windows"];
-    let suffix = name.strip_prefix(bin_prefix)?.strip_prefix('-')?;
-    let parts: Vec<&str> = suffix.split('-').collect();
-    let platform_start = parts
-        .iter()
-        .position(|p| PLATFORM_OS.contains(p))
-        .unwrap_or(parts.len());
-    let ver_str = parts[..platform_start].join("-");
-    semver::Version::parse(&ver_str).ok()?;
-    Some(ver_str)
+    fuigo_shell::leader::version_from_versioned_binary_name(name, bin_prefix)
 }
 
 /// Fetch the stable channel pointer for caching alongside the version.
@@ -586,6 +787,26 @@ pub fn channel_label() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// P145: npm's multi-line failure becomes one line with the code and the first real message.
+    #[test]
+    fn p145_npm_error_summary_is_one_line() {
+        let refused = "npm error code ECONNREFUSED\nnpm error syscall connect\nnpm error errno ECONNREFUSED\n\
+npm error FetchError: request to http://127.0.0.1:4873/fuigo failed, reason: connect ECONNREFUSED 127.0.0.1:4873\n\
+npm error A complete log of this run can be found in: C:\\Users\\a\\npm-cache\\_logs\\x.log\n";
+        assert_eq!(
+            npm_error_summary(refused),
+            "ECONNREFUSED: FetchError: request to http://127.0.0.1:4873/fuigo failed, reason: connect ECONNREFUSED 127.0.0.1:4873"
+        );
+        let forbidden = "npm error code E403\nnpm error 403 403 Forbidden - GET https://m.example/fuigo\nnpm error 403 In most cases";
+        assert_eq!(npm_error_summary(forbidden), "E403: 403 Forbidden - GET https://m.example/fuigo");
+        assert_eq!(npm_error_summary("npm ERR! code E404\nnpm ERR! 404 Not Found - GET x"), "E404: Not Found - GET x");
+        assert_eq!(npm_error_summary("\n  something odd\n"), "something odd");
+        assert_eq!(npm_error_summary(""), "npm failed without a message");
+        let long = format!("npm error code X\nnpm error {}", "y".repeat(400));
+        let got = npm_error_summary(&long);
+        assert!(got.chars().count() <= 301 && !got.contains('\n'), "{got}");
+    }
+
     #[test]
     fn loopback_base_rejects_userinfo_and_non_loopback() {
         use super::is_loopback_base;
@@ -796,5 +1017,50 @@ mod tests {
             checked_at: "not-rfc3339".to_string(),
         };
         assert!(!bad.is_fresh(now, Duration::from_secs(60)));
+    }
+
+    /// R110 (U2): the highest version wins over list order (gh lists newest created first);
+    /// stable ignores semver prereleases; junk tags are skipped.
+    #[test]
+    fn highest_release_version_is_semver_max_not_list_order() {
+        use super::highest_release_version;
+        let tags = "v1.0.19\nv1.0.22-rc.1\nv1.0.21\nnightly\nv1.0.20\n";
+        assert_eq!(highest_release_version(tags, true).as_deref(), Some("1.0.21"));
+        assert_eq!(highest_release_version(tags, false).as_deref(), Some("1.0.22-rc.1"));
+        assert_eq!(highest_release_version("v1.0.10\nv1.0.9\n", true).as_deref(), Some("1.0.10"));
+        assert_eq!(highest_release_version("", true), None);
+        assert_eq!(highest_release_version("latest\n", true), None);
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn update_config_debug_redacts_keys() {
+        let cfg = UpdateConfig {
+            proxy_base_url: "https://p70.invalid/v1".into(),
+            auth_scope: "fuigo::p70".into(),
+            deployment_key: Some("p70dk-FAKE-2b3c4d5e".into()),
+            alpha_test_key: Some("p70ak-FAKE-6f7a8b9c".into()),
+            channel: "stable".into(),
+            npm_registry: None,
+        };
+        assert_redacted(&cfg, &["p70dk-FAKE-2b3c4d5e", "p70ak-FAKE-6f7a8b9c"]);
     }
 }

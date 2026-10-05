@@ -6,7 +6,11 @@ const FEEDBACK_PLACEHOLDER_SENTINEL: &str = "Please provide as much detail as po
 const FEEDBACK_LABEL_SENTINEL: &str = "How can we improve Fuigo?";
 // Fragment of `FEEDBACK_TRACE_QUESTION_LABEL` short enough to survive terminal wrapping at any tested width
 const TRACE_QUESTION_SENTINEL: &str = "Opt-in to provide your trace";
-const THANKS_SENTINEL: &str = "Thanks for the feedback";
+/// The one line each submitted report produces. The PTY sandbox pins `FUIGO_FEEDBACK_ENABLED=false` (and has no feedback
+/// receiver), so a submit ends in "Couldn't send feedback: Feedback is disabled ..."; since P152 the thank-you waits for a
+/// confirmed send, so it must never appear here.
+const THANKS_SENTINEL: &str = "Couldn't send feedback";
+const REAL_THANKS: &str = "Thanks for the feedback";
 const INLINE_FEEDBACK: &str = "pty-inline-feedback-report-xyz";
 const PANE_FEEDBACK: &str = "pty-pane-feedback-crash-on-empty-xyz";
 
@@ -80,7 +84,7 @@ async fn feedback_slash_opens_descriptive_pane() {
     assert_eq!(
         thanks_count(&harness),
         0,
-        "empty Enter must not thank the user"
+        "empty Enter must not send"
     );
 
     // Type freeform feedback and submit (pane starts in InputMode).
@@ -90,11 +94,11 @@ async fn feedback_slash_opens_descriptive_pane() {
     skip_trace_question_if_offered(&mut harness);
     harness
         .wait_for_text(THANKS_SENTINEL, Duration::from_secs(15))
-        .expect("pane submit should thank the user");
+        .expect("pane submit should report its result");
     assert_eq!(
         thanks_count(&harness),
         1,
-        "exactly one thanks after pane submit"
+        "exactly one result after pane submit"
     );
     assert!(
         !harness.contains_text(FEEDBACK_LABEL_SENTINEL),
@@ -124,16 +128,21 @@ async fn feedback_slash_opens_descriptive_pane() {
     skip_trace_question_if_offered(&mut harness);
     harness
         .wait_until(
-            "second thanks for prefilled submit",
+            "second result for prefilled submit",
             Duration::from_secs(15),
             |h| thanks_count(h) >= 2,
         )
-        .expect("prefilled pane Enter should produce a second thanks");
+        .expect("prefilled pane Enter should produce a second result");
 
     harness.update(Duration::from_millis(400));
     assert!(
         !harness.contains_text(FEEDBACK_LABEL_SENTINEL),
         "feedback pane should close after prefilled submit\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert!(
+        !harness.contains_text(REAL_THANKS),
+        "an unsent report must not be thanked for\nscreen:\n{}",
         harness.screen_contents()
     );
     assert!(

@@ -289,9 +289,7 @@ impl SessionActor {
             return;
         }
         let prompt_id = prompt_id.to_owned();
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_handle()
             .update_resources_with(move |resources| {
                 use fuigo_tools::implementations::fuigo_build::task::types::CurrentPromptIdResource;
                 if resources
@@ -318,9 +316,7 @@ impl SessionActor {
             .goal_loop_active_gate
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let prompt_id = prompt_id.to_owned();
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_handle()
             .update_resources_with(move |resources| {
                 use fuigo_tools::implementations::fuigo_build::task::types::{
                     CurrentPromptIdResource, GoalLoopActive,

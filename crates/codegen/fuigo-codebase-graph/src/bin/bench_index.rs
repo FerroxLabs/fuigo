@@ -1,4 +1,7 @@
 //! Benchmark binary for index building.
+// Dev/benchmark tool: never shipped (not linked into `fuigo-pager`), run by hand on a terminal.
+// Printing is its whole interface, so the workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::Path;
 use std::time::Instant;

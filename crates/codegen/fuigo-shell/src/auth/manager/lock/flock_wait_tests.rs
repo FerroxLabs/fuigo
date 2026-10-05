@@ -133,12 +133,28 @@ async fn freed_flock_at_the_deadline_is_acquired_through_the_public_api() {
         .lock()
         .unwrap()
         .insert(lock_path.clone(), Arc::downgrade(&planted));
+    // Free the flock only once the acquirer has subscribed to the planted round,
+    // which it does only after its first `try_acquire_once` found the flock busy.
+    // A fixed sleep here raced that first attempt: on a loaded host the test thread
+    // was descheduled past the sleep, the first attempt found the flock already
+    // free and acquired it at once (measured: 172ms against the 300ms budget), and
+    // the deadline salvage this test exists to exercise never ran.
+    // Baseline strong count is 2 (this test + the releaser); a subscriber's
+    // `Ticket` makes it 3. Bounded, so a regression fails the assertions below
+    // instead of hanging.
+    let subscribed = Arc::clone(&planted);
     let releaser = std::thread::spawn(move || {
-        std::thread::sleep(StdDuration::from_millis(50));
+        let give_up = std::time::Instant::now() + StdDuration::from_secs(10);
+        while Arc::strong_count(&subscribed) < 3 && std::time::Instant::now() < give_up {
+            std::thread::sleep(StdDuration::from_millis(1));
+        }
+        drop(subscribed);
         drop(holder);
     });
 
-    let budget = StdDuration::from_millis(300);
+    // Wide enough that the releaser, woken by the subscription, frees the flock
+    // well before the deadline even when the host is saturated.
+    let budget = StdDuration::from_millis(1000);
     let started = tokio::time::Instant::now();
     let got = try_lock_auth_file_async(&path, budget, Heartbeat::Skip).await;
     let elapsed = started.elapsed();
@@ -286,4 +302,42 @@ async fn timed_out_waiters_reuse_one_parked_flock_wait() {
         lock.is_some(),
         "flock must be free after the unclaimed acquisition is dropped"
     );
+}
+
+/// A wait whose blocking task is cancelled before it ever runs (here: scheduled on a runtime already shut down, which
+/// tokio cancels instead of running) must still deposit an error and wake its subscribers. Subscribers can live on
+/// another runtime (the sync acquire runs the wait on a private runtime it then shuts down), and a round with no thread
+/// to serve it would otherwise leave them waiting until their deadline.
+#[cfg(unix)]
+#[test]
+fn a_wait_cancelled_before_its_thread_starts_still_deposits() {
+    let dir = TempDir::new().unwrap();
+    let lock_path = dir.path().join("auth.json.lock");
+    // Held throughout, so a task that did run would park on it rather than deposit.
+    let holder = File::create(&lock_path).unwrap();
+    holder.try_lock_exclusive().unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    rt.shutdown_background();
+    let ticket = {
+        let _entered = handle.enter();
+        join(&lock_path)
+    };
+
+    let waited = std::time::Instant::now();
+    let deposited = loop {
+        if let Some(result) = ticket.try_claim() {
+            break result;
+        }
+        assert!(
+            waited.elapsed() < StdDuration::from_secs(60),
+            "a cancelled wait must deposit; its subscribers would otherwise wait on a round nobody serves"
+        );
+        std::thread::sleep(StdDuration::from_millis(5));
+    };
+    deposited.expect_err("the cancelled wait deposits an error, not a lock");
+    drop(holder);
 }

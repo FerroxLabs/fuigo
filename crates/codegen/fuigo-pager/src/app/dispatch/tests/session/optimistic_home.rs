@@ -280,6 +280,8 @@ fn worktree_from_welcome_abandons_home() {
     assert_ne!(id, home);
 }
 
+// `dispatch_open_dashboard` reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_from_welcome_exits_back_to_welcome() {
     let mut app = test_app();

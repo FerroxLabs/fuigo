@@ -27,11 +27,13 @@ A harness or ACP client that launches `fuigo agent stdio` can inject settings wi
 - **`FUIGO_CONFIG`**: an inline JSON object overlay.
 - **`FUIGO_CONFIG_PATH`**: an *additional* file overlay (not a replacement for `config.toml`), a JSON or TOML file read by its extension (`.json` → JSON, else TOML). `FUIGO_CONFIG` wins if both are set. An empty `FUIGO_CONFIG` is treated as unset, and a malformed one logs a warning and falls through to `FUIGO_CONFIG_PATH`.
 
-The overlay is **deep-merged** on top of your `config.toml` (it overrides only the keys it sets), placed above the user/managed layers but **below** `requirements.toml` / MDM so an enterprise pin still wins. A malformed blob is ignored with a warning. This mirrors `CODEX_CONFIG` from the `codex-acp` adapter (a JSON object merged into the session config); Fuigo is ACP-native, so the overlay lives in the agent itself. It only affects settings read from the merged config, and it is **not** a permission-escalation path. The overlay is confined, fail-closed, to an **allowlist** of soft settings (`models`, `features`, a narrowed `toolset`, and a `shell_environment_policy` limited to its filter fields, which select among env names the launcher already controls and cannot inject an env value into tool subprocesses); every other table is dropped at the choke point, so the overlay cannot spawn commands, set auth policy, redirect network traffic, elevate trust, or add a discovery source. Even on the allowlisted settings, a specific set of security gates read the raw disk layers rather than the overlay. The `ConfigLayers::env_overlay` rustdoc is the canonical list of what the overlay can and cannot reach and which gates read it overlay-free; see also the [internal environment-variables reference](../internal/22-environment-variables.md). Use `FUIGO_DEFAULT_SELECTED_PERMISSION` for headless permission control. For example, to set the default reasoning effort:
+The overlay is **deep-merged** on top of your `config.toml` (it overrides only the keys it sets), placed above the user/managed layers but **below** `requirements.toml` / MDM so an enterprise pin still wins. A malformed blob is ignored with a warning. This mirrors `CODEX_CONFIG` from the `codex-acp` adapter (a JSON object merged into the session config); Fuigo is ACP-native, so the overlay lives in the agent itself. It only affects settings read from the merged config, and it is **not** a permission-escalation path. The overlay is confined, fail-closed, to an **allowlist** of soft settings (`models`, `features`, a narrowed `toolset`, a `shell_environment_policy` limited to its filter fields, which select among env names the launcher already controls and cannot inject an env value into tool subprocesses, and `plugins.auto_discover`, which can only turn implicit plugin discovery off); every other table is dropped at the choke point, so the overlay cannot spawn commands, set auth policy, redirect network traffic, elevate trust, or add a discovery source. Even on the allowlisted settings, a specific set of security gates read the raw disk layers rather than the overlay. The `ConfigLayers::env_overlay` rustdoc is the canonical list of what the overlay can and cannot reach and which gates read it overlay-free; see also the [internal environment-variables reference](../internal/22-environment-variables.md). Use `FUIGO_DEFAULT_SELECTED_PERMISSION` for headless permission control. For example, to set the default reasoning effort:
 
 ```bash
 FUIGO_CONFIG='{"models": {"default_reasoning_effort": "high"}}' fuigo agent stdio
 ```
+
+An app that embeds Fuigo can keep the machine owner's plugins (and the MCP servers, hooks and skills they bring) out of its sessions with `FUIGO_CONFIG='{"plugins": {"auto_discover": false}}'`, together with the `FUIGO_CLAUDE_*_ENABLED=0` and `FUIGO_CURSOR_*_ENABLED=0` switches for configuration imported from Claude Code and Cursor.
 
 ---
 
@@ -64,7 +66,7 @@ stream_tool_calls = true
 simple_mode = true                     # readline-style prompt editing (default); false = vim editing in the prompt
 vim_mode = false                       # vim-style scrollback navigation keys (default: false)
 max_thoughts_width = 120               # max column width for reasoning display
-default_selected_permission = "always_allow_all_sessions" # preselected row on the FIRST approval prompt
+default_selected_permission = "allow_once" # preselected row on the FIRST approval prompt
 remember_tool_approvals = true         # show per-command "Always allow" options on permission prompts;
                                        # grants are remembered per project (default: true); see 22-permissions-and-safety.md
 show_thinking_blocks = true            # show agent thinking blocks in the TUI (default: true)
@@ -135,9 +137,9 @@ When the agent asks to run a command (or take some other tool action), the appro
 
 | Value | Preselected row |
 |-------|-----------------|
-| `always_allow_all_sessions` (default) | The "Always allow on all sessions" row. |
+| `always_allow_all_sessions` | The "Always allow on all sessions" row (one Enter turns on always-approve mode). |
 | `allow_command_always` | The "Always allow this command" row. |
-| `allow_once` | The "Yes" / allow-once row. |
+| `allow_once` (default) | The "Yes" / allow-once row. |
 | `reject` | The reject row. |
 
 ```toml
@@ -147,9 +149,9 @@ default_selected_permission = "allow_once"
 
 After you answer the first prompt the cursor turns **sticky**: each later prompt preselects whatever you last confirmed (pick "No" once and subsequent prompts start on their reject row), carrying across edit / bash / MCP prompts until you restart. So this setting only picks the starting point.
 
-Values match case-insensitively; an unset or unrecognized value falls back to `always_allow_all_sessions`. The `allow_command_always` row is always scoped to the specific action being approved (command / tool / domain / edit-session), never a global allow-everything — that's what `always_allow_all_sessions` is for. Note the per-command "Always allow" rows appear while `[ui] remember_tool_approvals` is enabled (the default; set it to `false` to hide them). See [22-permissions-and-safety.md](22-permissions-and-safety.md).
+Values match case-insensitively; an unset or unrecognized value falls back to `allow_once`, the least permissive way to approve. The `allow_command_always` row is always scoped to the specific action being approved (command / tool / domain / edit-session), never a global allow-everything — that's what `always_allow_all_sessions` is for. Note the per-command "Always allow" rows appear while `[ui] remember_tool_approvals` is enabled (the default; set it to `false` to hide them). See [22-permissions-and-safety.md](22-permissions-and-safety.md).
 
-You can also override this with `FUIGO_DEFAULT_SELECTED_PERMISSION`, which is handy for headless or agent test runs that shouldn't mutate `config.toml`. Precedence: env var → `config.toml` → `always_allow_all_sessions`.
+You can also override this with `FUIGO_DEFAULT_SELECTED_PERMISSION`, which is handy for headless or agent test runs that shouldn't mutate `config.toml`. Precedence: env var → `config.toml` → `allow_once`.
 
 #### Vim mode
 

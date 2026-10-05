@@ -365,6 +365,15 @@ async fn fetch_for_principal(
     }
 
     if let Some(auth) = team_auth {
+        // P47: the team session token goes only where the service-endpoint trust class admits the URL, with the
+        // resolved managed-config URL as the configured service base. The deployment key above keeps its own rules.
+        crate::auth::session_delivery::service_session_gate(
+            &auth,
+            &url,
+            Some(&url),
+            "managed_config",
+        )
+        .map_err(|refused| ManagedConfigError::SessionDestinationRefused(refused.to_string()))?;
         let body = fetch_managed_config(
             &url,
             &auth.key,
@@ -609,5 +618,57 @@ pub async fn run_setup() -> SetupOutcome {
         Ok(SyncOutcome { served: true, .. }) => SetupOutcome::Installed,
         Ok(_) => SetupOutcome::NothingConfigured,
         Err(e) => SetupOutcome::Failed(e),
+    }
+}
+
+/// P47: the managed-config team fetch decides session delivery through the service-endpoint trust class.
+/// Wire-level, in a fresh process (see `auth::p47_service_wire_tests` for the harness and the assertions).
+#[cfg(test)]
+mod p47_wire_tests {
+    use super::*;
+    use crate::auth::p47_service_wire_tests::{
+        assert_delivered, assert_nothing_sent, assert_refusal_text, hostile_bases, preconditions,
+        session_auth, TRUSTED,
+    };
+    use crate::test_support::session_wire::SessionWire;
+
+    #[test]
+    fn p47_wire_managed_config_team_fetch() {
+        if fuigo_test_support::env::fresh_process_home(
+            "managed_config::supervisor::p47_wire_tests::p47_wire_managed_config_team_fetch",
+        )
+        .is_none()
+        {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut wire = SessionWire::start().await;
+            preconditions();
+            let set_url = |base: &str| {
+                // SAFETY: fresh single-test process; the URL is resolved from the environment per fetch.
+                unsafe {
+                    std::env::set_var("FUIGO_MANAGED_CONFIG_URL", format!("{base}/deployment/config"));
+                    std::env::remove_var("FUIGO_DEPLOYMENT_KEY");
+                }
+            };
+            for base in hostile_bases(&wire) {
+                set_url(&base);
+                let err = fetch_for_principal(SyncBudget::Login, Some(session_auth()))
+                    .await
+                    .err()
+                    .expect("refused");
+                assert!(matches!(err, ManagedConfigError::SessionDestinationRefused(_)), "{err}");
+                assert!(!err.is_retryable());
+                assert_refusal_text(&err.to_string(), "managed_config");
+            }
+            assert_nothing_sent(&wire.observed().await, "managed_config");
+            set_url(TRUSTED);
+            let _ = fetch_for_principal(SyncBudget::Login, Some(session_auth())).await;
+            assert_delivered(&wire.observed().await, "managed_config");
+        });
     }
 }

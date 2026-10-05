@@ -35,6 +35,8 @@ pub(crate) enum TurnStopReason {
     Error,
     MaxTokens,
     MaxTurnRequests,
+    /// The agent process died or was restarted mid-turn; the shell closes the turn on the next load.
+    Interrupted,
     Unknown,
 }
 
@@ -48,6 +50,7 @@ impl From<&str> for TurnStopReason {
             "error" => Self::Error,
             "max_tokens" => Self::MaxTokens,
             "max_turn_requests" => Self::MaxTurnRequests,
+            fuigo_shell::session::interrupted_turn::INTERRUPTED_STOP_REASON => Self::Interrupted,
             _ => Self::Unknown,
         }
     }
@@ -70,6 +73,8 @@ pub(crate) struct TerminalMarkerInput<'a> {
     /// Typed kind of a failed stop; picks error-specific failure copy.
     pub error_kind: Option<WireErrorType>,
     pub error_banner_present: bool,
+    /// The shell's typed verdicts for a failed stop; the failure headline reads its status from them, not from `agent_result`.
+    pub verdicts: Option<&'a fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
 }
 
 /// Saturating `Duration` to ms conversion; missing stays `None`.
@@ -103,8 +108,17 @@ pub(crate) fn terminal_marker(input: TerminalMarkerInput<'_>) -> Option<SessionE
         TurnStopReason::Error => Some(failed_turn_event(
             input.error_kind,
             input.agent_result,
+            input.verdicts,
             elapsed,
         )),
+        // The shell's text names the cause; the request-failure formatter would relabel it "Request failed"
+        TurnStopReason::Interrupted => Some(SessionEvent::TurnFailed {
+            error: input
+                .agent_result
+                .unwrap_or(fuigo_shell::session::interrupted_turn::INTERRUPTED_MESSAGE)
+                .to_string(),
+            elapsed,
+        }),
     }
 }
 
@@ -113,13 +127,15 @@ pub(crate) fn terminal_marker(input: TerminalMarkerInput<'_>) -> Option<SessionE
 pub(super) fn failed_turn_event(
     error_kind: Option<WireErrorType>,
     agent_result: Option<&str>,
+    verdicts: Option<&fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
     elapsed: Option<std::time::Duration>,
 ) -> SessionEvent {
     SessionEvent::TurnFailed {
-        error: crate::app::error_display::format_request_failure(
+        error: crate::app::error_display::format_request_failure_typed(
             None,
             error_kind,
             agent_result.unwrap_or("unknown error"),
+            verdicts,
         )
         .message(),
         elapsed,
@@ -349,6 +365,8 @@ pub(super) struct TerminalSignal<'a> {
     pub cancellation_context: Option<&'a serde_json::Value>,
     /// Typed kind of a failed stop, parsed at the wire ingress (`wire_error_kind`: absent maps to `None`, unknown to `Some(Other)`).
     pub error_kind: Option<WireErrorType>,
+    /// The shell's typed verdicts for a failed stop (`TurnCompleted.verdicts`); absent from an older shell and the legacy `prompt_complete` payload.
+    pub verdicts: Option<&'a fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
 }
 
 /// What applying a terminal turn signal did to one agent.
@@ -384,6 +402,7 @@ fn arm_driver_turn_end_reconcile(
         cancellation_category,
         cancellation_context,
         error_kind,
+        verdicts,
     } = signal;
     if agent.session.loading_replay {
         return false;
@@ -426,6 +445,7 @@ fn arm_driver_turn_end_reconcile(
             cancellation_category: cancellation_category.map(str::to_string),
             cancellation_context: cancellation_context.cloned(),
             error_kind,
+            verdicts: verdicts.cloned(),
             received_at,
         });
         crate::unified_log::info(
@@ -460,6 +480,7 @@ fn arm_driver_turn_end_reconcile(
         cancellation_category: cancellation_category.map(str::to_string),
         cancellation_context: cancellation_context.cloned(),
         error_kind,
+        verdicts: verdicts.cloned(),
         received_at: std::time::Instant::now(),
     });
     true
@@ -513,6 +534,7 @@ pub(super) fn finalize_turn_from_terminal(
         cancellation_category,
         cancellation_context,
         error_kind,
+        verdicts,
     } = signal;
     if !agent.attached_as_viewer {
         if arm_driver_turn_end_reconcile(agent, session_id, signal) {
@@ -561,6 +583,7 @@ pub(super) fn finalize_turn_from_terminal(
         error_banner_present: super::dispatch::scrollback_has_recent_error_banner(
             &agent.scrollback,
         ),
+        verdicts,
     });
     push_turn_terminal_marker(agent, event);
 
@@ -594,6 +617,8 @@ pub(super) fn apply_terminal_outcome(
             {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
             }
+            // P125: a relay refusal that arrived during the turn is shown now that it is over.
+            app.apply_relay_refusal(agent_id);
             is_active
         }
     }

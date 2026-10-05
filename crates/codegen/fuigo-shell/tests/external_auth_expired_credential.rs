@@ -268,6 +268,7 @@ fn expired_external_credential_routes_to_the_provider_login_flow() {
             FRESH_TOKEN,
         ))
         .expect("mock server");
+    let (configured_url, _front_ca) = mock_rt.block_on(session_front::start(&server.url()));
 
     let fuigo_home = TempDir::new().expect("fuigo home");
     let workdir = TempDir::new().expect("workdir");
@@ -281,9 +282,11 @@ fn expired_external_credential_routes_to_the_provider_login_flow() {
     // which never read the process environment.
     unsafe {
         std::env::set_var("FUIGO_HOME", fuigo_home.path());
-        std::env::set_var("FUIGO_CLI_CHAT_PROXY_BASE_URL", server.url());
-        std::env::set_var("FUIGO_API_BASE_URL", server.url());
-        std::env::set_var("FUIGO_MODELS_BASE_URL", server.url());
+        // P42: the session token goes only to a configured https origin, never http:// or loopback, so the
+        // mock is reached as the configured origin through `session_front` (TLS-terminating proxy).
+        std::env::set_var("FUIGO_CLI_CHAT_PROXY_BASE_URL", &configured_url);
+        std::env::set_var("FUIGO_API_BASE_URL", &configured_url);
+        std::env::set_var("FUIGO_MODELS_BASE_URL", &configured_url);
         std::env::set_var("FUIGO_AUTH_PROVIDER_COMMAND", &provider);
         std::env::set_var("FUIGO_AUTH_PROVIDER_LABEL", PROVIDER_LABEL);
         // An API key would be advertised first and mask the session-auth path.
@@ -431,4 +434,102 @@ fn expired_external_credential_routes_to_the_provider_login_flow() {
             "the banner and the turn error must say the same thing"
         );
     }));
+}
+
+/// P42: a non-`cfg(test)` copy of `fuigo_shell`'s `test_support::session_wire::SessionFront` (that module is
+/// compiled only into the crate's own unit-test binary). It makes the loopback mock reachable as the configured
+/// origin `https://api.fluxrouter.ai/v1`: `HTTPS_PROXY` points here, a `CONNECT` to that host is TLS-terminated
+/// with a throwaway CA (`FUIGO_EXTRA_CA_BUNDLE`) and forwarded unchanged to the mock; `NO_PROXY` keeps loopback
+/// direct. The trust set comes from the real config (`FUIGO_API_BASE_URL`), nothing is overridden.
+mod session_front {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    pub(super) const HOST: &str = "api.fluxrouter.ai";
+
+    /// Start the front for `backend_url` and set the process proxy/CA variables. Must run before any HTTP
+    /// client is built. Returns the configured-origin URL and the CA dir (keep it alive).
+    pub(super) async fn start(backend_url: &str) -> (String, tempfile::TempDir) {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf = CertificateParams::new(vec![HOST.to_string()])
+            .unwrap()
+            .signed_by(&leaf_key, &ca, &ca_key)
+            .unwrap();
+        let ca_dir = tempfile::tempdir().unwrap();
+        let ca_path = ca_dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.pem()).unwrap();
+        let mut tls = rustls::ServerConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.der().clone(), ca.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+        )
+        .unwrap();
+        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+
+        let parsed = url::Url::parse(backend_url).unwrap();
+        let backend = format!(
+            "{}:{}",
+            parsed.host_str().unwrap(),
+            parsed.port_or_known_default().unwrap()
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        // SAFETY: called once, before the agent or any HTTP client exists (single-test binary).
+        unsafe {
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                std::env::set_var(key, &proxy);
+            }
+            std::env::remove_var("ALL_PROXY");
+            for key in ["NO_PROXY", "no_proxy"] {
+                std::env::set_var(key, "127.0.0.1,localhost,::1");
+            }
+            std::env::remove_var("SSL_CERT_FILE");
+            std::env::set_var("FUIGO_EXTRA_CA_BUNDLE", &ca_path);
+        }
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let line = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+                    if !(line.starts_with(&format!("CONNECT {HOST}:443"))) {
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    if socket
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let Ok(mut tls) = acceptor.accept(socket).await else { return };
+                    let Ok(mut upstream) = tokio::net::TcpStream::connect(backend).await else { return };
+                    let _ = tokio::io::copy_bidirectional(&mut tls, &mut upstream).await;
+                });
+            }
+        });
+        (format!("https://{HOST}{}", parsed.path().trim_end_matches('/')), ca_dir)
+    }
 }

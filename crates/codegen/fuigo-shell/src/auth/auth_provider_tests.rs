@@ -796,6 +796,11 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
         "FUIGO_TRACE_UPLOAD_CREDENTIALS_FILE",
         "OTEL_EXPORTER_OTLP_HEADERS",
         "FUIGO_INTERNAL_OTLP_HEADERS",
+        "FUIGO_AGENT_SECRET",
+        "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "FUIGO_TELEMETRY_EVENTS_API_KEY",
+        "FUIGO_TELEMETRY_MIXPANEL_TOKEN",
     ];
     assert_eq!(
         crate::agent::config::FIRST_PARTY_CREDENTIAL_ENV_VARS,
@@ -854,6 +859,29 @@ fn resolve_program_resolves_against_cwd() {
     );
 }
 
+/// Barrier between writing a script and executing it under test. While any process still holds a write fd on the
+/// file, `exec` fails with ETXTBSY ("text file busy"). Another test thread that forks between our `write` and our
+/// `exec` inherits a copy of that write fd until its child reaches its own `exec`, so in a parallel run the first exec
+/// of a freshly written script can fail. Once one exec succeeds no write fd is left anywhere, so the real run after it
+/// is deterministic. Only ETXTBSY is retried; any other error or a nonzero exit is returned to the test as-is.
+#[cfg(unix)]
+fn wait_until_executable(script: &std::path::Path) {
+    for _ in 0..2000 {
+        match std::process::Command::new(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            _ => return,
+        }
+    }
+    panic!("script stayed busy (ETXTBSY) for 4 s: {}", script.display());
+}
+
 /// The `args` form (the portable, no-shell shape a desktop or Windows helper should use) resolves a relative program against the provider's `cwd`.
 #[cfg(unix)]
 #[tokio::test]
@@ -865,6 +893,7 @@ async fn provider_resolves_relative_program_against_cwd() {
     let mut perms = std::fs::metadata(&script).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&script, perms).unwrap();
+    wait_until_executable(&script);
 
     let provider = AuthProviderRef::new(
         "test-cwd-relative".to_owned(),
@@ -906,5 +935,40 @@ async fn provider_command_runs_in_cwd() {
     assert_eq!(
         provider.ensure_fresh_token(None).await.rotated().as_deref(),
         Some("file-tok")
+    );
+}
+
+/// P120 (Astra r1 #5): the helper's explicit `FUIGO_AUTH_PROVIDER_*` variables arrive: the shared filter runs before
+/// them, never after. The filter removes Fuigo-OWNED secrets only, so a config-registered name of the same spelling
+/// would be the user's own and stay too.
+#[tokio::test]
+async fn p120_explicit_provider_variables_survive_the_secret_filter() {
+    use fuigo_secrets::test_probe as probe;
+    const NAME: &str = "auth::auth_provider::tests::p120_explicit_provider_variables_survive_the_secret_filter";
+    if probe::in_parent(NAME, &[]) {
+        return;
+    }
+    fuigo_tools::util::shell_env_policy::register_credential_env_names([
+        "FUIGO_AUTH_PROVIDER_ACCESS_TOKEN",
+    ]);
+    let provider = AuthProviderRef::new(
+        "test-p120-explicit".to_owned(),
+        AuthProviderConfig {
+            subscription: None,
+            account: None,
+            command: "printf 'seen-%s' \"${FUIGO_AUTH_PROVIDER_ACCESS_TOKEN:-none}\"".to_owned(),
+            args: None,
+            token_ttl_secs: Some(3600),
+            timeout_secs: None,
+            cwd: None,
+        },
+    );
+    let first = provider.ensure_fresh_token(None).await.rotated().unwrap();
+    assert_eq!(first, "seen-none");
+    test_expire_provider_token("test-p120-explicit");
+    assert_eq!(
+        provider.ensure_fresh_token(Some(&first)).await.rotated().as_deref(),
+        Some("seen-seen-none"),
+        "the explicit prior token must reach the command"
     );
 }

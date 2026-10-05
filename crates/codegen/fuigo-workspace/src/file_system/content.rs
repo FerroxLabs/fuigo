@@ -42,7 +42,8 @@ fn build_ripgrep_command(root: &Path, params: &ContentSearchParams) -> anyhow::R
     cmd.current_dir(root);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
-    fuigo_tty_utils::detach_search_command(&mut cmd);
+    // P113 r3: the policy environment (no Fuigo secret, provider key or configured credential), like the search tools.
+    fuigo_tools::util::spawn::detach_search_command(&mut cmd);
 
     cmd.arg("--json");
     cmd.arg("--line-number");
@@ -260,6 +261,87 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P113 r3: Fuigo's own secret variables (and a provider key), planted in the PARENT. Literal on purpose.
+    #[cfg(unix)]
+    const P113_SECRETS: &[&str] = &[
+        "FUIGO_API_KEY",
+        "FUIGO_CODE_API_KEY",
+        "OPENAI_API_KEY",
+        "FUIGO_AGENT_SECRET",
+        "FUIGO_AUTH",
+        "FUIGO_AUTH_PATH",
+        "FUIGO_DEPLOYMENT_KEY",
+        "FUIGO_EXTRA_AUTH_KEY",
+        "FUIGO_TRACE_UPLOAD_CREDENTIALS_FILE",
+        "FUIGO_INTERNAL_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "FUIGO_TELEMETRY_EVENTS_API_KEY",
+        "FUIGO_TELEMETRY_MIXPANEL_TOKEN",
+        "P113_MCP_BEARER",
+    ];
+
+    /// P113 r3 (receipt R113, Not met 3): the workspace content search spawned `rg` (or the wrapper `RG_BIN_PATH`
+    /// names) with the agent's whole environment. It now gets the same policy environment as the search tools: none
+    /// of Fuigo's secrets, no provider key, no configured credential; ordinary variables kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p113_content_search_child_never_sees_fuigo_secrets() {
+        const NAME: &str = "p113_content_search_child_never_sees_fuigo_secrets";
+        let dir = tempfile::TempDir::new().unwrap();
+        if std::env::var("P113_CHILD_TEST").as_deref() != Ok(NAME) {
+            // Parent: re-run this test in a fresh process whose environment holds the secrets and names a probe as rg.
+            let probe = dir.path().join("rg-probe.sh");
+            let marker = dir.path().join("marker");
+            let absent: String = P113_SECRETS.iter().map(|n| format!("${{{n}+x}}")).collect();
+            std::fs::write(
+                &probe,
+                format!(
+                    "#!/bin/sh\ntest \"$P113_BENIGN\" = kept && test -z \"{absent}\" && printf 1 > '{}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.arg(NAME)
+                .args(["--test-threads=1", "--nocapture"])
+                .env("P113_CHILD_TEST", NAME)
+                .env("P113_BENIGN", "kept")
+                .env("RG_BIN_PATH", &probe)
+                .env("P113_SEARCH_ROOT", dir.path());
+            for name in P113_SECRETS {
+                cmd.env(name, "fake-p113-ambient");
+            }
+            let output = cmd.output().unwrap();
+            let diagnostics = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .replace("fake-p113-", "[redacted]-");
+            assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
+            assert!(diagnostics.contains("test result: ok. 1 passed"), "one child test: {diagnostics}");
+            assert_eq!(
+                std::fs::read_to_string(&marker).ok().as_deref(),
+                Some("1"),
+                "the content-search child saw a Fuigo secret or lost an ordinary variable"
+            );
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names(["P113_MCP_BEARER"]);
+        let root = std::path::PathBuf::from(std::env::var("P113_SEARCH_ROOT").unwrap());
+        let params = ContentSearchParams {
+            pattern: "needle".to_string(),
+            ..Default::default()
+        };
+        let mut cmd = build_ripgrep_command(&root, &params).expect("build rg command");
+        #[allow(clippy::disallowed_methods)] // test child, waited on below
+        let status = cmd.status().await.expect("spawn the rg probe");
+        assert!(status.success(), "the rg probe ran"); // the parent judges the environment by the marker
+    }
 
     /// Cancellation is dropping the future; commands from `build_ripgrep_command` must kill rg on drop.
     #[cfg(unix)]

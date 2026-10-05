@@ -18,7 +18,11 @@ pub enum Command {
     Doctor(crate::doctor_cmd::DoctorArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
-    /// Sign out and clear cached credentials
+    /// Clear the current Fuigo session and all locally stored subscription credentials
+    ///
+    /// With --provider, clear only that subscription provider (or --account).
+    /// Subscription tokens are deleted locally, not revoked at the provider.
+    /// Configured API keys and environment variables are unchanged.
     Logout {
         /// Clear only this Fuigo-owned subscription provider.
         #[arg(long, value_enum)]
@@ -272,7 +276,7 @@ pub struct WorkspaceStartArgs {
     pub json: bool,
 }
 /// Arguments for the `agent` subcommand.
-#[derive(Debug, clap::Args, Clone)]
+#[derive(clap::Args, Clone)]
 pub struct AgentArgs {
     /// Run authentication before starting the agent
     #[arg(
@@ -323,6 +327,41 @@ pub struct AgentArgs {
     #[command(subcommand)]
     pub mode: Option<AgentCmd>,
 }
+/// Hand-written `Debug` (P70a): the two base-URL overrides may carry a key in their userinfo or query, so they print
+/// through `redact_url`. The destructure is exhaustive, so a new field fails to compile here until its Debug output
+/// is decided.
+impl std::fmt::Debug for AgentArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            reauthenticate,
+            model,
+            reasoning_effort,
+            yolo,
+            agent_profile,
+            plugin_dirs,
+            leader,
+            no_leader,
+            headless,
+            cli_chat_proxy_base_url,
+            fuigo_api_base_url,
+            mode,
+        } = self;
+        f.debug_struct("AgentArgs")
+            .field("reauthenticate", reauthenticate)
+            .field("model", model)
+            .field("reasoning_effort", reasoning_effort)
+            .field("yolo", yolo)
+            .field("agent_profile", agent_profile)
+            .field("plugin_dirs", plugin_dirs)
+            .field("leader", leader)
+            .field("no_leader", no_leader)
+            .field("headless", headless)
+            .field("cli_chat_proxy_base_url", &cli_chat_proxy_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("fuigo_api_base_url", &fuigo_api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("mode", mode)
+            .finish()
+    }
+}
 impl AgentArgs {
     /// Canonicalized `--plugin-dir` paths, warning to stderr and skipping anything that isn't an existing directory.
     /// stderr is safe: JSON-RPC uses stdout.
@@ -332,14 +371,14 @@ impl AgentArgs {
             .filter_map(|p| match dunce::canonicalize(p) {
                 Ok(canonical) if canonical.is_dir() => Some(canonical),
                 Ok(_) => {
-                    eprintln!(
+                    fuigo_tty_utils::cli_eprintln!(
                         "fuigo: --plugin-dir {}: not a directory; skipping",
                         p.display()
                     );
                     None
                 }
                 Err(e) => {
-                    eprintln!("fuigo: --plugin-dir {}: {e}; skipping", p.display());
+                    fuigo_tty_utils::cli_eprintln!("fuigo: --plugin-dir {}: {e}; skipping", p.display());
                     None
                 }
             })
@@ -359,15 +398,30 @@ pub enum AgentCmd {
     Leader(LeaderArgs),
 }
 /// WebSocket URL override arguments, used by headless / leader / serve modes.
-#[derive(Debug, clap::Args, Clone, Default)]
+#[derive(clap::Args, Clone, Default)]
 pub struct HeadlessArgs {
     #[arg(long = "fuigo-ws-origin")]
     pub fuigo_ws_origin: Option<String>,
     #[arg(long = "fuigo-ws-url")]
     pub fuigo_ws_url: Option<String>,
 }
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for HeadlessArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            fuigo_ws_origin,
+            fuigo_ws_url,
+        } = self;
+        f.debug_struct("HeadlessArgs")
+            .field("fuigo_ws_origin", &fuigo_ws_origin.as_deref().map(fuigo_auth::redact_url))
+            .field("fuigo_ws_url", &fuigo_ws_url.as_deref().map(fuigo_auth::redact_url))
+            .finish()
+    }
+}
 /// Arguments for the `agent serve` subcommand.
-#[derive(Debug, clap::Args, Clone)]
+#[derive(clap::Args, Clone)]
 pub struct ServeArgs {
     /// Address for the server to listen on
     #[arg(long, default_value = "127.0.0.1:2419")]
@@ -381,6 +435,25 @@ pub struct ServeArgs {
     /// Authentication and WebSocket URL overrides
     #[command(flatten)]
     pub headless: HeadlessArgs,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ServeArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            bind,
+            secret,
+            remote,
+            headless,
+        } = self;
+        f.debug_struct("ServeArgs")
+            .field("bind", bind)
+            .field("secret", &secret.as_ref().map(|_| "<redacted>"))
+            .field("remote", &remote.as_deref().map(fuigo_auth::redact_url))
+            .field("headless", headless)
+            .finish()
+    }
 }
 impl ServeArgs {
     /// Get the secret, generating a random one if not provided.
@@ -620,31 +693,6 @@ pub struct PagerArgs {
     /// Disable plan mode.
     #[arg(long = "no-plan")]
     pub no_plan: bool,
-    /// Own a local `workspace_server` (replaces remote sandbox). Requires `--chat`.
-    ///
-    /// Compiled only with `--features local-workspace` (not implied by `chat`).
-    #[cfg(feature = "local-workspace")]
-    #[arg(
-        long = "local-workspace",
-        num_args = 0..= 1,
-        value_name = "CWD",
-        conflicts_with = "local_workspace_attach",
-        requires = "chat"
-    )]
-    pub local_workspace: Option<Option<PathBuf>>,
-    /// Attach an existing local `workspace_server` by `server_id`, replacing the chat sandbox (ExistingWorkspace only). Requires `--chat`.
-    #[cfg(feature = "local-workspace")]
-    #[arg(
-        long = "local-workspace-attach",
-        value_name = "SERVER_ID",
-        conflicts_with = "local_workspace",
-        requires = "chat"
-    )]
-    pub local_workspace_attach: Option<String>,
-    /// Cwd override for local-workspace attach/own. Requires `--chat`.
-    #[cfg(feature = "local-workspace")]
-    #[arg(long = "local-workspace-cwd", value_name = "PATH", requires = "chat")]
-    pub local_workspace_cwd: Option<PathBuf>,
     /// Disable subagent spawning.
     #[arg(long = "no-subagents")]
     pub no_subagents: bool,
@@ -843,20 +891,22 @@ fn strip_cur_dir(path: PathBuf) -> PathBuf {
         .collect()
 }
 impl PagerArgs {
+    /// `--no-memory` wins over `--experimental-memory`. clap marks the two as conflicting, so both can only be set by
+    /// constructing the struct directly; if the conflict is ever dropped, the safe reading is the one that writes no memory.
     pub fn memory_enabled_override(&self) -> Option<bool> {
-        if self.experimental_memory {
-            Some(true)
-        } else if self.no_memory {
+        if self.no_memory {
             Some(false)
+        } else if self.experimental_memory {
+            Some(true)
         } else {
             None
         }
     }
     pub(crate) fn memory_override_flag(&self) -> Option<&'static str> {
-        if self.experimental_memory {
-            Some("--experimental-memory")
-        } else if self.no_memory {
+        if self.no_memory {
             Some("--no-memory")
+        } else if self.experimental_memory {
+            Some("--experimental-memory")
         } else {
             None
         }
@@ -896,21 +946,6 @@ impl PagerArgs {
     /// Optional-flag accessor; always `false` in builds without the optional feature, so call sites need no `cfg` of their own.
     pub fn chat(&self) -> bool {
         false
-    }
-    /// `--local-workspace[=cwd]` own-mode flag.
-    #[cfg(feature = "local-workspace")]
-    pub fn local_workspace(&self) -> Option<Option<&std::path::Path>> {
-        self.local_workspace.as_ref().map(|inner| inner.as_deref())
-    }
-    /// `--local-workspace-attach=<server_id>`.
-    #[cfg(feature = "local-workspace")]
-    pub fn local_workspace_attach(&self) -> Option<&str> {
-        self.local_workspace_attach.as_deref()
-    }
-    /// `--local-workspace-cwd=<path>`.
-    #[cfg(feature = "local-workspace")]
-    pub fn local_workspace_cwd(&self) -> Option<&std::path::Path> {
-        self.local_workspace_cwd.as_deref()
     }
     /// Get the session ID to resume, from either --resume or --load (hidden alias).
     ///
@@ -1004,7 +1039,7 @@ impl PagerArgs {
             ref sandbox_profile,
         } = pinned
         {
-            eprintln!("Resuming session {} (matched by title)", id);
+            fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", id);
             self.pinned_resume_profile = Some(sandbox_profile.clone());
         }
         let Some(id) = pinned.id() else {
@@ -1161,6 +1196,22 @@ mod tests {
                 "{HEADLESS_TIMEOUT_ENV}={bad:?} must degrade to no cap"
             );
         }
+    }
+    #[test]
+    fn no_memory_wins_over_experimental_memory_and_clap_rejects_both() {
+        // The command line never produces both: clap refuses the pair.
+        assert!(PagerArgs::try_parse_from(["fuigo", "--no-memory", "--experimental-memory"]).is_err());
+        assert!(PagerArgs::try_parse_from(["fuigo", "--experimental-memory", "--no-memory"]).is_err());
+        // If both are set anyway, `--no-memory` decides, for the override and for the flag named in diagnostics.
+        let mut args = PagerArgs::try_parse_from(["fuigo"]).expect("parses");
+        args.experimental_memory = true;
+        args.no_memory = true;
+        assert_eq!(args.memory_enabled_override(), Some(false));
+        assert_eq!(args.memory_override_flag(), Some("--no-memory"));
+        args.no_memory = false;
+        assert_eq!(args.memory_enabled_override(), Some(true));
+        args.experimental_memory = false;
+        assert_eq!(args.memory_enabled_override(), None);
     }
     /// A well-formed value still applies, and an explicit `--timeout` outranks it.
     #[test]
@@ -1545,6 +1596,16 @@ mod tests {
         assert_eq!(args.initial_prompt(), Some("spaced"));
         let blank = PagerArgs::try_parse_from(["fuigo", "   "]).expect("blank prompt parses");
         assert_eq!(blank.initial_prompt(), None);
+    }
+    #[test]
+    fn logout_help_describes_local_subscription_deletion() {
+        let help = PagerArgs::try_parse_from(["fuigo", "logout", "--help"])
+            .unwrap_err()
+            .to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(help.contains("all locally stored subscription credentials"));
+        assert!(help.contains("not revoked at the provider"));
+        assert!(help.contains("Configured API keys and environment variables are unchanged"));
     }
     #[test]
     fn subscription_cli_parsing() {

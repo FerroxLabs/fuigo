@@ -126,11 +126,13 @@ fn create_client_main_loop(
                     // that name it are taken at their word; the rest are
                     // credited with the text we had most recently sent, which
                     // is all arrival order can tell us.
+                    // Not `documents.version`: the server can answer a notification before its
+                    // sender has recorded it as sent. See `Documents::push_version_cap`.
                     diagnostics.record_push(
                         uri,
                         params.diagnostics,
                         params.version,
-                        documents.version(uri),
+                        documents.push_version_cap(uri),
                     );
                     notify.notify_one();
                     ControlFlow::Continue(())
@@ -317,6 +319,169 @@ async fn t05_mcp_hook_lsp_spawn_paths_lsp() {
         assert!(result.is_err()); // Probe exits deliberately before protocol initialization.
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "1");
     }
+}
+
+/// P86 (CB-1), LSP servers: the credentials sit in the agent's OWN environment; the server and
+/// its child must not see them, and a key the user wrote into the server's `env` still arrives.
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn p86_lsp_servers_never_see_parent_credentials() {
+    if crate::util::shell_env_policy::p86_parent_env("p86_lsp_servers_never_see_parent_credentials")
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for selected in [false, true] {
+        let marker = dir
+            .path()
+            .join(if selected { "selected" } else { "default" });
+        let check = if selected {
+            "test \"$P86_BENIGN\" = kept && test \"$FLUX_API_KEY\" = fake-p86-selected && test -z \"${ANTHROPIC_AUTH_TOKEN+x}${OPENAI_API_KEY+x}${P86_CORP_KEY+x}\"".to_string()
+        } else {
+            crate::util::shell_env_policy::P86_CHILD_CHECK.to_string()
+        };
+        let script = format!("{check} && /bin/sh -c '{check}' && printf 1 > \"$P86_MARKER\"");
+        let mut env = std::collections::HashMap::from([(
+            "P86_MARKER".to_string(),
+            marker.to_string_lossy().into_owned(),
+        )]);
+        if selected {
+            env.insert("FLUX_API_KEY".into(), "fake-p86-selected".into());
+        }
+        let config: LspServerConfig = serde_json::from_value(serde_json::json!({"command":"/bin/sh", "args":["-c",script], "env":env, "startupTimeout":1000})).unwrap();
+        let result = LspClient::start(
+            "p86".into(),
+            1,
+            config,
+            dir.path(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
+        assert!(result.is_err()); // The probe exits before protocol initialization.
+        assert_eq!(
+            std::fs::read_to_string(&marker).ok().as_deref(),
+            Some("1"),
+            "selected={selected}: the LSP child saw a parent credential"
+        );
+    }
+}
+
+/// P113 (CIE-02): Fuigo's own secret variables, planted in the PARENT by the P113 child-environment probes. Literal on
+/// purpose (a probe that read the denylist would plant nothing once it was emptied). `FUIGO_AGENT_SECRET` authenticates
+/// an ACP connection to `fuigo agent serve`; `FUIGO_AUTH` is the whole saved login.
+#[cfg(all(test, unix))]
+const P113_INTERNAL_SECRETS: &[&str] = &[
+    "FUIGO_AGENT_SECRET",
+    "FUIGO_AUTH",
+    "FUIGO_AUTH_PATH",
+    "FUIGO_DEPLOYMENT_KEY",
+    "FUIGO_EXTRA_AUTH_KEY",
+    "FUIGO_TRACE_UPLOAD_CREDENTIALS_FILE",
+    "FUIGO_INTERNAL_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+    "FUIGO_TELEMETRY_EVENTS_API_KEY",
+    "FUIGO_TELEMETRY_MIXPANEL_TOKEN",
+];
+
+/// The shell test a P113 probe child runs: the benign parent variable arrived, none of [`P113_INTERNAL_SECRETS`]
+/// did, except `FUIGO_AGENT_SECRET` when the server's own `env` names it (`explicit`).
+#[cfg(all(test, unix))]
+fn p113_child_check(explicit: bool) -> String {
+    let absent: String = P113_INTERNAL_SECRETS
+        .iter()
+        .filter(|name| !(explicit && **name == "FUIGO_AGENT_SECRET"))
+        .map(|name| format!("${{{name}+x}}"))
+        .collect();
+    let agent = if explicit {
+        " && test \"$FUIGO_AGENT_SECRET\" = fake-p113-explicit"
+    } else {
+        ""
+    };
+    format!("test \"$P113_BENIGN\" = kept{agent} && test -z \"{absent}\"")
+}
+
+/// Re-run `test_name` in a fresh test process whose own environment holds every [`P113_INTERNAL_SECRETS`] entry and
+/// `P113_BENIGN=kept`. Returns `true` in the parent (which then returns), `false` in the child (which runs the body).
+#[cfg(all(test, unix))]
+fn p113_parent_env(test_name: &str) -> bool {
+    if std::env::var("P113_CHILD_TEST").as_deref() == Ok(test_name) {
+        return false;
+    }
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.arg(test_name)
+        .args(["--test-threads=1", "--nocapture"])
+        .env("P113_CHILD_TEST", test_name)
+        .env("P113_BENIGN", "kept");
+    for name in P113_INTERNAL_SECRETS {
+        cmd.env(name, "fake-p113-ambient");
+    }
+    let output = cmd.output().unwrap();
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .replace("fake-p113-", "[redacted]-");
+    assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
+    assert!(diagnostics.contains("test result: ok. 1 passed"), "the P113 child must run exactly one test: {diagnostics}");
+    true
+}
+
+/// P113 (CIE-02), LSP servers: Fuigo's own secret variables sit in the agent's environment; the server and its child
+/// see none of them, and `FUIGO_AGENT_SECRET` written into the server's `env` still arrives.
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn p113_lsp_servers_never_see_fuigo_internal_secrets() {
+    if p113_parent_env("p113_lsp_servers_never_see_fuigo_internal_secrets") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for explicit in [false, true] {
+        let marker = dir.path().join(if explicit { "explicit" } else { "default" });
+        let check = p113_child_check(explicit);
+        let script = format!("{check} && /bin/sh -c '{check}' && printf 1 > \"$P113_MARKER\"");
+        let mut env = std::collections::HashMap::from([(
+            "P113_MARKER".to_string(),
+            marker.to_string_lossy().into_owned(),
+        )]);
+        if explicit {
+            env.insert("FUIGO_AGENT_SECRET".into(), "fake-p113-explicit".into());
+        }
+        let config: LspServerConfig = serde_json::from_value(serde_json::json!({"command":"/bin/sh", "args":["-c",script], "env":env, "startupTimeout":1000})).unwrap();
+        let result = LspClient::start(
+            "p113".into(),
+            1,
+            config,
+            dir.path(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
+        assert!(result.is_err()); // The probe exits before protocol initialization.
+        assert_eq!(
+            std::fs::read_to_string(&marker).ok().as_deref(),
+            Some("1"),
+            "explicit={explicit}: the LSP child saw a Fuigo secret, or missed the explicit one"
+        );
+    }
+}
+
+/// P113 (Astra r2 #4), search children: the search tools' child (`rg`, or a wrapper named by `RG_BIN_PATH`) is
+/// prepared by `crate::util::detach_search_command`, the one place all four search tools call; it gets the policy
+/// base environment, so none of Fuigo's own secrets. (With the LSP probe because both share the planted parent.)
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn p113_search_children_never_see_fuigo_internal_secrets() {
+    if p113_parent_env("p113_search_children_never_see_fuigo_internal_secrets") {
+        return;
+    }
+    let check = p113_child_check(false);
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.args(["-c", &format!("{check} && /bin/sh -c '{check}'")]);
+    crate::util::detach_search_command(&mut cmd);
+    let status = cmd.status().await.unwrap();
+    assert!(status.success(), "a search child saw a Fuigo secret");
 }
 
 impl LspClient {
@@ -726,6 +891,8 @@ impl LspClient {
         let new_end = end_position(content);
         let update = self.documents.plan(&uri_str);
         let version = update.version();
+        // Before the send: the server may answer it before we reach `commit` below.
+        self.documents.begin_send(&uri_str, version);
 
         let sent = match update {
             Update::Open { version } => {
@@ -768,6 +935,7 @@ impl LspClient {
         };
 
         if let Err(e) = sent {
+            self.documents.abandon_send(&uri_str);
             tracing::debug!(server = %self.server_name, error = %e, "failed to send document update");
             return None;
         }

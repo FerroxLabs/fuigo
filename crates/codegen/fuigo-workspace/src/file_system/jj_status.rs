@@ -60,6 +60,7 @@ pub async fn jj_status(working_directory: impl Into<PathBuf>) -> Result<String, 
 /// A cancelled gather (a dropped, unconsumed prefetch) kills jj's whole process group, so its children can't run past the drop either.
 async fn run_jj(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new("jj");
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     cmd.arg("--ignore-working-copy")
         .args(args)
         .current_dir(cwd)

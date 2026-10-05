@@ -13,7 +13,8 @@ impl SessionActor {
         if !self.telemetry_enabled || !fuigo_telemetry::is_session_metrics_enabled() {
             return;
         }
-        let Some(api_key) = self.tokenize_api_key().await else {
+        let tokenize_url = tokenize_text_url(&fuigo_api_base_url());
+        let Some(api_key) = self.tokenize_api_key(&tokenize_url).await else {
             tracing::debug!("session_context_snapshot: no api key");
             return;
         };
@@ -26,7 +27,7 @@ impl SessionActor {
         let texts = self.snapshot_texts().await;
         let counts = texts.item_counts();
         let tokens = tokenize_texts_parallel(
-            &tokenize_text_url(&fuigo_api_base_url()),
+            &tokenize_url,
             &api_key,
             model,
             texts.jobs(),
@@ -52,18 +53,32 @@ impl SessionActor {
         fuigo_telemetry::session_ctx::drain_pending(fuigo_telemetry::session_ctx::CLI_DRAIN).await;
     }
 
-    async fn tokenize_api_key(&self) -> Option<String> {
+    /// P42: the session token goes to `/tokenize-text` only when that URL may receive it
+    /// (`session_delivery::session_may_reach`); the buffered chat-state key is re-checked the same way.
+    async fn tokenize_api_key(&self, tokenize_url: &str) -> Option<String> {
+        let session_may_reach = crate::auth::session_delivery::session_may_reach(tokenize_url);
         if let Some(manager) = &self.auth_manager
             && let Ok(auth) = manager.auth().await
             && !auth.key.is_empty()
+            // A held static `AuthMode::ApiKey` credential is not a session token and keeps its pre-P42 precedence.
+            && (session_may_reach || !crate::auth::session_delivery::is_session_credential(&auth))
         {
             return Some(auth.key);
         }
-        self.chat_state_handle
-            .get_credentials()
-            .await
-            .api_key
-            .filter(|key| !key.is_empty())
+        let buffered = self.chat_state_handle.get_credentials().await.api_key;
+        crate::auth::session_delivery::withhold_session_bearer(
+            buffered,
+            tokenize_url,
+            self.auth_manager.as_deref(),
+            "tokenize_text",
+        )
+        .filter(|key| !key.is_empty())
+    }
+
+    /// Test seam for the P42 tokenize-key check.
+    #[cfg(test)]
+    pub(crate) async fn p42_tokenize_api_key(&self, tokenize_url: &str) -> Option<String> {
+        self.tokenize_api_key(tokenize_url).await
     }
 
     async fn snapshot_texts(&self) -> SnapshotTexts {
@@ -286,7 +301,11 @@ async fn tokenize_one(
     let resp = client
         .post(url)
         .header(reqwest::header::AUTHORIZATION, auth)
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity-class header, FluxRouter-operated destinations only.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
         .json(&serde_json::json!({
             "text": text,
             "model": model,
@@ -339,6 +358,15 @@ fn session_context_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// P43 hostile: a tokenize endpoint that is not FluxRouter-operated gets no client version.
+    #[tokio::test(flavor = "current_thread")]
+    async fn tokenize_sends_no_identity_to_a_non_fluxrouter_host() {
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let client = crate::http::shared_client();
+        let _ = tokenize_one(&client, &format!("{base}/tokenize-text"), "key", "m", "t").await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "context_snapshot_tokenize");
+    }
 
     fn info() -> SessionInfoData {
         SessionInfoData {

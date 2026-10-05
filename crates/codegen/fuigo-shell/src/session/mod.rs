@@ -454,6 +454,8 @@ pub(crate) mod image_describe;
 pub(crate) mod image_normalize;
 pub(crate) mod inference_metrics;
 pub use fuigo_shared::session::info;
+pub mod interrupted_turn;
+pub(crate) mod turn_owner_lock;
 pub mod managed_mcp;
 pub(crate) mod mcp_descriptors;
 pub(crate) mod mcp_dispatcher;

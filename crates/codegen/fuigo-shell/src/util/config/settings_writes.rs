@@ -117,7 +117,7 @@ pub async fn set_combine_queued_prompts(value: bool) -> Result<()> {
 pub async fn set_follow_up_behavior(value: String) -> Result<()> {
     // Keep the hot-path cache in sync before the disk write returns.
     set_follow_up_steer_cache(value == "steer");
-    update_config(|cfg| cfg.ui.follow_up_behavior = Some(value)).await
+    update_config(|cfg| cfg.ui.follow_up_behavior = Some(value.clone())).await
 }
 
 /// Persist `[ui].simple_mode` via `update_config`.
@@ -170,20 +170,20 @@ pub async fn set_contextual_hint_ssh_wrap(value: bool) -> Result<()> {
 /// Persist `[ui].theme` via `update_config`.
 /// Caller must pass the canonical theme name (`fuigonight`, `tokyonight`, `auto`, etc.).
 pub async fn set_theme(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.theme = Some(value)).await
+    update_config(|cfg| cfg.ui.theme = Some(value.clone())).await
 }
 
 /// Persist `[ui].auto_dark_theme` via `update_config`.
 /// `UiConfig::auto_dark_theme` is `Option<String>` holding a canonical theme name.
 /// The pager's `load_auto_theme_config` filter rejects `auto` at read time to prevent a circular reference.
 pub async fn set_auto_dark_theme(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.auto_dark_theme = Some(value)).await
+    update_config(|cfg| cfg.ui.auto_dark_theme = Some(value.clone())).await
 }
 
 /// Persist `[ui].auto_light_theme` via `update_config`.
 /// The shape matches [`set_auto_dark_theme`].
 pub async fn set_auto_light_theme(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.auto_light_theme = Some(value)).await
+    update_config(|cfg| cfg.ui.auto_light_theme = Some(value.clone())).await
 }
 
 /// Maximum length (in bytes) accepted by [`set_default_model`].
@@ -210,7 +210,7 @@ pub async fn set_default_model(value: String) -> Result<()> {
 /// Persist `[privacy].privacy_banner_acked` (RFC 3339 UTC dismiss time).
 pub async fn set_privacy_banner_acked(acked_at_rfc3339: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.privacy.privacy_banner_acked = Some(acked_at_rfc3339);
+        cfg.privacy.privacy_banner_acked = Some(acked_at_rfc3339.clone());
     })
     .await
 }
@@ -248,7 +248,7 @@ pub async fn set_fork_secondary_model(value: String) -> Result<()> {
         cfg.ui.fork_secondary_model = if value.is_empty() {
             crate::models::default_model().to_string()
         } else {
-            value
+            value.clone()
         };
     })
     .await
@@ -275,7 +275,7 @@ pub async fn set_scroll_speed(value: i64) -> Result<()> {
 
 /// Persist `[ui].scroll_mode` (`auto` | `wheel` | `trackpad`) via `update_config`.
 pub async fn set_scroll_mode(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.scroll_mode = Some(value)).await
+    update_config(|cfg| cfg.ui.scroll_mode = Some(value.clone())).await
 }
 
 /// Persist `[ui].invert_scroll` via `update_config`.
@@ -337,7 +337,7 @@ pub async fn set_collapsed_edit_blocks(value: bool) -> Result<()> {
 /// This makes any Settings write a one-shot disk migration away from the legacy keys.
 pub async fn set_keep_text_selection(value: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.ui.keep_text_selection = Some(value);
+        cfg.ui.keep_text_selection = Some(value.clone());
         cfg.ui.selection_highlight_duration_ms = None;
         cfg.ui.double_click_action = None;
     })
@@ -347,26 +347,26 @@ pub async fn set_keep_text_selection(value: String) -> Result<()> {
 /// Persist `[ui].render_mermaid` via `update_config`.
 /// Value is one of the canonical strings `auto` | `on` | `off`.
 pub async fn set_render_mermaid(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.render_mermaid = Some(value)).await
+    update_config(|cfg| cfg.ui.render_mermaid = Some(value.clone())).await
 }
 
 /// Persist `[ui].hunk_tracker_mode` via `update_config`.
 /// Value is one of the canonical strings `agent_only` | `all_dirty` | `off`.
 /// Restart-required: the mode is read once at connect time.
 pub async fn set_hunk_tracker_mode(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.hunk_tracker_mode = Some(value)).await
+    update_config(|cfg| cfg.ui.hunk_tracker_mode = Some(value.clone())).await
 }
 
 /// Persist `[ui].voice_capture_mode` via `update_config`.
 /// Value is one of the canonical strings `toggle` | `hold`.
 pub async fn set_voice_capture_mode(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.voice_capture_mode = Some(value)).await
+    update_config(|cfg| cfg.ui.voice_capture_mode = Some(value.clone())).await
 }
 
 /// Persist `[ui].voice_stt_language` via `update_config`.
 /// Value is a canonical language code from the settings catalog (`en`, `es`, …) or `auto` (system locale, falling back to English).
 pub async fn set_voice_stt_language(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.voice_stt_language = Some(value)).await
+    update_config(|cfg| cfg.ui.voice_stt_language = Some(value.clone())).await
 }
 
 /// Persist `[ui].voice_keybind_enabled` via `update_config`.
@@ -379,14 +379,14 @@ pub async fn set_voice_keybind_enabled(value: bool) -> Result<()> {
 /// Value is one of the canonical strings from `DEFAULT_SELECTED_PERMISSION_CHOICES` (`default` | `allow_once` | `allow_always` | `reject`).
 /// `default` is the "no preselection" sentinel.
 pub async fn set_default_selected_permission(value: String) -> Result<()> {
-    update_config(|cfg| cfg.ui.default_selected_permission = Some(value)).await
+    update_config(|cfg| cfg.ui.default_selected_permission = Some(value.clone())).await
 }
 
 /// Persist `[ui].cancel_subagents_on_turn_cancel` via `update_config`.
 /// Canonical values: `ask` (clear / prompt each time), `always_stop`, `always_continue`.
 pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.ui.cancel_subagents_on_turn_cancel = if value == "ask" { None } else { Some(value) };
+        cfg.ui.cancel_subagents_on_turn_cancel = if value == "ask" { None } else { Some(value.clone()) };
     })
     .await
 }
@@ -394,7 +394,7 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Empty clears the key.
 pub async fn set_screen_mode(value: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.ui.screen_mode = if value.is_empty() { None } else { Some(value) };
+        cfg.ui.screen_mode = if value.is_empty() { None } else { Some(value.clone()) };
     })
     .await
 }

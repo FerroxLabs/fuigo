@@ -1,0 +1,310 @@
+crates/build/fuigo-proto-build/src/lib.rs:139: println!(
+crates/build/fuigo-proto-build/src/lib.rs:241: println!("cargo:rerun-if-changed={line}");
+crates/build/fuigo-proto-build/src/find_protoc.rs:65: eprintln!(
+crates/build/fuigo-proto-build/src/find_protoc.rs:91: eprintln!("`protoc` not found; likely it is missing in docker image");
+crates/codegen/ptyctl-cli/src/main.rs:104: eprintln!("Error: {e:#}");
+crates/codegen/ptyctl-cli/src/main.rs:121: eprintln!("Error: {e:#}");
+crates/codegen/ptyctl-cli/src/main.rs:141: println!("{}", serde_json::to_string_pretty(&items)?);
+crates/codegen/ptyctl-cli/src/main.rs:143: println!("No active sessions");
+crates/codegen/ptyctl-cli/src/main.rs:145: println!(
+crates/codegen/ptyctl-cli/src/main.rs:149: println!("{}", "-".repeat(60));
+crates/codegen/ptyctl-cli/src/main.rs:160: println!(
+crates/codegen/ptyctl-cli/src/commands/client.rs:82: println!("{body}");
+crates/codegen/ptyctl-cli/src/commands/client.rs:90: println!("{:4} {text}", i + 1);
+crates/codegen/ptyctl-cli/src/commands/client.rs:92: println!("{text}");
+crates/codegen/ptyctl-cli/src/commands/client.rs:110: println!("{body}");
+crates/codegen/ptyctl-cli/src/commands/client.rs:123: println!("{body}");
+crates/codegen/ptyctl-cli/src/commands/client.rs:147: println!("Resized to {cols}x{rows}");
+crates/codegen/ptyctl-cli/src/commands/client.rs:191: println!("{}", serde_json::to_string_pretty(&outcome)?);
+crates/codegen/ptyctl-cli/src/commands/client.rs:211: println!("Session stopped");
+crates/codegen/ptyctl-cli/src/commands/run.rs:96: eprintln!("Command: {}", command.join(" "));
+crates/codegen/ptyctl-cli/src/commands/run.rs:98: eprintln!("PID: {p}");
+crates/codegen/ptyctl-cli/src/commands/run.rs:100: eprintln!("Server listening on port: {actual_port}");
+crates/codegen/ptyctl-cli/src/commands/run.rs:102: println!("{actual_port}");
+crates/codegen/fuigo-tools/build.rs:54: println!("cargo:rerun-if-env-changed=FUIGO_TOOLS_BUNDLE_FD_PATH");
+crates/codegen/fuigo-tools/build.rs:55: println!("cargo:rustc-check-cfg=cfg(bundle_fd)");
+crates/codegen/fuigo-tools/build.rs:95: println!("cargo:rustc-cfg=bundle_fd");
+crates/codegen/fuigo-tools/build.rs:96: println!("cargo:rustc-env=FUIGO_TOOLS_FD_VER={ver}");
+crates/codegen/fuigo-tools/build.rs:100: println!("cargo:rustc-env=FUIGO_TOOLS_FD_TARGET=override");
+crates/codegen/fuigo-tools/build.rs:112: println!("cargo:rustc-env=FUIGO_TOOLS_FD_TARGET={asset_triple}");
+crates/codegen/fuigo-tools/build.rs:207: println!("cargo:rustc-env=FUIGO_TOOLS_{name_uc}_SHA256={sha}");
+crates/codegen/fuigo-tools/build.rs:226: println!("cargo:rerun-if-env-changed={override_env}");
+crates/codegen/fuigo-tools/build.rs:227: println!("cargo:rustc-check-cfg=cfg(bundle_{name})");
+crates/codegen/fuigo-tools/build.rs:246: println!("cargo:rustc-cfg=bundle_{name}");
+crates/codegen/fuigo-tools/build.rs:247: println!("cargo:rustc-env=FUIGO_TOOLS_{name_uc}_VER={ver}");
+crates/codegen/fuigo-tools/build.rs:248: println!("cargo:rustc-env=FUIGO_TOOLS_{name_uc}_TARGET=override");
+crates/codegen/fuigo-tools/build.rs:257: println!("cargo:rerun-if-env-changed=FUIGO_TOOLS_BUNDLE_RG_PATH");
+crates/codegen/fuigo-tools/build.rs:258: println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
+crates/codegen/fuigo-tools/build.rs:282: println!("cargo:rustc-cfg=bundle_rg");
+crates/codegen/fuigo-tools/build.rs:283: println!("cargo:rustc-env=FUIGO_TOOLS_RG_VER={}", RG_VER);
+crates/codegen/fuigo-tools/build.rs:288: println!("cargo:rustc-env=FUIGO_TOOLS_RG_TARGET=override");
+crates/codegen/fuigo-tools/build.rs:316: println!("cargo:rustc-env=FUIGO_TOOLS_RG_TARGET={}", asset_triple);
+crates/codegen/fuigo-version/build.rs:2: println!("cargo:rerun-if-env-changed=FUIGO_VERSION");
+crates/codegen/fuigo-sandbox/src/test_util.rs:14: eprintln!("skipping profile resolve test: host hook write-deny unresolvable ({e})");
+crates/codegen/fuigo-test-support/src/env.rs:17: eprintln!("[test-support] ignoring unparseable {key}={raw:?}; using default");
+crates/codegen/fuigo-test-support/src/headless.rs:165: eprintln!(
+crates/codegen/fuigo-test-support/src/acp_client.rs:393: eprintln!("[harness-timing] {what}: {:?}", started.elapsed());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:189: println!("Loaded index from cache: {}", cache_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:193: println!("Building index for: {}", repo_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:202: println!(
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:209: println!("Warning: Failed to save cache: {}", e);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:211: println!("Saved cache to: {}", cache_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:220: println!("Building index for: {}", path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:233: println!("Index built successfully!");
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:234: println!("  Files indexed: {}", files);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:235: println!("  Definitions:   {}", defs);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:236: println!("  References:    {}", refs);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:237: println!("  Aliases:       {}", index.alias_count());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:238: println!("  Time:          {:?}", elapsed);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:242: println!("Error saving cache: {}", e);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:245: println!("  Cache saved:   {}", cache_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:274: println!("Error: {}", e);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:282: println!("Error: Must provide either --file, --row, --col OR --symbol");
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:290: println!("Symbol: {}", result.symbol);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:291: println!("Definitions ({}):", result.locations.len());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:293: println!("  {}:{}", loc.path, loc.line);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:324: println!("Error: {}", e);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:332: println!("Error: Must provide either --file, --row, --col OR --symbol");
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:340: println!("Symbol: {}", result.symbol);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:341: println!("References ({}):", result.locations.len());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:344: println!("  {}:{} (as {})", loc.path, loc.line, sym);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:346: println!("  {}:{}", loc.path, loc.line);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:357: println!("Index Statistics for: {}", path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:358: println!("  Cache location: {}", cache_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:359: println!("  Files indexed:  {}", files);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:360: println!("  Definitions:    {}", defs);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:361: println!("  References:     {}", refs);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:362: println!("  Aliases:        {}", index.alias_count());
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:367: println!("\nTop 10 most referenced symbols:");
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:369: println!("  {:6} {}", count, name);
+crates/codegen/fuigo-codebase-graph/src/bin/code_graph.rs:393: println!("{}", serde_json::to_string_pretty(&output).unwrap());
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:19: eprintln!("Usage: bench_file_listing <path> [cli|git2|git2-index|both]");
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:20: eprintln!("Or set BENCH_REPO_ROOT to a large checkout to bench against");
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:33: println!("CLI: {} files in {:?}", files.len(), elapsed);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:39: println!("git2: {} files in {:?}", files.len(), elapsed);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:45: println!("git2 (index only): {} files in {:?}", files.len(), elapsed);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:49: println!("Benchmarking file listing for: {}", root_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:50: println!();
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:95: println!("Results ({} iterations):", iterations);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:96: println!(
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:100: println!(
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:104: println!(
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:108: println!();
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:112: println!("git2 (index only) is {:.2}x faster than CLI", speedup);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_file_listing.rs:114: println!("CLI is {:.2}x faster than git2 (index only)", 1.0 / speedup);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:19: eprintln!("Usage: bench_index <path>");
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:20: eprintln!("Or set BENCH_REPO_ROOT to a large checkout to bench against");
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:25: println!("Verifying query compilation...");
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:31: println!("  .{}: OK ({} patterns)", ext, query.pattern_count());
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:34: println!("  .{}: FAILED - {:?}", ext, e);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:37: None => println!("  .{}: NOT SUPPORTED", ext),
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:40: println!();
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:44: println!("Building index for: {}", root_path.display());
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:54: println!("Files indexed: {}", file_count);
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:55: println!(
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:59: println!("Aliases: {}", index.alias_count());
+crates/codegen/fuigo-codebase-graph/src/bin/bench_index.rs:60: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:327: eprintln!("  [A/B] Creating worktree A...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:334: eprintln!("  [A/B] Creating worktree B...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:342: eprintln!("  [A/B] Warming caches A...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:348: eprintln!("  [A/B] Warming caches B...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:368: eprintln!("  [A/B] Syncing A...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:374: eprintln!("  [A/B] Syncing B...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:406: eprintln!("  [A/B] Releasing A...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:412: eprintln!("  [A/B] Releasing B...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:432: eprintln!("  [A/B] Cleaning up A...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:438: eprintln!("  [A/B] Cleaning up B...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:465: eprintln!("  Creating worktree...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:468: eprintln!("  Warming caches (1st)...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:471: eprintln!("  Warming caches (2nd, hot)...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:474: eprintln!("  Syncing (skip_clean=true, pool mode)...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:479: eprintln!("  Post-sync git status...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:482: eprintln!("  Simulating use...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:485: eprintln!("  Releasing...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:488: eprintln!("  Post-release warm...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:491: eprintln!("  Cleaning up...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:561: println!();
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:562: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:569: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:574: println!("  │            └─ {}", phase.detail);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:577: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:584: println!();
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:585: println!("╔══════════════════════════════════════════════════════════════════╗");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:586: println!("║                    BENCHMARK SUMMARY                            ║");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:587: println!("╠══════════════════════════════════════════════════════════════════╣");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:588: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:592: println!("║ Tracked files: {:<48} ║", result.tracked_files);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:593: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:601: println!("║ Iterations: {:<51} ║", result.iterations.len());
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:602: println!("╠══════════════════════════════════════════════════════════════════╣");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:603: println!("║ Phase Averages:                                                 ║");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:615: println!("║   {:>8.1}ms ({:>4.1}%)  {:<35}{}", avg, pct, name, marker);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:617: println!("╠══════════════════════════════════════════════════════════════════╣");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:618: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:622: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:633: println!("╚══════════════════════════════════════════════════════════════════╝");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:637: println!("{{");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:638: println!("  \"source\": {:?},", result.source);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:639: println!("  \"tracked_files\": {},", result.tracked_files);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:640: println!("  \"ab_mode\": {},", result.ab_mode);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:641: println!("  \"iterations\": [");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:643: println!("    {{");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:644: println!("      \"iteration\": {},", iter.iteration);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:645: println!("      \"total_ms\": {:.2},", iter.total_ms);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:646: println!("      \"phases\": [");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:649: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:654: println!("      ]");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:660: println!("    }}{comma}");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:662: println!("  ],");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:663: println!("  \"summary\": {{");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:664: println!("    \"total_avg_ms\": {:.2},", result.summary.total_avg_ms);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:665: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:669: println!("    \"phase_averages\": [");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:676: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:681: println!("    ]");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:682: println!("  }}");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:683: println!("}}");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:710: eprintln!("╔══════════════════════════════════════════════════════════════════╗");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:711: eprintln!("║             Pool Performance Benchmark                          ║");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:712: eprintln!("╠══════════════════════════════════════════════════════════════════╣");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:713: eprintln!("║ Source: {}", source.display());
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:714: eprintln!("║ Tracked files: {tracked}");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:715: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:723: eprintln!("║ Iterations: {}", cli.iterations);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:724: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:732: eprintln!("║ Copy dirty: {}", cli.copy_dirty);
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:733: eprintln!("╚══════════════════════════════════════════════════════════════════╝");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:734: eprintln!();
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:744: eprintln!("Bench dir: {}", bench_dir.path().display());
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:749: eprintln!("Enabling git perf features on source...");
+crates/codegen/fuigo-fast-worktree/src/bin/pool_perf_bench.rs:763: eprintln!("\n━━━ Iteration {}/{} ━━━", i + 1, cli.iterations);
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:64: eprintln!("nfs-create-latency-bench: NFS worktrees are macOS-only.");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:65: eprintln!("This binary compiles on Linux so CI typechecks; it does not sample NFS_WT_*.");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:196: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:357: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:383: eprintln!("source={} tracked={tracked}", source.display());
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:384: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:411: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:433: eprintln!(
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:460: println!("{{");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:461: println!("  \"tracked_files\": {tracked},");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:462: println!("  \"release\": {},", !cfg!(debug_assertions));
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:463: println!("  \"strategy\": {strategy:?},");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:465: println!("  \"product_create_p50_ms\": null,");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:466: println!("  \"product_create_mean_ms\": null,");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:468: println!("  \"product_create_p50_ms\": {nfs_p50:.3},");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:469: println!("  \"product_create_mean_ms\": {nfs_mean:.3},");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:472: Some(c) => println!("  \"copy_create_p50_ms\": {c:.3},"),
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:473: None => println!("  \"copy_create_p50_ms\": null,"),
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:476: Some(c) => println!("  \"copy_create_mean_ms\": {c:.3},"),
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:477: None => println!("  \"copy_create_mean_ms\": null,"),
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:479: println!("  \"iterations\": [");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:482: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:487: println!("  ]");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:488: println!("}}");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:490: println!("{p50_line}");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:492: println!("copy compare p50={c:.3} ms (not an NFS number)");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:526: eprintln!("{line}");
+crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs:528: println!("{line}");
+crates/codegen/fuigo-fast-worktree/src/bin/worktree_lifecycle_bench.rs:1200: println!("{}", serde_json::to_string(&result)?);
+crates/codegen/fuigo-fast-worktree/src/bin/worktree_lifecycle_bench.rs:1826: println!("{json}");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:166: println!("\n✓ Worktree created successfully!");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:167: println!("  Path:   {}", result.worktree_path.display());
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:168: println!("  Commit: {}", &result.commit[..12]);
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:172: println!(
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:177: println!("  Method: snapshot (instant, BTRFS or overlay)");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:181: println!("  Mode:   standalone (independent .git/, promotable via rename)");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:183: println!("  Mode:   linked worktree");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:187: println!("  Ignored: {} copied", ignored_stats.files_copied);
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:192: println!("\n⚠ Warnings:");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:195: println!("  - {}", error);
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:202: println!("\n⚠ Warnings:");
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:205: println!("  - {}", error);
+crates/codegen/fuigo-fast-worktree/src/bin/cli.rs:209: println!("\n  Time: {:.2?}", elapsed);
+crates/codegen/fuigo-workspace/src/bin/workspace_server.rs:256: println!("{}", serde_json::to_string(&CAPABILITIES)?);
+crates/codegen/fuigo-workspace/src/bin/workspace_server.rs:260: eprintln!("{msg}");
+crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs:111: eprintln!("[probe] attempt {attempt} failed: {e}");
+crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs:148: eprintln!("[probe] servers visible to this user: {server_ids:?}");
+crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs:167: eprintln!(
+crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs:193: eprintln!("[probe] run_terminal_command OK (nonce echoed)");
+crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs:202: eprintln!("[probe] read_file OK (read back written nonce)");
+crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs:204: println!("PROBE_OK");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:132: eprintln!(
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:340: eprintln!("taking over from predecessor workspace-server (pid {pid})");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:342: eprintln!("failed to signal predecessor (pid {pid}): {e}");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:348: eprintln!("predecessor (pid {pid}) did not release the pidfile lock in time; killing it");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:350: eprintln!("failed to kill predecessor (pid {pid}): {e}");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:358: eprintln!("pidfile lock is still held after killing pid {pid}; exiting");
+third_party/dagre_rust/src/layout/acyclic.rs:13: println!("greedy_fas");
+crates/codegen/fuigo-shell/build.rs:14: println!("cargo:rerun-if-env-changed=FUIGO_SHELL_BUNDLE_RG_PATH");
+crates/codegen/fuigo-shell/build.rs:15: println!("cargo:rerun-if-env-changed=FUIGO_SHELL_RG_DOWNLOAD_BASE");
+crates/codegen/fuigo-shell/build.rs:17: println!("cargo:rustc-check-cfg=cfg(bundle_rg)");
+crates/codegen/fuigo-shell/build.rs:52: println!("cargo:rustc-cfg=bundle_rg");
+crates/codegen/fuigo-shell/build.rs:53: println!("cargo:rustc-env=FUIGO_SHELL_RG_VER={}", RG_VER);
+crates/codegen/fuigo-shell/build.rs:54: println!(
+crates/codegen/fuigo-shell/build.rs:62: println!("cargo:rustc-env=FUIGO_SHELL_RG_TARGET=override");
+crates/codegen/fuigo-shell/build.rs:90: println!("cargo:rustc-env=FUIGO_SHELL_RG_TARGET={}", asset_triple);
+crates/codegen/fuigo-update/src/version_policy.rs:103: eprintln!("{message}");
+crates/codegen/fuigo-update/src/auto_update.rs:179: println!("{payload}");
+crates/codegen/fuigo-update/src/auto_update.rs:184: println!("Fuigo - v{} [{}]", status.current_version, status.channel);
+crates/codegen/fuigo-update/src/auto_update.rs:185: println!("Update check failed: {error}");
+crates/codegen/fuigo-update/src/auto_update.rs:193: println!(
+crates/codegen/fuigo-update/src/auto_update.rs:198: println!("A new version of Fuigo is available.");
+crates/codegen/fuigo-update/src/auto_update.rs:204: println!(
+crates/codegen/fuigo-update/src/auto_update.rs:211: println!("Fuigo - v{}{}", status.current_version, channel_label);
+crates/codegen/fuigo-update/src/auto_update.rs:714: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:720: eprintln!("Update failed: {}", e);
+crates/codegen/fuigo-update/src/auto_update.rs:724: eprintln!("{}", MSG_AUTO_UPDATE_BACKGROUND);
+crates/codegen/fuigo-update/src/auto_update.rs:728: eprintln!("Update failed: {}", e);
+crates/codegen/fuigo-update/src/auto_update.rs:742: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:747: eprintln!("{}", PROMPT_UPDATE_NOW);
+crates/codegen/fuigo-update/src/auto_update.rs:756: eprintln!("Update failed: {}", e);
+crates/codegen/fuigo-update/src/auto_update.rs:760: eprintln!("{}", MSG_AUTO_UPDATE_BACKGROUND);
+crates/codegen/fuigo-update/src/auto_update.rs:775: eprintln!("{}", MSG_RUN_UPDATE_MANUAL);
+crates/codegen/fuigo-update/src/auto_update.rs:860: eprintln!("Restarting Fuigo...");
+crates/codegen/fuigo-update/src/auto_update.rs:1586: eprintln!("  Downloading fuigo v{} ({})...", version, platform);
+crates/codegen/fuigo-update/src/auto_update.rs:1618: eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2257: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2302: eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2372: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2376: eprintln!("    Processes running from the npm vendored binary path may be");
+crates/codegen/fuigo-update/src/auto_update.rs:2377: eprintln!("    killed by macOS when npm replaces the package files.");
+crates/codegen/fuigo-update/src/auto_update.rs:2378: eprintln!("    Consider closing other fuigo sessions before updating.");
+crates/codegen/fuigo-update/src/auto_update.rs:2379: eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2456: eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2469: eprintln!("Switched to {} channel.", ch);
+crates/codegen/fuigo-update/src/auto_update.rs:2490: eprintln!("Auto-update is not available for manual installations.");
+crates/codegen/fuigo-update/src/auto_update.rs:2513: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2517: eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2527: eprintln!("  ✓ fuigo v{} installed successfully!", version);
+crates/codegen/fuigo-update/src/auto_update.rs:2528: eprintln!("  Please restart Fuigo.");
+crates/codegen/fuigo-update/src/auto_update.rs:2547: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2563: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2594: eprintln!("Already up to date ({}).", effective_current);
+crates/codegen/fuigo-update/src/auto_update.rs:2636: eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2642: eprintln!("Updating Fuigo {} → {}", effective_current, install_target);
+crates/codegen/fuigo-update/src/auto_update.rs:2646: eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2653: eprintln!("  ✓ fuigo v{} installed successfully!", target_version);
+crates/codegen/fuigo-update/src/auto_update.rs:2656: eprintln!("  Please restart Fuigo.");
+crates/codegen/fuigo-update/src/auto_update.rs:2677: Ok(true) => eprintln!("  Applied managed configuration."),
+crates/codegen/fuigo-update/src/auto_update.rs:2683: eprintln!("  Couldn't apply managed configuration. Run `fuigo setup` to retry.");
+crates/codegen/fuigo-update/src/auto_update.rs:2685: Err(e) => eprintln!("  Couldn't apply managed configuration. {e}"),
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:47: eprintln!(
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:51: eprintln!("Speak now...\n");
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:58: println!("Mic-only OK: {bytes} bytes in {chunks} chunks");
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:60: println!("WARNING: no audio — grant mic access to the terminal");
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:75: print!("{}", format_probe_report(&report));
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:119: _ => eprintln!("unknown arg: {}", argv[i]),
+crates/codegen/fuigo-voice/src/bin/voice_probe.rs:145: eprintln!(
+crates/codegen/fuigo-pager-pty-harness/src/bin/scroll_matrix.rs:65: eprintln!("scroll-matrix failed: {error:#}");
+crates/codegen/fuigo-pager-pty-harness/src/bin/scroll_matrix.rs:105: print!("{}", summary_table(&reports));
+crates/codegen/fuigo-pager-pty-harness/src/bin/scroll_matrix.rs:107: eprintln!("report: {}", report_path.display());
+crates/codegen/fuigo-pager-pty-harness/src/bin/scroll_matrix.rs:122: eprintln!("[{}/{}] {}", i + 1, cells.len(), cell.id);
+crates/codegen/fuigo-pager-pty-harness/src/bin/scroll_matrix.rs:135: eprintln!("running {}", cell.id);
+crates/codegen/fuigo-pager-pty-harness/src/bin/startup_tui_probe.rs:272: eprintln!("warning: skipping {}: {err}", dir.display());
+crates/codegen/fuigo-pager-pty-harness/src/bin/pty_scenario.rs:36: eprintln!("pty-scenario failed: {error:#}");
+crates/codegen/fuigo-pager-pty-harness/src/bin/pty_scenario.rs:57: println!("{json}");
+crates/codegen/fuigo-pager-bin/build.rs:15: println!("cargo:rerun-if-env-changed=FUIGO_VERSION");
+crates/codegen/fuigo-pager-bin/build.rs:16: println!("cargo:rerun-if-changed={}", version_manifest().display());
+crates/codegen/fuigo-pager-bin/build.rs:27: println!("cargo:rerun-if-changed={path}");
+crates/codegen/fuigo-pager-bin/build.rs:49: println!("cargo:rustc-env=VERSION_WITH_COMMIT={version} ({commit})");

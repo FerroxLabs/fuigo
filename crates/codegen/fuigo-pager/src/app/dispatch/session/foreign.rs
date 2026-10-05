@@ -11,17 +11,8 @@ use fuigo_shell::session::unified_list::ListScope;
 
 /// The history `kind` filter for the welcome screen's multi-source history under `--chat`.
 ///
-/// Sandbox maps to `chat` (gateway); Local maps to `build` (local-disk).
-/// Modal and non-welcome fetches get `None` so the shell keeps its default of forcing chat mode.
+/// Always `None`: the shell keeps its default of forcing chat mode for every fetch.
 pub(in crate::app::dispatch) fn welcome_history_kind_filter(app: &AppView) -> Option<Vec<String>> {
-    #[cfg(feature = "local-workspace")]
-    {
-        if app.chat_mode && matches!(app.active_view, crate::app::app_view::ActiveView::Welcome) {
-            return Some(vec![
-                app.welcome_workspace_mode.history_kind_filter().to_string(),
-            ]);
-        }
-    }
     let _ = app;
     None
 }
@@ -69,13 +60,6 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
     app.foreign_session_scan_seq += 1;
     let foreign_seq = app.foreign_session_scan_seq;
     let kind_filter = welcome_history_kind_filter(app);
-    #[cfg(feature = "local-workspace")]
-    crate::views::welcome::workspace_mode::log_history_source(
-        "session_list_fetch_dispatch",
-        Some(app.welcome_workspace_mode),
-        kind_filter.as_deref(),
-        None,
-    );
     let (host, generation) = match modal_generation {
         Some(generation) => (SessionPickerHost::AgentModal, generation),
         None => (SessionPickerHost::Welcome, app.session_picker_generation),

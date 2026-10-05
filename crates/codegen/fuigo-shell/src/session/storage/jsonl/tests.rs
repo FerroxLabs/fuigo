@@ -349,9 +349,11 @@ async fn merge_rewind_points_from_persists_merged_set() {
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].prompt_index, 0);
 }
-/// A malformed on-disk line makes the STRICT merge read abort BEFORE writing, leaving `rewind_points.jsonl` untouched (never drop the line).
+/// A malformed on-disk line is never dropped by the merge. Before P114 the merge aborted on it (and so did every later
+/// merge and truncation, for good); now it succeeds and keeps the line byte for byte, since it records which prompt's
+/// saved files are missing (Fable P111 #1).
 #[tokio::test]
-async fn merge_rewind_points_from_aborts_on_malformed_without_writing() {
+async fn merge_rewind_points_from_keeps_a_malformed_line() {
     let temp_dir = TempDir::new().unwrap();
     let info = create_test_info();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -359,12 +361,11 @@ async fn merge_rewind_points_from_aborts_on_malformed_without_writing() {
     let path = adapter.rewind_points_file_path(&info).unwrap();
     let original = "garbage{not json\n";
     tokio::fs::write(&path, original).await.unwrap();
-    let res = adapter.merge_rewind_points_from(&info, 1).await;
-    assert!(res.is_err(), "malformed read must abort the merge");
+    adapter.merge_rewind_points_from(&info, 1).await.expect("a malformed line does not block the merge");
     assert_eq!(
             tokio::fs::read_to_string(&path).await.unwrap(),
             original,
-            "rewind_points.jsonl must be preserved when the merge aborts"
+            "the malformed line is kept byte for byte"
         );
 }
 /// File-content `file_snapshots` must round-trip through the on-disk read-modify-write merge (not just index/count).
@@ -2604,4 +2605,566 @@ async fn corrupt_usage_json_does_not_read_as_missing() {
     let err = adapter.read_usage(&info).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not-json");
+}
+/// P114 (Fable P111 #1): `rewind_points.jsonl` holding a torn row (a record cut short, inside a multi-byte character, and
+/// terminated by the next append). After a rewind that did not need it succeeds, the persistence actor truncates the
+/// file from the target; a ConversationOnly rewind merges it. Both read the file strictly, so the torn row made them
+/// fail and left the undone prompts' points on disk, where the next resume loads them again. They must succeed, drop or
+/// fold exactly the readable rows they were asked to, and keep the damaged row (it records which prompts' saved files
+/// are missing).
+#[tokio::test]
+async fn rewind_point_truncate_and_merge_keep_a_torn_row_and_succeed() {
+    use fuigo_paths::RelPathBuf;
+    use fuigo_workspace::session::file_state::{FileSnapshot, RewindPoint};
+    let point = |idx: usize, file: &str, content: &str| {
+        let mut p = RewindPoint::new(idx);
+        p.add_snapshot(FileSnapshot::new(RelPathBuf::new(file).unwrap(), Some(content.to_string())));
+        serde_json::to_vec(&p).unwrap()
+    };
+    let full = point(2, "d.rs", "café");
+    let accent = full.windows(2).position(|w| w == "é".as_bytes()).unwrap();
+    let torn = full[..accent + 1].to_vec();
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let mut body = Vec::new();
+    for row in [point(1, "a.rs", "a1"), torn.clone(), point(3, "b.rs", "b3"), point(4, "c.rs", "c4")] {
+        body.extend_from_slice(&row);
+        body.push(b'\n');
+    }
+    std::fs::write(&path, &body).unwrap();
+    let rows = |path: &std::path::Path| -> Vec<Result<usize, Vec<u8>>> {
+        std::fs::read(path)
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<RewindPoint>(line).map(|p| p.prompt_index).map_err(|_| line.to_vec()))
+            .collect()
+    };
+
+    adapter.truncate_rewind_points_from(&info, 4).await.expect("truncating past the torn row works");
+    assert_eq!(rows(&path), vec![Ok(1), Err(torn.clone()), Ok(3)], "only the point of prompt 4 is dropped");
+
+    adapter.merge_rewind_points_from(&info, 2).await.expect("merging works");
+    let merged = rows(&path);
+    assert_eq!(merged, vec![Ok(1), Err(torn.clone())], "prompt 3 folds into prompt 1; the torn row is kept, last");
+    let first: RewindPoint = serde_json::from_slice(std::fs::read(&path).unwrap().split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(first.file_snapshots.len(), 2, "prompt 1's point now also holds prompt 3's saved file");
+}
+
+/// Every regular file under `dir` with its Unix mode bits.
+#[cfg(unix)]
+fn p120_modes(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u32)> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if meta.is_dir() {
+            out.extend(p120_modes(&path));
+        } else if meta.is_file() {
+            out.push((path, meta.permissions().mode() & 0o777));
+        }
+    }
+    out
+}
+/// P120 (R113 R3.5): session files are created readable by the owner only, whatever the umask.
+#[cfg(unix)]
+#[tokio::test]
+async fn p120_session_files_are_created_owner_only() {
+    // SAFETY: umask only changes the process's default creation mask.
+    unsafe { libc::umask(0o022) };
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter.append_chat_message(&info, &ConversationItem::user("hello")).await.unwrap();
+    adapter
+        .append_update(&info, &SessionUpdate::Acp(Box::new(create_test_notification())))
+        .await
+        .unwrap();
+    adapter.write_plan_state(&info, &create_test_plan_state()).await.unwrap();
+    let seg = crate::extensions::notification::CompactionSegmentFile {
+        items: vec![ConversationItem::user("a")],
+        summary: "s".to_string(),
+        detail: fuigo_chat_state::CompactionDetail::Verbose,
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+    };
+    adapter.write_compaction_segment(&info, &seg).await.unwrap();
+    let modes = p120_modes(&adapter.session_dir(&info));
+    assert!(modes.len() >= 5, "control: the session wrote its files: {modes:?}");
+    let loose: Vec<_> = modes.iter().filter(|(_, mode)| *mode != 0o600).collect();
+    assert!(loose.is_empty(), "session files with a mode other than 0600: {loose:?}");
+}
+/// P120: a session file that already exists with a looser mode (an older version, a restored backup) is tightened
+/// when it is opened for writing.
+#[cfg(unix)]
+#[tokio::test]
+async fn p120_existing_loose_session_files_are_tightened_on_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter.append_chat_message(&info, &ConversationItem::user("hello")).await.unwrap();
+    adapter
+        .append_update(&info, &SessionUpdate::Acp(Box::new(create_test_notification())))
+        .await
+        .unwrap();
+    let dir = adapter.session_dir(&info);
+    let loosen = || {
+        for (path, _) in p120_modes(&dir) {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    };
+    loosen();
+    adapter.append_chat_message(&info, &ConversationItem::user("again")).await.unwrap();
+    adapter
+        .append_update(&info, &SessionUpdate::Acp(Box::new(create_test_notification())))
+        .await
+        .unwrap();
+    let mode = |name: &str| std::fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(crate::session::storage::CHAT_HISTORY_FILE), 0o600, "chat history");
+    assert_eq!(mode("updates.jsonl"), 0o600, "updates");
+    loosen();
+    adapter.update_current_model(&info, &default_model_id()).await.unwrap();
+    assert_eq!(mode(crate::session::storage::SUMMARY_FILE), 0o600, "summary");
+}
+/// P120 (Astra r1 #6): a fork copies the source's sidecars and transcripts, and the copies are owner-only even when
+/// the source files are loose (an older version wrote them 0644).
+#[cfg(unix)]
+#[tokio::test]
+async fn p120_forked_session_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info { id: acp::SessionId::new("src-p120-modes"), cwd: "/src".to_string() };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    adapter.append_chat_message(&source, &ConversationItem::user("hello")).await.unwrap();
+    std::fs::write(adapter.plan_file(&source), b"plan").unwrap();
+    std::fs::write(adapter.signals_file(&source), b"signals").unwrap();
+    std::fs::write(adapter.session_dir(&source).join("tool_state.json"), b"{\"todo\":[]}").unwrap();
+    let compaction = adapter.session_dir(&source).join(fuigo_compaction_transcript::COMPACTION_DIR);
+    std::fs::create_dir_all(&compaction).unwrap();
+    std::fs::write(compaction.join("segment_000.md"), b"# segment").unwrap();
+    for (path, _) in p120_modes(&adapter.session_dir(&source)) {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let target = Info { id: acp::SessionId::new("tgt-p120-modes"), cwd: "/tgt".to_string() };
+    adapter.copy_session_data(&source, &target, CopySessionOptions::default()).await.unwrap();
+    let modes = p120_modes(&adapter.session_dir(&target));
+    assert!(modes.len() >= 4, "control: the fork wrote its files: {modes:?}");
+    let loose: Vec<_> = modes.iter().filter(|(_, mode)| *mode != 0o600).collect();
+    assert!(loose.is_empty(), "forked files with a mode other than 0600: {loose:?}");
+}
+/// P120 (Astra r2 #6): the pre-strip backup of a loose chat file is owner-only.
+#[cfg(unix)]
+#[tokio::test]
+async fn p120_pre_strip_backup_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter.append_chat_message(&info, &ConversationItem::user("hello")).await.unwrap();
+    let chat = adapter.chat_file(&info);
+    std::fs::set_permissions(&chat, std::fs::Permissions::from_mode(0o644)).unwrap();
+    adapter.backup_chat_history_before_strip(&info).await.unwrap();
+    let backup = chat.with_extension("jsonl.pre-strip");
+    assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
+}
+/// A `rewind_points.jsonl` of three rows in file order: prompt 0, a row cut short in the middle of its fields (a crash in
+/// the middle of an append, terminated by the next append), prompt 2.
+fn p123_rewind_file_with_a_damaged_row() -> Vec<u8> {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let mut bytes = Vec::new();
+    bytes.extend(serde_json::to_vec(&RewindPoint::new(0)).unwrap());
+    bytes.push(b'\n');
+    let second = serde_json::to_vec(&RewindPoint::new(1)).unwrap();
+    bytes.extend_from_slice(&second[..second.len() / 2]);
+    bytes.push(b'\n');
+    bytes.extend(serde_json::to_vec(&RewindPoint::new(2)).unwrap());
+    bytes.push(b'\n');
+    bytes
+}
+
+/// P123 (P114 open item 3a): the full load (`load_session`, which export and the writeback backfill use) and
+/// `load_rewind_points` read `rewind_points.jsonl` strictly, so one damaged row made them fail. They now tolerate it the way
+/// rewind does: the readable rows are returned, the damaged row is left in the file byte for byte, and the load succeeds.
+#[tokio::test]
+async fn a_damaged_rewind_row_does_not_fail_the_full_load() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let original = p123_rewind_file_with_a_damaged_row();
+    std::fs::write(&path, &original).unwrap();
+    let loaded = adapter
+        .load_session(&info)
+        .await
+        .expect("a damaged rewind row must not fail the full load (export, writeback backfill)");
+    let indexes: Vec<usize> = loaded.rewind_points.iter().map(|point| point.prompt_index).collect();
+    assert_eq!(indexes, vec![0, 2], "the readable rows are loaded");
+    assert_eq!(loaded.damaged_rewind_lines, vec![2], "the damaged row is reported by its line number");
+    let points = adapter
+        .load_rewind_points(&info)
+        .await
+        .expect("a damaged rewind row must not fail load_rewind_points");
+    assert_eq!(points.len(), 2);
+    assert_eq!(std::fs::read(&path).unwrap(), original, "loading never changes the file: the damaged row is kept");
+}
+
+/// P123 (P114 open item 3b): a truncate or merge of `rewind_points.jsonl` read the file, then renamed a rewritten copy
+/// over it, and an append another process made in between was lost. The rewrite now holds the append lock from its read to
+/// its rename, so the append waits and lands after the rename. The rewrite is held between its read and its write here:
+/// the test checks the append lock is held at that point (no timing involved), then lets a second writer append meanwhile.
+#[tokio::test]
+async fn a_rewind_points_rewrite_does_not_lose_an_append_made_during_it() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    for merge in [false, true] {
+        let temp_dir = TempDir::new().unwrap();
+        let info = create_test_info();
+        let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+        adapter.init_session(&info, default_model_id()).await.unwrap();
+        for i in 0..3 {
+            adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+        }
+        let path = adapter.rewind_points_file_path(&info).unwrap();
+        let (held, release) = super::load_repair::seams::hold_next_write(&path);
+        let rewriter = adapter.clone();
+        let rewrite_info = info.clone();
+        let rewrite = tokio::spawn(async move {
+            if merge {
+                rewriter.merge_rewind_points_from(&rewrite_info, 2).await
+            } else {
+                rewriter.truncate_rewind_points_from(&rewrite_info, 2).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(20), held)
+            .await
+            .expect("the rewrite reached its write")
+            .unwrap();
+        // The rewrite has read the file and waits to write. Nobody else may append now: it holds the append lock.
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("jsonl.lock"))
+            .unwrap();
+        assert!(
+            fs2::FileExt::try_lock_exclusive(&probe).is_err(),
+            "merge={merge}: the rewrite does not hold the append lock between its read and its rename"
+        );
+        // Another writer appends prompt 5 meanwhile: it waits for the lock and lands after the rename.
+        let appender = adapter.clone();
+        let append_info = info.clone();
+        let append = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(appender.append_rewind_point(&append_info, &RewindPoint::new(5)))
+        });
+        release.send(()).unwrap();
+        rewrite.await.unwrap().unwrap();
+        append.join().unwrap().unwrap();
+        let indexes: Vec<usize> = adapter
+            .load_rewind_points(&info)
+            .await
+            .unwrap()
+            .iter()
+            .map(|point| point.prompt_index)
+            .collect();
+        assert!(
+            indexes.contains(&5),
+            "merge={merge}: the append made during the rewrite was lost; rows now: {indexes:?}"
+        );
+        assert!(indexes.contains(&0) && indexes.contains(&1), "merge={merge}: the kept rows are there: {indexes:?}");
+        assert!(!indexes.contains(&2), "merge={merge}: the rewrite still did its work: {indexes:?}");
+    }
+}
+
+/// P123 (Astra r1 HIGH): the rewrite runs on the persistence actor's queue, so an append lock held for good by another
+/// process (suspended inside its append) must not hold every later write and flush hostage. The rewrite waits a bounded
+/// time and then fails with `WouldBlock`, leaving the file as it was.
+#[tokio::test]
+#[serial_test::serial(rewrite_lock_wait)]
+async fn a_rewind_points_rewrite_gives_up_when_the_append_lock_stays_held() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..3 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let held = JsonlStorageAdapter::lock_append(&path).unwrap();
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(200, std::sync::atomic::Ordering::Relaxed);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.truncate_rewind_points_from(&info, 1)).await;
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    drop(held);
+    let error = outcome
+        .expect("the rewrite must not wait for a held lock for ever")
+        .expect_err("a lock that stays held fails the rewrite");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock, "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "a failed rewrite leaves the file as it was");
+    adapter.truncate_rewind_points_from(&info, 1).await.expect("the rewrite works once the lock is free");
+}
+
+/// P123 (Astra r1 MEDIUM): a lock file that cannot be opened at all (here a directory sits where it belongs) must not make
+/// a rewrite that worked before fail: it goes ahead without the lock, as the readers do.
+#[tokio::test]
+async fn a_rewind_points_rewrite_does_not_need_a_usable_lock_file() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..3 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
+    std::fs::create_dir(path.with_extension("jsonl.lock")).unwrap();
+    adapter
+        .truncate_rewind_points_from(&info, 1)
+        .await
+        .expect("an unusable lock file does not fail the rewrite");
+    let rows = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(rows.lines().count(), 1, "the rewrite was made: {rows}");
+}
+
+/// P123 (Astra r2 MEDIUM): a process that only READS the rewind points holds the append lock shared. The rewrite holds it
+/// shared too (which still keeps every append, an exclusive taker, out), so a reader that is suspended does not make it
+/// fail.
+#[tokio::test]
+#[serial_test::serial(rewrite_lock_wait)]
+async fn a_rewind_points_rewrite_does_not_wait_for_a_reader() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..3 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let reader = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(path.with_extension("jsonl.lock")).unwrap();
+    fs2::FileExt::lock_shared(&reader).unwrap();
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(300, std::sync::atomic::Ordering::Relaxed);
+    let outcome = adapter.truncate_rewind_points_from(&info, 1).await;
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    drop(reader);
+    outcome.expect("a reader holding the lock shared does not stop the rewrite");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+}
+
+/// P140 (K19): two rewriters of `rewind_points.jsonl` (two Fuigo processes; here two adapters on their own threads, each
+/// with its own lock handles) both held the append lock SHARED, so both read, edited and renamed and the later rename
+/// dropped the earlier edit. Rewriter A is held between its read and its rename; rewriter B, whose edit is the larger,
+/// must wait for A (it cannot finish while A is held) and then apply its edit on top of A's.
+#[tokio::test]
+#[serial_test::serial(rewrite_lock_wait)]
+async fn two_rewind_points_rewriters_do_not_lose_each_others_edit() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..6 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let (held, release) = super::load_repair::seams::hold_next_write(&path);
+    let a = adapter.clone();
+    let a_info = info.clone();
+    let rewrite_a = tokio::spawn(async move { a.truncate_rewind_points_from(&a_info, 4).await });
+    tokio::time::timeout(std::time::Duration::from_secs(20), held)
+        .await
+        .expect("rewriter A reached its write")
+        .unwrap();
+    // A has read the six rows and waits to rename. B, in "another process", drops rows 2 and later.
+    let b = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let b_info = info.clone();
+    let contended_before = super::REWRITE_LOCK_CONTENDED.load(std::sync::atomic::Ordering::SeqCst);
+    let mut rewrite_b = tokio::spawn(async move { b.truncate_rewind_points_from(&b_info, 2).await });
+    // B must be seen queued behind A (it found the rewrite lock held), and must still be waiting afterwards.
+    let queued = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while super::REWRITE_LOCK_CONTENDED.load(std::sync::atomic::Ordering::SeqCst) == contended_before {
+        assert!(!rewrite_b.is_finished(), "rewriter B finished while rewriter A was still between its read and its rename");
+        assert!(std::time::Instant::now() < queued, "rewriter B never queued behind rewriter A");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(!rewrite_b.is_finished(), "rewriter B finished while rewriter A was still between its read and its rename");
+    release.send(()).unwrap();
+    rewrite_a.await.unwrap().unwrap();
+    rewrite_b.await.unwrap().unwrap();
+    let indexes: Vec<usize> = adapter
+        .load_rewind_points(&info)
+        .await
+        .unwrap()
+        .iter()
+        .map(|point| point.prompt_index)
+        .collect();
+    assert_eq!(indexes, vec![0, 1], "one rewriter's edit was lost");
+}
+
+/// P140: a rewrite lock that stays held (another process suspended inside its rewrite) fails the rewrite after the same
+/// bounded wait as the append lock, with `WouldBlock`, and leaves the file as it was. The lock file is owner-only.
+#[tokio::test]
+#[serial_test::serial(rewrite_lock_wait)]
+async fn a_rewind_points_rewrite_gives_up_when_the_rewrite_lock_stays_held() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..3 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let lock_path = path.with_extension("jsonl.rewrite.lock");
+    let held = super::super::owner_only::open(
+        std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
+        &lock_path,
+    )
+    .unwrap();
+    fs2::FileExt::lock_exclusive(&held).unwrap();
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(200, std::sync::atomic::Ordering::Relaxed);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.merge_rewind_points_from(&info, 1)).await;
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    drop(held);
+    let error = outcome
+        .expect("the rewrite must not wait for a held rewrite lock for ever")
+        .expect_err("a rewrite lock that stays held fails the rewrite");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock, "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "a failed rewrite leaves the file as it was");
+    adapter.merge_rewind_points_from(&info, 1).await.expect("the rewrite works once the lock is free");
+}
+
+/// P146: a rewind takes the rewrite lock before it changes anything and hands it to its own rewrite, which gives it
+/// back. Taken, it keeps a second rewriter (another process) out until the rewind is done, and the rewind's own rewrite
+/// and put-back do not wait for the lock it already holds. Held by another process past the wait, taking it fails with `WouldBlock`.
+#[tokio::test]
+#[serial_test::serial(rewrite_lock_wait)]
+async fn a_rewind_holds_the_rewrite_lock_from_before_it_starts_until_it_is_done() {
+    use crate::session::storage::RewindPointsRewrite;
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..4 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(300, std::sync::atomic::Ordering::Relaxed);
+
+    let lock = adapter.lock_rewind_points_rewrite(&info).await.expect("the lock is free");
+    assert!(lock.rewrite.is_some(), "the lock file was opened and locked");
+    // Another process's rewriter (its own handle on the lock file) cannot get in while the rewind holds it.
+    let other = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let blocked = other.truncate_rewind_points_from(&info, 1).await.expect_err("the rewind holds the lock");
+    assert_eq!(blocked.kind(), std::io::ErrorKind::WouldBlock, "{blocked}");
+    let blocked = other.lock_rewind_points_rewrite(&info).await.expect_err("the rewind holds the lock");
+    assert_eq!(blocked.kind(), std::io::ErrorKind::WouldBlock, "{blocked}");
+    // The rewind's own rewrite runs while it holds the lock (it does not wait for it); the lock is still held after.
+    let before = std::fs::read(&path).unwrap();
+    let undo = adapter
+        .rewrite_rewind_points_holding(&info, RewindPointsRewrite::TruncateFrom(2))
+        .await
+        .expect("the rewind's rewrite runs under its own lock");
+    assert_eq!(undo.previous.as_deref(), Some(&before[..]), "what the file held before is kept");
+    assert_eq!(undo.written, std::fs::read(&path).unwrap(), "what was written is kept");
+    let blocked = other.lock_rewind_points_rewrite(&info).await.expect_err("still held after the rewrite");
+    assert_eq!(blocked.kind(), std::io::ErrorKind::WouldBlock, "{blocked}");
+    let indexes: Vec<usize> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<RewindPoint>(l).unwrap().prompt_index)
+        .collect();
+    assert_eq!(indexes, vec![0, 1]);
+    // While the rewind runs, its previous content has a durable copy. Another process appends meanwhile.
+    let copy = path.with_extension("jsonl.pre-rewind");
+    assert_eq!(std::fs::read(&copy).unwrap(), before, "the durable copy holds what the file held");
+    other.append_rewind_point(&info, &RewindPoint::new(9)).await.expect("appends still land");
+    // The rewind did not go through: the file is put back with the appended row kept, the copy goes, then the lock
+    // is released.
+    adapter.end_rewind_points_rewrite(&info, undo, true).await.expect("put back");
+    drop(lock);
+    let indexes: Vec<usize> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<RewindPoint>(l).unwrap().prompt_index)
+        .collect();
+    assert_eq!(indexes, vec![0, 1, 2, 3, 9], "what the file held, then the row appended since");
+    assert!(std::fs::read(&path).unwrap().starts_with(&before));
+    assert!(!copy.exists(), "the durable copy is removed once the rewind is done");
+    let after = other.lock_rewind_points_rewrite(&info).await.expect("released once the rewind is done");
+    drop(after);
+    let undo = adapter
+        .rewrite_rewind_points_holding(&info, RewindPointsRewrite::MergeFrom(1))
+        .await
+        .expect("the rewrite works once the lock is free");
+    adapter.end_rewind_points_rewrite(&info, undo, false).await.expect("done");
+    assert!(!copy.exists(), "a rewind that went through leaves no copy");
+    super::REWRITE_LOCK_WAIT_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// P146 (Astra r3 #3): a put-back after a failed rewind keeps a row appended since on its own line, even when the
+/// file's last row had no newline (the reader accepts such a row): the two rows must not run into one damaged line.
+#[tokio::test]
+async fn a_put_back_does_not_join_an_unterminated_last_row_and_an_appended_row() {
+    use crate::session::storage::RewindPointsRewrite;
+    use fuigo_workspace::session::file_state::RewindPoint;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    for i in 0..3 {
+        adapter.append_rewind_point(&info, &RewindPoint::new(i)).await.unwrap();
+    }
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let mut unterminated = std::fs::read(&path).unwrap();
+    assert_eq!(unterminated.pop(), Some(b'\n'));
+    std::fs::write(&path, &unterminated).unwrap();
+    let lock = adapter.lock_rewind_points_rewrite(&info).await.unwrap();
+    let undo = adapter.rewrite_rewind_points_holding(&info, RewindPointsRewrite::TruncateFrom(1)).await.unwrap();
+    adapter.append_rewind_point(&info, &RewindPoint::new(7)).await.unwrap();
+    adapter.end_rewind_points_rewrite(&info, undo, true).await.expect("put back");
+    drop(lock);
+    let indexes: Vec<usize> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<RewindPoint>(l).expect("every row parses").prompt_index)
+        .collect();
+    assert_eq!(indexes, vec![0, 1, 2, 7]);
+    assert!(!path.with_extension("jsonl.pre-rewind").exists());
+}
+
+/// P140: the rewrite lock file is created by the rewrite itself, owner-only (the P120 rule).
+#[cfg(unix)]
+#[tokio::test]
+async fn the_rewind_points_rewrite_lock_file_is_created_owner_only() {
+    use fuigo_workspace::session::file_state::RewindPoint;
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter.append_rewind_point(&info, &RewindPoint::new(0)).await.unwrap();
+    let path = adapter.rewind_points_file_path(&info).unwrap();
+    let lock_path = path.with_extension("jsonl.rewrite.lock");
+    assert!(!lock_path.exists(), "fixture: nothing has rewritten yet");
+    adapter.truncate_rewind_points_from(&info, 0).await.unwrap();
+    let mode = std::fs::metadata(&lock_path).expect("the rewrite made its lock file").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the rewrite lock file is owner-only");
 }

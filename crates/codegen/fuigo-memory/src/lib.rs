@@ -39,7 +39,7 @@ pub mod watcher;
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use observation::*;
-pub use storage::{MemoryScope, MemoryStorage};
+pub use storage::{LegacyMemoryNotice, LegacyMemoryOutcome, MemoryScope, MemoryStorage};
 
 pub(crate) const MEMORY_LOG_TARGET: &str = "fuigo_memory";
 
@@ -117,3 +117,8 @@ pub async fn embed_missing_chunks(
 
 #[cfg(test)]
 mod quality_tests;
+
+#[cfg(test)]
+mod filter_tests;
+#[cfg(test)]
+mod p91_identity_tests;

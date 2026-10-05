@@ -105,8 +105,8 @@ impl OidcRefresher {
                 "oidc refresh: disk has valid AT, adopting instead of consuming RT",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": fuigo_auth::bearer_suffix(&disk_now.key),
-                    "tried_key_prefix": fuigo_auth::bearer_suffix(&tried.key),
+                    "disk_key_prefix": fuigo_auth::bearer_fingerprint(&disk_now.key),
+                    "tried_key_prefix": fuigo_auth::bearer_fingerprint(&tried.key),
                 })),
             );
             self.note_refresh_progress();
@@ -126,11 +126,11 @@ impl OidcRefresher {
                 "tried_rt_prefix": tried
                     .refresh_token
                     .as_deref()
-                    .map(fuigo_auth::bearer_suffix),
+                    .map(fuigo_auth::bearer_fingerprint),
                 "disk_rt_prefix": disk_now
                     .refresh_token
                     .as_deref()
-                    .map(fuigo_auth::bearer_suffix),
+                    .map(fuigo_auth::bearer_fingerprint),
             })),
         );
 
@@ -149,6 +149,14 @@ impl OidcRefresher {
             }
             OidcRefreshResult::Failed { .. } => {
                 Some(RefreshOutcome::transient("OIDC disk-retry refresh failed"))
+            }
+            // P149: a policy refusal is a verdict here too (see `refresh`).
+            OidcRefreshResult::Refused { message } => {
+                tracing::warn!(%message, "auth: OIDC token endpoint refused (disk retry)");
+                Some(RefreshOutcome::permanent_for(
+                    RefreshTokenFailedReason::TokenEndpointRefused,
+                    &disk_now,
+                ))
             }
         }
     }
@@ -180,7 +188,7 @@ impl TokenRefresher for OidcRefresher {
                 "oidc refresh: sibling refreshed, adopting valid disk AT",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": fuigo_auth::bearer_suffix(&d.key),
+                    "disk_key_prefix": fuigo_auth::bearer_fingerprint(&d.key),
                 })),
             );
             self.note_refresh_progress();
@@ -210,7 +218,7 @@ impl TokenRefresher for OidcRefresher {
         );
 
         // Snapshot for diagnostic upload on failure (user id, never email).
-        let pre_token = fuigo_auth::bearer_suffix(&auth.key).to_owned();
+        let pre_token = fuigo_auth::bearer_fingerprint(&auth.key);
         let pre_user_id = if auth.user_id.is_empty() {
             "unknown".into()
         } else {
@@ -239,6 +247,22 @@ impl TokenRefresher for OidcRefresher {
                     );
                 }
                 RefreshOutcome::permanent_for(reason, &auth)
+            }
+            // P99: local policy refused the token endpoint (nothing was sent, or a redirect off the admitted
+            // endpoint was not followed). This proves nothing about the credential, so the credential is kept.
+            // P149 (S7/B11): but asking again cannot succeed until the provider's configuration changes, and a
+            // redirecting endpoint receives the refresh token on every attempt, so it is a verdict, not a transient
+            // failure: `refresh_chain` records it (credentials retained, it ages out like `ClientRejected`) and no
+            // caller retries or resends while it stands. The exact reason goes to the log; the verdict's message
+            // names both refusals.
+            OidcRefreshResult::Refused { message } => {
+                tracing::warn!(
+                    refresh_reason = ?reason,
+                    issuer = ?auth.oidc_issuer,
+                    %message,
+                    "auth: OIDC token endpoint refused"
+                );
+                RefreshOutcome::permanent_for(RefreshTokenFailedReason::TokenEndpointRefused, &auth)
             }
             OidcRefreshResult::Failed {
                 network_unreachable,

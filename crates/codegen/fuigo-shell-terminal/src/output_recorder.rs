@@ -34,10 +34,17 @@ impl OutputRecorder {
     }
 
     pub(crate) async fn initialize(&self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        if let Err(e) = tokio::fs::File::create(&self.path).await {
+        // A client terminal's output log is session content: owner-only folder and file (P150, S14).
+        let path = self.path.clone();
+        let created = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                let _ = fuigo_config::create_dir_all_owner_only(parent);
+            }
+            fuigo_config::create_file_owner_only(&path).map(drop)
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        if let Err(e) = created {
             tracing::debug!(path = %self.path.display(), error = %e, "output recorder: failed to create log file");
         }
     }
@@ -72,13 +79,11 @@ impl OutputRecorder {
         if !new_suffix.is_empty() {
             use tokio::io::AsyncWriteExt;
             if self.file.is_none() {
-                self.file = Some(
-                    tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&self.path)
-                        .await?,
-                );
+                let mut options = tokio::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                self.file = Some(options.open(&self.path).await?);
             }
             let write = {
                 let file = self.file.as_mut().expect("handle opened above");
@@ -198,6 +203,19 @@ mod tests {
         assert_eq!(ov("xxabcxx", "abc", 8192), 0);
     }
 
+    /// P150 (S14): when `initialize` could not make the log, the first append creates it, also owner-only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p150_recorder_append_creates_the_log_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task.log");
+        let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024);
+        recorder.append("line1\n").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "line1\n");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     #[tokio::test]
     async fn recorder_appends_cumulative_suffixes() {
         let dir = tempfile::tempdir().unwrap();
@@ -205,6 +223,14 @@ mod tests {
         let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024);
         recorder.initialize().await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        // P150 (S14): a client terminal's log is session content, owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+        }
 
         recorder.append("line1\n").await.unwrap();
         recorder.append("line1\nline2\n").await.unwrap();

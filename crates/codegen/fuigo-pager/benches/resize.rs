@@ -4,6 +4,9 @@
 //! - re-deriving an entry's source text per width instead of reusing its cached line-width profile (makes the estimate pass O(conversation bytes)),
 //! - building or cloning an `AppearanceConfig` per entry,
 //! - running `warm_measure_pages_above` on every resize instead of once the width settles.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::time::Duration;
 

@@ -9,7 +9,7 @@ use super::agent::AgentId;
 use crate::unified_log as ulog;
 use fuigo_shell::sampling::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, error_kind_str_from_error,
-    format_rate_limited_user_message, http_status_from_error,
+    format_rate_limited_user_message_with, http_status_from_error,
 };
 use fuigo_shell::session::ExtMethodResult;
 use fuigo_shell::session::helpers::session_compact::{
@@ -124,15 +124,24 @@ pub(super) async fn fetch_plugin_cta_mcps(
     }
 }
 /// Convert an ACP error to a user-friendly string for display.
-/// Rate-limit errors render the free-usage paywall, else the server detail, else the auth-aware fallback (see [`format_rate_limited_user_message`]).
+/// Rate-limit errors render the free-usage paywall, else the server detail, else the auth-aware fallback (see [`format_rate_limited_user_message_with`]).
 /// The server detail is rewritten in EVERY auth mode when the body pushes the provider's own
 /// consumer subscription; only the auth-appropriate replacement copy differs.
 /// All other errors render as the formatted request-failure banner text (status headline and sanitized detail).
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
+    let verdicts = fuigo_shell::sampling::error_verdicts::error_verdicts_from_error(err);
+    // P119: a disk-full verdict outranks the (possibly scrubbed) text.
+    if verdicts.as_ref().is_some_and(|v| v.disk_full) {
+        return sanitize_user_error(fuigo_fast_worktree::ENOSPC_OS_MESSAGE);
+    }
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = error_data_detail(err);
         return sanitize_user_error(
-            &format_rate_limited_user_message(detail.as_deref(), is_api_key_auth),
+            &format_rate_limited_user_message_with(
+                detail.as_deref(),
+                is_api_key_auth,
+                verdicts.as_ref(),
+            ),
         );
     }
     if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
@@ -143,10 +152,11 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
     let raw = error_data_detail(err)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| acp_error_text(err));
-    crate::app::error_display::format_request_failure(
+    crate::app::error_display::format_request_failure_typed(
             http_status_from_error(err),
             crate::app::error_display::wire_error_kind(error_kind_str_from_error(err)),
             &raw,
+            verdicts.as_ref(),
         )
         .message()
 }
@@ -268,9 +278,7 @@ pub(crate) fn parse_session_scheduler_background_loops(
 }
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
 pub(crate) fn is_disk_full_error(raw: &str) -> bool {
-    raw.contains(fuigo_fast_worktree::OUT_OF_DISK_CONTEXT)
-        || raw.contains(fuigo_fast_worktree::ENOSPC_OS_MESSAGE)
-        || raw.contains("Disk quota exceeded") || raw.contains("Out of disk space")
+    fuigo_shell::sampling::error_verdicts::is_disk_full_text(raw)
 }
 /// Sanitize an error string before showing it to the user.
 ///
@@ -338,9 +346,6 @@ pub(crate) struct SessionFlags {
     /// Gateway light-frontend (`kind: "chat"`); `--chat` / `/chat`.
     /// Mutually exclusive with Build plan profiles: profiles are omitted and a warn is logged when plan flags are also set.
     pub chat_mode: bool,
-    /// Local-workspace stamp for ACP `_meta` (scrub still strips envId / Direct hub).
-    #[cfg(feature = "local-workspace")]
-    pub local_workspace: Option<crate::app::session_startup::LocalWorkspaceConfig>,
     /// Effective screen mode label (`ScreenMode::meta_label`), stamped into every `PromptRequest._meta.screenMode`.
     /// Feeds minimal-vs-regular usage telemetry.
     /// `None` (key omitted) only under `Default` in tests; real launches always know their mode.
@@ -393,10 +398,6 @@ impl SessionFlags {
         }
         if self.chat_mode {
             meta.insert("fuigo/session".into(), serde_json::json!({ "kind": "chat" }));
-            #[cfg(feature = "local-workspace")]
-            if let Some(ref lw) = self.local_workspace {
-                stamp_local_workspace_meta(&mut meta, lw);
-            }
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
@@ -414,22 +415,11 @@ impl SessionFlags {
 }
 /// Workspace-bind `_meta` keys **always** forbidden on chat create/load.
 ///
-/// `fuigo/cloud_existing_workspace` is intentionally omitted: scrub keeps it only when `fuigo/local_workspace.mode == "attach"`.
+/// [`scrub_chat_workspace_bind_meta`] also strips `fuigo/cloud_existing_workspace`.
 #[allow(dead_code)]
 pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
     "envId",
     "fuigo/cloud_server_id",
-];
-/// FS-only tool ids for local existing workspace (chat attach/own).
-#[cfg(feature = "local-workspace")]
-pub(super) const LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS: &[&str] = &[
-    "workspace.fs_list",
-    "workspace.fs_exists",
-    "workspace.fs_read_file",
-    "workspace.fs_write_file",
-    "workspace.fs_delete_file",
-    "workspace.put_files",
-    "workspace.get_files",
 ];
 /// Stamp `_meta["fuigo/session"].kind = "chat"` and strip Build `agentProfile`.
 pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
@@ -437,86 +427,17 @@ pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
     obj.insert("fuigo/session".into(), serde_json::json!({ "kind": "chat" }));
     obj.remove("agentProfile");
 }
-/// Stamp the chat and local-workspace intent.
-/// Attach also stamps `fuigo/cloud_existing_workspace`.
-/// Own leaves `server_id` unset; the shell supervisor mints one before the handshake.
-///
-/// Never stamps `envId` or `fuigo/cloud_server_id`.
-#[cfg(feature = "local-workspace")]
-pub(super) fn stamp_local_workspace_meta(
-    meta: &mut serde_json::Map<String, serde_json::Value>,
-    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
-) {
-    use crate::app::session_startup::LocalWorkspaceMode;
-    let mut local = serde_json::Map::new();
-    let mode = match cfg.mode {
-        LocalWorkspaceMode::Attach => "attach",
-        LocalWorkspaceMode::Own => "own",
-    };
-    local.insert("mode".into(), serde_json::json!(mode));
-    if let Some(ref sid) = cfg.server_id {
-        local.insert("server_id".into(), serde_json::json!(sid));
-    }
-    if let Some(ref cwd) = cfg.cwd {
-        local
-            .insert("cwd".into(), serde_json::json!(cwd.to_string_lossy().into_owned()));
-    }
-    meta.insert("fuigo/local_workspace".into(), serde_json::Value::Object(local));
-    tracing::info!(
-        target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
-        event = "acp_meta_stamped",
-        mode,
-        server_id = cfg.server_id.as_deref(),
-        cwd = cfg.cwd.as_ref().map(|p| p.display().to_string()),
-        "stamped fuigo/local_workspace onto session meta"
-    );
-    if cfg.mode == LocalWorkspaceMode::Attach && let Some(ref sid) = cfg.server_id {
-        let mut existing = serde_json::Map::new();
-        existing.insert("server_id".into(), serde_json::json!(sid));
-        if let Some(ref cwd) = cfg.cwd {
-            existing
-                .insert(
-                    "cwd".into(),
-                    serde_json::json!(cwd.to_string_lossy().into_owned()),
-                );
-        }
-        meta.insert(
-            "fuigo/cloud_existing_workspace".into(),
-            serde_json::Value::Object(existing),
-        );
-    }
-}
-/// Apply [`stamp_local_workspace_meta`] onto optional ACP meta.
-#[cfg(feature = "local-workspace")]
-pub(super) fn apply_local_workspace_meta(
-    meta: &mut Option<acp::Meta>,
-    cfg: &crate::app::session_startup::LocalWorkspaceConfig,
-) {
-    let obj = meta.get_or_insert_with(acp::Meta::new);
-    stamp_local_workspace_meta(obj, cfg);
-}
-/// Shared chat create/load/worktree meta finalize: chat kind, local-workspace stamp, then scrub.
-pub(super) fn finalize_chat_session_meta(
-    meta: &mut Option<acp::Meta>,
-    is_chat_path: bool,
-    #[cfg_attr(not(feature = "local-workspace"), allow(unused_variables))]
-    session_flags: &SessionFlags,
-) {
+/// Shared chat create/load/worktree meta finalize: chat kind, then scrub.
+pub(super) fn finalize_chat_session_meta(meta: &mut Option<acp::Meta>, is_chat_path: bool) {
     if !is_chat_path {
         return;
     }
     apply_chat_kind_meta(meta);
-    #[cfg(feature = "local-workspace")]
-    if let Some(ref lw) = session_flags.local_workspace {
-        apply_local_workspace_meta(meta, lw);
-    }
     scrub_chat_workspace_bind_meta(meta);
 }
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
 ///
-/// Narrow scrub exception: keep `fuigo/cloud_existing_workspace` when local intent is **attach**.
-/// Own stamps intent only (shell mints `server_id`).
-/// Never keep `envId` or Direct hub `fuigo/cloud_server_id`.
+/// Never keep `envId`, Direct hub `fuigo/cloud_server_id`, or `fuigo/cloud_existing_workspace`.
 pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     let Some(obj) = meta.as_mut() else {
         return;
@@ -524,59 +445,7 @@ pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         obj.remove(*key);
     }
-    #[cfg(feature = "local-workspace")]
-    {
-        let allow_existing_attach = obj
-            .get("fuigo/local_workspace")
-            .and_then(|v| v.get("mode"))
-            .and_then(|m| m.as_str()) == Some("attach");
-        if !allow_existing_attach {
-            obj.remove("fuigo/cloud_existing_workspace");
-        }
-    }
-    {
-        obj.remove("fuigo/cloud_existing_workspace");
-    }
-}
-/// Fail closed on operator attestation outside the FS-only allowlist.
-/// A `None` or empty attested set is uncheckable, so refuse; the live server is not probed.
-#[cfg(feature = "local-workspace")]
-pub(crate) fn reject_non_fs_only_advertised_tools(
-    advertised_tool_ids: Option<&[&str]>,
-) -> Result<(), String> {
-    let Some(ids) = advertised_tool_ids else {
-        return Err(
-            "operator attestation FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS is unset \
-             (uncheckable); refuse attach. Live workspace_server was not inspected. Set \
-             the env to a comma-separated FS-only catalog."
-                .into(),
-        );
-    };
-    if ids.is_empty() {
-        return Err(
-            "operator attestation FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS is empty \
-             (uncheckable); refuse attach. Live workspace_server was not inspected."
-                .into(),
-        );
-    }
-    let forbidden: Vec<&str> = ids
-        .iter()
-        .copied()
-        .filter(|id| !LOCAL_WORKSPACE_FS_ONLY_TOOL_IDS.contains(id))
-        .collect();
-    if forbidden.is_empty() {
-        Ok(())
-    } else {
-        Err(
-                format!(
-            "operator attestation lists tools outside the FS-only allowlist: {}. \
-             Live workspace_server was not inspected. Fix \
-             FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS or restart workspace_server \
-             with --require-explicit-toolset and an FS-only catalog.",
-            forbidden.join(", ")
-        ),
-            )
-    }
+    obj.remove("fuigo/cloud_existing_workspace");
 }
 /// Metadata returned from effect execution so the event loop can patch state that requires a spawned task handle (e.g., auth AbortHandle).
 #[derive(Default)]

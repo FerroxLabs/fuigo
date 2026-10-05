@@ -223,6 +223,7 @@ fn activity_label_rendered_for_each_turn_activity() {
                 max_retries: 5,
                 reason: "API error (status 429 Too Many Requests): rate limit exceeded".into(),
                 error_type: None,
+                verdicts: None,
             },
             "Retrying (2/5)".into(),
         ),

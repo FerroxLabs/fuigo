@@ -17,7 +17,12 @@ use crate::util::config::MANAGED_WINS_OVER_USER;
 pub const USER_GUIDE_FILENAME: &str = "26-config-reference.md";
 
 /// Keys that the pager and `load_from_disk()` read from the user `config.toml` only.
-const USER_ONLY_KEYS: &[&str] = &["features.remember_mode", "privacy.privacy_banner_acked"];
+const USER_ONLY_KEYS: &[&str] = &[
+    "features.remember_mode",
+    "privacy.privacy_banner_acked",
+    // P93: `agent::relay_opt_in` reads it from the user config file alone.
+    "relay.trusted_origins",
+];
 
 /// The nested FuigoComConfig, OAuth2, and OIDC leaf keys that enterprise deployments write today.
 /// Keep in sync with `src/auth/config.rs`.
@@ -96,28 +101,6 @@ fn find_monorepo_root() -> Option<PathBuf> {
 
 fn load_markdown() -> String {
     let path = committed_markdown_path();
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-fn agents_md_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("FUIGO_CONFIG_DOCS_AGENTS_MD") {
-        return PathBuf::from(path);
-    }
-    let crate_agents = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("AGENTS.md");
-    if crate_agents.exists() {
-        return crate_agents;
-    }
-    let root = find_monorepo_root().unwrap_or_else(|| {
-        panic!(
-            "fuigo-shell AGENTS.md not found; set FUIGO_CONFIG_DOCS_AGENTS_MD or run from the monorepo (CARGO_MANIFEST_DIR={})",
-            env!("CARGO_MANIFEST_DIR")
-        )
-    });
-    root.join("crates/codegen/fuigo-shell/AGENTS.md")
-}
-
-fn load_agents_markdown() -> String {
-    let path = agents_md_path();
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -462,10 +445,31 @@ mod tests {
         }
     }
 
+    /// The shipped page itself is the contract: its opening says it is the complete field list for all three files,
+    /// it carries the table header the parser keys on, and it never names the contributor-side registries.
+    /// It no longer reads a crate-local `AGENTS.md`: upstream never published that file and this tree never had it.
+    /// The edit-this-file guidance for contributors is this module's own doc comment.
     #[test]
     fn page_is_the_user_facing_field_list() {
-        let (_, _, md) = page();
+        let (config, req, md) = page();
         assert!(md.starts_with("# Configuration reference\n"));
+        assert!(md.contains(
+            "It is the complete field list for `config.toml`, `managed_config.toml`, and `requirements.toml`."
+        ));
+        for section in [
+            "## config.toml",
+            "## managed_config.toml",
+            "## requirements.toml",
+        ] {
+            assert!(
+                md.lines().any(|l| l.starts_with(section)),
+                "user-guide is missing the `{section}` section"
+            );
+        }
+        assert!(
+            !config.is_empty() && !req.is_empty(),
+            "both the config.toml and requirements.toml tables must parse to rows"
+        );
         assert!(md.contains("| Key | Type / Values | Requirements | Managed | Details |"));
         assert!(md.contains("| `models.allowed_models` | `string[]` | `pin` |"));
         assert!(md.contains("### `cli`\n"));
@@ -480,10 +484,5 @@ mod tests {
                 "user-guide must not name contributor registry {leak}"
             );
         }
-        let agents = load_agents_markdown();
-        assert!(agents.contains("Edit it; do not regenerate it."));
-        assert!(agents.contains("FEATURES"));
-        assert!(agents.contains("UNMIRRORED_BOOLEAN_FEATURES"));
-        assert!(agents.contains("KNOWN_MCP_SERVER_FIELDS"));
     }
 }

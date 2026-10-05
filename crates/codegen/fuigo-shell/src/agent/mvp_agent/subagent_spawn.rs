@@ -3,41 +3,37 @@
 //! These builders live inside `mvp_agent` (`use super::*`) so they can read `MvpAgent`'s private state directly.
 //! `crate::agent::subagent::spawn` drives the child's lifecycle and reaches back in only through the `pub(crate)` functions below.
 //!
-//! - `start_subagent_coordinator`: takes the event receiver and presentation state and starts the coordinator via `spawn_subagent_coordinator`.
+//! - `start_subagent_coordinator`: takes the event receiver and presentation state and starts the coordinator via `subagent_coordinator_task`, bound to the agent.
 //! - `build_subagent_validation_context` and `try_build_subagent_spawn_context`: snapshot config and the parent handle for the child.
 use super::*;
 use crate::session::repo_changes::UploadMethod;
 impl MvpAgent {
     /// Starts the shared coordinator actor; idempotent.
-    /// Takes the event receiver and the concurrency limits off private state and passes them to `spawn_subagent_coordinator`.
-    /// `LocalRef` lets the `!Send` runner touch `self`.
+    /// Takes the event receiver and the concurrency limits off private state and passes them to `subagent_coordinator_task`.
+    /// `LocalRef` lets the `!Send` runner touch `self`; the coordinator (with every child run it owns) is bound to the
+    /// agent (`spawn_bound`), as are the synthetic-trace loop and each trace it starts.
     pub(super) fn start_subagent_coordinator(&self) {
         let Some(rx) = self.subagent_event_rx.borrow_mut().take() else {
             return;
         };
-        let agent_ref = LocalRef::new(self);
         let limits = fuigo_tools::implementations::fuigo_build::task::admission::SubagentLimits {
             max_concurrent: self.cfg.borrow().subagents_max_concurrent,
             behavior: self.cfg.borrow().subagents_limit_behavior,
         };
-        crate::agent::subagent::spawn_subagent_coordinator(agent_ref.clone(), rx, limits);
+        self.spawn_bound(move |agent_ref| {
+            Box::pin(crate::agent::subagent::subagent_coordinator_task(agent_ref, rx, limits))
+        });
         let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
             crate::upload::turn::SyntheticTurnTraceRequest,
         >();
         self.subagent_presentation.borrow_mut().synthetic_trace_tx = Some(trace_tx);
-        tokio::task::spawn_local({
-            let agent_ref = agent_ref.clone();
-            async move {
-                while let Some(request) = trace_rx.recv().await {
-                    tokio::task::spawn_local({
-                        let agent_ref = agent_ref.clone();
-                        async move {
-                            handle_synthetic_turn_trace(agent_ref, request).await;
-                        }
-                    });
-                }
+        self.spawn_bound(|agent_ref| Box::pin(async move {
+            while let Some(request) = trace_rx.recv().await {
+                agent_ref
+                    .get()
+                    .spawn_bound(move |agent_ref| Box::pin(handle_synthetic_turn_trace(agent_ref, request)));
             }
-        });
+        }));
     }
     /// Lightweight context for the `SubagentEvent::ValidateType` drain arm.
     /// Tolerates an evicted parent session: returns built-in defaults and warns.
@@ -162,7 +158,7 @@ impl MvpAgent {
                 .and_then(|s| s.inference_idle_timeout_secs);
             per_model.or(remote).unwrap_or(600).max(10)
         };
-        let parent_hook_registry = parent_handle.as_ref().and_then(|h| h.hook_registry.clone());
+        let parent_hook_registry = parent_handle.as_ref().and_then(|h| h.hook_registry.get());
         let parent_max_turns = parent_handle.as_ref().and_then(|h| h.max_turns);
         let parent_model_agent_type =
             config::find_model_by_id(&available_models, parent_model_id.0.as_ref())

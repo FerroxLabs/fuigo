@@ -1,0 +1,35 @@
+# gpt-6-astra read-only audit, P73. Brief given, then the auditor's final answer verbatim.
+# (The full tool transcript was ~0.4-1.5 MB per round and is trimmed; the final answer is complete.)
+
+## BRIEF
+Round 3 audit. Worktree at your cwd (read-only), HEAD vs base 48886772 (`git diff 48886772..HEAD`). Do NOT run cargo. Prior rounds: docs/strike/audits/p73-astra-r1.txt and p73-astra-r2.txt (R2: no BLOCKER/HIGH; 1 MEDIUM + 4 LOW, all against the source-scanning guard crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs). The guard was rewritten to close them: (MEDIUM) attributes are now parsed as spans, so a multi-line attribute between `#[test]` and the fn no longer hides the test, and a comment between `#[cfg(test)]` and `mod` no longer hides the module; (LOW) a lexer that classifies code/comment/literal handles `br#".."#`; the opt-out marker is read from real comments only; the dashboard serial matcher accepts `serial(.., FUIGO_AGENT_DASHBOARD, ..)` multi-key lists and rejects `cfg_attr` wrappers and other keys; the bare `let k = ThemeKind::X; set(k)` imported-setter form is documented as a known limit in the module docs (not fixed). The 7 guard tests passed on the Hetzner build box and the real-tree scan found zero violations. Re-audit ONLY: (1) are the R2 findings closed, with concrete counterexamples if not; (2) any NEW BLOCKER/HIGH in the rewrite (panics on index arithmetic, e.g. `comments[start.saturating_sub(4)..=end]` vs `code` length, infinite loops in attr_spans/attrs_above/cfg_test_mod_lines/parse, wrong span ends); (3) anything in the rest of the diff you now consider HIGH. Report findings by severity with file:line, then end with exactly one line `VERDICT: <APPROVE|APPROVE WITH LOW-SEVERITY NIT|REQUEST CHANGES> - <reason>`. Use REQUEST CHANGES only for BLOCKER or HIGH.
+
+## FINAL ANSWER
+Audited `48886772..56eb821643539757cb1cf3f02c91ffa224f3b1ab` read-only. No Cargo or Rust tests run.
+
+**BLOCKER/HIGH: none found**, including in the remaining diff.
+
+**LOW — Documented limitation remains:** [theme_pin_guard_tests.rs:32](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:32) still misses this unpinned mutation:
+
+```rust
+use crate::theme::cache::set;
+
+#[test]
+fn t() {
+    let k = ThemeKind::FuigoDay;
+    set(k);
+}
+```
+
+Line 12 accurately documents this limitation. R2’s finding is acknowledged, not functionally fixed; it is non-blocking.
+
+The other four R2 findings are closed by inspection:
+
+- **MEDIUM, attribute/module discovery:** [theme_pin_guard_tests.rs:246](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:246) records complete attribute spans. Backward traversal crosses multiline attributes, and module discovery skips intervening comments.
+- **LOW, raw byte strings:** [theme_pin_guard_tests.rs:99](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:99) recognizes `br#…#`, including R2’s embedded-quote examples. Their contents no longer grant locks or fabricate mutations.
+- **LOW, string opt-outs:** [theme_pin_guard_tests.rs:443](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:443) searches the comment-only view; `"theme-pin:"` cannot exempt a mutation.
+- **LOW, dashboard serialization:** [theme_pin_guard_tests.rs:377](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:377) matches exact comma-separated keys in direct serial attributes. Multiple keys work; other keys and `cfg_attr` wrappers do not qualify.
+
+No new panic or nontermination path found: both views preserve line counts, function endpoints stay within those counts, empty input never reaches `len() - 1`, and every parser loop makes strict progress. No new HIGH span-end defect found. The remaining source changes are unchanged since R2; reviewing the cache publication, worker split and test changes supplied no reason to elevate them to HIGH.
+
+VERDICT: APPROVE WITH LOW-SEVERITY NIT - Four R2 findings are closed; the remaining imported-setter limitation is documented, with no BLOCKER/HIGH found.

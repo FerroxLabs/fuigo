@@ -1,4 +1,3 @@
-#![allow(clippy::await_holding_refcell_ref)]
 #![allow(clippy::arc_with_non_send_sync)]
 //! Session actor implementation for the MVP ACP agent.
 //!
@@ -1020,9 +1019,9 @@ pub(crate) struct SessionActor {
     pub(crate) goal_classifier_in_flight: std::sync::atomic::AtomicBool,
     /// Agent-level managed MCP gateway catalog cache.
     pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    /// Original client-provided MCP servers from session creation.
-    /// Retained for re-merge during plugin reload.
-    pub(crate) initial_client_mcp_servers: Vec<acp::McpServer>,
+    /// Client-provided MCP servers as admitted at session creation, replaced by `update_mcp_servers` and a resident
+    /// `session/load` ([`crate::session::SessionCommand::SetClientMcpSeed`]). Re-merged during plugin reload.
+    pub(crate) initial_client_mcp_servers: std::cell::RefCell<crate::session::managed_mcp::ClientMcpSeed>,
     /// Shared MCP tool metadata for the BM25 search index. Updated after MCP init.
     pub(crate) tool_metadata_snapshot:
         Arc<std::sync::Mutex<crate::session::tool_index::ToolMetadataSnapshot>>,
@@ -1063,6 +1062,8 @@ pub(crate) struct SessionActor {
     /// Wrapped in `RefCell` for mid-session reload from `&self` methods.
     /// Safe: session actor is single-threaded (LocalSet), no concurrent access.
     pub(crate) hook_registry: std::cell::RefCell<Option<Arc<fuigo_hooks::discovery::HookRegistry>>>,
+    /// The same registry, published for the session's handle after every write to `hook_registry` (see `LiveHookRegistry`).
+    pub(crate) hook_registry_live: crate::session::LiveHookRegistry,
     /// The turn's single end-of-turn hook report.
     /// Actor-scoped rather than turn-local because the gate runs on the turn task while a cancel runs on the command loop.
     pub(crate) turn_report: turn_report_slot::TurnReportSlot,
@@ -1090,6 +1091,9 @@ pub(crate) struct SessionActor {
     pub(crate) plugin_registry_handle: Option<fuigo_agent::plugins::SharedPluginRegistryHandle>,
     /// Centralized event tracking: event log, turn-end guard, active tool, doom loop terminate flag.
     pub(crate) events: crate::session::events::EventTracker,
+    /// Cross-process liveness for this session's turns, held for the actor's lifetime so a load in another
+    /// process does not declare this actor's open turn lost (see `session::turn_owner_lock`).
+    pub(crate) _turn_owner_lock: Option<crate::session::turn_owner_lock::TurnOwnerLock>,
     /// Optional hub-side session event emitter (always constructed without a harness client in the agent; methods no-op with `None` transport).
     pub(crate) observability_bridge: fuigo_computer_hub_sdk::ObservabilityBridge,
     /// Turn number captured at the start of each turn (before prompt index increment).
@@ -1451,10 +1455,9 @@ fn save_prompt_context(session_info: &SessionInfo, prompt_context: &fuigo_agent:
             return;
         }
     };
-    let path = dir.join(PROMPT_CONTEXT_FILENAME);
     match serde_json::to_string_pretty(prompt_context) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
+            if let Err(e) = write_prompt_context_in(&dir, json) {
                 tracing::warn!(?e, "failed to write prompt_context.json");
             }
         }
@@ -1462,6 +1465,11 @@ fn save_prompt_context(session_info: &SessionInfo, prompt_context: &fuigo_agent:
             tracing::warn!(?e, "failed to serialize PromptContext");
         }
     }
+}
+/// Write `prompt_context.json` in `dir` owner-only like every other session file (P145: it kept the folder's inherited
+/// ACL on Windows and the umask's mode on Unix).
+fn write_prompt_context_in(dir: &std::path::Path, json: String) -> std::io::Result<()> {
+    crate::session::storage::owner_only::write(&dir.join(PROMPT_CONTEXT_FILENAME), json)
 }
 const SYSTEM_PROMPT_FILENAME: &str = "system_prompt.txt";
 /// Synchronously and atomically rewrite `{session_dir}/chat_history.jsonl`.
@@ -1485,23 +1493,34 @@ fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[C
         }
     };
     let final_path = dir.join("chat_history.jsonl");
+    // A load-time repair that could not be backed up holds back every rewrite until the backup exists (P96).
+    if let Err(e) = crate::session::storage::jsonl::load_repair::rewrite_gate(&final_path) {
+        tracing::warn!(session_id = %session_info.id.0, ?e,
+            "persist_chat_history_jsonl_sync: not rewriting chat_history.jsonl, its pre-repair backup could not be made");
+        return;
+    }
     let tmp_path = dir.join("chat_history.jsonl.sync.tmp");
+    let mut buf = Vec::new();
     let result = (|| -> std::io::Result<()> {
         use std::io::Write;
-        let mut buf = Vec::new();
         for item in conversation {
             serde_json::to_writer(&mut buf, item)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             buf.push(b'\n');
         }
-        std::fs::File::create(&tmp_path)?.write_all(&buf)?;
+        // Owner-only like the file it replaces (P145): the rename carries the temp file's mode/ACL over.
+        crate::session::storage::owner_only::create(&tmp_path)?.write_all(&buf)?;
         std::fs::rename(&tmp_path, &final_path)?;
         Ok(())
     })();
-    if let Err(e) = result {
-        tracing::warn!(session_id = %session_info.id.0, ?e,
-            "persist_chat_history_jsonl_sync: failed to persist chat_history.jsonl");
-        let _ = std::fs::remove_file(&tmp_path);
+    match result {
+        // The whole history was rewritten: a compaction rewrite that had not landed is superseded (P111).
+        Ok(()) => crate::session::storage::jsonl::compaction_witness::clear_after_chat_rewrite(&dir, Some(&buf)),
+        Err(e) => {
+            tracing::warn!(session_id = %session_info.id.0, ?e,
+                "persist_chat_history_jsonl_sync: failed to persist chat_history.jsonl");
+            let _ = std::fs::remove_file(&tmp_path);
+        }
     }
 }
 /// Persist the exact rendered system prompt to `{session_dir}/system_prompt.txt`.
@@ -1515,10 +1534,13 @@ fn save_system_prompt(session_info: &SessionInfo, system_prompt: &str) {
             return;
         }
     };
-    let path = dir.join(SYSTEM_PROMPT_FILENAME);
-    if let Err(e) = std::fs::write(&path, system_prompt) {
+    if let Err(e) = write_system_prompt_in(&dir, system_prompt) {
         tracing::warn!(?e, "failed to write system_prompt.txt");
     }
+}
+/// Write `system_prompt.txt` in `dir` owner-only (P145, see [`write_prompt_context_in`]).
+fn write_system_prompt_in(dir: &std::path::Path, system_prompt: &str) -> std::io::Result<()> {
+    crate::session::storage::owner_only::write(&dir.join(SYSTEM_PROMPT_FILENAME), system_prompt)
 }
 /// Load the canonical system prompt from `{session_dir}/system_prompt.txt`.
 ///
@@ -1559,6 +1581,9 @@ mod managed_hooks_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/compaction_agent_borrow_tests.rs"]
+mod compaction_agent_borrow_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/support.rs"]
 mod support;
@@ -1799,6 +1824,9 @@ mod prompt_mode_transition_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_queue_actor_tests.rs"]
 mod prompt_queue_actor_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/p133_config_notice_tests.rs"]
+mod p133_config_notice_tests;
 /// Regression coverage for the per-turn `record_token_usage` path.
 #[cfg(test)]
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]
@@ -1992,6 +2020,12 @@ impl Drop for TurnMetrics {
 #[path = "acp_session_tests/auth_error_no_retry_tests.rs"]
 mod auth_error_no_retry_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/p42_session_delivery_wire_tests.rs"]
+mod p42_session_delivery_wire_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/p42_memory_embed_spawn_tests.rs"]
+mod p42_memory_embed_spawn_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn/auth_retry_budget_tests.rs"]
 mod auth_retry_budget_tests;
 /// Regression coverage for the auto-wake suppression sweep and shutdown drain.
@@ -2009,17 +2043,35 @@ mod build_tool_parse_error_message_tests;
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/budget_denial_tests.rs"]
+mod budget_denial_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
 mod chat_history_integrity_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/disk_full_tests.rs"]
 mod disk_full_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/limit_denial_tests.rs"]
+mod limit_denial_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/goal_latch_tests.rs"]
+mod goal_latch_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
 mod empty_response_retry_status_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/history_backup_owed_tests.rs"]
+mod history_backup_owed_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn_start_snapshot_tests.rs"]
+mod turn_start_snapshot_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/invalid_prompt_snapshot_tests.rs"]
+mod invalid_prompt_snapshot_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;

@@ -280,6 +280,7 @@ mod tests {
     /// This locks the mechanism: off omits the entry, on (what `pump_transcript` sets) includes it.
     #[test]
     fn transcript_includes_thinking_when_pump_enables_toggle() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let theme = Theme::current();
         let appearance = super::super::commit::committed_appearance(
             &fuigo_pager::appearance::AppearanceConfig::default(),
@@ -311,6 +312,7 @@ mod tests {
     /// The collapsed "Thought for Xs" header alone is not enough.
     #[test]
     fn transcript_expands_streamed_thinking_body() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::scrollback::state::ScrollbackState;
 
         let theme = Theme::current();
@@ -339,6 +341,7 @@ mod tests {
     /// `minimal_collapse_thinking` points users at `/transcript` for the full text, so the transcript must ignore the committed display mode.
     #[test]
     fn transcript_expands_thinking_committed_collapsed() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let theme = Theme::current();
         let appearance = super::super::commit::committed_appearance(
             &fuigo_pager::appearance::AppearanceConfig {
@@ -372,6 +375,7 @@ mod tests {
 
     #[test]
     fn transcript_uses_owning_session_cwd_for_tool_paths() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let theme = Theme::current();
         let appearance = super::super::commit::committed_appearance(
             &fuigo_pager::appearance::AppearanceConfig::default(),

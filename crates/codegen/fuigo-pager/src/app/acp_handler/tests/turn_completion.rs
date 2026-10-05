@@ -627,6 +627,7 @@
                 error_kind: None,
                 usage: None,
                 elapsed_ms: None,
+                verdicts: None,
             },
             meta: Some(serde_json::json!({ "isReplay": false })),
         };
@@ -666,6 +667,7 @@
                 error_kind: None,
                 usage: None,
                 elapsed_ms: None,
+                verdicts: None,
             },
             meta: Some(serde_json::json!({ "isReplay": false })),
         };
@@ -681,6 +683,200 @@
             Some(SessionEvent::TurnFailed { error, .. }) => assert_eq!(error, clean),
             other => panic!("expected TurnFailed, got {other:?}"),
         }
+    }
+
+    /// A wake `TurnCompleted` carrying the shell's typed verdicts (P119 / P70c).
+    fn wake_terminal_with_verdicts(
+        prompt_id: &str,
+        stop_reason: &str,
+        agent_result: &str,
+        verdicts: Option<fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
+    ) -> acp::ExtNotification {
+        wake_terminal_with_verdicts_replay(prompt_id, stop_reason, agent_result, verdicts, false)
+    }
+
+    fn wake_terminal_with_verdicts_replay(
+        prompt_id: &str,
+        stop_reason: &str,
+        agent_result: &str,
+        verdicts: Option<fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
+        is_replay: bool,
+    ) -> acp::ExtNotification {
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new("sess-wake"),
+            update: FuigoSessionUpdate::TurnCompleted {
+                prompt_id: prompt_id.into(),
+                stop_reason: stop_reason.into(),
+                agent_result: Some(agent_result.into()),
+                error_kind: None,
+                usage: None,
+                elapsed_ms: None,
+                verdicts,
+            },
+            meta: Some(serde_json::json!({ "isReplay": is_replay })),
+        };
+        acp::ExtNotification::new(
+            "fuigo/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        )
+    }
+
+    fn wake_failure_text(app: &AppView) -> String {
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::TurnFailed { error, .. }) => error,
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+    }
+
+    /// The text below has had the pitch cut out (a sent credential overlapped it), so a text classifier says "not an
+    /// upsell" and shows it. The verdict, computed before the replacement, says it was: the replacement copy is shown.
+    #[test]
+    fn wake_upsell_filter_decides_on_the_verdict_not_the_redacted_text() {
+        use fuigo_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_OAUTH;
+        use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+        let mut app = make_app_with_agent("sess-wake");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+        let redacted = "You've hit the rate limit for your plan. Upgrade to a [redacted] for higher limits.";
+        let verdicts = ErrorVerdicts {
+            consumer_upsell: true,
+            ..ErrorVerdicts::default()
+        };
+        let _ = handle_ext_notification(
+            &wake_terminal_with_verdicts("task-completed-v1", "rate_limit", redacted, Some(verdicts)),
+            &mut app,
+        );
+        assert_eq!(wake_failure_text(&app), RATE_LIMITED_USER_MESSAGE_OAUTH);
+    }
+
+    /// The reverse: the text still reads like the pitch, but the shell judged it was not (verdict false), so the verdict wins.
+    #[test]
+    fn wake_upsell_filter_keeps_the_text_when_the_verdict_says_no_upsell() {
+        use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+        let mut app = make_app_with_agent("sess-wake");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+        let text = "Upgrade to a SuperGrok subscription: https://grok.com/supergrok";
+        let _ = handle_ext_notification(
+            &wake_terminal_with_verdicts(
+                "task-completed-v2",
+                "rate_limit",
+                text,
+                Some(ErrorVerdicts::default()),
+            ),
+            &mut app,
+        );
+        assert_eq!(wake_failure_text(&app), text);
+    }
+
+    /// Without verdicts (an older shell) the text decides, as before.
+    #[test]
+    fn wake_upsell_filter_falls_back_to_the_text_without_verdicts() {
+        use fuigo_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_OAUTH;
+        let mut app = make_app_with_agent("sess-wake");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+        let _ = handle_ext_notification(
+            &wake_terminal_with_verdicts(
+                "task-completed-v3",
+                "rate_limit",
+                "Upgrade to a SuperGrok subscription: https://grok.com/supergrok",
+                None,
+            ),
+            &mut app,
+        );
+        assert_eq!(wake_failure_text(&app), RATE_LIMITED_USER_MESSAGE_OAUTH);
+    }
+
+    /// The headline status comes from the verdict: the redacted text names no status.
+    #[test]
+    fn wake_failure_headline_reads_the_status_from_the_verdict() {
+        use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+        for busy in [true, false] {
+            let mut app = make_app_with_agent("sess-wake");
+            if busy {
+                app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+            }
+            let verdicts = ErrorVerdicts {
+                http_status: Some(503),
+                ..ErrorVerdicts::default()
+            };
+            let _ = handle_ext_notification(
+                &wake_terminal_with_verdicts(
+                    "task-completed-v4",
+                    "error",
+                    "upstream said [redacted] and stopped",
+                    Some(verdicts),
+                ),
+                &mut app,
+            );
+            let text = wake_failure_text(&app);
+            assert!(text.starts_with("Service unavailable"), "busy={busy}: {text}");
+        }
+    }
+
+    /// The idle rail (`finish_wake_turn`, a wake that streamed output) and the replay rail decide on the verdicts too.
+    #[test]
+    fn chatty_wake_idle_and_replay_rails_decide_on_the_verdicts() {
+        use fuigo_shell::sampling::error::RATE_LIMITED_USER_MESSAGE_OAUTH;
+        use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+        let upsell = ErrorVerdicts {
+            consumer_upsell: true,
+            ..ErrorVerdicts::default()
+        };
+        let status = ErrorVerdicts {
+            http_status: Some(503),
+            ..ErrorVerdicts::default()
+        };
+        for replay in [false, true] {
+            for (stop, verdicts) in [("rate_limit", upsell.clone()), ("error", status.clone())] {
+                let mut app = make_app_with_agent("sess-wake");
+                if replay {
+                    begin_replay(&mut app);
+                    let _ = handle(
+                        make_replay_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+                        &mut app,
+                    );
+                } else {
+                    let _ = handle(
+                        make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+                        &mut app,
+                    );
+                }
+                let _ = handle_ext_notification(
+                    &wake_terminal_with_verdicts_replay(
+                        "task-completed-bg1",
+                        stop,
+                        "cut [redacted] short",
+                        Some(verdicts),
+                        replay,
+                    ),
+                    &mut app,
+                );
+                let text = wake_failure_text(&app);
+                if stop == "rate_limit" {
+                    assert_eq!(text, RATE_LIMITED_USER_MESSAGE_OAUTH, "replay={replay}");
+                } else {
+                    assert!(text.starts_with("Service unavailable"), "replay={replay}: {text}");
+                }
+            }
+        }
+    }
+
+    /// Older shell: no verdicts, the text names the status, the headline still recovers it.
+    #[test]
+    fn wake_failure_headline_falls_back_to_the_text_without_verdicts() {
+        let mut app = make_app_with_agent("sess-wake");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+        let _ = handle_ext_notification(
+            &wake_terminal_with_verdicts(
+                "task-completed-v5",
+                "error",
+                "API error (status 503): upstream down",
+                None,
+            ),
+            &mut app,
+        );
+        let text = wake_failure_text(&app);
+        assert!(text.starts_with("Service unavailable"), "{text}");
     }
 
     #[test]

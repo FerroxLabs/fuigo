@@ -22,8 +22,10 @@ use fuigo_workspace::permission::is_enable_always_approve_option;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultSelectedPermission {
     /// The global "Always allow on all sessions" (enable-always-approve) row.
-    /// It is also the fallback for an unset / unrecognised config value, so it is the effective default.
+    /// Only an explicit `always_allow_all_sessions` selects it: one Enter there turns on always-approve mode.
     AlwaysAllowAllSessions,
+    /// The one-shot allow row, the least permissive way to approve.
+    /// It is the fallback for an unset / unrecognised config value, so it is the effective default (P152).
     AllowOnce,
     /// The prompt-scoped always-allow row ("Always allow this command" /
     /// tool / domain / edit-session).
@@ -55,16 +57,25 @@ impl DefaultSelectedPermission {
         }
     }
 
-    /// Parse a config.toml / registry value (trimmed, case-insensitive, no aliases).
-    /// Both `always_allow_all_sessions` and any unrecognised or empty value resolve to [`AlwaysAllowAllSessions`](Self::AlwaysAllowAllSessions).
-    /// No `Option` has to be threaded through callers.
-    pub fn from_config_value(s: &str) -> Self {
+    /// The value an unset or unrecognised setting means: the least permissive approve row (P152).
+    /// A safety prompt must never preselect a broader grant than "allow once" unless the user configured it.
+    pub const EFFECTIVE_DEFAULT: Self = Self::AllowOnce;
+
+    /// Parse a config.toml / registry value (trimmed, case-insensitive, no aliases); `None` for an empty or unrecognised value.
+    pub fn parse_config_value(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "allow_once" => Self::AllowOnce,
-            "allow_command_always" => Self::AllowCommandAlways,
-            "reject" => Self::Reject,
-            _ => Self::AlwaysAllowAllSessions,
+            "always_allow_all_sessions" => Some(Self::AlwaysAllowAllSessions),
+            "allow_once" => Some(Self::AllowOnce),
+            "allow_command_always" => Some(Self::AllowCommandAlways),
+            "reject" => Some(Self::Reject),
+            _ => None,
         }
+    }
+
+    /// [`parse_config_value`](Self::parse_config_value), with an empty or unrecognised value resolving to
+    /// [`EFFECTIVE_DEFAULT`](Self::EFFECTIVE_DEFAULT) (allow once). No `Option` has to be threaded through callers.
+    pub fn from_config_value(s: &str) -> Self {
+        Self::parse_config_value(s).unwrap_or(Self::EFFECTIVE_DEFAULT)
     }
 
     /// Whether this preselection targets the given ACP option kind.
@@ -109,11 +120,11 @@ impl DefaultSelectedPermission {
 //
 // Read when queueing the first prompt of a session
 // Seeded by `prime` at startup (and lazily on first read) so the path never hits disk mid-session
-// `AlwaysAllowAllSessions` represents the effective default (unset).
+// `EFFECTIVE_DEFAULT` (allow once) represents the unset value.
 
 thread_local! {
     static CONFIG_CURRENT: Cell<DefaultSelectedPermission> =
-        const { Cell::new(DefaultSelectedPermission::AlwaysAllowAllSessions) };
+        const { Cell::new(DefaultSelectedPermission::EFFECTIVE_DEFAULT) };
     static CONFIG_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -123,7 +134,7 @@ thread_local! {
 ///
 /// 1. `FUIGO_DEFAULT_SELECTED_PERMISSION` env var (headless / agent testing; overrides `config.toml` without editing it),
 /// 2. `[ui].default_selected_permission` in the layered effective config,
-/// 3. [`AlwaysAllowAllSessions`](DefaultSelectedPermission::AlwaysAllowAllSessions) (the effective default).
+/// 3. [`EFFECTIVE_DEFAULT`](DefaultSelectedPermission::EFFECTIVE_DEFAULT) (allow once).
 ///
 /// Unrecognised / empty values at any layer fall through to the next.
 pub fn load_default_selected_permission() -> DefaultSelectedPermission {
@@ -131,13 +142,12 @@ pub fn load_default_selected_permission() -> DefaultSelectedPermission {
         if !loaded.get() {
             let resolved = std::env::var("FUIGO_DEFAULT_SELECTED_PERMISSION")
                 .ok()
-                .map(|s| DefaultSelectedPermission::from_config_value(&s))
-                .filter(|p| *p != DefaultSelectedPermission::AlwaysAllowAllSessions)
+                .and_then(|s| DefaultSelectedPermission::parse_config_value(&s))
                 .or_else(|| {
                     load_string_from_effective_config("default_selected_permission")
-                        .map(|s| DefaultSelectedPermission::from_config_value(&s))
+                        .and_then(|s| DefaultSelectedPermission::parse_config_value(&s))
                 })
-                .unwrap_or(DefaultSelectedPermission::AlwaysAllowAllSessions);
+                .unwrap_or(DefaultSelectedPermission::EFFECTIVE_DEFAULT);
             CONFIG_CURRENT.with(|c| c.set(resolved));
             loaded.set(true);
         }
@@ -189,8 +199,9 @@ pub fn set_last_used_permission(kind: DefaultSelectedPermission) {
 /// Precedence:
 ///
 /// 1. the sticky last-used kind (once the user has confirmed any prompt),
-/// 2. the configured `[ui].default_selected_permission`,
-/// 3. the global "Always allow on all sessions" row, matched by identity via `is_enable_always_approve_option`, not by list position,
+/// 2. the configured `[ui].default_selected_permission` (unset means allow once),
+/// 3. only when `always_allow_all_sessions` is configured explicitly: the global "Always allow on all sessions" row, matched by
+///    identity via `is_enable_always_approve_option`, not by list position,
 /// 4. index 0 (clients that don't get the YOLO row prepended).
 ///
 /// The YOLO row is skipped while a concrete target kind is in play, so a configured / sticky preselection never lands on it.
@@ -260,14 +271,15 @@ mod tests {
             DefaultSelectedPermission::from_config_value("always_allow_all_sessions"),
             DefaultSelectedPermission::AlwaysAllowAllSessions
         );
-        // Empty and garbage collapse to the effective default.
+        // Empty and garbage collapse to the effective default: allow once, the least permissive approve row (P152).
+        // A safety prompt must never preselect always-approve mode unless the user configured exactly that.
         assert_eq!(
             DefaultSelectedPermission::from_config_value(""),
-            DefaultSelectedPermission::AlwaysAllowAllSessions
+            DefaultSelectedPermission::AllowOnce
         );
         assert_eq!(
             DefaultSelectedPermission::from_config_value("bogus"),
-            DefaultSelectedPermission::AlwaysAllowAllSessions
+            DefaultSelectedPermission::AllowOnce
         );
     }
 
@@ -349,10 +361,30 @@ mod tests {
         .unwrap();
     }
 
+    /// P152: the effective default (nothing configured) lands on the one-shot allow row, not the always-approve row.
     #[test]
-    fn resolve_unset_lands_on_yolo_row() {
+    fn resolve_effective_default_lands_on_allow_once_not_yolo() {
         std::thread::spawn(|| {
-            // Force the config cache to the default without touching disk/env.
+            set_default_selected_permission(DefaultSelectedPermission::EFFECTIVE_DEFAULT);
+            let options = [
+                opt(
+                    ENABLE_ALWAYS_APPROVE_OPTION_ID,
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                opt("allow-always", acp::PermissionOptionKind::AllowAlways),
+                opt("allow-once", acp::PermissionOptionKind::AllowOnce),
+                opt("reject-once", acp::PermissionOptionKind::RejectOnce),
+            ];
+            assert_eq!(resolve_initial_cursor(&options), 2);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_explicit_always_allow_all_sessions_lands_on_yolo_row() {
+        std::thread::spawn(|| {
+            // Force the config cache to the explicit opt-in without touching disk/env.
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
             let options = [
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
@@ -362,7 +394,7 @@ mod tests {
                 ),
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
-            // With no sticky kind and the default config, the cursor lands on the enable-always-approve row
+            // With no sticky kind and the explicit opt-in, the cursor lands on the enable-always-approve row
             // It is matched by identity (index 1), not the first AllowOnce (index 0)
             assert_eq!(resolve_initial_cursor(&options), 1);
         })
@@ -418,7 +450,7 @@ mod tests {
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
-            // No sticky kind, default config, no YOLO row (non-TUI client), so the cursor falls back to index 0
+            // No sticky kind, explicit always-approve config, no YOLO row (non-TUI client), so the cursor falls back to index 0
             assert_eq!(resolve_initial_cursor(&options), 0);
         })
         .join()

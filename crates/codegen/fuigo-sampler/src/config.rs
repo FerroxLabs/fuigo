@@ -35,7 +35,7 @@ pub enum AuthScheme {
 /// URL-derived request headers (e.g. `X-XAI-Token-Auth` for the cli-chat-proxy) land in [`Self::extra_headers`].
 /// `agent::config::inject_url_derived_headers` folds them in before the `SamplerConfig` is handed to the actor.
 /// Auth is selected separately via `auth_scheme`, while `api_backend` controls only the request/response protocol shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
     /// Persisted discriminator keeps a deserialized subscription config fail-closed.
     #[serde(default)]
@@ -129,6 +129,89 @@ pub struct SamplerConfig {
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SamplerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            subscription,
+            subscription_resolver,
+            api_key,
+            base_url,
+            mtls_cert_dir,
+            model,
+            max_completion_tokens,
+            temperature,
+            top_p,
+            api_backend,
+            auth_scheme,
+            extra_headers,
+            extra_response_includes,
+            query_params,
+            env_http_headers,
+            context_window,
+            force_http1,
+            max_retries,
+            rate_limit_retry_threshold,
+            stream_tool_calls,
+            idle_timeout_secs,
+            reasoning_effort,
+            reasoning_summary,
+            origin_client,
+            client_identifier,
+            deployment_id,
+            user_id,
+            client_version,
+            attribution_callback,
+            bearer_resolver,
+            supports_backend_search,
+            programmatic_tool_calling,
+            compactions_remaining,
+            compaction_at_tokens,
+            doom_loop_recovery,
+            header_injector,
+        } = self;
+        f.debug_struct("SamplerConfig")
+            .field("subscription", subscription)
+            .field("subscription_resolver", &subscription_resolver.as_ref().map(|_| "<dyn>"))
+            .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &fuigo_auth::redact_url(base_url))
+            .field("mtls_cert_dir", mtls_cert_dir)
+            .field("model", model)
+            .field("max_completion_tokens", max_completion_tokens)
+            .field("temperature", temperature)
+            .field("top_p", top_p)
+            .field("api_backend", api_backend)
+            .field("auth_scheme", auth_scheme)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("extra_response_includes", extra_response_includes)
+            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("env_http_headers", env_http_headers)
+            .field("context_window", context_window)
+            .field("force_http1", force_http1)
+            .field("max_retries", max_retries)
+            .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
+            .field("stream_tool_calls", stream_tool_calls)
+            .field("idle_timeout_secs", idle_timeout_secs)
+            .field("reasoning_effort", reasoning_effort)
+            .field("reasoning_summary", reasoning_summary)
+            .field("origin_client", origin_client)
+            .field("client_identifier", client_identifier)
+            .field("deployment_id", deployment_id)
+            .field("user_id", user_id)
+            .field("client_version", client_version)
+            .field("attribution_callback", &attribution_callback.as_ref().map(|_| "<dyn>"))
+            .field("bearer_resolver", &bearer_resolver.as_ref().map(|_| "<dyn>"))
+            .field("supports_backend_search", supports_backend_search)
+            .field("programmatic_tool_calling", programmatic_tool_calling)
+            .field("compactions_remaining", compactions_remaining)
+            .field("compaction_at_tokens", compaction_at_tokens)
+            .field("doom_loop_recovery", doom_loop_recovery)
+            .field("header_injector", &header_injector.as_ref().map(|_| "<dyn>"))
+            .finish()
+    }
 }
 
 impl Default for SamplerConfig {
@@ -253,5 +336,45 @@ mod tests {
             round_tripped.doom_loop_recovery,
             with_policy.doom_loop_recovery
         );
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    /// P70: `SamplerConfig`'s Debug used to print `api_key` and every header value.
+    #[test]
+    fn sampler_config_debug_redacts_key_headers_and_query() {
+        let cfg = SamplerConfig {
+            api_key: Some("p70sk-FAKE-1b2c3d4e5f".into()),
+            extra_headers: [("Authorization".to_owned(), "Bearer p70hd-FAKE-9a8b7c".to_owned())].into_iter().collect(),
+            query_params: [("key".to_owned(), "p70qp-FAKE-5e6f7a".to_owned())].into_iter().collect(),
+            model: "p70-model".into(),
+            base_url: "https://p70.invalid/v1?key=p70bu-FAKE-3c4d5e".into(),
+            ..SamplerConfig::default()
+        };
+        assert_redacted(
+            &cfg,
+            &["p70sk-FAKE-1b2c3d4e5f", "p70hd-FAKE-9a8b7c", "p70qp-FAKE-5e6f7a", "p70bu-FAKE-3c4d5e"],
+        );
+        let client = crate::SamplingClient::new(cfg.clone()).expect("client");
+        assert_redacted(&client, &["p70bu-FAKE-3c4d5e"]);
+        let out = format!("{cfg:?}");
+        assert!(out.contains("Authorization") && out.contains("p70-model"), "non-secret fields still print: {out}");
     }
 }

@@ -38,6 +38,8 @@ fuigo-config = { workspace = true }
 fuigo-extra-ca = { workspace = true }
 fuigo-sampler = { workspace = true }
 fuigo-token-estimation = { workspace = true }
+# Benign-panic classification shared with the local crash recorder (one list).
+fuigo-crash-handler = { path = "../fuigo-crash-handler" }
 fuigo-dirs = { workspace = true }
 sentry = { version = "0.42.0", default-features = false, features = [
     "panic",

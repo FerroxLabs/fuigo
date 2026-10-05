@@ -700,6 +700,7 @@ mod tests {
 
     #[test]
     fn reauth_required_has_warning_accent() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = SessionEventBlock::new(SessionEvent::ReAuthRequired);
         let theme = Theme::current();
         let accent = block.accent(&ctx());
@@ -712,6 +713,7 @@ mod tests {
 
     #[test]
     fn request_failed_message_and_warning_accent() {
+        let _theme = crate::theme::cache::pin_theme();
         let event = SessionEvent::RequestFailed {
             status: Some(500),
             headline: "Server error (500)".into(),
@@ -742,6 +744,7 @@ mod tests {
 
     #[test]
     fn context_too_large_has_warning_accent() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = SessionEventBlock::new(SessionEvent::ContextTooLarge);
         let theme = Theme::current();
         let accent = block.accent(&ctx());
@@ -820,6 +823,7 @@ mod tests {
 
     #[test]
     fn compaction_failed_has_warning_accent() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = SessionEventBlock::new(SessionEvent::CompactionFailed {
             error: "out of credits or over your spending limit. Add credits and retry.".into(),
         });
@@ -972,6 +976,7 @@ mod tests {
 
     #[test]
     fn recap_accent_and_bullet_use_neutral_tool_color_when_idle() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = SessionEventBlock::new(SessionEvent::Recap {
             summary: "did stuff".into(),
             auto: false,
@@ -994,6 +999,7 @@ mod tests {
 
     #[test]
     fn recap_loading_shows_header_only_with_animated_sidebar() {
+        let _theme = crate::theme::cache::pin_theme();
         // An empty summary on a running entry is the in-flight loading state
         let block = SessionEventBlock::new(SessionEvent::Recap {
             summary: String::new(),

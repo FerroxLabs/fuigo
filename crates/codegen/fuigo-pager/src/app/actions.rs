@@ -183,9 +183,6 @@ pub enum Action {
     /// Process-wide chat mode still stamps kind=chat via SessionFlags in the load effect.
     /// Under `--chat`, local Build disk rows are refused in dispatch (never coerced).
     LoadSession(String, Option<std::path::PathBuf>, bool),
-    /// Welcome Local workspace ACK confirmed (y); write the ack and start the session.
-    #[cfg(feature = "local-workspace")]
-    ConfirmWelcomeLocalWorkspaceAck,
     /// Create a new session with a client-chosen session ID (`--session-id`).
     NewSessionWithId(String),
     /// Startup `--fork-session`: fork `parent` then load the child.
@@ -834,6 +831,15 @@ pub enum Action {
     DoctorFixCancelled(DoctorFixTarget),
     /// Persist the memory modal fullscreen preference to config.toml.
     PersistMemoryFullscreen(bool),
+    /// Persist a dismissed plugin CTA (`[plugins] dismissed_ctas`) off the
+    /// input thread. The in-memory dismissal has already happened.
+    PersistPluginCtaDismissal(String),
+    /// Run an agents-modal `config.toml` write off the input thread; the open
+    /// modal is told the result.
+    AgentsModalConfigWrite(crate::views::agents_modal::AgentsConfigWrite),
+    /// Run a `/provider` write off the input thread; the result is reported
+    /// where the command was typed.
+    WriteProviderConfig(crate::slash::commands::provider::ProviderWriteRequest),
     /// Open the Agent Dashboard view (`/dashboard`, `Ctrl+\`, `fuigo dashboard`).
     OpenDashboard,
     /// Close the dashboard, returning to the previous `ActiveView`.
@@ -1639,9 +1645,12 @@ pub enum Effect {
     /// Runs off the render path via `spawn_blocking`.
     /// Result is cached on `AppView` so `/release-notes` and the welcome screen share it.
     FetchChangelog,
-    /// Persist the hidden announcement ids to disk.
+    /// Persist a change to the hidden announcement ids: each id in `changed`
+    /// is hidden on disk exactly when it is in `hidden_ids` (this view's whole
+    /// set after the change); ids another process hid or showed are kept.
     PersistAnnouncementsHidden {
         hidden_ids: std::collections::BTreeSet<String>,
+        changed: std::collections::BTreeSet<String>,
     },
     /// Persist `[privacy].privacy_banner_acked` (RFC 3339 dismiss time).
     PersistPrivacyBannerAcked { acked_at: String },
@@ -1660,6 +1669,23 @@ pub enum Effect {
     /// Multi-pager safe via `config_toml_edit::read_config_document_for_edit`, which loads, modifies, then writes the whole document.
     /// Concurrent pagers may produce last-writer-wins behaviour but never corrupt the file.
     PersistDashboard(crate::views::dashboard::PersistedDashboard),
+    /// Blocking `config.toml` write of a plugin CTA dismissal (fire and forget, logged on failure).
+    PersistPluginCtaDismissal {
+        plugin_id: String,
+        /// The user `config.toml`, made absolute when the click was dispatched.
+        config_path: std::path::PathBuf,
+    },
+    /// Blocking agents-modal `config.toml` write; reports back as [`TaskResult::AgentsModalConfigWritten`].
+    AgentsModalConfigWrite {
+        /// The agent view whose modal asked; `None` when none was on screen.
+        agent_id: Option<AgentId>,
+        write: crate::views::agents_modal::AgentsConfigWrite,
+    },
+    /// Blocking `/provider` write; reports back as [`TaskResult::ProviderConfigWritten`].
+    WriteProviderConfig {
+        request: crate::slash::commands::provider::ProviderWriteRequest,
+        report_to: ConfigWriteReport,
+    },
     /// Persist a per-command worktree mode preference to `[hints]` in config.toml.
     /// `config_key` is the TOML key under `[hints]` (`"new_session_worktree_mode"` or `"fork_worktree_mode"`).
     PersistWorktreeMode {
@@ -1971,9 +1997,11 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Save a remember note to workspace MEMORY.md (async file write).
+    /// Save a remember note to workspace MEMORY.md through the shell (`fuigo/memory/save_note`).
     SaveMemoryNote {
         agent_id: AgentId,
+        /// The session whose shell decides, at write time, whether memory is on and does the write.
+        session_id: acp::SessionId,
         text: String,
         cwd: std::path::PathBuf,
     },
@@ -2302,6 +2330,16 @@ pub struct WorkspaceMemberUpsertFailure {
     pub error: String,
     pub retryable: bool,
 }
+/// Where a config write started from a slash command reports its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigWriteReport {
+    /// The agent view the command was typed in (its scrollback).
+    Agent(AgentId),
+    /// The dashboard's dispatch input (its toast).
+    Dashboard,
+    /// Neither was on screen: the first agent, else a startup notice.
+    Anywhere,
+}
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
@@ -2519,6 +2557,9 @@ pub enum TaskResult {
         /// HTTP status code from the upstream API error, if available.
         /// Used by dispatch to show targeted UI (e.g. credit-limit upsell on 403).
         http_status: Option<u16>,
+        /// The shell's typed verdicts for the error (P119), when the reply carried them. Dispatch decides on these,
+        /// never on the words of `result`'s text, which the shell may have scrubbed.
+        verdicts: Option<fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
         /// The `prompt_id` the pager minted when it sent this `session/prompt` RPC.
         /// On `Ok` the agent echoes `promptId` back in PR meta, but an `acp::Error` carries no meta.
         /// This is therefore the ONLY way to attribute an *error* response to its prompt.
@@ -3062,6 +3103,18 @@ pub enum TaskResult {
     },
     /// Best-effort persist failed (cycle_mode path).
     /// Logs and toasts but does NOT roll back in-memory state.
+    /// An agents-modal config write finished.
+    AgentsModalConfigWritten {
+        agent_id: Option<AgentId>,
+        write: crate::views::agents_modal::AgentsConfigWrite,
+        /// A failure is acknowledged where it is shown (see `config_write_queue`).
+        result: Result<(), crate::config_write_queue::WriteFailure>,
+    },
+    /// A `/provider` write finished: `Ok` message or the failure to show.
+    ProviderConfigWritten {
+        report_to: ConfigWriteReport,
+        result: Result<String, crate::config_write_queue::WriteFailure>,
+    },
     SettingPersistFailedBestEffort {
         key: crate::settings::SettingKey,
         error: String,

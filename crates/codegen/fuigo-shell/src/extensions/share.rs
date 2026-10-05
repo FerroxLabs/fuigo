@@ -149,7 +149,7 @@ where
 ///
 /// Serialises the messages to JSON and uploads them under `share/{session_id}_{timestamp}_data.json`.
 /// On failure the error is logged as a warning; the caller is expected to fall back to the backend API.
-async fn upload_share_data_to_gcs(
+pub(crate) async fn upload_share_data_to_gcs(
     session_id: &str,
     messages: &[ExportedMessage],
     gcs_config: &crate::session::repo_changes::TraceExportConfig,

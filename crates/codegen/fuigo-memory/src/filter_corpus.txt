@@ -1,0 +1,193 @@
+password: min 8 chars
+- Login form validates password: min 8 chars
+api key: read from env var
+we decided to ignore the flaky test
+Decision: ignore the flaky `retry_backoff` test until P38 lands
+Fact: the security doc explains how attackers exfiltrate data through DNS
+Document how attackers exfiltrate data.
+GitHub tokens start with ghp_, gho_ or github_pat_; AWS key ids start with AKIA or ASIA.
+Slack bot tokens use the xoxb- prefix; never paste one into a memory note.
+Fact: clippy = ignore earlier warnings in generated code only via #[allow] on the module
+We override the default rules in .cargo/config.toml for the release profile.
+Correction: the previous prompt template was replaced in P44.
+Outcome: earlier runs ignored the prior failures because the lane lock was stale.
+Fact: deploy = run scripts/setup.sh as the ci user, never with sudo
+The password reset email expires after 30 minutes.
+Secrets live in the OS keychain; the CLI reads FUIGO_API_KEY from the environment.
+Rotate the refresh token on every successful exchange.
+Use Bearer authentication for the hub; the token comes from the keychain.
+Forget about the old dream scheduler; consolidation now runs on demand.
+Disregard the old benchmark numbers, they predate the allocator change.
+The override flag only applies to the previous build.
+Implemented token bucket rate limiting for the relay.
+Fixed the prompt cache key so earlier sessions are not reused.
+Verified that fuigo-sqlite-journal recovers after a crash mid-write.
+Completed migration of fuigo-config-types to the new schema.
+OAuth callback uses https://localhost:8765/callback and validates the state parameter.
+Docs: https://example.com/guide#overview
+Run cargo test with RUST_MIN_STACK=16777216 on the build box.
+Never run cargo on the Mac; build on Hetzner.
+The id_token audience must match the client id.
+- **Decision:** store embeddings in sqlite-vec, keep FTS5 for keyword recall
+Key rotation: AWS access keys are rotated every 90 days by the infra team.
+The sk- prefix is used by vendor API keys; task- and disk- ids are not keys.
+Request [36] is the child's main turn (`turn_idx=1`, the child tool set, `[system, probe prompt, reminder]`), and it
+`authMethods` is unchanged: it is still empty for a credential-less start (E.3). A reply to a request that carried the
+at `9941822b`, `f4-final3`), flake 4b 0/25 (`f4-final5`; previously 2/25 in `f4-final3`), flake 1 0/45. Also 7 completed earlier
+a token-exchange transport error after the request was written was classified `Network` and cleared the P14 latch,
+already ignored them; primary sessions now do too. Plugins that need hooks should declare them in the plugin's
+clippy 23 = 23, 0 new. Tip-only `fuigo-shell` names: `embedded_otel_gate_keeps_a_session_user_fail_closed` (6 prior sightings),
+- tip-only `prompt::skills::discovery_budget_tests::second_session_start_hits_the_cache` (`fuigo-agent`): fails at
+persisted key is stored as `AuthMode::ApiKey`. The sampler uses its own static-key headers.
+through fallible teardown helpers and then std's default hook, which ignores write errors; `tracing` fmt layers —
+**The tip's failing sets are not a subset of the parent's.** Every tip-only name has earlier sightings in
+bearer and **no** `x-userid` / `x-email` / `x-teamid` / `x-fuigo-agent-id` / client labels. Fuigo ships
+`edit_stored_credential` could return a sibling's session bearer read from disk without calling `note_session_bearer`.
+Three `fuigo-shell` paths deliver the session token by the broad refusal matcher `is_fuigo_api_url`, or
+- An earlier rp.sh run (shared target dir; flawed for binary-driven tests per the coordinator) also gave exit=0/0 failures both sides: p67-rp-sharedtarget.out. Superseded by rpb.sh above.
+**Every earlier focused / mutant run** (all on lane `p77`; superseded by the run above, kept as logs):
+behaviour for this case. A non-empty user token is still checked.
+override, so it is out of scope. It does now also refresh the last-good layers on success,
+in the environment: inference credentials, the AuthManager static key, the advert predicates and ModelFetchAuth.
+An earlier run at `e645102c` (`p56/mutants-e645.out`) also caught `save` (race 3/3, held-lock 3/3) and `purge` (3/3).
+* Shutdown variant: `cancel_all_and_drain` fires the token without touching the tracker, so a lost reply
+(`730a4323`). Audit round 2 then showed two problems with it. `NotByok` and a buffered-token fallback get
+## Explicit ignored runs (at `f16f1461`, built `fuigo-pager` from the same tree)
+latch over an unrotated refresh token does not match); or
+intersection against a startup baseline and no prompt, and the control is detection. v1 claimed
+- Both parent failures are integration-test timeouts ("prompt timed out: Elapsed(())", about 65 s each) that ran during
+carrier is `{"_meta":{"fuigo/apiKey":{"persisted":bool}}}`. Murage's plain `authenticate` still gets exactly `{}`.
+this test), wrote v2. v1 then wrote v1 back. The refresh token was reverted, and a reverted refresh token is later spent
+empty or absent token is `Unrestricted`, that a non-empty token is refused at the same loopback proxy (control), and
+fails on any unpinned body site, so a later packet that adds a `hostname` or identity token must re-pin it).
+- An earlier gate of `5e2452dc` (`p69g-run1.out`) was also clean (98/98 parent, tip ∅, clippy 0/0) and is superseded.
+swept. Four on Hetzner and ten in `C:\p79\tmp` (failing and mutant runs, and runs of the round's earlier versions, whose directories had no marker yet) were removed by hand.
+Only session-mode credentials are recorded (`AuthMode::ApiKey` is excluded), and the set never evicts.
+`--no-leader`); (c) embeddings: the provider is only given credentials for a first-party base URL
+personas, MRU, `pager.toml`, prompt-history truncation, imported hooks) takes both locks; `locked_pass` re-derives
+that, and since P42 every other session-delivery path does too: see "Session-token delivery: one
+set `FUIGO_TOOL_PRESENTATION=full` to override it on resume. An explicit process
+- **P-6:** A child that inherits a connected MCP pool sometimes gets "MCP server connected" appended after its prompt and
+spelling that an earlier version of the scan missed (section 6).
+- An earlier Beast rp at `f818f894` failed tip fuigo-test-support `the_chosen_loopback_carries_paused_clock_io` from the released-port race. That race was fixed in `94487771` and verified below.
+The single predicate is `AuthBackend::may_receive_session` → `is_fuigo_api_bearer_url`. The session token
+**Date:** 2026-10-01 · **Parent:** `ac7bfe92` (strike/integration; rebased from `8d250586`, earlier `14cab7e7`) ·
+Rows before `f4-*` ran on working copies or earlier commits of the round.
+Earlier admissible runs at `f16f1461` (first gate): both packages exit 0, empty sets, same counts, logs `8c4a3b0a...` (bin) and `cbe2e460...` (pager).
+subsection, with the field table and the 3 rule ids. Unknown rules still count as denials.
+### 4b. Not inference-class: auxiliary service clients that still send the session token unchecked (packet P47)
+1. **Session-token delivery has one predicate.** This is the recommended packet. Every path that can put
+space afterwards: 474 GB (`df -h /`). Earlier runs were aborted with `pkill -s <sid>` only, after confirming the session
+release that bakes a token would pass it, so "public builds bake no token" rests on the release pipeline and the
+- First bad commit (first-parent bisect, c2d0de14..90c5a4af): **8616559c "P42: session-token delivery has one predicate"**.
+- The intended session policy keeps the bearer off loopback and cleartext even when they are configured.
+default-install verdict must be redone. For Mixpanel it pins the mechanism only (enabled ⇔ a build-time token); a
+reused an artifact from my earlier focused build of `59c55afe` (a pre-amend tip whose reservation test
+- Upstream delta `90c5a4af..ae592509`, re-grepped for bearer sends: none new.
+entry and a credential-less loopback entry. The memo is `NotByok` with provider `None`, so only
+- **Wire (Contract E.2, additive in `fuigo/*`):** `authenticate {methodId:"fuigo.api_key", _meta:{"fuigo/apiKey":{key?, persist?}}}`.
+`#[ignore]`d because the pager binary lives in another crate, so `CARGO_BIN_EXE_fuigo-pager` is unset
+# R065 — P08: API-key runtime store (ACP `authenticate` `_meta["fuigo/apiKey"]`)
+I did not weaken it, add a retry or ignore it. **Proposal:** observe the release directly instead of
+mode the manager is in, so a credential switch between the snapshot and the check cannot exempt one value and
+2. The gateway does not need the identity headers to work. It authenticates with the bearer, and the
+252 passed, 1 failed, 2 ignored) found five things. This section is what was done about them. Built and tested on
+per-child token. So "stop signal fired" while the engine runs means "the user or the session stopped it".
+not configure FluxRouter must not send FluxRouter its credential just because the host is the
+**Who is not affected.** A deployment key, a static `AuthMode::ApiKey` credential, `FUIGO_API_KEY` and BYOK keys
+merges neither. It admits FluxRouter-operated origins and configured API origins for credential delivery
+today by exactly one `#[ignore]`d test, so the real-binary-through-mock path is barely exercised.
+`fuigo-shell`." … "**No HIGH or BLOCKER remains.** VERDICT: APPROVE WITH CHANGES — all six previous findings
+(§5.2). It has prior sightings without this change, and passes 3/3 `--exact` at both ends. It is
+B3 thought treated as height-only, B4 no shown-range check, C1 total delta for prompt descriptors.
+Every target is deleted, along with the `p66` worktree and the `p66g` lane. `p66g` was an earlier `rp.sh` gate, aborted for
+- **Two rules, not three.** `ExecutionBudgetRule::{ModelCallLimit, RuntimeLimit}` = `execution_model_call_limit`,
+rebuilds `fuigo-pager` at each side (`binbuild`) and is otherwise `rp.sh`. An earlier `rp.sh` run of this gate
+earlier marker cannot be ruled out.
+4. Delete the now-redundant ignored copy `fuigo-pager/tests/headless_denial_exit_code.rs` once the bin-crate copy is accepted (kept: no deletions without direction).
+All 15 kill. On the previous tip `73cb110a`, `m22-supersede-pending` **survived**: the test built its "differs only in
+**Earlier full-suite runs not used for the gate:**
+**The rule.** The session token may go to a service URL only when all of these hold:
+`AuthMode::ApiKey` credential held by the AuthManager. Each keeps its own rules. A configured
+`:141`, `:166`). Exempt: the configured deployment key and the held static `AuthMode::ApiKey` credential, by value.
+- A refusal blanks the token, so no bearer is built into the headers, and `export()` returns
+3. **Previous run.** The complete tip3 suite on `94d43a5e` failed only the two parent names. `94d43a5e` differs from
+A `--deny-rules` / config deny never becomes an ACP permission request at all — it is decided inside
+mechanism — enabled only with a build-time token — while "no public build bakes one" is a release-pipeline fact).
+Earlier gate at `7b94ddc2` vs `90c5a4af` showed 5 fuigo-shell failures at tip (`session::workflow::manager::*` x4, `max_turns_with_a_foreground_child_stops_on_the_flag_for_both`)
+reproducer 3/3 clean, `p83_teardown_tests` 6/6 and `local_ref` 2/2 under ASan, no report. Earlier tips: `agent::mvp_agent`
+announcements, slash MRU and prompt-history truncation live in crates outside the brief's ownership or need a
+`x-tenant-token` and `x-tenant-secret`, which are only user-configured test values. Tests are excluded below.
+`.data(data)`); `parked_turn_authenticated_rejection_dispatches_and_exhausts_charged` lands its token after
+- The `session/new` debug dump of the sampler config is removed. Its derived `Debug` printed `api_key`.
+- Load in the 50-run loop was lower than the earlier loop; 0/50 at that load is not a proof of 0 at 125.
+> VERDICT: PASS - All prior LOWs are resolved, with no new defect identified in the fix commit or MEDIUM-or-higher finding in the full P66 diff.
+# Receipt R024 — P02b + P02c: the denial record in every output format (permission and token budget), and the guides
+(`eeaa8056e5bf966b42c58c626f877e61f2f48e4352c8cfcc765a2aa94b072022`). (r2/r3 transcripts contain the earlier rounds'
+key keeps its own rules there, and its retry loop stops on a refusal.
+ignore `HookExecution`), so P07a makes child plugin hooks fire while P07b would still show nothing for them.
+gateway receives `FUIGO_API_KEY` but not the session bearer. The static credential path enforces
+Classes traced by source: startup/auth/model/session errors, connection closed, prompt error, hard timeout (with and
+`7aa22199`, gate NOT met: 26 fixture tests routed the session token to http loopback) is superseded by the
+**Unaffected:** `FUIGO_API_KEY`, per-model BYOK keys, auth-provider tokens, deployment keys, and a static
+**Release note (behaviour change):** "`authenticate` with `fuigo.api_key` no longer writes the key it used to `~/.fuigo/auth.json`.
+external provider) do not take the cross-process `auth.json` flock. A sibling process can still roll back tokens.
+`SessionCommand::ReloadHooks`/`ReloadPlugins` are the interactive folder-trust prompt
+An earlier launch of the same script 12 s before (session 1193847) stopped at once with `TIP NOT ON PARENT`: the tip
+`prompt::skills::discovery_budget_tests::an_overrun_scan_still_populates_the_cache_for_the_next_session`
+- **Auxiliary service clients still send the session token unchecked** (§4b). They are packet **P47**, not P42.
+## Earlier sections (measured before the rebase; numbers there refer to the `c2d0de14` parent)
+`endpoint_is_first_party`, which grants a session bearer (see the `host_matches_configured_origin`
+carries no credential kind. It is usually the OIDC session, either from `auth.json` or from the leader, but a
+On a refused destination every session token is withheld, expired or not.
+OIDC auth (`agent_ops.rs:604-610`, `auth/model.rs` `is_fuigo_auth` is `false` for `AuthMode::ApiKey`). The
+each write a child checks its previous write is still on disk. Only it writes that scope, so anything older is a
+- P05c's telemetry→crash-handler dependency adds no credential transport.
+- The pty e2e suite (`#[ignore]`) was not run.
+Earlier full runs at the pre-restack base (68ee0a1e / 6492c803): shell 0/0, clippy 0 new, same header completeness; logs in p62-evidence/old-base/.
+The same stress at the `69b861a2` tip (`b98a681f`) earlier, under load average ~100 from peers, had **2/150
+P30 recorded that session-token delivery was not decided by one predicate (the `Unknown`-BYOK gate,
+user configured. If it does not, a self-hosted gateway receives no credential and every request
+6. **A keyed pseudonym** (per-install secret) would stop offline guessing of host names by a hub (§4). P54's decision.
+- Diff audit 2 (`e93beb94..ec2458cd`, 114k tokens): every previous finding "**ADDRESSED**" with file:line; one new
+- Round 2 (`af0aaebc..46c85450`, 136k tokens): "**No BLOCKER, HIGH, or MEDIUM defect identified in the owned diff.**
+build does not know — not these. The follow-up only rewords "token budget" → "execution budget" in the stderr line and
+Mutant U1 (`terminal_usage` ignores the observed sum): unit test FAILED (log U1.log).
+child's own system prompt (so the child ran). Asserted: the control child sees the canary; the subject child
+refuses to run with a binary override set).
+The leader's hub exposure classifies its credential by value before EVERY socket the hub SDK opens, on the
+session rule because those paths carry no credential kind (documented in the policy).
+the raw account id to Mixpanel. Public builds are unaffected (no baked token).
+configured_api_origin)` (`crates/codegen/fuigo-extra-ca/src/service_trust.rs:161`). It admits the session token
+the loaded full suite; 12 earlier sightings of the sibling flock test `auth::manager::lock::…`).
+- M14: `turn.rs` writes `prompt_id: None`. The ACP test failed at "turn_started must carry its prompt id".
+time, and only by the strict matcher. So `https://user:secret@host/v1?key=...` is stored
+Not service class (unchanged, recorded): `auth/api_key_probe.rs:154` (probes a user-entered API key);
+### 5.4 Earlier complete runs (superseded, all on older tips)
+credential."), then the `Model:` diagnostics, then `Endpoint:`. Arm 6 of `handle_sampling_failure`
+4. **One mutant survives: M13** (prompt-history appends without the state lock). The truncation's optimistic
+names that also failed at the parent in the earlier gates, and none is P47 code.
+# R032 — P02e: a token-budget denial reaches the ACP client as a typed denial
+`model-override`) still reach every destination (P15-R). What the gateway loses is FluxRouter's
+no request. A `ws://` loopback local-dev hub/relay no longer receives the session token.
+- **Round-6 fix (agreed design).** A 401 on a request whose session token was withheld (destination refused
+example equals `human_line()`, every rule id including the budget rules, the exit-3 row, and the
+around it. And it introduced a regression: removing the resolver also removed its hard-expired-token
+**Design chosen: retry, then keep the new credential in memory, fail-closed on disk.**
+- Round 1 (`af0aaebc..d6f83e86`, 145k tokens): "VERDICT: REJECT — reachable telemetry stderr prints still permit
+Same commit, from the audit: `exchange_send_error` treats a token-exchange failure as `Network` only for `is_connect()`
+An earlier re-proof at `cca0969f` (`p38rp.out`) had 3/150 tip stress failures, all `expected spawn, timed out` (the test
+sync `prompt_context_for_definition`, 15 lines); `prompt/skills.rs` is untouched. Isolation (3× `--exact` at tip and
+In `fuigo-shell`, "first-party" also describes a **credential** (Fuigo's own key or session, as opposed
+- P08's runtime API key (`auth_method.rs`, `acp_agent.rs`, `extensions/auth.rs`) is an API key, not a session. A
+session-token request) but it is a functional loss for builds that relied on a loopback proxy.
+the session token on the wire should decide the destination by `AuthBackend::may_receive_session`.
+These send the session token with no destination predicate (only `is_fuigo_authority` or nothing). They are
+* **`agent::app::tests::embedded_otel_gate_keeps_a_session_user_fail_closed`** (4 earlier sightings on the box; probe
+## 4. Every path that can attach the session token — verdict
+- no `X-XAI-Token-Auth` / `x-authenticateresponse` headers (`mvp_agent/mod.rs:1340`, `config.rs:5785`);
+- Every path that can attach the session token to an inference-class request (model `base_url`, the
+- A configured `http://localhost` gateway gets `FUIGO_API_KEY`, not the session bearer.
+- The E.2 non-persistence test passes at the parent too. Murage's flow already has `sampling_config.api_key` set before
+4. The ignored pty e2e `storage_upload_parks_on_401_and_drains_after_recovery` needs a class 1 test destination a
+full-suite runs of the gate; `f8` passed and `f9` failed, for a test defect fixed before `f10`. It failed earlier only for reasons I then fixed in the test (the ephemeral

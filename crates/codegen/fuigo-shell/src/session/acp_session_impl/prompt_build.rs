@@ -958,15 +958,42 @@ impl SessionActor {
             &fuigo_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
         let active_session_config = self.reconstruct_full_config().await;
-        let resolved_describe = self
-            .resolve_aux_sampler_config(&self.image_description_model)
-            .await;
+        // The helper slug and how it was chosen come from ONE config snapshot (P90 F6), so a
+        // config reload can never pair one helper with another helper's provenance. The
+        // session's spawn-time slug is the fallback for a config that carries none.
+        let (describe_slug, choice) = self
+            .models_manager
+            .image_description_helper()
+            .unwrap_or_else(|| {
+                (
+                    self.image_description_model.clone(),
+                    crate::agent::config::HelperModelChoice::Default,
+                )
+            });
+        let resolved_describe = crate::agent::config::explicit_helper_route(
+            self.resolve_aux_sampler_config(&describe_slug, choice).await,
+            self.models_manager.model_in_catalog(&describe_slug),
+            &active_session_config,
+            choice,
+        );
+        if crate::agent::config::explicit_helper_fallback_refused(
+            resolved_describe.as_ref(),
+            &active_session_config,
+            choice,
+        ) {
+            return Err(crate::acp_error::internal_error(format!(
+                "the configured image description model {describe_slug:?} cannot be used (no \
+                 credentials or not in the model catalog); Fuigo will not send the images to \
+                 the subscription instead. Fix or remove [models] image_description."
+            )));
+        }
         let (describe_model, sampler_config) =
             crate::agent::config::finalize_image_describe_sampler_config(
                 resolved_describe,
                 &active_session_config,
                 self.client_identifier.clone(),
                 Some(self.max_retries),
+                choice,
             );
         let client = fuigo_sampler::SamplingClient::new(sampler_config).map_err(|e| {
             crate::acp_error::internal_error(format!(

@@ -206,6 +206,76 @@ pub struct SessionStateCopy {
     pub files: Vec<CopiedSessionFile>,
 }
 
+/// A turn's claim on the session's snapshot lock (P135, K17). [`SnapshotTurn::begin`] asks the persistence actor to take
+/// the lock before the turn's first transcript echo; the drop sends the end, on every exit of the turn (success, an early
+/// error, a cancel that drops the future, a panic), so the lifetime is the turn's and not inferred from message kinds.
+pub(crate) struct SnapshotTurn {
+    tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    turn_id: u64,
+    /// The actor holds a `Weak` of this: it is alive exactly while the turn is, so the actor can tell a turn that is still
+    /// running (its hold must stand, however long an image transcription takes) from one that is gone without an end.
+    alive: std::sync::Arc<()>,
+    send_end: bool,
+}
+
+impl SnapshotTurn {
+    pub(crate) fn begin(tx: &tokio::sync::mpsc::UnboundedSender<PersistenceMsg>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let turn_id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let alive = std::sync::Arc::new(());
+        let _ = tx.send(PersistenceMsg::SnapshotBegin { turn_id, alive: std::sync::Arc::downgrade(&alive) });
+        Self { tx: tx.clone(), turn_id, alive, send_end: true }
+    }
+
+    /// Test seam: the turn goes away and its end is lost.
+    #[cfg(test)]
+    pub(crate) fn drop_losing_the_end(mut self) {
+        self.send_end = false;
+    }
+}
+
+impl Drop for SnapshotTurn {
+    fn drop(&mut self) {
+        let _ = &self.alive;
+        if self.send_end {
+            let _ = self.tx.send(PersistenceMsg::SnapshotEnd { turn_id: self.turn_id });
+        }
+    }
+}
+
+/// Lets a caller stop waiting for a queued persistence request so that it never runs afterwards (P146): the actor
+/// starts the request only if the caller has not given up, and the caller gives up only if it has not started.
+#[derive(Debug, Clone, Default)]
+pub struct AckGate(std::sync::Arc<std::sync::Mutex<AckGateState>>);
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum AckGateState {
+    #[default]
+    Queued,
+    Started,
+    Abandoned,
+}
+
+impl AckGate {
+    /// Actor side: `true` when the request may run (the caller still waits).
+    pub(crate) fn start(&self) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *state == AckGateState::Queued {
+            *state = AckGateState::Started;
+        }
+        *state == AckGateState::Started
+    }
+
+    /// Caller side: `true` when the request had not started and now never will.
+    pub(crate) fn abandon(&self) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *state == AckGateState::Queued {
+            *state = AckGateState::Abandoned;
+        }
+        *state == AckGateState::Abandoned
+    }
+}
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PersistenceMsg {
@@ -224,6 +294,18 @@ pub enum PersistenceMsg {
         respond_to: tokio::sync::oneshot::Sender<Result<(), fuigo_chat_state::commands::CompactionCommitError>>,
     },
     Update(SessionUpdate),
+    /// A turn is about to echo its prompt: take the session's snapshot lock and keep it until the matching
+    /// [`PersistenceMsg::SnapshotEnd`] (P135, K17). Sent by [`SnapshotTurn::begin`].
+    SnapshotBegin {
+        turn_id: u64,
+        /// Alive while the turn's [`SnapshotTurn`] exists: the hold's time limit applies only once it is gone.
+        alive: std::sync::Weak<()>,
+    },
+    /// The turn `turn_id` has written its prompt (or left early): release the snapshot lock. Sent by the drop of
+    /// [`SnapshotTurn`], so on every exit path. Ignored when `turn_id` does not hold the lock.
+    SnapshotEnd {
+        turn_id: u64,
+    },
     AppendUpdateDurablyAndAck {
         update: SessionUpdate,
         respond_to:
@@ -237,8 +319,16 @@ pub enum PersistenceMsg {
             Result<fuigo_chat_state::StrictAppendAck, fuigo_chat_state::StrictAppendError>,
         >,
     },
-    /// Replace the entire chat history (used for compaction)
+    /// Replace the entire chat history (used for compaction). Not acknowledged: a compaction's rewrite that does not
+    /// land is recovered from disk by the compaction witness (later appends keep going to the file), and the failure
+    /// fails the next FlushAndAck.
     ReplaceChatHistory(Vec<ConversationItem>),
+    /// Replace the entire chat history and acknowledge the disk outcome (a rewind, which must not report success
+    /// unless its history replacement persisted).
+    ReplaceChatHistoryAndAck {
+        messages: Vec<ConversationItem>,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     /// Destructive image-strip rewrite: back up the on-disk history first, and only rewrite if the backup landed.
     /// Acks the combined disk outcome.
     ReplaceChatHistoryForStripAndAck {
@@ -264,6 +354,29 @@ pub enum PersistenceMsg {
     /// Disk is authoritative, so a partial in-memory tracker can't truncate history.
     MergeRewindPointsFrom {
         target_index: usize,
+    },
+    /// Take the rewind points rewrite lock for a rewind, before the rewind changes anything (P146). The reply carries
+    /// the held lock, or the error that refuses the rewind (`WouldBlock`: another process kept it past the wait).
+    /// Skipped when `gate` says the rewind stopped waiting before it started.
+    LockRewindPointsRewrite {
+        gate: AckGate,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::storage::RewindPointsRewriteLock>>,
+    },
+    /// The rewind's rewrite of `rewind_points.jsonl`, made before the rewound conversation is saved, while the rewind
+    /// holds the lock [`PersistenceMsg::LockRewindPointsRewrite`] took (P146, K19). The reply carries what the file
+    /// held and what was written. The lock never travels in a message: one given up on cannot keep it.
+    RewriteRewindPointsAndAck {
+        rewrite: crate::session::storage::RewindPointsRewrite,
+        gate: AckGate,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::storage::RewindPointsUndo>>,
+    },
+    /// The rewind of [`PersistenceMsg::RewriteRewindPointsAndAck`] is done. `put_back`: the rewound conversation was
+    /// not saved, so the rewind did not go through and `rewind_points.jsonl` gets back what it held.
+    EndRewindPointsAndAck {
+        undo: crate::session::storage::RewindPointsUndo,
+        put_back: bool,
+        gate: AckGate,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     /// Collection ID for telemetry tracing
     CollectionId(String),
@@ -312,6 +425,8 @@ pub enum PersistenceMsg {
     /// Generated session title from background LLM task.
     /// Routed back through the persistence channel so the storage write stays sequential with other summary.json mutations.
     GeneratedTitle(String),
+    /// P121 (K6): rebuilt title client after a model switch or a catalog reload.
+    ReplaceSummaryHelper(crate::session::summary::SummaryHelper),
     /// Early-session title refresh (turns 3 and 6): overwrite an existing auto title with one regenerated from the whole conversation.
     /// Never overwrites a manual `/rename` (enforced atomically under the summary lock).
     RegenerateTitle(String),
@@ -379,6 +494,10 @@ pub(crate) async fn compaction_fixture_persistence(
                         Ok(())
                     }.await;
                     let _ = respond_to.send(result);
+                }
+                PersistenceMsg::ReplaceChatHistoryAndAck { messages, respond_to } => {
+                    let _ = respond_to.send(Ok(()));
+                    let _ = observed.send(PersistenceMsg::ReplaceChatHistory(messages));
                 }
                 // In this scripted fixture the ordinary messages are observations,
                 // not disk writes. FIFO acknowledgment ensures the observer sees
@@ -1487,6 +1606,10 @@ struct SessionPersistence {
     last_usage_live: Option<crate::session::usage_file::UsageSummary>,
     last_usage_turn: Option<u32>,
     last_incoming_turn: Option<u32>,
+    /// The session's snapshot lock, held from a turn's `SnapshotBegin` until its `SnapshotEnd` (P135, K17),
+    /// and released early only for a turn that is gone without an end, after
+    /// [`snapshot_lock::hold_max`](crate::session::storage::snapshot_lock::hold_max).
+    turn_start_guard: Option<crate::session::storage::snapshot_lock::SnapshotHold>,
 }
 
 impl SessionPersistence {
@@ -1669,6 +1792,7 @@ impl SessionPersistence {
         let state = RetryState::Failed {
             error_type: DISK_FULL_ERROR_TYPE.to_string(),
             message: DISK_FULL_USER_MESSAGE.to_string(),
+            verdicts: None,
         };
         let notification = FuigoSessionNotification {
             session_id: self.info.id.clone(),
@@ -1722,7 +1846,7 @@ impl SessionPersistence {
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&dir)?;
             let probe = dir.join(".disk_ok");
-            std::fs::write(&probe, b"ok")?;
+            fuigo_config::write_file_owner_only(&probe, b"ok")?;
             let _ = std::fs::remove_file(&probe);
             io::Result::Ok(())
         })
@@ -1970,12 +2094,53 @@ impl SessionPersistence {
         synced
     }
 
+    /// The hold has been kept for [`snapshot_lock::hold_max`](crate::session::storage::snapshot_lock::hold_max). A turn that
+    /// is still running keeps it, however long it takes (an image transcription is minutes per image, and releasing then
+    /// would leave a prompt's echoes on disk with no chat item for a fork that follows); the time is counted again. A hold
+    /// whose turn is gone without its end (a bug, not an expected case) is released, so forks are never refused for good.
+    ///
+    /// Expiry runs only when the channel is drained (the caller's `timeout_at` fires only when `recv` found nothing before the
+    /// deadline, and re-checks `rx.is_empty()`): a queued message, such as the turn's own chat item and end, is always
+    /// processed first, so the lock is never released ahead of a chat item whose echoes are already buffered (Astra P135 r3 H).
+    async fn expire_snapshot_hold(&mut self) {
+        let Some(hold) = self.turn_start_guard.as_mut() else { return };
+        if hold.turn_alive() {
+            tracing::debug!(turn_id = hold.turn_id, "the snapshot lock stays held: its turn is still running");
+            hold.since = std::time::Instant::now();
+            return;
+        }
+        let hold = self.turn_start_guard.take().expect("checked above");
+        #[cfg(test)]
+        crate::session::storage::snapshot_lock::EXPIRY_RELEASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            turn_id = hold.turn_id,
+            held_ms = hold.since.elapsed().as_millis() as u64,
+            "the snapshot lock was held past its limit by a turn that is gone, without an end; releasing it"
+        );
+        // The echoes still buffered stay buffered (the next write flushes them).
+    }
+
     async fn run(mut self) {
         // Persistence traffic counts as worktree activity, debounced to avoid per-message DB writes
         // Long-resident sessions (leader/remote, active for days without a re-open) thus stay out of gc expiry
         // The constructors fire the t=0 touch, so this starts at now().
         let mut last_worktree_touch = std::time::Instant::now();
-        while let Some(msg) = self.rx.recv().await {
+        loop {
+            let received = match self.turn_start_guard.as_ref().map(|hold| hold.expires_at()) {
+                Some(deadline) => match tokio::time::timeout_at(deadline.into(), self.rx.recv()).await {
+                    Ok(received) => received,
+                    Err(_) => {
+                        // `timeout_at` polls `recv` before the deadline, so this arm runs only when nothing was ready; the
+                        // check keeps the invariant explicit should a message have landed since.
+                        if self.rx.is_empty() {
+                            self.expire_snapshot_hold().await;
+                        }
+                        continue;
+                    }
+                },
+                None => self.rx.recv().await,
+            };
+            let Some(msg) = received else { break };
             if last_worktree_touch.elapsed() >= WORKTREE_TOUCH_INTERVAL {
                 last_worktree_touch = std::time::Instant::now();
                 // Detached on purpose: opportunistic refresh, no ordering need.
@@ -2000,6 +2165,25 @@ impl SessionPersistence {
                     let result = self.probe_writable().await;
                     self.observe_io(&result);
                     let _ = respond_to.send(result);
+                }
+                PersistenceMsg::SnapshotBegin { turn_id, alive } => {
+                    // A hold still open belongs to a turn whose end never arrived: it ends here (never two holds, and the
+                    // old file must be closed before the lock is taken again, or this task would wait for itself).
+                    if self.turn_start_guard.is_some() {
+                        tracing::warn!(turn_id, "a new turn began while the snapshot lock was still held; releasing the old hold");
+                        let _ = self.flush_pending().await;
+                        self.turn_start_guard = None;
+                    }
+                    self.turn_start_guard = crate::session::storage::snapshot_lock::acquire_async(&session_dir(&self.info))
+                        .await
+                        .map(|file| crate::session::storage::snapshot_lock::SnapshotHold::new(turn_id, file, alive));
+                }
+                PersistenceMsg::SnapshotEnd { turn_id } => {
+                    if self.turn_start_guard.as_ref().is_some_and(|hold| hold.turn_id == turn_id) {
+                        // The echoes still buffered are written before the hold ends.
+                        let _ = self.flush_pending().await;
+                        self.turn_start_guard = None;
+                    }
                 }
                 PersistenceMsg::Update(update) => {
                     match update {
@@ -2030,6 +2214,14 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
                     let result = self.handle_durable_append(update).await;
+                    // Test-only: hold this ack back so a recovery's bound can be outlived by an append that has
+                    // already landed. Compiled out of every non-test build.
+                    #[cfg(test)]
+                    let Some((result, respond_to)) =
+                        test_seam::maybe_delay_ack(&self.info.id.0, result, respond_to)
+                    else {
+                        continue;
+                    };
                     // A dropped receiver is a fire-and-forget durable append (e.g. the TurnCompleted terminal).
                     // Its errors would otherwise vanish with the unread ack
                     if let Err(Err(error)) = respond_to.send(result) {
@@ -2037,6 +2229,24 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::Chat(chat_msg) => {
+                    // A prompt starts a turn: its transcript echoes were written while the turn's snapshot lock was held
+                    // (`SnapshotBegin`), and the chat item is written under it, so a fork's snapshot sees the prompt in both
+                    // files or in neither (P123, K17). The hold ends with the turn's `SnapshotEnd`, never with a chat item
+                    // (a workflow reminder or a completion between turns is not the prompt, P135). The lock is taken here
+                    // for a prompt item when no turn holds it.
+                    let is_turn_start =
+                        matches!(&chat_msg, ConversationItem::User(user) if user.prompt_index.is_some());
+                    let _turn_start = if is_turn_start {
+                        let guard = if self.turn_start_guard.is_some() {
+                            None
+                        } else {
+                            crate::session::storage::snapshot_lock::acquire_async(&session_dir(&self.info)).await
+                        };
+                        let _ = self.flush_pending().await;
+                        guard
+                    } else {
+                        None
+                    };
                     let result = self
                         .storage
                         .append_chat_message_commit_aware(&self.info, &chat_msg)
@@ -2081,14 +2291,20 @@ impl SessionPersistence {
                         num_messages = messages.len(),
                         "Replacing chat history (compaction)"
                     );
-                    let result = self
-                        .storage
-                        .replace_chat_history(&self.info, &messages)
-                        .await;
-                    self.observe_io(&result);
-                    if let Err(e) = result {
+                    if let Err(e) = self.replace_chat_history_now(&messages).await {
+                        // Not lost: a compaction's rewrite that did not land is recovered from disk (the compaction
+                        // witness recognises the old history and takes the items appended after it). The failure
+                        // still fails the next FlushAndAck, so the turn reports that a write did not reach disk.
                         tracing::warn!(?e, "failed to replace chat history");
+                        self.note_write_failure(&e);
                     }
+                }
+                PersistenceMsg::ReplaceChatHistoryAndAck {
+                    messages,
+                    respond_to,
+                } => {
+                    let result = self.replace_chat_history_acknowledged(&messages).await;
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::ReplaceChatHistoryForStripAndAck {
                     messages,
@@ -2251,6 +2467,9 @@ impl SessionPersistence {
                         sync.set_manual_title(title);
                     }
                 }
+                PersistenceMsg::ReplaceSummaryHelper(helper) => {
+                    self.summary.replace_helper(helper);
+                }
                 PersistenceMsg::ResetTitleToAuto => {
                     self.summary.reset();
                     if let Some(sync) = &self.remote_sync {
@@ -2284,6 +2503,34 @@ impl SessionPersistence {
                         .await
                     {
                         tracing::warn!(?e, from_index, "failed to truncate rewind points");
+                    }
+                }
+                PersistenceMsg::LockRewindPointsRewrite { gate, respond_to } => {
+                    if gate.start() {
+                        let result = self.storage.lock_rewind_points_rewrite(&self.info).await;
+                        if let Err(e) = &result {
+                            tracing::warn!(?e, "rewind refused: the rewind points rewrite lock was not taken");
+                        }
+                        // A reply nobody waits for any more drops the lock with it.
+                        let _ = respond_to.send(result);
+                    }
+                }
+                PersistenceMsg::RewriteRewindPointsAndAck { rewrite, gate, respond_to } => {
+                    if gate.start() {
+                        let result = self.storage.rewrite_rewind_points_holding(&self.info, rewrite).await;
+                        if let Err(e) = &result {
+                            tracing::warn!(?e, ?rewrite, "failed to rewrite rewind points for a rewind");
+                        }
+                        let _ = respond_to.send(result);
+                    }
+                }
+                PersistenceMsg::EndRewindPointsAndAck { undo, put_back, gate, respond_to } => {
+                    if gate.start() {
+                        let result = self.storage.end_rewind_points_rewrite(&self.info, undo, put_back).await;
+                        if let Err(e) = &result {
+                            tracing::warn!(?e, put_back, "failed to finish the rewind of rewind points");
+                        }
+                        let _ = respond_to.send(result);
                     }
                 }
                 PersistenceMsg::MergeRewindPointsFrom { target_index } => {
@@ -2369,6 +2616,10 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::CommitCompactionAndAck { checkpoint, activation, cancel, respond_to } => {
                     use fuigo_chat_state::commands::CompactionCommitError;
+                    let sync_marker = match (&self.remote_sync, &activation) {
+                        (Some(_), SessionUpdate::Fuigo(marker)) => Some((**marker).clone()),
+                        _ => None,
+                    };
                     let result = async {
                         if cancel.is_cancelled() {
                             return Err(CompactionCommitError::NotCommitted(io::Error::other("compaction cancelled before prepare")));
@@ -2379,11 +2630,28 @@ impl SessionPersistence {
                             // marker they have no replay authority.
                             return Err(CompactionCommitError::NotCommitted(io::Error::other("compaction cancelled before activation")));
                         }
+                        // The rewrite of chat_history.jsonl with the projection follows the acknowledgement as a
+                        // separate message. The witness lets a load tell that this marker committed while that rewrite
+                        // never landed (a crash in between), and resume from the projection instead (P111, DI-03).
+                        self.storage
+                            .write_compaction_witness(&self.info, &checkpoint)
+                            .await
+                            .map_err(CompactionCommitError::NotCommitted)?;
                         self.handle_durable_append(activation).await.map_err(|error| match error {
                             crate::session::storage::AppendUpdateError::NotCommitted(error) => CompactionCommitError::NotCommitted(error),
                             crate::session::storage::AppendUpdateError::Committed(error) => CompactionCommitError::Committed(error),
                         })
                     }.await;
+                    if matches!(&result, Ok(()) | Err(CompactionCommitError::Committed(_))) {
+                        // The marker is on disk: witness entries of earlier compactions are no longer needed.
+                        self.storage.compaction_activated(&self.info, &checkpoint.checkpoint_id).await;
+                        // Carry the checkpoint through remote storage so a pulled copy resumes with its summary.
+                        if let (Some(sync), Some(marker)) = (&self.remote_sync, &sync_marker)
+                            && let Some(message) = crate::session::export::ExportedMessage::compaction_checkpoint(marker, &checkpoint)
+                        {
+                            sync.queue_checkpoint(message);
+                        }
+                    }
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CompactionRequest(request) => {
@@ -2420,6 +2688,40 @@ impl SessionPersistence {
         }
 
         let _ = self.flush_pending().await;
+    }
+
+    /// Replace `chat_history.jsonl` with `messages` (atomically: the file is the old history or the new one).
+    async fn replace_chat_history_now(&mut self, messages: &[ConversationItem]) -> io::Result<()> {
+        #[cfg(test)]
+        if test_seam::take_history_replacement_failure(&self.info.id.0) {
+            return Err(io::Error::other("injected chat history replacement failure"));
+        }
+        let result = self.storage.replace_chat_history(&self.info, messages).await;
+        self.observe_io(&result);
+        result
+    }
+
+    /// Replace the chat history for a caller that may not report success unless the new history is stored (a rewind).
+    /// `Ok` when `chat_history.jsonl` holds `messages`, even if bookkeeping after that failed (the history is what the
+    /// caller asked to persist); `Err` only when the file still holds the previous history, so the caller can keep it.
+    async fn replace_chat_history_acknowledged(&mut self, messages: &[ConversationItem]) -> io::Result<()> {
+        #[cfg(test)]
+        if test_seam::take_history_replacement_failure(&self.info.id.0) {
+            return Err(io::Error::other("injected chat history replacement failure"));
+        }
+        let result = self
+            .storage
+            .replace_chat_history_commit_aware(&self.info, messages)
+            .await;
+        self.observe_append_chat(&result);
+        match result {
+            Ok(()) => Ok(()),
+            Err(crate::session::storage::AppendChatError::Committed(error)) => {
+                tracing::warn!(%error, "chat history replaced; bookkeeping after it failed");
+                Ok(())
+            }
+            Err(crate::session::storage::AppendChatError::NotCommitted(error)) => Err(error),
+        }
     }
 
     async fn copy_session_dir_to_memory(&self) -> anyhow::Result<SessionStateCopy> {
@@ -2507,7 +2809,13 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() {
+        // Never through a symlink (P146): a link planted in the session folder (a checkpoint, a subdirectory) would
+        // pull a file from outside it into the copy. `file_type` does not follow links, and the read opens every
+        // folder and the file relative to the session folder without following one swapped in since.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file() {
             let rel_path = match path.strip_prefix(base) {
                 Ok(p) => p,
                 Err(_) => continue,
@@ -2515,7 +2823,18 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
             let Some(name) = rel_path.to_str() else {
                 continue;
             };
-            let data = match std::fs::read(&path) {
+            let opened = match crate::session::storage::open_beneath_nofollow(base, rel_path) {
+                Ok(file) => Ok(file),
+                Err(crate::session::storage::BeneathRefusal::Io(error)) => Err(error),
+                Err(crate::session::storage::BeneathRefusal::Refused(what)) => {
+                    tracing::warn!(path = %path.display(), what, "session copy: file refused");
+                    continue;
+                }
+            };
+            let data = match opened.and_then(|mut file| {
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut data).map(|_| data)
+            }) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(?e, "Failed to read session file during copy");
@@ -2526,7 +2845,7 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
                 name: name.to_string(),
                 data,
             });
-        } else if path.is_dir() {
+        } else if file_type.is_dir() {
             collect_session_files_recursive(base, &path, files);
         }
     }
@@ -2796,6 +3115,7 @@ pub(crate) async fn new(
             last_usage_live: None,
             last_usage_turn: None,
             last_incoming_turn: None,
+            turn_start_guard: None,
         };
         persistence.run().await;
     });
@@ -2879,6 +3199,7 @@ pub(crate) async fn new_with_explicit_dir(
             last_usage_live: None,
             last_usage_turn: None,
             last_incoming_turn: None,
+            turn_start_guard: None,
         };
         persistence.run().await;
     });
@@ -2904,6 +3225,8 @@ pub struct PersistedInfo {
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+    /// Set when `chat_history` was repaired at load after unreadable lines (P96): the note to show the user.
+    pub history_repair_notice: Option<String>,
 }
 
 /// On NotFound, try pulling from backend. Returns pulled info or the original error.
@@ -2916,6 +3239,40 @@ async fn pull_on_miss(
         return Err(err);
     }
     try_pull_from_remote(info, client).await.ok_or(err)
+}
+
+/// Resume never depends on the latest compaction checkpoint (see [`load_light`]), but a rewind past that compaction
+/// does: it reads the checkpoint file and refuses when it is missing or unreadable. Say so once, at load, instead of
+/// failing the load the way 1.0.10-1.0.19 did (L-1). Never returns an error.
+async fn warn_on_unreadable_compaction_checkpoint(
+    storage: &dyn StorageAdapter,
+    info: &Info,
+    updates_path: &std::path::Path,
+) {
+    let checkpoint = match crate::session::helpers::replay::find_latest_compaction_checkpoint(updates_path) {
+        Ok(Some(checkpoint)) => checkpoint,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(session_id = %info.id.0, %error,
+                "could not scan updates.jsonl for compaction checkpoints; resuming from chat_history.jsonl");
+            return;
+        }
+    };
+    let problem = match storage.read_compaction_checkpoint(info, &checkpoint.checkpoint_file).await {
+        Ok(file) if file.schema_version == 1 && checkpoint.schema_version == 1 => return,
+        Ok(file) => format!(
+            "unsupported checkpoint schema (marker {}, file {})",
+            checkpoint.schema_version, file.schema_version
+        ),
+        Err(error) => error.to_string(),
+    };
+    tracing::warn!(
+        session_id = %info.id.0,
+        checkpoint = %checkpoint.checkpoint_file,
+        %problem,
+        "latest compaction checkpoint is unreadable; resuming from chat_history.jsonl \
+         (rewinding to before this compaction will not be possible)"
+    );
 }
 
 /// Load a session without reading updates into memory.
@@ -2938,8 +3295,8 @@ pub(crate) async fn load_light(
         session_kind: _,
     } = deps;
     let root_dir = fuigo_home();
-    let storage: Box<dyn StorageAdapter> =
-        Box::new(JsonlStorageAdapter::with_root(root_dir.clone()));
+    let jsonl_storage = JsonlStorageAdapter::with_root(root_dir.clone());
+    let storage: Box<dyn StorageAdapter> = Box::new(jsonl_storage.clone());
 
     let (mut persisted, loaded_info) = match storage.load_session_without_updates(info).await {
         Ok(p) => (p, info.clone()),
@@ -2952,29 +3309,32 @@ pub(crate) async fn load_light(
             None => return Err(e),
         },
     };
+    // A torn line the reader skipped can leave a tool result without its call, which strict providers reject on every
+    // request. Repair that here, behind a backup of the file as found (P96). The same holds when an earlier load
+    // skipped the line and left its `.corrupt` copy (a session that broke before P96). The repair does nothing for a
+    // session a live actor holds (a reconnect, or another process): it needs the exclusive turn-owner lock.
+    // A compaction that committed (its marker is in updates.jsonl) while its rewrite of chat_history.jsonl never
+    // landed left the history from before it in the file, followed by everything written since. The load already took
+    // the checkpoint's projection and those later items instead (P111, DI-03; `load_session_without_updates`), and
+    // counts their unreadable lines, so the repair below covers the recovered history too; spawn persists it.
+    let history_repair_notice = jsonl_storage
+        .repair_after_corrupt_load(&loaded_info, &mut persisted)
+        .await
+        .map(|repair| repair.notice());
     // Touch on load too: resuming must reset the worktree's gc expiry clock.
     touch_worktree_for_session(&loaded_info).await;
 
     let updates_file_path = storage.updates_file_path(&loaded_info);
     let rewind_points_file_path = storage.rewind_points_file_path(&loaded_info);
 
-    if let Some(updates_path) = updates_file_path.as_ref()
-        && let Some(checkpoint) = crate::session::helpers::replay::find_latest_compaction_checkpoint(updates_path)? {
-        let file = storage.read_compaction_checkpoint(&loaded_info, &checkpoint.checkpoint_file).await?;
-        if file.schema_version != 1 || checkpoint.schema_version != 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
-        }
-        // Legacy checkpoints were written before prefix resolution; their
-        // chat_history remains authoritative for ordinary resume.
-        if let Some(prefix_len) = file.inherited_prefix_len {
-            let replay = crate::session::helpers::replay::replay_to_prompt(
-                updates_path, &session_dir(&loaded_info), usize::MAX,
-            )?;
-            if replay.last_compaction_prompt_index == Some(file.prompt_index_at_compaction) {
-                persisted.chat_history = replay.conversation;
-                persisted.summary.inherited_prefix_len = (prefix_len > 0).then_some(prefix_len);
-            }
-        }
+    // `chat_history.jsonl` is the model's own record and stays authoritative on resume, compacted or not: after a
+    // compaction commits, the chat-state actor rewrites it to the exact compacted projection and appends every later
+    // message (tool calls and tool results included) to it. 1.0.10-1.0.19 replaced it here with
+    // `replay_to_prompt(updates.jsonl)`, a text-only rebuild meant for rewinds, which drops tool calls and results and
+    // merges the assistant text around them (P88). The checkpoint is only inspected so a damaged one is reported; it
+    // never decides what the model sees and never fails the load (it used to).
+    if let Some(updates_path) = updates_file_path.as_ref() {
+        warn_on_unreadable_compaction_checkpoint(storage.as_ref(), &loaded_info, updates_path).await;
     }
 
     let persisted_info = PersistedInfo {
@@ -2988,6 +3348,7 @@ pub(crate) async fn load_light(
         announcement_state: persisted.announcement_state,
         goal_mode_state: persisted.goal_mode_state,
         workflow_runs: persisted.workflow_runs,
+        history_repair_notice,
     };
 
     let (handle, rx, summary_tx, disk_full_tx, retry_status_mirror) = actor_channel();
@@ -3029,6 +3390,7 @@ pub(crate) async fn load_light(
             last_usage_live: None,
             last_usage_turn: None,
             last_incoming_turn: None,
+            turn_start_guard: None,
         };
         persistence.run().await;
     });
@@ -3435,3 +3797,190 @@ mod repo_wide_resolution_tests;
 #[cfg(test)]
 #[path = "persistence_actor_lifetime_tests.rs"]
 mod actor_lifetime_tests;
+
+/// Test-only seam: holds the acknowledgement of a session's next durable append until the test releases it (the write
+/// itself is not held), and counts finished deferred-recovery finishers. `cfg(test)`, so none of it exists in a
+/// shipped build.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    type Ack = tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>;
+    type WrittenSignal = (
+        Option<tokio::sync::oneshot::Sender<()>>,
+        Option<tokio::sync::oneshot::Receiver<()>>,
+    );
+    type Outcome = Result<(), crate::session::storage::AppendUpdateError>;
+
+    static HELD: Mutex<Option<HashMap<String, tokio::sync::oneshot::Receiver<()>>>> = Mutex::new(None);
+    /// Per session: signalled once the held append has been written, and awaited just before the load's replay.
+    static WRITTEN: Mutex<Option<HashMap<String, WrittenSignal>>> = Mutex::new(None);
+    static FINISHED: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+    /// Per session: how many more chat history replacements fail (P111).
+    static FAILING_REPLACEMENTS: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+    /// The next `count` chat history replacements of `session_id` fail before touching the disk (`0` disarms).
+    pub(crate) fn fail_history_replacements(session_id: &str, count: usize) {
+        FAILING_REPLACEMENTS
+            .lock()
+            .expect("failing replacements")
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_owned(), count);
+    }
+
+    /// Whether this chat history replacement of `session_id` is to fail (consumes one armed failure).
+    pub(super) fn take_history_replacement_failure(session_id: &str) -> bool {
+        let mut armed = FAILING_REPLACEMENTS.lock().expect("failing replacements");
+        match armed.as_mut().and_then(|armed| armed.get_mut(session_id)) {
+            Some(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A real persistence actor for `info` over `storage`, for tests outside this module that need production disk
+    /// behaviour behind a `PersistenceMsg` channel.
+    pub(crate) fn spawn_actor(
+        info: super::Info,
+        storage: std::sync::Arc<dyn super::StorageAdapter>,
+    ) -> tokio::sync::mpsc::UnboundedSender<super::PersistenceMsg> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (disk_full_tx, _disk_full_rx) = tokio::sync::watch::channel(false);
+        let sampling_client =
+            super::OaiCompatClient::new(fuigo_sampler::SamplerConfig::default()).expect("sampling client");
+        let summary = crate::session::summary::SummaryGenerator::new(crate::session::summary::SummaryConfig {
+            sampling_client,
+            model: String::new(),
+            policy: Default::default(),
+            session_id: info.id.to_string(),
+            persistence_tx: tx.downgrade(),
+        });
+        tokio::spawn(
+            super::SessionPersistence {
+                info,
+                storage,
+                pending_notification: None,
+                rx,
+                remote_sync: None,
+                created_fresh: false,
+                relay_sync: None,
+                summary,
+                registry_title_sync: None,
+                gateway: None,
+                search_index: crate::session::storage::search::SharedSearchIndex::never_indexed(),
+                disk_full_tx,
+                disk_full_notified: false,
+                retry_status_mirror: Default::default(),
+                dirty_files: Default::default(),
+                pending_write_error: None,
+                last_usage_live: None,
+                last_usage_turn: None,
+                last_incoming_turn: None,
+                turn_start_guard: None,
+            }
+            .run(),
+        );
+        tx
+    }
+
+    /// Releases a held acknowledgement; dropping it releases too.
+    pub(crate) struct AckRelease(tokio::sync::oneshot::Sender<()>);
+
+    impl AckRelease {
+        pub(crate) fn release(self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// The next durable append for `session_id` is written at once, but acknowledged only once the returned handle
+    /// is released.
+    pub(crate) fn hold_next_durable_ack(session_id: &str) -> AckRelease {
+        let (release, held) = tokio::sync::oneshot::channel();
+        HELD.lock()
+            .expect("held acks")
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_owned(), held);
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+        WRITTEN
+            .lock()
+            .expect("written")
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_owned(), (Some(written_tx), Some(written_rx)));
+        AckRelease(release)
+    }
+
+    /// `Some` hands the append straight back (nothing held); `None` means the ack was taken over and is sent once
+    /// released, from a detached task.
+    pub(super) fn maybe_delay_ack(
+        session_id: &str,
+        result: Outcome,
+        respond_to: Ack,
+    ) -> Option<(Outcome, Ack)> {
+        let held = HELD
+            .lock()
+            .expect("held acks")
+            .as_mut()
+            .and_then(|held| held.remove(session_id));
+        let Some(held) = held else {
+            return Some((result, respond_to));
+        };
+        if let Some((Some(written), _)) = WRITTEN
+            .lock()
+            .expect("written")
+            .as_mut()
+            .and_then(|written| written.get_mut(session_id))
+            .map(|entry| (entry.0.take(), ()))
+        {
+            let _ = written.send(());
+        }
+        tokio::spawn(async move {
+            let _ = held.await;
+            let _ = respond_to.send(result);
+        });
+        None
+    }
+
+    /// Called by a load just before its replay: waits (bounded) until the held append has been written, so the replay
+    /// is ordered after the marker's write. A no-op when nothing is armed for the session.
+    pub(crate) async fn await_held_write(session_id: &str) {
+        let written = WRITTEN
+            .lock()
+            .expect("written")
+            .as_mut()
+            .and_then(|written| written.get_mut(session_id))
+            .and_then(|entry| entry.1.take());
+        if let Some(written) = written {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(60), written).await;
+        }
+    }
+
+    /// Drop guard a deferred-recovery finisher holds, so a test can wait for it to be completely done.
+    pub(crate) struct FinisherDone(pub(crate) String);
+
+    impl Drop for FinisherDone {
+        fn drop(&mut self) {
+            // A finisher that panicked did not complete; the test then times out instead of passing.
+            if std::thread::panicking() {
+                return;
+            }
+            *FINISHED
+                .lock()
+                .expect("finished")
+                .get_or_insert_with(HashMap::new)
+                .entry(std::mem::take(&mut self.0))
+                .or_default() += 1;
+        }
+    }
+
+    pub(crate) fn finishers_done(session_id: &str) -> usize {
+        FINISHED
+            .lock()
+            .expect("finished")
+            .as_ref()
+            .and_then(|done| done.get(session_id).copied())
+            .unwrap_or(0)
+    }
+}

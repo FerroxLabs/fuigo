@@ -1121,6 +1121,7 @@ mod tests {
 
     #[test]
     fn usage_limit_tab_shows_allowance_and_payg() {
+        let _theme = crate::theme::cache::pin_theme();
         let state = state_with_session();
         let bal = CreditBalance {
             usage_pct: 50.67,
@@ -1152,6 +1153,7 @@ mod tests {
 
     #[test]
     fn usage_limit_tab_states() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let mut state = state_with_session();
         state.billing_loading = true;
@@ -1174,6 +1176,7 @@ mod tests {
 
     #[test]
     fn render_smoke_shows_tabs_and_copy_shortcut() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1203,6 +1206,7 @@ mod tests {
 
     #[test]
     fn copy_all_returns_readable_block_and_footer_button() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1252,6 +1256,7 @@ mod tests {
 
     #[test]
     fn click_value_row_copies_without_drag() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1291,6 +1296,7 @@ mod tests {
 
     #[test]
     fn drag_select_copies_slice_and_paints_selection_band() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1344,6 +1350,7 @@ mod tests {
 
     #[test]
     fn drag_from_blank_line_keeps_newline() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1389,6 +1396,7 @@ mod tests {
 
     #[test]
     fn content_reload_cancels_in_progress_drag() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1419,6 +1427,7 @@ mod tests {
 
     #[test]
     fn bare_moved_ends_stale_drag() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1458,6 +1467,7 @@ mod tests {
 
     #[test]
     fn bare_moved_keeps_pending_press_for_click() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1489,6 +1499,7 @@ mod tests {
 
     #[test]
     fn chrome_clicks_do_not_start_content_drag() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1548,6 +1559,7 @@ mod tests {
 
     #[test]
     fn popup_height_is_capped_on_tall_terminals() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 100, 60);
         let mut buf = Buffer::empty(area);
         let mut state = state_with_session();
@@ -1561,6 +1573,7 @@ mod tests {
 
     #[test]
     fn session_info_tab_spaces_groups_and_compacts_model_block() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut state = state_with_session();
         state.session_fields = Some(vec![
             field("Title", "t", false),

@@ -223,7 +223,9 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
     } else {
         "/minimal"
     };
-    eprintln!("Reopening session in {mode_label} mode… (switch back with {reverse})");
+    fuigo_tty_utils::cli_eprintln!(
+        "Reopening session in {mode_label} mode… (switch back with {reverse})"
+    );
     let _ = io::stdout().flush();
     let _ = io::stderr().flush();
 

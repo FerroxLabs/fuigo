@@ -151,6 +151,10 @@ mod tests {
         f();
         system_appearance::clear_mock();
         theme_cache::reset_for_test();
+        // Leave the cache LOADED: `reset_for_test` clears it, and the next unlocked `Theme::current()`
+        // anywhere in the binary would then seed the kind from disk outside the theme lock, overwriting
+        // whatever a `pin_theme()` holder had set (R070).
+        theme_cache::set(ThemeKind::FuigoNight);
     }
 
     // -- suggest_args ---------------------------------------------------------

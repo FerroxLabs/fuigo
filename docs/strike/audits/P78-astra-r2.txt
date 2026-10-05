@@ -1,0 +1,12 @@
+# P78 Astra round 2 (gpt-6-astra, codex exec, read-only) - audited 37a5b9d4..102ce53f
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `37a5b9d4..102ce53f` using git and file reads only. No builds, tests, or edits.
+
+1. **MEDIUM — STILL OPEN: reader guard accepts an uncalled closure.** [theme_pin_guard_tests.rs:529](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:529)  
+   `let _theme = || crate::theme::cache::pin_theme();` passes because the RHS ends with `::pin_theme();`. No lock is acquired, leaving subsequent assertions exposed to concurrent theme changes. Restrict the RHS to an actual path call. **Existing tests do not catch this:** the closure fixture uses a different binding and a multiline body. All four actual listed readers currently hold real guards.
+
+2. **LOW — NEW: first-line scanning rejects valid multiline pin statements.** [theme_pin_guard_tests.rs:544](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:544)  
+   Splitting `let _theme =` and `crate::theme::cache::pin_theme();` across lines makes the guard fail despite acquiring and retaining the lock before every assertion. A multiline comment within that statement produces the same false failure. Collect the complete first statement before checking it. **Existing self-tests do not cover either case.**
+
+LAND-WITH-FOLLOWUPS

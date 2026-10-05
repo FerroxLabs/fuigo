@@ -23,7 +23,105 @@ enum QuestionSwitch {
     Next,
     Prev,
 }
+/// How long after a plain text key the permission card treats the next keys as more of the same typing (P152).
+/// Typed characters arrive well inside this; a deliberate answer after reading the prompt comes later.
+const PERMISSION_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_millis(700);
+/// Shown when a key that would answer the permission prompt arrived inside a burst of typing and was held.
+const PERMISSION_TYPING_HELD_NOTICE: &str =
+    "Typing paused: answer the permission prompt with the arrow keys and Enter";
+/// A permission option that grants beyond the current call: Fuigo's global always-approve row, or an ACP
+/// `AllowAlways` option (P152).
+fn is_broad_grant(opt: &agent_client_protocol::PermissionOption) -> bool {
+    fuigo_workspace::permission::is_enable_always_approve_option(opt)
+        || opt.kind == agent_client_protocol::PermissionOptionKind::AllowAlways
+}
 impl AgentView {
+    /// P152 (e2e lane M #4): text typed straight through an open permission prompt (the user was writing their next
+    /// message when it appeared) must not answer it. Letters are not selector keys, but a digit, `e`, `j`/`k` and the
+    /// Enter that ends the burst are. So every plain text key on the option rows starts or extends a typing burst, and
+    /// inside a burst those answering keys are held. Arrow keys, Tab and Ctrl chords are never typing.
+    /// Returns `Some(outcome)` when the key was consumed here.
+    fn permission_typing_guard(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
+        use crate::views::permission_view::PermissionFocus;
+        let front = self
+            .permission_queue
+            .front()
+            .filter(|p| p.focus == PermissionFocus::Options)
+            .map(|p| p.id);
+        let front_id = front?;
+        let now = Instant::now();
+        // A burst belongs to the card it was typed at; a new card starts clean.
+        let typing = self.permission_typed_at.is_some_and(|(id, t)| {
+            id == front_id && now.saturating_duration_since(t) < PERMISSION_TYPING_WINDOW
+        });
+        let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        match key.code {
+            KeyCode::Char(c) if plain => {
+                let answers_or_moves = c.is_ascii_digit() || matches!(c, 'e' | 'j' | 'k' | '<' | '>');
+                if answers_or_moves && !typing {
+                    // A deliberate selector key, not typing. A digit that lands on a broad grant only moves the
+                    // cursor there, and it starts the typing window: `1`, Enter typed as a one-character message
+                    // must not grant beyond this call, so the Enter right after it is held (Fable P152 MEDIUM).
+                    let lands_on_broad_grant = c
+                        .to_digit(10)
+                        .and_then(|d| d.checked_sub(1))
+                        .and_then(|idx| self.permission_queue.front()?.options.get(idx as usize))
+                        .is_some_and(is_broad_grant);
+                    if lands_on_broad_grant {
+                        self.permission_typed_at = Some((front_id, now));
+                    }
+                    return None;
+                }
+                self.permission_typed_at = Some((front_id, now));
+                // P152 (Astra r2 #3): typing never leaves a broad grant focused. A message that began with a digit
+                // may have moved the cursor onto an "allow always" / always-approve row; once it is clearly text, the
+                // cursor goes back to the narrowest allow row, so a later Enter can grant no more than once.
+                self.unfocus_broad_grant_while_typing();
+                if answers_or_moves {
+                    self.show_toast(PERMISSION_TYPING_HELD_NOTICE);
+                    return Some(InputOutcome::Changed);
+                }
+                // A letter: its own handling (ignored, or the reject row's followup) is unchanged.
+                None
+            }
+            KeyCode::Enter if typing => {
+                self.show_toast(PERMISSION_TYPING_HELD_NOTICE);
+                Some(InputOutcome::Changed)
+            }
+            // Editing keys are typing (Astra r2/r3 #3: `1 line`, Backspace, Enter and `1`, Backspace, Enter must not
+            // grant). They do nothing on the option rows, so they always start or extend a burst, and take the cursor
+            // off a broad grant a digit put it on.
+            KeyCode::Backspace | KeyCode::Delete => {
+                self.permission_typed_at = Some((front_id, now));
+                self.unfocus_broad_grant_while_typing();
+                None
+            }
+            KeyCode::Enter => None,
+            _ => {
+                // Arrow keys, Tab, PageUp/PageDown and Ctrl chords (Ctrl+J/K move rows too) are deliberate
+                // navigation: they end a burst, so the Enter the held-key notice asks for is honoured (Astra r1/r2 #5).
+                self.permission_typed_at = None;
+                None
+            }
+        }
+    }
+    /// Move the front permission card's cursor off a broad grant (an `AllowAlways` row or the global always-approve
+    /// row) onto its first `AllowOnce` row, if it has one (P152, Astra r2 #3).
+    fn unfocus_broad_grant_while_typing(&mut self) {
+        let Some(perm) = self.permission_queue.front_mut() else {
+            return;
+        };
+        if !perm.options.get(perm.active_idx).is_some_and(is_broad_grant) {
+            return;
+        }
+        if let Some(idx) = perm
+            .options
+            .iter()
+            .position(|o| o.kind == agent_client_protocol::PermissionOptionKind::AllowOnce && !is_broad_grant(o))
+        {
+            perm.active_idx = idx;
+        }
+    }
     /// Handle key input for the permission card.
     /// Like the question card it has an option-row mode and text modes (a followup message to the agent, and a hand-written always-allow pattern).
     /// `Esc` steps back down through them ([`AgentView::card_esc`]) and `Ctrl+C` is the only cancel.
@@ -31,6 +129,9 @@ impl AgentView {
         use crate::views::permission_view::PermissionFocus;
         if key.code == KeyCode::Esc {
             return self.handle_card_esc();
+        }
+        if let Some(outcome) = self.permission_typing_guard(key) {
+            return outcome;
         }
         let perm_content_w = self
             .pane_areas
@@ -90,6 +191,13 @@ impl AgentView {
                 }
                 if let KeyCode::Char(ch @ '1'..='9') = key.code {
                     let idx = (ch as u8 - b'1') as usize;
+                    // P152 (Astra r1/r2 #3): a digit never picks a broad grant (the global always-approve row or an
+                    // "allow always" row). A message that starts with `1` or `2` must not grant beyond this one call;
+                    // such a row takes the arrow keys and Enter (the digit only moves the cursor there), or Ctrl+O.
+                    if perm.options.get(idx).is_some_and(is_broad_grant) {
+                        perm.active_idx = idx;
+                        return InputOutcome::Changed;
+                    }
                     if let Some(opt) = perm.options.get(idx) {
                         return InputOutcome::Action(Action::PermissionSelect(
                             opt.option_id.clone(),
@@ -553,9 +661,20 @@ impl AgentView {
                             } else {
                                 return self.submit_question_answers(false);
                             }
+                        } else if !qv.no_freeform
+                            && key.modifiers.is_empty()
+                            && qv.is_worktree_question()
+                        {
+                            // P152: on the worktree questions a letter that names no option starts the typed answer.
+                            let freeform_idx = qv.total_items(qv.active_tab).saturating_sub(1);
+                            qv.set_cursor(freeform_idx);
+                            let text = qv.activate_freeform_input();
+                            self.prompt.set_text_preserving(&text);
+                            let _ = self.prompt.handle_key(key);
+                            return InputOutcome::Changed;
                         }
                     }
-                    KeyCode::Char('y') if key.modifiers.is_empty() => {
+                    KeyCode::Char('y') if key.modifiers.is_empty() && !qv.is_worktree_question() => {
                         if !qv.is_prompt_blocked() && !qv.is_on_freeform_row() {
                             let cursor = qv.cursor();
                             let active = qv.active_tab;
@@ -580,6 +699,21 @@ impl AgentView {
                     }
                     KeyCode::Char('X') if key.modifiers == KeyModifiers::SHIFT => {
                         return self.submit_question_answers(true);
+                    }
+                    // P152 (e2e lane M #3): on the /fork and new-session worktree questions any other printable key
+                    // starts the typed answer, so a typed `no` is an answer instead of being swallowed and leaving the
+                    // following Enter to take the focused "Yes". (ACP questions keep their keys: Astra r1 #4.)
+                    KeyCode::Char(_)
+                        if !qv.no_freeform
+                            && qv.is_worktree_question()
+                            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+                    {
+                        let freeform_idx = qv.total_items(qv.active_tab).saturating_sub(1);
+                        qv.set_cursor(freeform_idx);
+                        let text = qv.activate_freeform_input();
+                        self.prompt.set_text_preserving(&text);
+                        let _ = self.prompt.handle_key(key);
+                        return InputOutcome::Changed;
                     }
                     _ => {}
                 }
@@ -2638,5 +2772,216 @@ mod question_answer_focus_tests {
             );
             tab(&mut agent);
         }
+    }
+}
+/// P152 (e2e lane M #4): keys typed straight through an open permission prompt (the user was writing their next message
+/// when the prompt appeared) must not answer it.
+#[cfg(test)]
+mod p152_permission_typing_guard_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+    fn option(id: &str, kind: acp::PermissionOptionKind) -> acp::PermissionOption {
+        acp::PermissionOption::new(
+            acp::PermissionOptionId::new(Arc::from(id)),
+            id.to_string(),
+            kind,
+        )
+    }
+    fn setup(agent: &mut AgentView) {
+        let mut perm = super::test_fixtures::make_followup_permission_state();
+        perm.focus = crate::views::permission_view::PermissionFocus::Options;
+        perm.options = vec![
+            option(
+                fuigo_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID,
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            option("allow-always", acp::PermissionOptionKind::AllowAlways),
+            option("allow-once", acp::PermissionOptionKind::AllowOnce),
+            option("reject-once", acp::PermissionOptionKind::RejectOnce),
+        ];
+        perm.active_idx = 2;
+        agent.permission_queue.push_back(perm);
+    }
+    fn press(agent: &mut AgentView, code: KeyCode) -> InputOutcome {
+        agent.handle_permission_key(&KeyEvent::new(code, KeyModifiers::empty()))
+    }
+    fn is_select(outcome: &InputOutcome) -> bool {
+        matches!(outcome, InputOutcome::Action(Action::PermissionSelect(_)))
+    }
+
+    /// The Enter that ends a burst of typed text is held, and so is a digit typed inside the burst.
+    #[test]
+    fn enter_and_digits_inside_a_typing_burst_answer_nothing() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        for c in "fix it".chars() {
+            assert!(!is_select(&press(&mut agent, KeyCode::Char(c))));
+        }
+        let digit = press(&mut agent, KeyCode::Char('1'));
+        assert!(!is_select(&digit), "a digit typed inside a burst must not pick a row: {digit:?}");
+        // `3` is the allow-once row, which a deliberate digit picks at once; inside the burst it is held.
+        let digit = press(&mut agent, KeyCode::Char('3'));
+        assert!(!is_select(&digit), "a digit typed inside a burst must not pick a row: {digit:?}");
+        let enter = press(&mut agent, KeyCode::Enter);
+        assert!(!is_select(&enter), "the Enter ending a typed burst must not answer: {enter:?}");
+        assert_eq!(agent.permission_queue.len(), 1, "the prompt stays open");
+    }
+
+    /// Astra r1 #3: a digit never picks the always-approve row (a message starting with `1` must not enable it); it
+    /// only moves the cursor there, and a deliberate Enter is still needed.
+    #[test]
+    fn a_digit_never_picks_the_always_approve_row() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let one = press(&mut agent, KeyCode::Char('1'));
+        assert!(!is_select(&one), "digit 1 must not select always-approve: {one:?}");
+        assert_eq!(agent.permission_queue.front().unwrap().active_idx, 0, "the cursor moves to the row");
+        agent.permission_typed_at = None; // the typing window the digit started has passed
+        let enter = press(&mut agent, KeyCode::Enter);
+        match enter {
+            InputOutcome::Action(Action::PermissionSelect(id)) => assert_eq!(
+                id.0.as_ref(),
+                fuigo_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID
+            ),
+            other => panic!("a deliberate Enter on the row selects it, got {other:?}"),
+        }
+    }
+
+    /// Astra r1 #5: arrow-key navigation ends a typing burst, so the Enter the held-key notice asks for is honoured.
+    #[test]
+    fn navigation_ends_a_typing_burst() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let _ = press(&mut agent, KeyCode::Char('h'));
+        let _ = press(&mut agent, KeyCode::Up);
+        let enter = press(&mut agent, KeyCode::Enter);
+        match enter {
+            InputOutcome::Action(Action::PermissionSelect(id)) => assert_eq!(id.0.as_ref(), "allow-always"),
+            other => panic!("Enter after deliberate navigation answers, got {other:?}"),
+        }
+    }
+
+    /// A burst typed at one card does not hold keys on the next card.
+    #[test]
+    fn a_burst_belongs_to_its_card() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let _ = press(&mut agent, KeyCode::Char('h'));
+        let first_id = agent.permission_queue.front().unwrap().id;
+        let _ = agent.permission_queue.pop_front();
+        setup(&mut agent);
+        agent.permission_queue.front_mut().unwrap().id = first_id + 1;
+        let enter = press(&mut agent, KeyCode::Enter);
+        assert!(is_select(&enter), "a new card is not inside the old burst: {enter:?}");
+    }
+
+    /// Astra r2 #3: a digit never picks an "allow always" row either (a sentence starting with `2` must not grant all
+    /// edits for the session); it only moves the cursor.
+    #[test]
+    fn a_digit_never_picks_an_allow_always_row() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let two = press(&mut agent, KeyCode::Char('2'));
+        assert!(!is_select(&two), "digit 2 must not select allow-always: {two:?}");
+        assert_eq!(agent.permission_queue.front().unwrap().active_idx, 1, "the cursor moves to the row");
+    }
+
+    /// Astra r2 #3: `1 line`, Backspace, Enter grants nothing broad. The text after the digit moves the cursor off the
+    /// always-approve row, Backspace keeps the burst alive, the Enter is held, and an Enter after the burst expires
+    /// answers only the narrowest allow row.
+    #[test]
+    fn typed_text_after_a_digit_never_grants_broadly() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        for c in "1 line".chars() {
+            assert!(!is_select(&press(&mut agent, KeyCode::Char(c))));
+        }
+        assert_eq!(agent.permission_queue.front().unwrap().active_idx, 2, "typing leaves allow-once focused");
+        let _ = press(&mut agent, KeyCode::Backspace);
+        let enter = press(&mut agent, KeyCode::Enter);
+        assert!(!is_select(&enter), "Backspace is typing; the Enter is held: {enter:?}");
+        agent.permission_typed_at = None; // the burst has expired
+        match press(&mut agent, KeyCode::Enter) {
+            InputOutcome::Action(Action::PermissionSelect(id)) => assert_eq!(id.0.as_ref(), "allow-once"),
+            other => panic!("a later Enter answers allow-once only, got {other:?}"),
+        }
+    }
+
+    /// Astra r3 H2: `1`, Backspace, Enter grants nothing broad: Backspace is typing even with no burst running, so it
+    /// takes the cursor off the always-approve row the digit focused, and the Enter right after it is held.
+    #[test]
+    fn a_digit_then_backspace_never_grants_broadly() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let _ = press(&mut agent, KeyCode::Char('1'));
+        assert_eq!(agent.permission_queue.front().unwrap().active_idx, 0);
+        let _ = press(&mut agent, KeyCode::Backspace);
+        assert_eq!(agent.permission_queue.front().unwrap().active_idx, 2, "Backspace leaves allow-once focused");
+        let enter = press(&mut agent, KeyCode::Enter);
+        assert!(!is_select(&enter), "the Enter right after editing is held: {enter:?}");
+    }
+
+    /// Fable P152 MEDIUM: `1`, Enter typed as a one-character message grants nothing broad. The digit moves the
+    /// cursor onto the always-approve row and starts the typing window, so the Enter right after it is held; once the
+    /// window has passed, a deliberate Enter on the row still selects it.
+    #[test]
+    fn a_digit_then_enter_inside_the_window_grants_nothing_broad() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let _ = press(&mut agent, KeyCode::Char('1'));
+        assert_eq!(agent.permission_queue.front().unwrap().active_idx, 0);
+        let enter = press(&mut agent, KeyCode::Enter);
+        assert!(!is_select(&enter), "the Enter right after a digit on a broad grant is held: {enter:?}");
+        assert_eq!(agent.permission_queue.len(), 1, "the prompt stays open");
+        agent.permission_typed_at = None; // the window has passed
+        match press(&mut agent, KeyCode::Enter) {
+            InputOutcome::Action(Action::PermissionSelect(id)) => assert_eq!(
+                id.0.as_ref(),
+                fuigo_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID
+            ),
+            other => panic!("a deliberate Enter after the window selects the row, got {other:?}"),
+        }
+    }
+
+    /// A digit on a narrow row still answers at once and starts no window (only broad rows need the pause).
+    #[test]
+    fn a_digit_on_a_narrow_row_starts_no_window() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let three = press(&mut agent, KeyCode::Char('3'));
+        assert!(is_select(&three), "a deliberate digit on allow-once answers: {three:?}");
+        assert!(agent.permission_typed_at.is_none());
+    }
+
+    /// Astra r2 #4: Ctrl+K moves rows, so it ends a burst like the arrow keys do.
+    #[test]
+    fn ctrl_navigation_ends_a_typing_burst() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let _ = press(&mut agent, KeyCode::Char('h'));
+        let _ = agent.handle_permission_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        match press(&mut agent, KeyCode::Enter) {
+            InputOutcome::Action(Action::PermissionSelect(id)) => assert_eq!(id.0.as_ref(), "allow-always"),
+            other => panic!("Enter after Ctrl+K navigation answers, got {other:?}"),
+        }
+    }
+
+    /// Without preceding typing, Enter and digits answer as before (the guard holds only typed-through keys).
+    #[test]
+    fn deliberate_enter_and_digit_still_answer() {
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let enter = press(&mut agent, KeyCode::Enter);
+        match enter {
+            InputOutcome::Action(Action::PermissionSelect(id)) => assert_eq!(id.0.as_ref(), "allow-once"),
+            other => panic!("a deliberate Enter answers the focused row, got {other:?}"),
+        }
+        let mut agent = make_agent();
+        setup(&mut agent);
+        let _ = press(&mut agent, KeyCode::Down);
+        let digit = press(&mut agent, KeyCode::Char('3'));
+        assert!(is_select(&digit), "navigation is not typing; a digit answers: {digit:?}");
     }
 }

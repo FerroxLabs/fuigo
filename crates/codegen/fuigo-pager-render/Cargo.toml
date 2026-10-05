@@ -121,3 +121,6 @@ test-support = []
 # leaving cargo's `default` (and thus cargo production builds) without them.
 # The helpers are inert unless their mock setters are called.
 default-bazel = ["test-support"]
+
+[lints]
+workspace = true

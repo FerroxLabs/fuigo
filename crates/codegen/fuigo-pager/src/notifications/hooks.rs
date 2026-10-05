@@ -13,6 +13,7 @@ fn execute_hook(
     timeout: Duration,
 ) {
     let mut cmd = Command::new("sh");
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     cmd.arg("-c")
         .arg(command)
         .env("FUIGO_EVENT", event_str)
@@ -279,6 +280,111 @@ mod tests {
         );
     }
 
+    /// Polls for the hook's COMPLETE output instead of a fixed sleep: the spawned thread and the fork/exec take variable time on
+    /// loaded systems. The file exists as soon as the shell's redirect creates it, before the payload writes, so "file exists" is
+    /// not "hook done": wait until `complete` accepts the content. 30 s is a hang guard only.
+    fn wait_for_complete_output(
+        out: &std::path::Path,
+        complete: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(c) = std::fs::read_to_string(out)
+                && complete(&c)
+            {
+                return c;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hook did not produce its complete output within 30s (sh or printf may not be available)"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Single-quotes a path for `sh`, escaping embedded apostrophes.
+    fn sh_quote(path: &std::path::Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    /// On drop (including a panic) releases the payload and then waits, bounded, until the payload has printed its last line,
+    /// so the shell is past its polling loop before the caller's directory is removed.
+    struct ReleaseOnDrop {
+        release: std::path::PathBuf,
+        out: std::path::PathBuf,
+    }
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.release, "");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if std::fs::read_to_string(&self.out).is_ok_and(|c| c.ends_with('\n')) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// The shell creates and truncates its redirect target before the payload writes, so the wait helper can be offered an
+    /// opened-but-unwritten (empty) file. The payload here is held back until the helper has been shown that empty file, so the
+    /// order is forced rather than timed: a helper that returned on mere file existence returns the empty content (or never
+    /// consults `complete` at all) and fails, whatever the host load.
+    #[test]
+    fn wait_for_complete_output_does_not_return_an_opened_but_unwritten_file() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("slow.txt");
+        let release = dir.path().join("release");
+        let hook = NotificationHook {
+            command: format!(
+                "{{ while [ ! -e {release} ]; do sleep 0.01; done; printf 'done\\n'; }} > {out}",
+                release = sh_quote(&release),
+                out = sh_quote(&out)
+            ),
+            events: vec![],
+            only_unfocused: false,
+            timeout_secs: 60,
+        };
+        run_hook(&hook, &test_event());
+        // However this test exits (including a panic), release the payload and wait for it to finish before the directory goes
+        // away, so the shell cannot be left polling a release file that no longer exists. Declared after `dir`, so it drops first.
+        let _release_on_exit = ReleaseOnDrop {
+            release: release.clone(),
+            out: out.clone(),
+        };
+
+        let saw_unwritten_file = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let (out, seen) = (out.clone(), Arc::clone(&saw_unwritten_file));
+            std::thread::spawn(move || {
+                wait_for_complete_output(&out, |c| {
+                    if c.is_empty() {
+                        seen.store(true, Ordering::SeqCst);
+                    }
+                    c.ends_with('\n')
+                })
+            })
+        };
+
+        // Release the payload only after the helper has been offered the empty file; if the helper returns first it never saw it.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !saw_unwritten_file.load(Ordering::SeqCst) {
+            assert!(
+                !waiter.is_finished(),
+                "the wait helper returned without ever being offered the opened-but-unwritten file"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the hook never opened its output file within 30s"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::write(&release, "").unwrap();
+        assert_eq!(waiter.join().expect("waiter thread"), "done\n");
+    }
+
     #[test]
     fn run_hook_passes_correct_env_via_thread() {
         let dir = tempfile::tempdir().unwrap();
@@ -296,20 +402,36 @@ mod tests {
         let event = test_event();
         run_hook(&hook, &event);
 
-        // Poll for the output file instead of a fixed sleep: the spawned thread and the fork/exec may take variable time on loaded systems
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let content = loop {
-            if let Ok(c) = std::fs::read_to_string(&out) {
-                break c;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "hook did not produce output file within 5s (sh or printf may not be available)"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        };
+        let content = wait_for_complete_output(&out, |c| {
+            c.contains("FUIGO_SESSION_ID=") && c.ends_with('\n')
+        });
         assert!(content.contains("FUIGO_EVENT=Turn complete"));
         assert!(content.contains("FUIGO_MESSAGE=test body payload"));
         assert!(content.contains("FUIGO_SESSION_ID=test-session-123"));
+    }
+}
+
+/// P120: a notification hook is a user-configured command; it must not inherit Fuigo's own secrets.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[test]
+    fn p120_notification_hooks_do_not_inherit_fuigo_secrets() {
+        const NAME: &str = "notifications::hooks::p120_tests::p120_notification_hooks_do_not_inherit_fuigo_secrets";
+        const REGISTERED: &str = "P120_HOOK_BEARER";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let dir = probe::scratch_dir("p120-hook");
+        let out = dir.join("env.txt");
+        execute_hook(&format!("env > '{}'", out.display()), "p120", "message", Some("sid"), Duration::from_secs(20));
+        let dump = std::fs::read_to_string(&out).expect("the hook ran");
+        probe::assert_clean(&dump, &[]);
+        probe::assert_kept(&dump, REGISTERED);
+        assert!(dump.lines().any(|l| l == "FUIGO_EVENT=p120"), "control: the hook's own variables arrive");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -49,30 +49,30 @@ impl SandboxClient {
     }
 
     // Do not set Content-Type: callers use .json() and reqwest .header() appends
+    /// P47: the session token goes only where the service-endpoint trust class admits `url` (with the
+    /// configured cli-chat-proxy base this client was built with); otherwise the request is not made.
     async fn auth_headers(
         &self,
         builder: reqwest::RequestBuilder,
+        url: &str,
     ) -> Result<reqwest::RequestBuilder> {
         let auth = self
             .auth_manager
             .auth()
             .await
             .context("failed to resolve sandbox auth")?;
-        let mut builder = builder
+        crate::auth::session_delivery::service_session_gate(
+            &auth,
+            url,
+            Some(&self.base_url),
+            "sandbox",
+        )?;
+        // P43: identity only to a FluxRouter-operated destination.
+        let identity = super::account_identity_headers(&self.base_url, &auth.user_id, auth.email.as_deref());
+        let builder = builder
             .header("Authorization", format!("Bearer {}", &auth.key))
             .header("X-XAI-Token-Auth", FuigoComConfig::default().token_header)
-            .header("x-userid", &auth.user_id)
-            .header("x-fuigo-client-version", fuigo_version::VERSION);
-
-        if let Some(email) = &auth.email {
-            builder = builder.header("x-email", email);
-        }
-
-        builder = builder
-            .header(
-                "x-fuigo-client-identifier",
-                crate::http::process_client_identifier(),
-            )
+            .headers(identity)
             .header(
                 crate::http::CLIENT_MODE_HEADER,
                 crate::http::process_client_mode(),
@@ -110,7 +110,7 @@ impl SandboxClient {
     pub async fn fork_session(&self, request: &SandboxForkRequest) -> Result<SandboxForkResponse> {
         let url = format!("{}/sandbox/sessions/fork", self.base_url);
         let response = self
-            .auth_headers(self.client.post(&url))
+            .auth_headers(self.client.post(&url), &url)
             .await?
             .json(request)
             .send_checked()
@@ -130,7 +130,7 @@ impl SandboxClient {
         }
 
         let response = self
-            .auth_headers(self.client.delete(&url))
+            .auth_headers(self.client.delete(&url), &url)
             .await?
             .send_checked()
             .await
@@ -155,7 +155,7 @@ impl SandboxClient {
         request: &SandboxListEnvironmentsRequest,
     ) -> Result<SandboxListEnvironmentsResponse> {
         let url = format!("{}/sandbox/environments", self.base_url);
-        let mut builder = self.auth_headers(self.client.get(&url)).await?;
+        let mut builder = self.auth_headers(self.client.get(&url), &url).await?;
         if let Some(page) = request.page {
             builder = builder.query(&[("page", page)]);
         }
@@ -175,7 +175,7 @@ impl SandboxClient {
     ) -> Result<SandboxEnvironmentResponse> {
         let url = format!("{}/sandbox/environments", self.base_url);
         let response = self
-            .auth_headers(self.client.post(&url))
+            .auth_headers(self.client.post(&url), &url)
             .await?
             .json(request)
             .send_checked()
@@ -191,7 +191,7 @@ impl SandboxClient {
     ) -> Result<SandboxEnvironmentResponse> {
         let url = format!("{}/sandbox/environments/{}", self.base_url, environment_id);
         let response = self
-            .auth_headers(self.client.put(&url))
+            .auth_headers(self.client.put(&url), &url)
             .await?
             .json(request)
             .send_checked()
@@ -203,11 +203,36 @@ impl SandboxClient {
     pub(crate) async fn delete_environment(&self, environment_id: &str) -> Result<()> {
         let url = format!("{}/sandbox/environments/{}", self.base_url, environment_id);
         let response = self
-            .auth_headers(self.client.delete(&url))
+            .auth_headers(self.client.delete(&url), &url)
             .await?
             .send_checked()
             .await
             .context("failed to send delete environment request")?;
         Self::check_response(response, "delete environment").await
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    /// P43 hostile: a sandbox host that is not FluxRouter-operated gets no identity.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::agent::identity_tests::sandbox_requests_send_no_identity_to_a_non_fluxrouter_host",
+        ) else {
+            return;
+        };
+        // Alone in its process: install the issuer no other test happened to install here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+            let base = front.front_service(&base);
+        let client = SandboxClient::new(base, crate::remote::skills_client::tests::test_auth_manager());
+        let _ = client
+            .list_environments(&SandboxListEnvironmentsRequest::default())
+            .await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "sandbox");
     }
 }

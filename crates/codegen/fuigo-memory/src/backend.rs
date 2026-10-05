@@ -59,7 +59,10 @@ pub struct EndpointScopedCredentials {
 impl std::fmt::Debug for EndpointScopedCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EndpointScopedCredentials")
-            .field("endpoint", &self.endpoint)
+            .field(
+                "endpoint",
+                &self.endpoint.as_ref().map(|url| fuigo_auth::redact_url(url.as_str())),
+            )
             .field("has_auth_credentials", &self.auth_credentials.is_some())
             .field("has_api_key_provider", &self.api_key_provider.is_some())
             .finish()
@@ -92,9 +95,10 @@ impl EndpointScopedCredentials {
             };
         }
         if auth_credentials.is_some() || api_key_provider.is_some() {
+            // P149 (S12, live lane C2 D4): location only; a base URL can carry a password or a query secret.
             tracing::info!(
                 target: crate::MEMORY_LOG_TARGET,
-                endpoint,
+                endpoint = %fuigo_auth::redact_url(endpoint),
                 "memory embeddings: session credentials withheld for non-first-party endpoint; its own key, if any, still applies"
             );
         }
@@ -171,8 +175,9 @@ async fn build_embedding_provider(
     if !credentials_approved {
         tracing::error!(
             target: crate::MEMORY_LOG_TARGET,
-            base_url,
-            approved = ?credentials.endpoint,
+            // P149 (S12): location only.
+            base_url = %fuigo_auth::redact_url(base_url),
+            approved = ?credentials.endpoint.as_ref().map(|url| fuigo_auth::redact_url(url.as_str())),
             "memory embeddings: scoped credentials do not match the request URL; dropping them"
         );
     }
@@ -1328,6 +1333,13 @@ mod tests {
             async fn refresh_after_unauthorized(&self) -> bool {
                 false
             }
+            fn bearer_may_reach(
+                &self,
+                _url: &reqwest::Url,
+                _bearer: &str,
+            ) -> Result<(), fuigo_auth::BearerDestinationRefused> {
+                Ok(())
+            }
         }
 
         let auth: Arc<dyn fuigo_auth::AuthCredentialProvider> = Arc::new(StubAuth);
@@ -1350,6 +1362,75 @@ mod tests {
             provider.is_some(),
             "trusted endpoint must build a provider from the session credential"
         );
+    }
+
+    /// A subscriber that keeps every event's fields as text, so a test can read what a log line would hold.
+    struct FieldCapture(Arc<std::sync::Mutex<String>>);
+    impl tracing::Subscriber for FieldCapture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Text<'a>(&'a mut String);
+            impl tracing::field::Visit for Text<'_> {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    self.0.push_str(&format!("{}={value:?} ", field.name()));
+                }
+            }
+            let mut text = self.0.lock().unwrap();
+            event.record(&mut Text(&mut text));
+            text.push('\n');
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// P149 (S12, live lane C2 D4): the "session credentials withheld" log line names the endpoint by location only,
+    /// and so does the scoped credentials' `Debug`.
+    #[test]
+    fn withheld_embeddings_endpoint_is_logged_by_location_only() {
+        struct AnyKey;
+        impl fuigo_tools::types::ApiKeyProvider for AnyKey {
+            fn current_api_key(&self) -> Option<String> {
+                None
+            }
+        }
+        const PASS: &str = "fuigo-p149-SYNTH-embpass";
+        const QUERY: &str = "fuigo-p149-SYNTH-embquery";
+        let endpoint = format!("https://p149u:{PASS}@gw.p149.invalid/v1?key={QUERY}");
+        let lines = Arc::new(std::sync::Mutex::new(String::new()));
+        let denied = tracing::subscriber::with_default(FieldCapture(lines.clone()), || {
+            EndpointScopedCredentials::for_endpoint(
+                &endpoint,
+                |_| false,
+                None,
+                Some(Arc::new(AnyKey) as fuigo_tools::types::SharedApiKeyProvider),
+            )
+        });
+        assert!(denied.is_empty(), "control: untrusted endpoint drops the credential");
+        let logged = lines.lock().unwrap().clone();
+        assert!(logged.contains("session credentials withheld"), "control: {logged}");
+        assert!(logged.contains("gw.p149.invalid/v1"), "control: the location is logged: {logged}");
+        for secret in [PASS, QUERY, "p149u"] {
+            assert!(!logged.contains(secret), "{secret} was logged: {logged}");
+        }
+
+        let kept = EndpointScopedCredentials::for_endpoint(
+            &endpoint,
+            |_| true,
+            None,
+            Some(Arc::new(AnyKey) as fuigo_tools::types::SharedApiKeyProvider),
+        );
+        let debug = format!("{kept:?}");
+        assert!(debug.contains("gw.p149.invalid"), "control: {debug}");
+        for secret in [PASS, QUERY] {
+            assert!(!debug.contains(secret), "Debug holds {secret}: {debug}");
+        }
     }
 
     #[test]

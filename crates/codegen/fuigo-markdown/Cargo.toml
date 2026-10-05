@@ -9,6 +9,13 @@ description = "Streaming markdown renderer for terminal UIs"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
+# The workspace's print deny (R077: release is panic = "abort", and a print to a dead stdout/stderr
+# aborts). Spelled out here because this crate's own [lints.rust] rules out `workspace = true`.
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+
 [dependencies]
 anstyle = { workspace = true }
 anstyle-lossy = { workspace = true }

@@ -3717,9 +3717,11 @@ name = "fuigo-announcements"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fuigo-config",
  "fuigo-tools",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "ts-rs",
@@ -3733,8 +3735,10 @@ dependencies = [
  "fuigo-extra-ca",
  "http 1.4.0",
  "mockito",
+ "regex",
  "reqwest 0.12.24",
  "reqwest-middleware 0.4.2",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]
@@ -3926,6 +3930,7 @@ dependencies = [
  "fuigo-dirs",
  "fuigo-tty-utils",
  "fuigo-version",
+ "libc",
  "prod-mc-cli-chat-proxy-types",
  "ring",
  "semver",
@@ -3936,8 +3941,10 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "unicode-normalization",
  "urlencoding",
  "which",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -3948,6 +3955,7 @@ dependencies = [
  "fuigo-announcements",
  "fuigo-config",
  "fuigo-mcp",
+ "fuigo-tools",
  "indexmap",
  "serde",
  "serde_json",
@@ -4022,6 +4030,7 @@ dependencies = [
  "reqwest 0.12.24",
  "rustls",
  "rustls-native-certs",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -4040,6 +4049,7 @@ dependencies = [
  "dunce",
  "fuigo-dirs",
  "fuigo-gix-status",
+ "fuigo-secrets",
  "fuigo-sqlite-journal",
  "fuigo-test-utils",
  "fuigo-tty-utils",
@@ -4055,13 +4065,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "url",
- "uuid",
 ]
 
 [[package]]
@@ -4087,6 +4094,7 @@ dependencies = [
  "fuigo-dirs",
  "fuigo-extra-ca",
  "fuigo-test-utils",
+ "fuigo-tty-utils",
  "fuigo-version",
  "futures",
  "gcloud-storage",
@@ -4191,9 +4199,11 @@ name = "fuigo-hooks"
 version = "0.1.0"
 dependencies = [
  "fastrand",
+ "fuigo-auth",
  "fuigo-config",
  "fuigo-extra-ca",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-tools",
  "regex",
  "reqwest 0.12.24",
@@ -4351,7 +4361,9 @@ dependencies = [
  "flate2",
  "fuigo-auth",
  "fuigo-config-types",
+ "fuigo-file-utils",
  "fuigo-http",
+ "fuigo-secrets",
  "fuigo-sqlite-journal",
  "fuigo-token-estimation",
  "fuigo-tools",
@@ -4360,6 +4372,7 @@ dependencies = [
  "libc",
  "nix 0.30.1",
  "notify",
+ "regex",
  "reqwest 0.12.24",
  "reqwest-middleware 0.4.2",
  "rusqlite",
@@ -4369,6 +4382,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "windows 0.61.3",
 ]
 
@@ -4437,6 +4451,7 @@ dependencies = [
  "fuigo-active-sessions",
  "fuigo-agent",
  "fuigo-announcements",
+ "fuigo-auth",
  "fuigo-config",
  "fuigo-crash-handler",
  "fuigo-dashboard-store",
@@ -4458,6 +4473,7 @@ dependencies = [
  "fuigo-ratatui-inline",
  "fuigo-ratatui-textarea",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-shell",
  "fuigo-status-line",
  "fuigo-telemetry",
@@ -4529,6 +4545,7 @@ dependencies = [
  "fuigo-sandbox",
  "fuigo-shell",
  "fuigo-telemetry",
+ "fuigo-test-support",
  "fuigo-tty-utils",
  "fuigo-update",
  "fuigo-version",
@@ -4759,6 +4776,7 @@ dependencies = [
  "fuigo-auth",
  "fuigo-extra-ca",
  "fuigo-sampling-types",
+ "fuigo-secrets",
  "fuigo-test-support",
  "fuigo-version",
  "futures-util",
@@ -4782,8 +4800,10 @@ dependencies = [
  "assert_matches",
  "async-openai",
  "chrono",
+ "fuigo-auth",
  "fuigo-circuit-breaker",
  "fuigo-compaction",
+ "fuigo-secrets",
  "fuigo-tools",
  "indexmap",
  "reqwest 0.12.24",
@@ -4803,6 +4823,7 @@ dependencies = [
  "dunce",
  "fuigo-config",
  "fuigo-dirs",
+ "fuigo-tty-utils",
  "globset",
  "ignore",
  "libc",
@@ -4826,6 +4847,7 @@ dependencies = [
  "regex",
  "serde_json",
  "url",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -4833,6 +4855,7 @@ name = "fuigo-session-events"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fuigo-secrets",
  "serde",
  "serde_json",
  "strum 0.27.2",
@@ -4851,6 +4874,7 @@ dependencies = [
  "fuigo-config",
  "fuigo-sqlite-journal",
  "fuigo-telemetry",
+ "libc",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -4874,6 +4898,7 @@ dependencies = [
  "fuigo-dirs",
  "fuigo-models",
  "fuigo-status-line",
+ "fuigo-test-support",
  "fuigo-tools",
  "fuigo-tty-utils",
  "image",
@@ -4889,6 +4914,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "uuid",
+ "wayland-backend",
  "wl-clipboard-rs",
 ]
 
@@ -4951,6 +4977,7 @@ dependencies = [
  "fuigo-sampler",
  "fuigo-sampling-types",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-session-events",
  "fuigo-session-search",
  "fuigo-shared",
@@ -5050,6 +5077,7 @@ dependencies = [
  "fuigo-config",
  "fuigo-env",
  "fuigo-extra-ca",
+ "fuigo-secrets",
  "fuigo-shared",
  "fuigo-tty-utils",
  "fuigo-version",
@@ -5175,6 +5203,7 @@ dependencies = [
  "filetime",
  "fuigo-auth",
  "fuigo-config",
+ "fuigo-crash-handler",
  "fuigo-dirs",
  "fuigo-env",
  "fuigo-extra-ca",
@@ -5328,6 +5357,7 @@ dependencies = [
  "fuigo-file-utils",
  "fuigo-interjection-core",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-test-support",
  "fuigo-test-utils",
  "fuigo-token-estimation",
@@ -5438,6 +5468,7 @@ version = "0.1.0"
 name = "fuigo-tty-utils"
 version = "0.1.0"
 dependencies = [
+ "fuigo-secrets",
  "libc",
  "nix 0.30.1",
  "tokio",
@@ -5451,11 +5482,14 @@ dependencies = [
  "anyhow",
  "dunce",
  "flate2",
+ "fuigo-auth",
  "fuigo-dirs",
  "fuigo-extra-ca",
+ "fuigo-secrets",
  "fuigo-shell",
  "fuigo-telemetry",
  "fuigo-tools",
+ "fuigo-tty-utils",
  "fuigo-version",
  "futures",
  "indicatif",
@@ -5465,19 +5499,21 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",
  "tracing",
  "url",
+ "windows 0.61.3",
  "wiremock",
  "zstd",
 ]
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.20"
+version = "1.0.21"
 dependencies = [
  "semver",
 ]
@@ -5560,8 +5596,10 @@ dependencies = [
  "fuigo-mcp",
  "fuigo-paths",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-session-events",
  "fuigo-telemetry",
+ "fuigo-test-support",
  "fuigo-test-utils",
  "fuigo-tool-protocol",
  "fuigo-tool-runtime",
@@ -12981,14 +13019,14 @@ dependencies = [
 [[package]]
 name = "tiff"
 version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
 dependencies = [
  "fax",
  "flate2",
  "half",
+ "image-webp",
  "quick-error",
  "weezl",
+ "zstd",
  "zune-jpeg",
 ]
 
@@ -14049,8 +14087,6 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usvg"
 version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d46cf96c5f498d36b7a9693bc6a7075c0bb9303189d61b2249b0dc3d309c07de"
 dependencies = [
  "base64 0.22.1",
  "data-url",
@@ -14380,6 +14416,7 @@ checksum = "fee64194ccd96bf648f42a65a7e589547096dfa702f7cadef84347b66ad164f9"
 dependencies = [
  "cc",
  "downcast-rs",
+ "log",
  "rustix 1.1.4",
  "smallvec",
  "wayland-sys",

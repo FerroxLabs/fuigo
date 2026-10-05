@@ -130,8 +130,20 @@ pub async fn run_command_hook(
         || command_str.contains('$')
         || command_str.starts_with('~');
 
+    // P70a: this hook's own child env, with the first-party key added only when its config names it explicitly.
+    // Detection reads the command as parsed: aliases from its `env` map are substituted there (`$TOKEN` with
+    // `TOKEN = "${FUIGO_API_KEY}"`), and an escaped `$${FUIGO_API_KEY}` is kept as written (Astra f5).
+    let child_env = crate::env_expand::hook_child_env(
+        Some(&command_str),
+        &spec.extra_env,
+        !matches!(
+            crate::config::hook_origin(spec),
+            crate::config::HookOrigin::ProjectFile | crate::config::HookOrigin::Plugin | crate::config::HookOrigin::Agent
+        ),
+    );
+
     let mut cmd = if is_shell_command {
-        let unresolved = find_unresolved_env_vars(&command_str, &spec.extra_env);
+        let unresolved = find_unresolved_env_vars(&command_str, &child_env);
         if !unresolved.is_empty() {
             let elapsed = start.elapsed();
             let list = unresolved
@@ -155,7 +167,7 @@ pub async fn run_command_hook(
         }
         #[cfg(not(unix))]
         {
-            let command_str = rewrite_hook_command_for_windows_shell(&command_str, &spec.extra_env);
+            let command_str = rewrite_hook_command_for_windows_shell(&command_str, &child_env);
             let inv = fuigo_config::shell::shell_command_argv(command_str.as_ref());
             let mut c = tokio::process::Command::new(&inv.program);
             c.args(&inv.args).envs(inv.env);
@@ -200,8 +212,10 @@ pub async fn run_command_hook(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .current_dir(ctx.workspace_root)
-        // SECURITY: extra_env is applied before the FUIGO_* identity vars so a hook cannot spoof them.
-        .envs(&spec.extra_env)
+        // SECURITY: extra_env is applied before the FUIGO_* identity vars so a hook cannot spoof them. It is applied
+        // after `apply_shell_environment_policy`, which strips `FUIGO_API_KEY` by name, so the key reaches this child
+        // only through `child_env`, i.e. when this hook's config names it (P70a).
+        .envs(child_env.iter())
         .env("FUIGO_HOOK_EVENT", envelope.hook_event_name.to_string())
         .env("FUIGO_HOOK_NAME", &spec.name)
         .env("FUIGO_SESSION_ID", ctx.session_id)
@@ -1983,6 +1997,187 @@ mod tests {
                 .0;
             assert!(matches!(result, HookRunnerResult::Success));
         }
+    }
+
+    /// P86 (CB-1), hooks: the credentials sit in the agent's OWN environment (a fresh test process
+    /// whose env holds them; the names are literal so an emptied denylist cannot empty the test);
+    /// the hook and its child must not see them, `P86_BENIGN` proves the parent env does reach the
+    /// hook, and a key the user wrote into the hook's `env` still arrives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p86_hooks_never_see_parent_credentials() {
+        const NAME: &str = "p86_hooks_never_see_parent_credentials";
+        if std::env::var("P86_CHILD_TEST").as_deref() != Ok(NAME) {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.arg(NAME)
+                .args(["--test-threads=1", "--nocapture"])
+                .env("P86_CHILD_TEST", NAME)
+                .env("P86_BENIGN", "kept");
+            for name in [
+                "FLUX_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "FUIGO_API_KEY",
+                "OPENAI_API_KEY",
+                "P86_CORP_KEY",
+            ] {
+                cmd.env(name, "fake-p86-ambient");
+            }
+            let output = cmd.output().unwrap();
+            let stdout = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .replace("fake-p86-", "[redacted]-");
+            assert!(
+                output.status.success(),
+                "isolated P86 hook probe failed: {stdout}"
+            );
+            assert!(stdout.contains("test result: ok. 1 passed"), "{stdout}");
+            return;
+        }
+        // What the config loader does with a user's `env_key = "P86_CORP_KEY"`.
+        fuigo_tools::util::shell_env_policy::register_credential_env_names(["P86_CORP_KEY"]);
+        for selected in [false, true] {
+            let flux = if selected {
+                "test \"$FLUX_API_KEY\" = fake-p86-selected"
+            } else {
+                "test -z \"${FLUX_API_KEY+x}\""
+            };
+            let check = format!(
+                "test \"$P86_BENIGN\" = kept && {flux} && test -z \"${{ANTHROPIC_AUTH_TOKEN+x}}${{FUIGO_API_KEY+x}}${{OPENAI_API_KEY+x}}${{P86_CORP_KEY+x}}\""
+            );
+            // The probe runs from a script file, not from the hook's command: a hook whose own config names
+            // `FUIGO_API_KEY` is given the key on purpose (P70a), and this test is about inheritance.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let script = dir.path().join("p86-probe.sh");
+            std::fs::write(&script, format!("{check} && /bin/sh -c '{check}'\n")).expect("write probe");
+            let mut spec = make_shell_spec(&format!("/bin/sh '{}'", script.display()));
+            if selected {
+                spec.extra_env
+                    .insert("FLUX_API_KEY".into(), "fake-p86-selected".into());
+            }
+            let result = run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::Observe)
+                .await
+                .0;
+            assert!(
+                matches!(result, HookRunnerResult::Success),
+                "selected={selected}: {result:?}"
+            );
+        }
+    }
+
+    /// P70a follow-up: the agent no longer holds the user's saved API key in its environment, and every hook child has
+    /// `FUIGO_API_KEY` stripped by name. A hook whose config names the key explicitly still gets it, through the
+    /// installed credential resolver, in its own child environment only: (1) `$FUIGO_API_KEY` in its command, (2)
+    /// `${FUIGO_API_KEY}` inside a value of its `env` map. (3) A script that reads `$FUIGO_API_KEY` from its inherited
+    /// environment, with nothing in the hook's config naming it, gets nothing. The key is never written to this
+    /// process's environment (`std::env::vars`, and `/proc/self/environ` on Linux).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p70a_first_party_key_reaches_a_hook_only_when_its_config_names_it() {
+        const KEY: &str = crate::test_support::P70A_TEST_KEY;
+        crate::test_support::install_p70a_key_resolver();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = |name: &str| dir.path().join(name);
+        let script = out("reads-inherited.sh");
+        std::fs::write(
+            &script,
+            format!("printf '%s' \"${{FUIGO_API_KEY-unset}}\" > '{}'\n", out("implicit").display()),
+        )
+        .expect("write script");
+
+        let explicit = make_shell_spec(&format!(
+            "printf '%s' \"$FUIGO_API_KEY\" > '{}'",
+            out("explicit").display()
+        ));
+        let mut via_env = make_shell_spec(&format!(
+            "printf '%s' \"$P70A_TOKEN\" > '{}'",
+            out("via-env").display()
+        ));
+        via_env
+            .extra_env
+            .insert("P70A_TOKEN".into(), "Bearer ${FUIGO_API_KEY}".into());
+        let implicit = make_shell_spec(&format!("/bin/sh '{}'", script.display()));
+        // Astra f1 #3: a reference nested in another variable's default still names the key.
+        let nested = make_shell_spec(&format!(
+            "printf '%s' \"${{P70A_UNSET_OVERRIDE:-$FUIGO_API_KEY}}\" > '{}'",
+            out("nested").display()
+        ));
+
+        for (label, spec) in [("explicit", &explicit), ("via-env", &via_env), ("implicit", &implicit), ("nested", &nested)] {
+            let result = run_command_hook(spec, &make_envelope(), &make_ctx(), GateKind::Observe)
+                .await
+                .0;
+            assert!(matches!(result, HookRunnerResult::Success), "{label}: {result:?}");
+        }
+        let read = |name: &str| std::fs::read_to_string(out(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(read("explicit"), KEY, "a hook whose command names $FUIGO_API_KEY gets the key");
+        assert_eq!(read("via-env"), format!("Bearer {KEY}"), "a hook env value naming ${{FUIGO_API_KEY}} gets the key");
+        assert_eq!(read("implicit"), "unset", "a script reading an inherited FUIGO_API_KEY got it");
+        assert_eq!(read("nested"), KEY, "a reference nested in a default did not get the key");
+        assert!(
+            !std::env::vars().any(|(_, v)| v.contains(KEY)),
+            "the key entered this process's environment"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let environ = std::fs::read("/proc/self/environ").expect("/proc/self/environ");
+            assert!(
+                !String::from_utf8_lossy(&environ).contains(KEY),
+                "the key is in /proc/self/environ"
+            );
+        }
+    }
+
+    /// P70a follow-up (Astra f5), through the PRODUCTION parser (`parse_hook_file`) and runner: (1) a command naming
+    /// the key directly and, escaped, `$${FUIGO_API_KEY}` gets the key for the first only (the shell reads the kept
+    /// `$$` as its PID); (2) an alias `$TOKEN` with `env = { TOKEN = "${FUIGO_API_KEY}" }` gets it (parsing substitutes
+    /// the alias); (3) an alias whose value is the escaped form gets nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p70a_parsed_hooks_resolve_plain_references_and_keep_escaped_ones() {
+        const KEY: &str = crate::test_support::P70A_TEST_KEY;
+        crate::test_support::install_p70a_key_resolver();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = |name: &str| dir.path().join(name).display().to_string();
+        let hook = |command: String, env: serde_json::Value| {
+            serde_json::json!({ "type": "command", "command": command, "env": env })
+        };
+        let json = serde_json::json!({ "hooks": { "Stop": [ { "hooks": [
+            hook(format!("printf '%s|%s' \"$FUIGO_API_KEY\" \"$${{FUIGO_API_KEY}}\" > '{}'", out("mixed")), serde_json::json!({})),
+            hook(format!("printf '%s' \"$TOKEN\" > '{}'", out("alias")), serde_json::json!({ "TOKEN": "${FUIGO_API_KEY}" })),
+            hook(format!("printf '%s' \"$TOKEN2\" > '{}'", out("escaped-alias")), serde_json::json!({ "TOKEN2": "$${FUIGO_API_KEY}" })),
+            // Astra f6 #1: an escaped modifier form.
+            hook(format!("printf '%s' \"$${{FUIGO_API_KEY:-fallback}}\" > '{}'", out("escaped-modifier")), serde_json::json!({})),
+            // Astra f7 #1: an expanded value holding private-use characters next to an escaped reference.
+            hook(
+                format!("printf '%s|%s' \"$ALIAS\" \"$${{FUIGO_API_KEY}}\" > '{}'", out("pua-alias")),
+                serde_json::json!({ "ALIAS": "\u{e000}{FUIGO_API_KEY}" }),
+            ),
+            // Astra f7 #2: an odd run is `$` (the PID, for a shell) and a reference: the hook names the key.
+            hook(format!("printf '%s' \"$$${{FUIGO_API_KEY}}\" > '{}'", out("odd-run")), serde_json::json!({})),
+        ] } ] } })
+        .to_string();
+        let (specs, errors) = crate::config::parse_hook_file_with_key_naming(&json, std::path::Path::new("/tmp/p70a-hooks.json"), true);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(specs.len(), 6);
+        for spec in &specs {
+            let result = run_command_hook(spec, &make_envelope(), &make_ctx(), GateKind::Observe).await.0;
+            assert!(matches!(result, HookRunnerResult::Success), "{}: {result:?}", spec.name);
+        }
+        let read = |name: &str| std::fs::read_to_string(out(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mixed = read("mixed");
+        let (plain, escaped) = mixed.split_once('|').expect("two fields");
+        assert_eq!(plain, KEY, "the plain reference did not get the key");
+        assert!(!escaped.contains(KEY) && escaped.ends_with("{FUIGO_API_KEY}"), "the escaped one: {escaped:?}");
+        assert_eq!(read("alias"), KEY, "an alias naming the key did not get it");
+        assert!(!read("escaped-alias").contains(KEY), "an alias holding the escaped form got the key");
+        let modifier = read("escaped-modifier");
+        assert!(!modifier.contains(KEY) && modifier.ends_with("{FUIGO_API_KEY:-fallback}"), "{modifier:?}");
+        let pua = read("pua-alias");
+        assert!(!pua.contains(KEY) && pua.starts_with("\u{e000}{FUIGO_API_KEY}|"), "{pua:?}");
+        assert!(read("odd-run").ends_with(KEY), "an odd run is a reference the hook named");
     }
 
     fn make_envelope() -> HookEventEnvelope {

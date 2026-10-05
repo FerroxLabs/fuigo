@@ -11,7 +11,12 @@ use fuigo_tools::types::tool::ToolKind;
 /// Client-facing names come from `${{ params.<kind>.<param> }}` via [`path_param_names_for_kind`].
 const CANONICAL_PATH_PARAMS: &[&str] = &["file_path", "path", "target_file"];
 
-const CHECK_TIMEOUT: Duration = Duration::from_millis(100);
+/// Product latency budget for each phase of the smoke check (resolve, then validate).
+/// The check runs on the tool-result path of every write or edit to a workflow script, so it must never stall
+/// the turn, and it is the bound that cuts off a nonterminating script; past it the model gets the warning.
+/// Wall-clock by design. Production passes this; a test that pins a verdict rather than the budget passes its own
+/// (`budget` parameter), because how long a trivial script takes on a loaded host is not part of the contract.
+pub(super) const CHECK_TIMEOUT: Duration = Duration::from_millis(100);
 pub(super) const MAX_CONCURRENT_CHECKS: usize = 4;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -106,6 +111,7 @@ pub(super) async fn snapshot_authored_workflow(
     cwd: &Path,
     display_cwd: Option<&Path>,
     session_dir: &Path,
+    budget: Duration,
 ) -> Option<Result<AuthoredWorkflowSnapshot, WorkflowSmokeCheckFailure>> {
     if !matches!(tool_kind, Some(ToolKind::Write) | Some(ToolKind::Edit)) {
         return None;
@@ -130,12 +136,12 @@ pub(super) async fn snapshot_authored_workflow(
             Some(&session_dir),
         )
     });
-    let resolution = match tokio::time::timeout(CHECK_TIMEOUT, resolution).await {
+    let resolution = match tokio::time::timeout(budget, resolution).await {
         Ok(join) => join,
         Err(_) => {
             return Some(Err(WorkflowSmokeCheckFailure {
                 path,
-                detail: format!("smoke check exceeded {} ms", CHECK_TIMEOUT.as_millis()),
+                detail: format!("smoke check exceeded {} ms", budget.as_millis()),
             }));
         }
     };
@@ -167,6 +173,7 @@ impl Drop for CancelOnDrop {
 pub(super) async fn check_snapshot(
     snapshot: AuthoredWorkflowSnapshot,
     permits: &Arc<tokio::sync::Semaphore>,
+    budget: Duration,
 ) -> Option<WorkflowSmokeCheckFailure> {
     let path = snapshot.path;
     let permit = Arc::clone(permits).acquire_owned().await.ok()?;
@@ -178,7 +185,7 @@ pub(super) async fn check_snapshot(
         fuigo_workflow::validate_script_with_cancel(&snapshot.script, None, validation_cancel)
             .map_err(|error| error.to_string())
     });
-    let validation = match tokio::time::timeout(CHECK_TIMEOUT, validation).await {
+    let validation = match tokio::time::timeout(budget, validation).await {
         Ok(result) => Ok(result.ok()),
         Err(error) => {
             cancel.cancel();
@@ -190,7 +197,7 @@ pub(super) async fn check_snapshot(
         Ok(Some(Ok(_))) => return None,
         Ok(Some(Err(error))) => error,
         Ok(None) => "smoke-check task failed".to_owned(),
-        Err(_) => format!("smoke check exceeded {} ms", CHECK_TIMEOUT.as_millis()),
+        Err(_) => format!("smoke check exceeded {} ms", budget.as_millis()),
     };
     Some(WorkflowSmokeCheckFailure { path, detail })
 }

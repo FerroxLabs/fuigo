@@ -28,6 +28,8 @@ mod edit_merge_parallel_pty;
 mod edit_merge_sequential_pty;
 #[path = "pty_e2e/file_path_with_space_emits_full_osc8_hyperlink.rs"]
 mod file_path_with_space_emits_full_osc8_hyperlink;
+#[path = "pty_e2e/headless_denial_exits_three_under_a_real_tty.rs"]
+mod headless_denial_exits_three_under_a_real_tty;
 #[path = "pty_e2e/folder_trust_cwd_is_home_git_repo_no_prompt.rs"]
 mod folder_trust_cwd_is_home_git_repo_no_prompt;
 #[path = "pty_e2e/folder_trust_decline_quits_without_grant.rs"]
@@ -44,7 +46,11 @@ mod managed_policy_gate_refusal_reaches_real_terminal;
 mod mcp_menu_loads_servers_in_non_project_dir;
 #[path = "pty_e2e/mcp_menu_loads_servers_in_project_dir.rs"]
 mod mcp_menu_loads_servers_in_project_dir;
+#[path = "pty_e2e/mcp_menu_unavailable_server_shows_reason.rs"]
+mod mcp_menu_unavailable_server_shows_reason;
 #[path = "pty_e2e/mid_text_skill_token_echo_styled_pty.rs"]
 mod mid_text_skill_token_echo_styled_pty;
 #[path = "pty_e2e/permission_prompt_hook_chimes_only_on_real_wait.rs"]
 mod permission_prompt_hook_chimes_only_on_real_wait;
+#[path = "pty_e2e/permission_prompt_preselects_allow_once_and_holds_typed_enter.rs"]
+mod permission_prompt_preselects_allow_once_and_holds_typed_enter;

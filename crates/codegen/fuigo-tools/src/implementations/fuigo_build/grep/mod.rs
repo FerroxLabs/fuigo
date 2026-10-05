@@ -865,13 +865,25 @@ async fn prepare_grep(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return Ok(GrepStep::Early(GrepSearchOutput {
-                stdout: Vec::new(),
-                stderr: format!("Error calling tool: {}", e).into_bytes(),
-                exit_code: -1,
-                match_count: 0,
-                file_matches: Vec::new(),
-            }));
+            // P19. A search that could not start is NOT a search that found nothing.
+            //
+            // This used to return Ok with empty stdout, zero matches and exit_code -1,
+            // so the tool call succeeded and the caller saw an empty result set. A model
+            // asking whether the codebase contains X was told "no" when the truth was
+            // "the search never ran", and the only diagnostic went to a stderr field
+            // inside the returned struct that nothing on the model-facing path reads.
+            //
+            // Observed for real, not hypothetically: under a full-parallel test run the
+            // box's descriptor limit (ulimit -n 1024 against 96 test threads, two pipes
+            // per spawned rg) produced EMFILE here, and 44 tests failed with an empty
+            // "successful" result. See receipt R006.
+            //
+            // Contract A: missing evidence fails closed. An unstartable child is missing
+            // evidence, so this is an error.
+            return Err(fuigo_tool_runtime::ToolError::new(
+                fuigo_tool_runtime::ToolErrorKind::Execution,
+                format!("ripgrep could not be started, so the search did not run: {e}"),
+            ));
         }
     };
 

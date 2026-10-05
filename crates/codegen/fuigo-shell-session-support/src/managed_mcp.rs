@@ -166,7 +166,11 @@ async fn get_authenticated_json<T: serde::de::DeserializeOwned>(
         .timeout(std::time::Duration::from_secs(10))
         .header("Authorization", format!("Bearer {auth_key}"))
         .header("X-XAI-Token-Auth", "xai-grok-cli")
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity-class header, FluxRouter-operated destinations only.
+        .headers(
+            fuigo_http::fluxrouter::IdentityDisclosure::for_destination(url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
         .send_checked()
         .await
     {
@@ -219,7 +223,11 @@ pub async fn call_gateway_tool(
         .timeout(GATEWAY_TOOL_CALL_TIMEOUT)
         .header("Authorization", format!("Bearer {auth_key}"))
         .header("X-XAI-Token-Auth", "xai-grok-cli")
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity-class header, FluxRouter-operated destinations only.
+        .headers(
+            fuigo_http::fluxrouter::IdentityDisclosure::for_destination(&url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
         .json(&request)
         .send_checked()
         .await
@@ -450,6 +458,66 @@ mod tests {
                 .pointer("/properties/query/type")
                 .and_then(|v| v.as_str())
         );
+    }
+
+    /// P43 hostile: a managed-MCP gateway that is not FluxRouter-operated gets no client version.
+    #[tokio::test]
+    async fn gateway_tool_call_sends_no_identity_to_a_non_fluxrouter_proxy() {
+        use axum::Router;
+        use axum::routing::post;
+        use tokio::net::TcpListener;
+        let seen: Arc<std::sync::Mutex<Vec<axum::http::HeaderMap>>> = Arc::default();
+        let recorder = seen.clone();
+        let app = Router::new().route(
+            "/mcp/tools/call",
+            post(move |headers: axum::http::HeaderMap| {
+                let recorder = recorder.clone();
+                async move {
+                    recorder.lock().unwrap().push(headers);
+                    axum::Json(serde_json::json!({}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let _ = call_gateway_tool(&format!("http://{addr}"), "token", "t", serde_json::json!({})).await;
+        server.abort();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the mock must have received the call");
+        assert!(!seen[0].contains_key("x-fuigo-client-version"));
+        assert_eq!(seen[0]["authorization"], "Bearer token");
+    }
+
+    /// P43 hostile: managed-MCP discovery (`get_authenticated_json`, its own gate) sends no
+    /// client version to a proxy that is not FluxRouter-operated.
+    #[tokio::test]
+    async fn gateway_discovery_sends_no_identity_to_a_non_fluxrouter_proxy() {
+        let seen: Arc<std::sync::Mutex<Vec<axum::http::HeaderMap>>> = Arc::default();
+        let recorder = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let recorder = recorder.clone();
+            async move {
+                recorder.lock().unwrap().push(headers);
+                axum::Json(serde_json::json!({}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let _ = get_authenticated_json::<serde_json::Value>(
+            &format!("http://{addr}/mcp/tools"),
+            "token",
+            "unavailable",
+            "failed",
+            "parse",
+        )
+        .await;
+        server.abort();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the mock must have received the discovery call");
+        assert!(!seen[0].contains_key("x-fuigo-client-version"));
+        assert_eq!(seen[0]["authorization"], "Bearer token");
     }
 
     #[tokio::test]

@@ -767,10 +767,13 @@ mod tests {
     async fn transport_failure_first_retry_skips_the_server_backoff() {
         const CONNECT_GUARD: Duration = Duration::from_secs(5);
 
-        let send_err = tokio::time::timeout(CONNECT_GUARD, reqwest::get("http://127.0.0.1:0"))
+        // A held closed port, not `127.0.0.1:0`: WSL2 mirrored networking never refuses a connect to a closed
+        // IPv4 loopback port, so that connect hangs past the guard instead of failing.
+        let refused = fuigo_test_support::refused_loopback_url();
+        let send_err = tokio::time::timeout(CONNECT_GUARD, reqwest::get(&refused))
             .await
-            .expect("port 0 connect fails well within the guard")
-            .expect_err("connecting to port 0 must fail");
+            .expect("a refused connect fails well within the guard")
+            .expect_err("connecting to a closed port must fail");
         let err = SamplingError::Http(send_err);
 
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {

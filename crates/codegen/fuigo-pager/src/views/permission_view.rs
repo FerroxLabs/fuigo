@@ -1635,6 +1635,7 @@ mod tests {
 
     #[test]
     fn render_short_area_at_buffer_bottom_does_not_panic() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         for buf_h in [10u16, 12, 24] {
             for area_h in 0u16..=5 {
@@ -1655,6 +1656,7 @@ mod tests {
 
     #[test]
     fn render_tiny_areas_with_args_do_not_panic() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         for expanded in [false, true] {
             for buf_w in 0u16..=10 {
@@ -1847,6 +1849,7 @@ mod tests {
 
     #[test]
     fn build_mcp_args_lines_highlights_without_altering_text_or_count() {
+        let _theme = crate::theme::cache::pin_theme();
         let description: Vec<String> = vec![
             "{".into(),
             format!("  \"body\": \"{}\",", "x".repeat(120)),
@@ -1890,6 +1893,7 @@ mod tests {
 
     #[test]
     fn render_shows_planned_mcp_args() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut state = empty_view_state(Some(mcp_state(
             "jira__AddjiraComment",
             Some("jira"),
@@ -2743,6 +2747,8 @@ mod tests {
 
     #[test]
     fn execute_header_display_matches_overlay_body() {
+        // Both sides render through `Theme::current()`; a concurrent theme write between the two renders makes the rows differ in style.
+        let _theme = crate::theme::cache::pin_theme();
         let script = dump_script_twin();
         for width in [12usize, 40, 400] {
             assert_eq!(
@@ -2751,6 +2757,29 @@ mod tests {
                 "width {width}"
             );
         }
+    }
+
+    /// The mechanism behind `execute_header_display_matches_overlay_body`'s flake: the rows are styled from the process-global theme.
+    /// So two renders straddling a theme write differ, which is exactly what an unpinned sibling's write did between that test's two renders.
+    /// Hermetic: the pin is held, so the flip below cannot reach another test.
+    #[test]
+    fn bash_display_rows_are_styled_from_the_global_theme() {
+        use crate::theme::ThemeKind;
+        let _theme = crate::theme::cache::pin_theme();
+        let script = dump_script_twin();
+        let night = render_bash_command_display_lines(script, 40);
+        crate::theme::cache::set(ThemeKind::FuigoDay);
+        let day = render_bash_command_display_lines(script, 40);
+        crate::theme::cache::set(ThemeKind::FuigoNight);
+        assert_ne!(
+            night, day,
+            "rows must carry the theme's colors, so a mid-test theme write changes them"
+        );
+        assert_eq!(
+            night,
+            render_bash_command_display_lines(script, 40),
+            "restored theme must reproduce the first render"
+        );
     }
 
     #[test]

@@ -3229,3 +3229,161 @@ async fn socket_close_does_not_fire_on_terminal_close() {
     conn.request_shutdown();
     conn.await_shutdown().await;
 }
+/// P47 (fuigo): `AuthProvider::destination_permits` is asked before every socket. The provider below permits the
+/// initial connect, then refuses (its credential changed kind): the forced reconnect opens NO socket and the
+/// connection actor stops on its own (terminal), instead of retrying. Positive control: the initial connect was
+/// made (one upgrade).
+#[tokio::test]
+async fn p47_destination_refused_on_reconnect_opens_no_socket_and_stops() {
+    use futures::{SinkExt as _, StreamExt as _};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct PermitOnce {
+        refuse: AtomicBool,
+    }
+    impl AuthProvider for PermitOnce {
+        fn current(&self) -> AuthCredential {
+            AuthCredential::bearer("test-token")
+        }
+        fn destination_permits(
+            &self,
+            _url: &url::Url,
+            _credential: &AuthCredential,
+        ) -> Result<(), String> {
+            if self.refuse.load(Ordering::SeqCst) {
+                Err("p47: refused".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock hub");
+    let addr = listener.local_addr().expect("mock addr");
+    let upgrades = Arc::new(AtomicUsize::new(0));
+    let upgrades_srv = upgrades.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let n = upgrades_srv.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                let _ = ws.next().await;
+                let ack = serde_json::json!({
+                    "connection_id": format!("mock-conn-{n}"),
+                    "user_id": "test",
+                    "computer_hub_version": "test",
+                    "supported_protocol_versions": ["1.0.0"],
+                });
+                if ws
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        ack.to_string().into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                while let Some(msg) = ws.next().await {
+                    if msg.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let provider = Arc::new(PermitOnce {
+        refuse: AtomicBool::new(false),
+    });
+    let credential: Arc<dyn AuthProvider> = provider.clone();
+    let conn = HubConnection::connect(ConnectionConfig {
+        url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+        credential,
+        kind: ConnectionKind::ToolServer,
+        on_reconnect: None,
+        on_disconnect: None,
+        on_terminal_close: None,
+        on_connect: None,
+        server_id: None,
+        server_description: None,
+        server_metadata: None,
+        outbound_buffer: None,
+        tuning: ConnectionTuning {
+            reconnect_backoff: Some(Arc::from([Duration::from_millis(10)])),
+            ..Default::default()
+        },
+        alpha_test_key: None,
+        allow_insecure_ws: false,
+        on_fatal: None,
+    })
+    .await
+    .expect("initial connect is permitted");
+    assert_eq!(upgrades.load(Ordering::SeqCst), 1);
+    provider.refuse.store(true, Ordering::SeqCst);
+    conn.force_reconnect();
+    tokio::time::timeout(Duration::from_secs(5), conn.await_shutdown())
+        .await
+        .expect("a refused reconnect must stop the connection actor on its own");
+    assert_eq!(upgrades.load(Ordering::SeqCst), 1, "a refused reconnect opened a socket");
+}
+/// P47 (fuigo): a provider that refuses the destination on the INITIAL connect opens no socket and the connect fails
+/// with `DestinationRefused` (not retried). The listener counts every TCP accept.
+#[tokio::test]
+async fn p47_destination_refused_on_initial_connect_opens_no_socket() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct Refuse;
+    impl AuthProvider for Refuse {
+        fn current(&self) -> AuthCredential {
+            AuthCredential::bearer("test-token")
+        }
+        fn destination_permits(
+            &self,
+            _url: &url::Url,
+            _credential: &AuthCredential,
+        ) -> Result<(), String> {
+            Err("p47: refused".into())
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock hub");
+    let addr = listener.local_addr().expect("mock addr");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let seen = accepts.clone();
+    tokio::spawn(async move {
+        while listener.accept().await.is_ok() {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let result = HubConnection::connect(ConnectionConfig {
+        url: url::Url::parse(&format!("ws://{addr}/v1/tools")).expect("mock url"),
+        credential: Arc::new(Refuse),
+        kind: ConnectionKind::ToolServer,
+        on_reconnect: None,
+        on_disconnect: None,
+        on_terminal_close: None,
+        on_connect: None,
+        server_id: None,
+        server_description: None,
+        server_metadata: None,
+        outbound_buffer: None,
+        tuning: ConnectionTuning::default(),
+        alpha_test_key: None,
+        allow_insecure_ws: false,
+        on_fatal: None,
+    })
+    .await;
+    match result {
+        Err(ClientError::DestinationRefused(reason)) => assert!(reason.contains("p47: refused")),
+        Err(other) => panic!("expected DestinationRefused, got {other}"),
+        Ok(_) => panic!("a refused destination must not connect"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(accepts.load(Ordering::SeqCst), 0, "a refused destination was contacted");
+}

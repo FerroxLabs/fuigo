@@ -269,14 +269,14 @@ fn before_send(mut event: Event<'static>, scrubber: &Scrubber) -> Option<Event<'
 }
 
 /// Drop panics caused by broken pipe or disk-full, both user-environment noise.
+///
+/// The classification is the crash recorder's, so Sentry drops exactly the panics for which the
+/// local crash report shows no "Fuigo crashed" notice: one list, in one place.
 fn is_broken_pipe_panic(event: &Event<'_>) -> bool {
     event.exception.values.iter().any(|ex| {
-        ex.value.as_deref().is_some_and(|v| {
-            v.contains("Broken pipe")
-                || v.contains("os error 32")
-                || v.contains("No space left on device")
-                || v.contains("os error 28")
-        })
+        ex.value
+            .as_deref()
+            .is_some_and(|v| fuigo_crash_handler::panic_info::classify_panic_message(v).is_benign())
     })
 }
 
@@ -330,6 +330,29 @@ mod tests {
             ..Default::default()
         });
         assert!(before_send(event, &s).is_some());
+    }
+
+    #[test]
+    fn sentry_filter_and_crash_recorder_agree() {
+        // The same message must be benign in both, or neither.
+        let s = make_scrubber();
+        for msg in [
+            "failed printing to stdout: Broken pipe (os error 32)",
+            "write: os error 32",
+            "flush: No space left on device (os error 28)",
+            "write log: os error 28",
+            "index out of bounds: the len is 3 but the index is 7",
+            "attempt to subtract with overflow",
+        ] {
+            let mut event = Event::default();
+            event.exception.values.push(Exception {
+                value: Some(msg.into()),
+                ..Default::default()
+            });
+            let dropped = before_send(event, &s).is_none();
+            let benign = fuigo_crash_handler::panic_info::classify_panic_message(msg).is_benign();
+            assert_eq!(dropped, benign, "{msg}");
+        }
     }
 
     #[test]

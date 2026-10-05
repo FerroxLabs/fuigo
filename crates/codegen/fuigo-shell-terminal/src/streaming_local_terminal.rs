@@ -859,6 +859,8 @@ fn spawn_with_argv(
 
         let mut cmd = CommandWrap::with_new(program, |cmd| {
             set_argv(cmd);
+            // P113 r3: the user's environment, without Fuigo's own secrets; explicit variables after.
+            crate::remove_fuigo_secrets(cmd);
             cmd.current_dir(cwd)
                 .envs(env)
                 .envs(crate::pager_env())
@@ -880,6 +882,8 @@ fn spawn_with_argv(
 
         let mut cmd = CommandWrap::with_new(program, |cmd| {
             set_argv(cmd);
+            // P113 r3: the user's environment, without Fuigo's own secrets; explicit variables after.
+            crate::remove_fuigo_secrets(cmd);
             cmd.current_dir(cwd)
                 .envs(env)
                 .envs(crate::pager_env())
@@ -1187,6 +1191,84 @@ mod tests {
         let statuses = extract_statuses(&notifier.notifications.lock().await);
         assert!(statuses.contains(&acp::ToolCallStatus::InProgress));
         assert!(statuses.contains(&acp::ToolCallStatus::Completed));
+    }
+
+    /// P113 r3: the streaming `!` runner keeps the user's environment but none of Fuigo's own secrets; an explicit
+    /// request variable still arrives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p113_streaming_bang_commands_never_see_fuigo_secrets() {
+        if crate::p113_probe::parent_env("p113_streaming_bang_commands_never_see_fuigo_secrets") {
+            return;
+        }
+        for explicit in [false, true] {
+            let runner = StreamingLocalTerminalRunner {
+                notifier: Arc::new(TestNotifier {
+                    notifications: Mutex::new(vec![]),
+                }),
+                session_id: acp::SessionId::new(format!("p113-bang-{explicit}")),
+            };
+            let check = crate::p113_probe::check(explicit);
+            let mut request = make_request(
+                &format!("p113-bang-tool-{explicit}"),
+                &format!("{check} && /bin/sh -c '{check}' && printf ok"),
+            );
+            if explicit {
+                request
+                    .env
+                    .insert("FUIGO_AGENT_SECRET".into(), "fake-p113-explicit".into());
+            }
+            let result = runner.run(request).await.unwrap();
+            assert_eq!(
+                (result.exit_code, result.combined_output.trim()),
+                (Some(0), "ok"),
+                "explicit={explicit}: the streaming `!` command saw a Fuigo secret, lost the user's environment, or \
+                 missed the explicit variable"
+            );
+        }
+    }
+
+    /// P113 r3: a client terminal (`create_terminal`, as a shell snippet and as a program with argv) keeps the user's
+    /// environment but none of Fuigo's own secrets; an explicit variable still arrives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p113_client_terminals_never_see_fuigo_secrets() {
+        if crate::p113_probe::parent_env("p113_client_terminals_never_see_fuigo_secrets") {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let session_id = format!("p113-client-terminal-{}", std::process::id());
+                for explicit in [false, true] {
+                    let check = crate::p113_probe::check(explicit);
+                    let snippet = format!("{check} && /bin/sh -c '{check}' && printf ok");
+                    let env = if explicit {
+                        HashMap::from([("FUIGO_AGENT_SECRET".to_string(), "fake-p113-explicit".to_string())])
+                    } else {
+                        HashMap::new()
+                    };
+                    for args in [vec![], vec!["-c".to_string(), snippet.clone()]] {
+                        let (command, label) = if args.is_empty() {
+                            (snippet.as_str(), "snippet")
+                        } else {
+                            ("/bin/sh", "argv")
+                        };
+                        let id = create_terminal(&session_id, command, &args, env.clone(), None, None)
+                            .await
+                            .unwrap();
+                        let status = wait_for_terminal_exit(&session_id, &id).await.unwrap();
+                        let output = get_terminal_output(&session_id, &id).await.unwrap();
+                        release_terminal(&session_id, &id).await;
+                        assert_eq!(
+                            (status.exit_code, output.output.trim()),
+                            (Some(0), "ok"),
+                            "explicit={explicit} {label}: the client terminal saw a Fuigo secret, lost the user's \
+                             environment, or missed the explicit variable"
+                        );
+                    }
+                }
+            })
+            .await;
     }
 
     #[tokio::test]

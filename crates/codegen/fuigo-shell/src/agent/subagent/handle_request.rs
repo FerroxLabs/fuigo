@@ -994,7 +994,9 @@ pub(crate) async fn run_shell_child(
     );
     let attribution_callback: Option<fuigo_sampler::SharedAttributionCallback> =
         effective_sampling_config.attribution_callback.clone();
-    let agent_memory_scope = definition.memory;
+    // A parent with memory off (`--no-memory`, `memory.enabled = false`: `ctx.memory_config` is `None`) must not
+    // hand a child persistent agent memory either: no memory write tools, no MEMORY.md injection, no storage.
+    let agent_memory_scope = definition.memory.filter(|_| ctx.memory_config.is_some());
     let agent_name_for_memory = definition.name.clone();
     let is_plugin_agent = definition.plugin_name.is_some();
     let yolo_policy_block = fuigo_workspace::permission::resolution::yolo_disabled_by_policy();
@@ -1054,6 +1056,10 @@ pub(crate) async fn run_shell_child(
         }
     }
     let is_plugin_agent = definition.plugin_name.is_some();
+    // P148 (S16): the refusals of `FUIGO_API_KEY` references this definition's inline hooks and MCP servers record are
+    // this spawn's, and the session that spawned it is told (C1: they reached neither that session nor a note).
+    let notice_scope = fuigo_config::key_naming::NoticeScope::new();
+    let _notice_scope_closer = notice_scope.close_on_drop();
     if let Some(ref hooks_config) = definition.hooks {
         if is_plugin_agent {
             tracing::warn!(
@@ -1070,15 +1076,17 @@ pub(crate) async fn run_shell_child(
             );
         } else {
             let hooks_val = hooks_config.as_value();
-            let (specs, errors) = fuigo_hooks::config::parse_hooks_from_value_with_dir(
-                &hooks_val,
-                &format!(
-                    "{}{}",
-                    fuigo_hooks::config::AGENT_HOOK_PREFIX,
-                    definition.name
-                ),
-                &ctx.parent_cwd,
-            );
+            let (specs, errors) = notice_scope.run(|| {
+                fuigo_hooks::config::parse_hooks_from_value_with_dir(
+                    &hooks_val,
+                    &format!(
+                        "{}{}",
+                        fuigo_hooks::config::AGENT_HOOK_PREFIX,
+                        definition.name
+                    ),
+                    &ctx.parent_cwd,
+                )
+            });
             for e in &errors {
                 tracing::warn!(agent = %definition.name, error = ?e, "agent hook parse error");
             }
@@ -1137,39 +1145,24 @@ pub(crate) async fn run_shell_child(
                             })
                     }
                     fuigo_agent::config::McpServerRef::Inline { name, config } => {
-                        if let serde_json::Value::Object(obj) = config
-                            && obj.contains_key("type")
-                        {
-                            let mut flat = obj.clone();
-                            flat.insert(
-                                "name".to_string(),
-                                serde_json::Value::String(name.clone()),
-                            );
-                            if let Ok(server) = serde_json::from_value::<
-                                agent_client_protocol::McpServer,
-                            >(serde_json::Value::Object(flat)) {
-                                return Some(server);
-                            }
-                            tracing::debug!(agent = %definition.name, server = name, "ACP wire format parse failed, trying map-keyed");
-                        }
-                        if let Some(inner_obj) = config.as_object() {
-                            let mut flat = inner_obj.clone();
-                            flat.insert(
-                                "name".to_string(),
-                                serde_json::Value::String(name.clone()),
-                            );
-                            if let Ok(server) = serde_json::from_value::<
-                                agent_client_protocol::McpServer,
-                            >(serde_json::Value::Object(flat)) {
-                                return Some(server);
-                            }
-                        }
-                        tracing::warn!(agent = %definition.name, server = name, "mcpServers: inline config could not be parsed");
-                        None
+                        notice_scope.run(|| inline_agent_mcp_server(&definition.name, name, config))
                     }
                 })
                 .collect()
     };
+    let notices = notice_scope.notes();
+    if !notices.is_empty() {
+        fuigo_telemetry::unified_log::warn(
+            "agent definition named FUIGO_API_KEY; the reference was removed",
+            None,
+            Some(serde_json::json!({ "agent": definition.name, "notes": notices.clone() })),
+        );
+        if let Some(parent_cmd_tx) = ctx.parent_cmd_tx.as_ref() {
+            for notice in notices {
+                let _ = parent_cmd_tx.send(SessionCommand::NotifyConfigNotice { notice });
+            }
+        }
+    }
     let parent_mcp_pool =
         resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
     let mcp_inherited_count = parent_mcp_pool
@@ -1260,7 +1253,7 @@ pub(crate) async fn run_shell_child(
         attribution_callback,
         tool_ctx,
         agent_mcp_servers,
-        vec![],
+        Default::default(),
         Default::default(),
         parent_mcp_pool,
         Vec::new(),
@@ -1694,6 +1687,7 @@ pub(crate) async fn run_shell_child(
             turn_number: 0,
             session_handle: child_handle.clone(),
             session_registry_enabled: false,
+            memory_enabled: false,
             upload_queue: None,
             artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
             auth_manager: ctx.auth_manager.clone(),
@@ -1964,7 +1958,7 @@ pub(crate) async fn run_shell_child(
         result.worktree_path = None;
     }
     let success = result.success && !result.cancelled;
-    let preview = crate::util::truncate(&result.output, 200);
+    let preview = fuigo_telemetry::sent_credentials::truncate_chars(&result.output, 200).0;
     let level_fn = if success {
         fuigo_telemetry::unified_log::info
     } else {
@@ -2119,4 +2113,35 @@ pub(crate) async fn dispose_worktree_after_completion(
         snapshot_ref,
         worktree_removed,
     }
+}
+
+/// An MCP server an agent definition declares inline (`mcpServers: {name: {...}}`), as the child session would spawn it.
+/// A definition is a file a repository (or any user) wrote, not a source that may name the saved API key, so every
+/// reference to the key is removed from the server (P133); `None` when it cannot be parsed.
+pub(crate) fn inline_agent_mcp_server(
+    agent: &str,
+    name: &str,
+    config: &serde_json::Value,
+) -> Option<agent_client_protocol::McpServer> {
+    let parse = |obj: &serde_json::Map<String, serde_json::Value>| {
+        let mut flat = obj.clone();
+        flat.insert("name".to_string(), serde_json::Value::String(name.to_owned()));
+        serde_json::from_value::<agent_client_protocol::McpServer>(serde_json::Value::Object(flat)).ok()
+    };
+    let origin = format!("defined inline by agent `{agent}`");
+    if let serde_json::Value::Object(obj) = config
+        && obj.contains_key("type")
+    {
+        if let Some(server) = parse(obj) {
+            return crate::session::managed_mcp::refuse_saved_key_in_server(server, &origin);
+        }
+        tracing::debug!(agent = %agent, server = name, "ACP wire format parse failed, trying map-keyed");
+    }
+    if let Some(inner_obj) = config.as_object()
+        && let Some(server) = parse(inner_obj)
+    {
+        return crate::session::managed_mcp::refuse_saved_key_in_server(server, &origin);
+    }
+    tracing::warn!(agent = %agent, server = name, "mcpServers: inline config could not be parsed");
+    None
 }

@@ -3,7 +3,7 @@
 //! and `fuigo-fast-worktree`.
 //!
 //! Which function to call:
-//! - [`fuigo_home`]: the usual choice, a cached, created path to build on.
+//! - [`fuigo_home`]: the usual choice, a memoised, created path to build on.
 //! - [`user_fuigo_home`]: `None` instead of a cwd fallback when no home resolves.
 //! - [`default_fuigo_home`]: the `<home>/.fuigo` default, ignoring `$FUIGO_HOME`, so callers can detect an override.
 //! - [`resolve_fuigo_home`]: a fresh, uncached resolve.
@@ -15,7 +15,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 /// Where a resolved fuigo home came from, so "why did fuigo pick this
 /// directory?" is answerable in diagnostics without re-reading the
@@ -81,19 +81,48 @@ pub fn default_fuigo_home() -> PathBuf {
     fuigo_home_in(&home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
-/// The fuigo home, created if missing and cached for the process; falls back to
-/// [`default_fuigo_home`] when neither `$FUIGO_HOME` nor a home resolves.
+/// What [`fuigo_home`] last resolved, and the inputs it resolved them from.
+struct HomeMemo {
+    fuigo_home_env: Option<std::ffi::OsString>,
+    os_home: Option<PathBuf>,
+    path: PathBuf,
+}
+
+/// The fuigo home, created if missing; falls back to [`default_fuigo_home`]
+/// when neither `$FUIGO_HOME` nor a home resolves.
+///
+/// Memoised on the INPUTS (`$FUIGO_HOME` and the OS home), not pinned for the
+/// process. In a shipped binary those never change, so this is the same single
+/// resolve-and-create it always was. In a test binary a guarded test that
+/// redirects `$FUIGO_HOME` sees its own directory, and a test that finishes and
+/// restores the variable sees the restored one. The previous `OnceLock` pinned
+/// whatever the FIRST caller in the process saw, so an early guarded test froze a
+/// temporary directory for the whole binary (later deleted underneath everyone)
+/// and every later guard was ignored by anything routed through this function --
+/// which is how a test came to write `~/.fuigo/config.toml`.
 pub fn fuigo_home() -> PathBuf {
-    static FUIGO_HOME: OnceLock<PathBuf> = OnceLock::new();
-    FUIGO_HOME
-        .get_or_init(|| {
-            let home = resolve_fuigo_home().unwrap_or_else(default_fuigo_home);
-            if let Err(err) = std::fs::create_dir_all(&home) {
-                tracing::warn!(path = %home.display(), %err, "failed to create fuigo home");
-            }
-            home
-        })
-        .clone()
+    static MEMO: Mutex<Option<HomeMemo>> = Mutex::new(None);
+    let fuigo_home_env = std::env::var_os("FUIGO_HOME");
+    let os_home = home_dir();
+    let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = memo.as_ref()
+        && m.fuigo_home_env == fuigo_home_env
+        && m.os_home == os_home
+    {
+        return m.path.clone();
+    }
+    let path = resolve_fuigo_home_from(fuigo_home_env.as_deref(), os_home.as_deref())
+        .map(|(home, _)| home)
+        .unwrap_or_else(default_fuigo_home);
+    if let Err(err) = std::fs::create_dir_all(&path) {
+        tracing::warn!(path = %path.display(), %err, "failed to create fuigo home");
+    }
+    *memo = Some(HomeMemo {
+        fuigo_home_env,
+        os_home,
+        path: path.clone(),
+    });
+    path
 }
 
 /// Like [`fuigo_home`], but `None` when no home resolves (no cwd fallback).
@@ -150,6 +179,60 @@ mod tests {
         let home = default_fuigo_home();
         assert!(!home.to_string_lossy().starts_with(r"\\?\"));
         assert!(home.ends_with(".fuigo"));
+    }
+
+    /// Serialises the tests below: they write the process environment.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    /// Restores `$FUIGO_HOME` on drop, even when an assertion panics.
+    struct Restore(Option<OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: every writer of the environment in this test binary holds `ENV`.
+            unsafe {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("FUIGO_HOME", v),
+                    None => std::env::remove_var("FUIGO_HOME"),
+                }
+            }
+        }
+    }
+
+    /// A redirect must be visible (no pinning by an earlier call) and must be
+    /// undone by restoring the variable (no escape into a stale directory).
+    #[test]
+    fn fuigo_home_follows_the_variable_instead_of_pinning_the_first_value() {
+        let _lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = Restore(std::env::var_os("FUIGO_HOME"));
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        // SAFETY: `ENV` is held.
+        unsafe { std::env::set_var("FUIGO_HOME", first.path()) };
+        assert_eq!(fuigo_home(), first.path());
+        assert_eq!(user_fuigo_home().as_deref(), Some(first.path()));
+
+        // The first call above must not have pinned `first` for the process.
+        // SAFETY: `ENV` is held.
+        unsafe { std::env::set_var("FUIGO_HOME", second.path()) };
+        assert_eq!(fuigo_home(), second.path());
+        assert_eq!(user_fuigo_home().as_deref(), Some(second.path()));
+
+        // And restoring the earlier value must not leave `second` behind.
+        // SAFETY: `ENV` is held.
+        unsafe { std::env::set_var("FUIGO_HOME", first.path()) };
+        assert_eq!(fuigo_home(), first.path());
+    }
+
+    #[test]
+    fn fuigo_home_creates_a_missing_override_directory() {
+        let _lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = Restore(std::env::var_os("FUIGO_HOME"));
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("not").join("yet");
+        // SAFETY: `ENV` is held.
+        unsafe { std::env::set_var("FUIGO_HOME", &target) };
+        assert_eq!(fuigo_home(), target);
+        assert!(target.is_dir());
     }
 
     #[test]

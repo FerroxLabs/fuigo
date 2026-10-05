@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use fuigo_auth::bearer_suffix;
+use fuigo_auth::bearer_fingerprint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -107,13 +107,13 @@ pub struct FuigoAuth {
 impl std::fmt::Debug for FuigoAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FuigoAuth")
-            .field("key", &bearer_suffix(&self.key))
+            .field("key", &bearer_fingerprint(&self.key))
             .field("auth_mode", &self.auth_mode)
             .field("user_id", &self.user_id)
             .field("expires_at", &self.expires_at)
             .field(
                 "refresh_token",
-                &self.refresh_token.as_deref().map(bearer_suffix),
+                &self.refresh_token.as_deref().map(bearer_fingerprint),
             )
             .finish_non_exhaustive()
     }

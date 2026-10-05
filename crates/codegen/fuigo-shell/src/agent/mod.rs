@@ -4,9 +4,13 @@ pub mod auth_method;
 pub mod chat_modes;
 pub mod config;
 pub(crate) mod config_model_override_parse;
+pub mod credential_scrub;
 mod ext_parsers;
 pub mod feedback_client;
 pub mod folder_trust;
+pub(crate) mod helper_epoch;
+#[cfg(test)]
+mod helper_epoch_tests;
 pub(crate) mod handlers;
 pub mod init;
 /// Provider credentials already present in the environment, for first run.
@@ -18,6 +22,9 @@ pub mod mvp_agent;
 pub(crate) mod otel_gate;
 pub(crate) mod proxy;
 pub mod relay;
+pub(crate) mod relay_credentials;
+/// P93: the opt-in that a relay not operated by FluxRouter needs before the agent is bridged to it.
+pub mod relay_opt_in;
 pub(crate) mod restore_code;
 pub mod roster;
 pub mod server;
@@ -28,7 +35,7 @@ pub(crate) mod subagent;
 pub(crate) mod subscription_check;
 pub(crate) mod update_chunk_merge;
 
-pub use mvp_agent::MvpAgent;
+pub use mvp_agent::{MvpAgent, MvpAgentHandle};
 pub use relay::{RelayConfig, RelayHandle, spawn_relay_connection};
 pub use server::{ServerConfig, run_agent_server};
 

@@ -586,7 +586,18 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "fuigo/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
         "fuigo/announcements/update" => handle_announcements_update(notif, app),
         "fuigo/git_head_changed" => handle_git_head_changed(notif, app),
-        "fuigo/leader/version_mismatch" => handle_version_mismatch(notif, app),
+        // The decoder strips the ACP `_`; the prefixed arm is defence in depth for a method that reaches here unstripped
+        "fuigo/leader/version_mismatch" | "_fuigo/leader/version_mismatch" => {
+            handle_version_mismatch(notif, app)
+        }
+        "fuigo/relay/refused" => handle_relay_refused(notif, app),
+        // P142: a one-off notice the shared-session leader's process printed to its log. The prefixed arm is defence in
+        // depth, as for the version mismatch.
+        "fuigo/leader/notice" | "_fuigo/leader/notice" => handle_leader_notice(notif, app),
+        "fuigo/relay/refusal_cleared" => {
+            app.clear_relay_refusal();
+            true
+        }
         "fuigo/mcp/init_progress" => handle_mcp_init_progress(notif, app),
         "fuigo/mcp/tools_changed" | "fuigo/mcp_initialized" => handle_mcp_tools_changed(notif, app),
         "fuigo/mcp/server_status" if push_server_status_enabled() => {
@@ -614,6 +625,37 @@ fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> b
         return false;
     };
     app.show_toast(&banner);
+    true
+}
+
+/// P142: show a notice from the leader's process (`params.message`) once, as a system note.
+fn handle_leader_notice(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let message = serde_json::from_str::<serde_json::Value>(notif.params.get())
+        .ok()
+        .and_then(|params| params.get("message")?.as_str().map(str::to_owned))
+        .filter(|message| !message.trim().is_empty());
+    let Some(message) = message else {
+        tracing::warn!("ignoring fuigo/leader/notice without a message");
+        return false;
+    };
+    app.note_leader_notice(message);
+    true
+}
+
+/// P125: the agent or the leader refused a relay FluxRouter does not operate that no opt-in names. Show which relay,
+/// why and how to trust it in every open session (and in sessions opened later), and a toast on the active view.
+fn handle_relay_refused(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(refusal) = crate::acp::relay_refusal(notif.params.get()) else {
+        tracing::warn!("ignoring fuigo/relay/refused without a message");
+        return false;
+    };
+    match refusal.session_id {
+        // A session's relay sync was refused: that session only.
+        Some(session_id) => app.note_relay_sync_refusal(&session_id, refusal.text),
+        // The leader refused its relay: every session.
+        None => app.note_relay_refusal(refusal.text),
+    }
+    app.show_toast(&refusal.toast);
     true
 }
 

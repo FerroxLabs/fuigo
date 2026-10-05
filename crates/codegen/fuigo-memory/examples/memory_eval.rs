@@ -1,5 +1,8 @@
 //! Offline production retrieval evaluation. No answer generation or network.
 //! Run with --features test-support. Third argument optionally supplies exact-text local vectors.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 use async_trait::async_trait;
 use fuigo_config_types::{MemoryIndexConfig, MemorySearchConfig};
 use fuigo_memory::{

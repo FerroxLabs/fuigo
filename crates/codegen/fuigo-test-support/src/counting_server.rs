@@ -56,7 +56,8 @@ pub async fn spawn_http_server<H>(respond: H) -> String
 where
     H: Fn(&str) -> Vec<u8> + Clone + Send + 'static,
 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // `loopback_ip`, not a fixed `127.0.0.1`: paused-clock callers need loopback I/O in step with the clock.
+    let listener = TcpListener::bind((crate::loopback_ip(), 0)).await.unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(async move {
         loop {
@@ -79,7 +80,8 @@ where
 
 /// Minimal keep-alive HTTP/1.1 server: counts accepted connections and records each request's header block.
 pub async fn spawn_counting_server() -> (String, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // `loopback_ip`, not a fixed `127.0.0.1`: paused-clock callers need loopback I/O in step with the clock.
+    let listener = TcpListener::bind((crate::loopback_ip(), 0)).await.unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let accepts = Arc::new(AtomicUsize::new(0));
     let heads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

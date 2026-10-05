@@ -14,9 +14,17 @@
 pub mod campaigns;
 mod config_layers;
 pub mod config_override;
+pub mod credential_env;
 mod env_overlay;
 pub mod fs_atomic;
 pub mod global_hook_sources;
+pub mod key_naming;
+#[cfg(test)]
+mod credential_env_k13_tests;
+#[cfg(test)]
+mod key_naming_tests;
+#[cfg(test)]
+mod p147_tests;
 mod loader;
 mod macos_managed;
 mod managed_cache;
@@ -26,11 +34,16 @@ pub mod shell;
 pub mod signed_policy;
 mod validation;
 pub mod version_overrides;
+pub mod write_through;
 
 // Only the campaign items other crates need are re-exported at the root
 // The rest stays reachable via the `pub mod` paths, keeping the root API narrow
 pub use campaigns::{
     CampaignEntry, CampaignOverrides, filter_active_campaigns, ids_touching_paths,
+};
+pub use credential_env::{
+    FIRST_PARTY_KEY_ENV_VAR, apply_first_party_key_defaults, install_credential_env_resolver, resolve_credential_env_var,
+    read_first_party_key_references, resolve_first_party_key_references,
 };
 pub use global_hook_sources::{
     GlobalHookSource, GlobalHookSourceError, GlobalHookSourceKind, ResolvedGlobalHookSources,
@@ -57,11 +70,13 @@ pub use loader::{
     TRUSTED_HOOK_PROJECTS_FILENAME, TRUSTED_PLUGINS_FILENAME, USER_CONFIG_FILENAME,
     apply_version_overrides_with_registered, deep_merge_toml, expand_env_vars_in_string,
     expand_env_vars_in_toml, hook_config_layers, hook_config_layers_at, load_config_file,
+    load_config_file_with_key_naming,
     load_from_disk, load_managed_config, load_system_managed_config, load_toml_file,
-    managed_config_layers, managed_config_layers_at, toml_error_detail,
+    managed_config_layers, managed_config_layers_at, parse_user_config_layer, toml_error_detail,
 };
 pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
 pub use managed_cache::{
+    managed_marker_records_file,
     MANAGED_CONFIG_CACHE_FILE, ServingIdentity, SyncMarker, bump_rollback_floor,
     bump_rollback_floor_with_now, confirmed_team_switch, confirmed_team_switch_at,
     fail_closed_policy_armed_at, is_managed_config_hard_stale_for, is_managed_config_stale_for,
@@ -71,6 +86,7 @@ pub use managed_cache::{
 };
 pub use paths::{
     claude_managed_settings_path, claude_managed_settings_probe_path, create_dir_all_owner_only,
+    create_file_owner_only, owner_only_file_options, tighten_file_owner_only, write_file_owner_only,
     decode_cwd_from_dirname, default_fuigo_home, encode_cwd_dirname, ensure_sessions_cwd_dir,
     ensure_sessions_cwd_dir_in, fuigo_application, fuigo_application_in, fuigo_home, sessions_cwd_dir,
     sessions_cwd_dir_in, set_dir_owner_only, system_config_dir, user_fuigo_home,

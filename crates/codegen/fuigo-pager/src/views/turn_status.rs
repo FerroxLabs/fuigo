@@ -665,6 +665,7 @@ fn compute_activity(
                 max_retries,
                 reason,
                 error_type,
+                verdicts,
             }),
         ) => (
             Style::default().fg(theme.warning),
@@ -673,6 +674,7 @@ fn compute_activity(
                 *max_retries,
                 reason,
                 error_type.as_deref(),
+                verdicts.as_ref(),
                 crate::app::error_display::RetryLabelStyle::Status,
             ),
             false,
@@ -893,6 +895,7 @@ mod tests {
 
     #[test]
     fn activity_label_reads_verifying_while_goal_verifying_overriding_stale_activity() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         // Running turn, no streaming activity, the verifying flag set: "Verifying…"
         let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, false, true);
@@ -925,6 +928,7 @@ mod tests {
 
     #[test]
     fn waiting_reason_renders_specific_label() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::acp::tracker::WaitingReason;
         let theme = Theme::current();
         let cases = [
@@ -963,6 +967,7 @@ mod tests {
 
     #[test]
     fn bash_turn_still_renders_running_not_waiting() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         // A bash (non-inference) turn with no activity keeps its own "Running…" label; the view leaves it as `None` rather than Waiting(Model)
         let (_, label, _) = compute_activity(&theme, &AgentState::TurnRunning, &None, true, false);
@@ -1281,6 +1286,7 @@ mod tests {
     /// Mouse hosts get a hit rect hugging exactly the rendered cue text, and hover brightens the label; keyboard-only hosts get neither.
     #[test]
     fn watching_cue_is_clickable_on_mouse_hosts_only() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let watchers = Watchers {
             monitors: 1,

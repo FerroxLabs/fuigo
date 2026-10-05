@@ -2,6 +2,8 @@
 //!
 //! Turns raw ACP / `RetryState` dumps (`API error (status 500): {"error":…}`) into the same kind of short warning banner used for 401 re-auth.
 
+use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+
 /// Wire `RetryState::Failed.error_type` values the pager understands.
 /// The vocabulary is the shell's `SamplingErrorKind::as_str` tags plus its special-cased tags (`context_length`, `legacy_auth`, …).
 /// Unknown strings map to [`WireErrorType::Other`] rather than being matched as raw `&str` at call sites.
@@ -10,6 +12,9 @@ pub(crate) enum WireErrorType {
     Auth,
     AuthTransient,
     LegacyAuth,
+    /// P42: the session token was withheld because the destination may not receive it. Fixed by
+    /// configuration (`[endpoints]`), never by retrying or signing in, so its copy carries no retry advice.
+    AuthDestinationRefused,
     ContextLength,
     EncryptedContentMismatch,
     DiskFull,
@@ -33,6 +38,9 @@ impl WireErrorType {
         match s {
             "auth_transient" => Self::AuthTransient,
             "legacy_auth" => Self::LegacyAuth,
+            s if s == fuigo_shell::extensions::notification::AUTH_DESTINATION_REFUSED_ERROR_TYPE => {
+                Self::AuthDestinationRefused
+            }
             s if s == fuigo_shell::extensions::notification::CONTEXT_LENGTH_ERROR_TYPE => {
                 Self::ContextLength
             }
@@ -117,10 +125,11 @@ pub(crate) fn format_retry_activity_label(
     max_retries: u32,
     reason: &str,
     error_type: Option<&str>,
+    verdicts: Option<&ErrorVerdicts>,
     style: RetryLabelStyle,
 ) -> String {
     let base = retry_clause(attempt, max_retries, style);
-    match classified_retry_headline(reason, error_type) {
+    match classified_retry_headline(reason, error_type, verdicts) {
         Some(headline) => format!("{headline} | {base}"),
         None => base,
     }
@@ -134,13 +143,17 @@ pub(crate) fn retry_clause(attempt: u32, max_retries: u32, style: RetryLabelStyl
     }
 }
 
-fn classified_retry_headline(reason: &str, error_type: Option<&str>) -> Option<String> {
+fn classified_retry_headline(
+    reason: &str,
+    error_type: Option<&str>,
+    verdicts: Option<&ErrorVerdicts>,
+) -> Option<String> {
     let reason = reason.trim();
     let kind = wire_error_kind(error_type);
     if reason.is_empty() && kind.is_none() {
         return None;
     }
-    let formatted = format_request_failure(None, kind, reason);
+    let formatted = format_request_failure_typed(None, kind, reason, verdicts);
     let generic = formatted.status.is_none() && matches!(formatted.wire, WireErrorType::Other);
     if generic {
         None
@@ -163,8 +176,29 @@ pub(crate) fn format_request_failure(
     error_type: Option<WireErrorType>,
     raw: &str,
 ) -> FormattedRequestFailure {
+    format_request_failure_typed(status, error_type, raw, None)
+}
+
+/// [`format_request_failure`] reading what it must infer from the failure (the status the text names, a truncation
+/// message, a transport dump) from `verdicts` when the shell sent them (P119), never from `raw`: the shell may have
+/// replaced a credential inside `raw`, and a decision must not change because of that. Without verdicts (an older
+/// shell, whose text is unscrubbed) `raw` is read with the same functions the shell uses to compute them.
+pub(crate) fn format_request_failure_typed(
+    status: Option<u16>,
+    error_type: Option<WireErrorType>,
+    raw: &str,
+    verdicts: Option<&ErrorVerdicts>,
+) -> FormattedRequestFailure {
+    let sniffed;
+    let verdicts = match verdicts {
+        Some(verdicts) => verdicts,
+        None => {
+            sniffed = ErrorVerdicts::sniffed_from(raw);
+            &sniffed
+        }
+    };
     let untyped = error_type.is_none();
-    let wire = if truncation_recovered_from_untyped_raw(error_type, raw) {
+    let wire = if truncation_recovered_from_untyped_raw(error_type, verdicts) {
         WireErrorType::MaxTokensTruncation
     } else {
         error_type.unwrap_or(WireErrorType::Other)
@@ -173,10 +207,10 @@ pub(crate) fn format_request_failure(
     // An `auth_transient` message contains "Unauthorized (401)", so only `Api` and `Other` recover a status from the text
     let status = status.or_else(|| {
         matches!(wire, WireErrorType::Api | WireErrorType::Other)
-            .then(|| parse_http_status(raw))
+            .then_some(verdicts.http_status)
             .flatten()
     });
-    let wire = refine_untyped_wire(wire, untyped, status, raw);
+    let wire = refine_untyped_wire(wire, untyped, status, verdicts);
     let extracted = extract_error_detail(raw);
     let mut class = classify(status, wire);
     // A status-less `api` error proves no server fault (a 403 content-safety block arrives this way): its readable detail is the message
@@ -217,31 +251,30 @@ pub(crate) fn format_request_failure(
 /// Those are old shells, and `updates.jsonl` replays they recorded.
 /// It is also the only truncation classifier for the exhausted-retry path, which passes no error type at all.
 /// Removing it once fleets converge would silently regress that path; type the `RetryState::Exhausted` reason first.
-fn truncation_recovered_from_untyped_raw(error_type: Option<WireErrorType>, raw: &str) -> bool {
-    error_type.is_none()
-        && parse_http_status(raw).is_none()
-        && raw.contains(fuigo_shell::sampling::error::MAX_TOKENS_TRUNCATION_MESSAGE)
+fn truncation_recovered_from_untyped_raw(
+    error_type: Option<WireErrorType>,
+    verdicts: &ErrorVerdicts,
+) -> bool {
+    error_type.is_none() && verdicts.http_status.is_none() && verdicts.max_tokens_truncation
 }
 
 fn refine_untyped_wire(
     wire: WireErrorType,
     untyped: bool,
     status: Option<u16>,
-    raw: &str,
+    verdicts: &ErrorVerdicts,
 ) -> WireErrorType {
     match wire {
         WireErrorType::Other if untyped && status.is_none() => {
-            http_wire_from_dump(raw).unwrap_or(wire)
+            // SamplingError::Http Display is `request error: {source}`.
+            if verdicts.http_dump {
+                WireErrorType::Http
+            } else {
+                wire
+            }
         }
         typed => typed,
     }
-}
-
-fn http_wire_from_dump(raw: &str) -> Option<WireErrorType> {
-    // SamplingError::Http Display is `request error: {source}`.
-    raw.trim()
-        .starts_with("request error:")
-        .then_some(WireErrorType::Http)
 }
 
 struct Classified {
@@ -367,6 +400,13 @@ fn classify(status: Option<u16>, wire: WireErrorType) -> Classified {
             Some("Try sending again in a moment."),
             None,
         ),
+        // The shell's message leads with the `[endpoints]` remedy, which becomes the detail; the fallback is the
+        // same remedy. No action: retrying or `/login` cannot change where the session token may go.
+        WireErrorType::AuthDestinationRefused => (
+            "Session token not sent",
+            None,
+            Some(fuigo_shell::extensions::notification::AUTH_DESTINATION_REFUSED_REMEDY),
+        ),
         _ => (
             "Request failed",
             Some("Try sending again."),
@@ -423,66 +463,10 @@ fn normalize_phrase(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Pull an HTTP error status out of a raw dump: `API error (status 500): …`, `Unauthorized (401)`, or our own formatted `Server error (500): …`.
+/// Pull an HTTP error status out of a raw dump (the shell's definition, [`fuigo_shell::sampling::error_verdicts::parse_http_status`]).
 /// 4xx/5xx only: prose like "status 200" or a year must never classify a failure.
 pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
-    // Every "status " occurrence, so "status unknown; … status 503" still finds the code
-    let mut from = 0;
-    while let Some(i) = find_ignore_ascii_case(&raw[from..], "status ") {
-        let after = from + i + "status ".len();
-        if let Some(code) = parse_status_digits(&raw[after..], false) {
-            return Some(code);
-        }
-        from = after;
-    }
-    const MARKERS: &[&str] = &[
-        "Unauthorized (",
-        "Forbidden (",
-        "Not Found (",
-        "Bad Request (",
-        "Payment Required (",
-        "Too Many Requests (",
-        "Internal Server Error (",
-        "Bad Gateway (",
-        "Service Unavailable (",
-        "Gateway Timeout (",
-        "Payload Too Large (",
-        "Request Entity Too Large (",
-        "Server error (",
-        "Request denied (",
-        "Request failed (",
-        "Not found (",
-        "Bad request (",
-        "Request too large (",
-        "Service unavailable (",
-        "Rate limited (",
-        "Request timed out (",
-        "Conflict (",
-    ];
-    for marker in MARKERS {
-        if let Some(i) = find_ignore_ascii_case(raw, marker)
-            && let Some(code) = parse_status_digits(&raw[i + marker.len()..], true)
-        {
-            return Some(code);
-        }
-    }
-    None
-}
-
-/// Exactly three digits in 400..600. `require_close_paren` for the `"… ("` markers, so prose like "merge conflict (300 files" can't match.
-fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
-    let bytes = s.as_bytes();
-    if bytes.len() < 3 || !bytes[..3].iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    if bytes.get(3).is_some_and(u8::is_ascii_digit) {
-        return None;
-    }
-    if require_close_paren && bytes.get(3) != Some(&b')') {
-        return None;
-    }
-    let code: u16 = s[..3].parse().ok()?;
-    (400..600).contains(&code).then_some(code)
+    fuigo_shell::sampling::error_verdicts::parse_http_status(raw)
 }
 
 fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
@@ -1086,11 +1070,11 @@ mod tests {
     fn retry_activity_label_uses_request_failure_headline() {
         let dns = "request error: error sending request for url (https://api.x.ai/v1/responses): client error (Connect): dns error: failed to lookup address information: Temporary failure in name resolution";
         assert_eq!(
-            format_retry_activity_label(8, 10, dns, None, RetryLabelStyle::Status),
+            format_retry_activity_label(8, 10, dns, None, None, RetryLabelStyle::Status),
             "Connection failed | Retrying (attempt 8)..."
         );
         assert!(
-            !format_retry_activity_label(8, 10, dns, None, RetryLabelStyle::Status)
+            !format_retry_activity_label(8, 10, dns, None, None, RetryLabelStyle::Status)
                 .contains("http")
         );
         assert_eq!(
@@ -1098,13 +1082,13 @@ mod tests {
                 2,
                 5,
                 "API error (status 429 Too Many Requests): rate limit exceeded",
-                None,
+                None, None,
                 RetryLabelStyle::Compact
             ),
             "Rate limited (429) | Retrying (2/5)"
         );
         assert_eq!(
-            format_retry_activity_label(2, 5, "", None, RetryLabelStyle::Status),
+            format_retry_activity_label(2, 5, "", None, None, RetryLabelStyle::Status),
             "Retrying (attempt 2)..."
         );
         assert_eq!(
@@ -1112,13 +1096,13 @@ mod tests {
                 1,
                 3,
                 "Re-authenticated after 401; retrying request",
-                None,
+                None, None,
                 RetryLabelStyle::Status
             ),
             "Retrying (attempt 1)..."
         );
         assert_eq!(
-            format_retry_activity_label(3, 5, "weird dump", Some("http"), RetryLabelStyle::Status),
+            format_retry_activity_label(3, 5, "weird dump", Some("http"), None, RetryLabelStyle::Status),
             "Connection failed | Retrying (attempt 3)..."
         );
         assert_eq!(
@@ -1126,13 +1110,13 @@ mod tests {
                 2,
                 5,
                 "slow down",
-                Some("rate_limited"),
+                Some("rate_limited"), None,
                 RetryLabelStyle::Compact
             ),
             "Rate limited | Retrying (2/5)"
         );
         assert_eq!(
-            format_retry_activity_label(1, 3, dns, Some("a_future_kind"), RetryLabelStyle::Status),
+            format_retry_activity_label(1, 3, dns, Some("a_future_kind"), None, RetryLabelStyle::Status),
             "Retrying (attempt 1)..."
         );
         assert_eq!(
@@ -1143,6 +1127,79 @@ mod tests {
             )
             .headline,
             "Request failed"
+        );
+    }
+    /// P42 (audit round 6, M1): a refused session destination keeps its `[endpoints]` remedy in the banner.
+    /// The shell's message leads with the remedy and the plain sentence, so the `Model:` cut keeps both; it
+    /// carries no status, so no 401 copy or sign-in reading can attach. Both the notification path and the
+    /// ACP-error path format through here with no status (the shell sends no `http_status`).
+    #[test]
+    fn auth_destination_refused_banner_keeps_the_endpoints_remedy() {
+        use fuigo_shell::extensions::notification::{
+            AUTH_DESTINATION_REFUSED_ERROR_TYPE, AUTH_DESTINATION_REFUSED_REMEDY,
+            AUTH_DESTINATION_REFUSED_SENTENCE, auth_destination_refused_message,
+        };
+        let kind = wire_error_kind(Some(AUTH_DESTINATION_REFUSED_ERROR_TYPE));
+        let raw = auth_destination_refused_message(
+            "http://127.0.0.1:9/v1",
+            "  Model:     p42-model\n  Auth:      Oidc\n  Version:   1.0.21\n  Available: p42-model",
+        );
+        let formatted = format_request_failure(None, kind, &raw);
+        let message = formatted.message();
+        assert_eq!(formatted.status, None, "{message}");
+        assert_eq!(formatted.wire, WireErrorType::AuthDestinationRefused, "{message}");
+        assert!(message.contains(AUTH_DESTINATION_REFUSED_REMEDY), "{message}");
+        assert!(message.contains(AUTH_DESTINATION_REFUSED_SENTENCE), "{message}");
+        for leaked in ["Model:", "127.0.0.1", "(401)", "Unauthorized"] {
+            assert!(!message.contains(leaked), "{leaked:?} in {message}");
+        }
+        // The fix is configuration: the banner carries no retry or sign-in advice (no generic "Try sending again").
+        for advice in ["Try sending again", "Try again", "send again", "/login", "Wait a minute"] {
+            assert!(!message.contains(advice), "{advice:?} in {message}");
+        }
+        // With no readable detail the fallback is still the remedy, still with no retry advice.
+        let bare = format_request_failure(None, kind, "").message();
+        assert!(bare.contains(AUTH_DESTINATION_REFUSED_REMEDY), "{bare}");
+        assert!(!bare.contains("Try sending again"), "{bare}");
+        // Control: the round-6 shape (sampler text, diagnostics, then the remedy) loses the remedy at the cut.
+        let old = format!(
+            "Unauthorized (401)\n\n  Model:     p42-model\n  Version:   1.0.21\n\n{AUTH_DESTINATION_REFUSED_REMEDY}"
+        );
+        let old = format_request_failure(None, kind, &old).message();
+        assert!(!old.contains("[endpoints]"), "{old}");
+    }
+
+    /// P119: the status, the truncation message and the transport dump come from the shell's verdicts when it sent
+    /// them; the scrubbed text no longer names them.
+    #[test]
+    fn typed_verdicts_decide_what_the_scrubbed_text_no_longer_says() {
+        use fuigo_shell::sampling::error_verdicts::ErrorVerdicts;
+        let scrubbed = "<redacted>: out of balance";
+        let status = ErrorVerdicts {
+            http_status: Some(402),
+            ..ErrorVerdicts::default()
+        };
+        let formatted = format_request_failure_typed(None, Some(WireErrorType::Api), scrubbed, Some(&status));
+        assert_eq!(formatted.status, Some(402));
+        assert!(formatted.headline.contains("402"), "{}", formatted.headline);
+        // Without verdicts the same text carries no status.
+        assert_eq!(format_request_failure(None, Some(WireErrorType::Api), scrubbed).status, None);
+
+        let truncated = ErrorVerdicts {
+            max_tokens_truncation: true,
+            ..ErrorVerdicts::default()
+        };
+        assert_eq!(
+            format_request_failure_typed(None, None, scrubbed, Some(&truncated)).wire,
+            WireErrorType::MaxTokensTruncation
+        );
+        let dump = ErrorVerdicts {
+            http_dump: true,
+            ..ErrorVerdicts::default()
+        };
+        assert_eq!(
+            format_request_failure_typed(None, None, scrubbed, Some(&dump)).wire,
+            WireErrorType::Http
         );
     }
 }

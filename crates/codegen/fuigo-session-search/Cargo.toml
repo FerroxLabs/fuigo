@@ -28,5 +28,8 @@ fuigo-sqlite-journal = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = { workspace = true }
+
 [lints]
 workspace = true

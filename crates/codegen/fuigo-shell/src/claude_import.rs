@@ -38,7 +38,7 @@ pub enum PathKind {
 }
 
 /// A single item that can be imported.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ImportableItem {
     /// A permission rule (allow/deny/ask).
     Permission(PermissionRule),
@@ -58,6 +58,39 @@ pub enum ImportableItem {
     },
     /// A path entry to add to `[paths] extra_skill_dirs` or `extra_rule_dirs`.
     PathEntry { kind: PathKind, path: String },
+}
+
+/// Hand-written `Debug` (P70): an imported environment variable's value and a hook's command print as `<redacted>`
+/// (users keep API keys there). The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ImportableItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Permission(rule) => f.debug_tuple("Permission").field(rule).finish(),
+            Self::EnvVar { key, value: _ } => f
+                .debug_struct("EnvVar")
+                .field("key", key)
+                .field("value", &"<redacted>")
+                .finish(),
+            Self::McpServer { name, config } => f
+                .debug_struct("McpServer")
+                .field("name", name)
+                .field("config", config)
+                .finish(),
+            Self::Hook { event, matcher, command, timeout } => f
+                .debug_struct("Hook")
+                .field("event", event)
+                .field("matcher", matcher)
+                // A hook command may embed a credential (`curl -H 'Authorization: Bearer …'`).
+                .field("command", &if command.is_empty() { "" } else { "<redacted>" })
+                .field("timeout", timeout)
+                .finish(),
+            Self::PathEntry { kind, path } => f
+                .debug_struct("PathEntry")
+                .field("kind", kind)
+                .field("path", path)
+                .finish(),
+        }
+    }
 }
 
 /// A plan describing what would be imported and where.
@@ -571,19 +604,51 @@ pub(crate) fn is_claude_import_marked_at(config_path: &Path) -> bool {
 /// Uses the same atomic write pattern as `save_mcp_server_config` (write to `.tmp`, then rename).
 /// Creates the file and parent directory if missing. Existing content in the file is preserved.
 fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
-    // Same lock every other writer of this file takes, held across the read and
-    // the write below.
-    let _lock = fuigo_config::fs_atomic::lock_config_for_write(config_path)?;
-    write_import_marker_locked(config_path)
+    // The shared read-modify-write: the lock every other writer of this file
+    // takes, the temp synced outside it, the rename only over the version read.
+    edit_owner_only(config_path, |current| {
+        with_import_marker(config_path, current).map(|contents| {
+            fuigo_config::fs_atomic::Edit::Replace {
+                contents: contents.into_bytes(),
+                value: (),
+            }
+        })
+    })
 }
 
-/// Body of [`write_import_marker`]; the caller holds the config write lock.
-fn write_import_marker_locked(config_path: &Path) -> anyhow::Result<()> {
+/// Read-modify-write `config_path` through the shared helper
+/// (`fuigo_config::fs_atomic::edit_locked_with_lock`, on the lock
+/// `util::config::rmw_lock_path` names for that file), replacing it with an
+/// owner-only mode: the existing mode minus group/world bits, `0600` for a new
+/// file (this file can carry imported credentials), as `write_atomically` with
+/// `replacement_mode(.., 0o600)` did. Lock and write failures come back as
+/// their `std::io::Error`.
+fn edit_owner_only<T>(
+    config_path: &Path,
+    edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> anyhow::Result<fuigo_config::fs_atomic::Edit<T>>,
+) -> anyhow::Result<T> {
+    use fuigo_config::fs_atomic::EditError;
+    crate::util::config::edit_config_file_raw(
+        config_path,
+        |path, bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600),
+        edit,
+    )
+    .map_err(|e| match e {
+        EditError::Edit(e) => e,
+        EditError::Lock(e) | EditError::Write(e) => e.into(),
+    })
+}
+
+/// `config.toml`'s text (`current`) with `[claude_compat] imported = true`.
+fn with_import_marker(
+    config_path: &Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
+) -> anyhow::Result<String> {
     // Report parse errors instead of silently discarding the file
     // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
     // The user can fix the TOML and retry
-    let mut root: TomlValue = match std::fs::read_to_string(config_path) {
-        Ok(s) => toml::from_str(&s).map_err(|e| {
+    let mut root: TomlValue = match crate::util::config::current_str(current) {
+        Ok(Some(s)) => toml::from_str(s).map_err(|e| {
             anyhow::anyhow!(
                 "refusing to write import marker: existing config at {} is \
                  not valid TOML ({}). Fix the file (or move it aside) and \
@@ -592,7 +657,7 @@ fn write_import_marker_locked(config_path: &Path) -> anyhow::Result<()> {
                 e
             )
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TomlValue::Table(TomlMap::new()),
+        Ok(None) => TomlValue::Table(TomlMap::new()),
         Err(e) => return Err(e.into()),
     };
     let table = root
@@ -605,21 +670,7 @@ fn write_import_marker_locked(config_path: &Path) -> anyhow::Result<()> {
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("[claude_compat] is not a table"))?;
     compat_table.insert("imported".to_string(), TomlValue::Boolean(true));
-
-    let toml_str = toml::to_string_pretty(&root)?;
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // The shared writer: a uniquely named temp file (a fixed `.toml.tmp` let two
-    // concurrent writers inherit each other's half-written file), the existing
-    // mode re-applied so a `chmod 600` config does not come back world-readable,
-    // and cleanup on any error.
-    fuigo_config::fs_atomic::write_atomically(
-        config_path,
-        &toml_str,
-        fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
-    )?;
-    Ok(())
+    Ok(toml::to_string_pretty(&root)?)
 }
 
 /// Public entry point for the slash command: write the marker, log success, and seed the in-process cache so gate checks reflect it without restart.
@@ -715,20 +766,34 @@ impl ImportResult {
 }
 
 /// Apply items to a single config.toml file using atomic write.
-fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
-    let _lock = fuigo_config::fs_atomic::lock_config_for_write(config_path)?;
-    apply_items_to_config_locked(config_path, items)
+///
+/// The read-modify-write goes through the shared helper ([`edit_owner_only`]),
+/// on the lock every writer of that file takes (for a project file, one under
+/// `~/.fuigo/locks/`, the lock the MCP writers of project files take too).
+pub(crate) fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
+    let count = edit_owner_only(config_path, |current| {
+        apply_items_to_text(config_path, current, items)
+    })?;
+    if count > 0 {
+        info!(
+            path = %config_path.display(),
+            count,
+            "Wrote imported settings to config.toml"
+        );
+    }
+    Ok(count)
 }
 
-/// Body of [`apply_items_to_config`]; the caller holds the config write lock.
-fn apply_items_to_config_locked(
+/// Body of [`apply_items_to_config`]: what to write for `current`.
+fn apply_items_to_text(
     config_path: &Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
     items: &[ImportableItem],
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<fuigo_config::fs_atomic::Edit<usize>> {
     // Read existing TOML, reporting parse errors instead of silently discarding the file
     // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
-    let mut root: TomlValue = match std::fs::read_to_string(config_path) {
-        Ok(s) => toml::from_str(&s).map_err(|e| {
+    let mut root: TomlValue = match crate::util::config::current_str(current) {
+        Ok(Some(s)) => toml::from_str(s).map_err(|e| {
             anyhow::anyhow!(
                 "refusing to import: existing config at {} is not valid TOML \
                  ({}). Fix the file (or move it aside) and retry.",
@@ -736,7 +801,7 @@ fn apply_items_to_config_locked(
                 e
             )
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TomlValue::Table(TomlMap::new()),
+        Ok(None) => TomlValue::Table(TomlMap::new()),
         Err(e) => return Err(e.into()),
     };
 
@@ -786,28 +851,13 @@ fn apply_items_to_config_locked(
         count += merge_mcp_servers(table, &mcp_servers)?;
     }
 
-    if count > 0 {
-        let toml_str = toml::to_string_pretty(&root)?;
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // The shared writer: uniquely named temp (a fixed `.toml.tmp` let two
-        // concurrent writers inherit each other's half-written file) and the
-        // existing mode re-applied, so a `chmod 600` config that may carry
-        // imported credentials does not come back world-readable.
-        fuigo_config::fs_atomic::write_atomically(
-            config_path,
-            &toml_str,
-            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
-        )?;
-        info!(
-            path = %config_path.display(),
-            count,
-            "Wrote imported settings to config.toml"
-        );
+    if count == 0 {
+        return Ok(fuigo_config::fs_atomic::Edit::Keep(0));
     }
-
-    Ok(count)
+    Ok(fuigo_config::fs_atomic::Edit::Replace {
+        contents: toml::to_string_pretty(&root)?.into_bytes(),
+        value: count,
+    })
 }
 
 /// Merge permission rules into `[permission]` using the compact format.
@@ -1010,9 +1060,52 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
 
     let target = hooks_dir.join("imported-from-claude.json");
 
+    // The shared read-modify-write (P72): under the file's state lock (under
+    // `~/.fuigo/locks/`, never in the repository; one lock for every link to
+    // the file, as the write goes through a symlink), so two imports at once
+    // -- or an import and a second Fuigo's -- cannot each merge into the same
+    // original and lose the other's hooks; staged under a unique temp name
+    // (the fixed `imported-from-claude.json.tmp` let two writers rename each
+    // other's half-written temp) and renamed only if the file is still the
+    // version merged into. The file keeps its mode.
+    let count = fuigo_config::fs_atomic::edit_state_file(
+        &target,
+        |bytes| {
+            fuigo_config::write_through::stage_file_atomically_with(
+                &target,
+                bytes,
+                fuigo_config::write_through::NewFileMode::Default,
+            )
+        },
+        |current| merge_hooks_into(&target, current, &new_hooks),
+    )
+    .map_err(|e| match e {
+        fuigo_config::fs_atomic::EditError::Edit(e) => e,
+        fuigo_config::fs_atomic::EditError::Lock(e) => anyhow::Error::from(e),
+        fuigo_config::fs_atomic::EditError::Write(e) => {
+            anyhow::anyhow!("failed to write {}: {e}", target.display())
+        }
+    })?;
+    if count > 0 {
+        info!(
+            path = %target.display(),
+            count,
+            "Wrote imported hooks to .fuigo/hooks/imported-from-claude.json"
+        );
+    }
+    Ok(count)
+}
+
+/// One pass of [`apply_hooks_to_dir`]: `new_hooks` merged into `current` (the
+/// file's bytes), and whether that changed anything.
+fn merge_hooks_into(
+    target: &Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
+    new_hooks: &[&ImportableItem],
+) -> anyhow::Result<fuigo_config::fs_atomic::Edit<usize>> {
     // Read existing JSON if present.
-    let mut root: serde_json::Value = match std::fs::read_to_string(&target) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+    let mut root: serde_json::Value = match crate::util::config::current_str(current) {
+        Ok(Some(s)) => serde_json::from_str(s).unwrap_or_else(|e| {
             warn!(
                 path = %target.display(),
                 error = %e,
@@ -1021,7 +1114,7 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
             );
             serde_json::json!({})
         }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Ok(None) => serde_json::json!({}),
         Err(e) => return Err(e.into()),
     };
     let root_obj = root
@@ -1037,7 +1130,7 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
     // `dirty` tracks whether we mutated the JSON in any way (including in-place timeout refreshes that don't add new entries)
     // The file is re-written only when dirty, even when count == 0
     let mut dirty = false;
-    for item in new_hooks {
+    for &item in new_hooks {
         let ImportableItem::Hook {
             event,
             matcher,
@@ -1135,19 +1228,13 @@ fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Res
     }
 
     if count > 0 || dirty {
-        std::fs::create_dir_all(hooks_dir)?;
-        let json_str = serde_json::to_string_pretty(&root)?;
-        let tmp = target.with_extension("json.tmp");
-        std::fs::write(&tmp, &json_str)?;
-        std::fs::rename(&tmp, &target)?;
-        info!(
-            path = %target.display(),
-            count,
-            "Wrote imported hooks to .fuigo/hooks/imported-from-claude.json"
-        );
+        Ok(fuigo_config::fs_atomic::Edit::Replace {
+            contents: serde_json::to_string_pretty(&root)?.into_bytes(),
+            value: count,
+        })
+    } else {
+        Ok(fuigo_config::fs_atomic::Edit::Keep(count))
     }
-
-    Ok(count)
 }
 
 #[cfg(test)]
@@ -1462,6 +1549,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.json");
         assert!(extract_hooks_from_settings_file(&path).is_empty());
+    }
+
+    /// P72: two imports into one hooks file at once (two Fuigos, or a
+    /// re-import racing an import) keep each other's hooks, and leave no temp
+    /// and no lock in the hooks directory.
+    #[test]
+    #[serial_test::serial] // the state lock lives under the (env-derived) fuigo home
+    fn imports_into_one_hooks_file_at_once_keep_each_others_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join(".fuigo/hooks");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let importer = |tag: &'static str| {
+            let (hooks_dir, barrier) = (hooks_dir.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..20 {
+                    let items = vec![ImportableItem::Hook {
+                        event: "PreToolUse".to_string(),
+                        matcher: Some(format!("{tag}{i}")),
+                        command: format!("echo {tag}{i}"),
+                        timeout: None,
+                    }];
+                    assert_eq!(apply_hooks_to_dir(&hooks_dir, &items).unwrap(), 1);
+                }
+            })
+        };
+        let a = importer("a");
+        let b = importer("b");
+        a.join().unwrap();
+        b.join().unwrap();
+        let target = hooks_dir.join("imported-from-claude.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let commands: std::collections::BTreeSet<String> = parsed["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["hooks"][0]["command"].as_str().unwrap().to_owned())
+            .collect();
+        for tag in ["a", "b"] {
+            for i in 0..20 {
+                assert!(commands.contains(&format!("echo {tag}{i}")), "{tag}{i}");
+            }
+        }
+        let names: Vec<String> = std::fs::read_dir(&hooks_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["imported-from-claude.json"]);
+    }
+
+    /// An unreadable hooks file is refused (not replaced with fresh content).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial] // the state lock lives under the (env-derived) fuigo home
+    fn an_unreadable_hooks_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks_dir = dir.path().join("hooks");
+        // A directory where the file should be cannot be read as one.
+        std::fs::create_dir_all(hooks_dir.join("imported-from-claude.json")).unwrap();
+        let items = vec![ImportableItem::Hook {
+            event: "PreToolUse".to_string(),
+            matcher: None,
+            command: "echo x".to_string(),
+            timeout: None,
+        }];
+        apply_hooks_to_dir(&hooks_dir, &items).unwrap_err();
+        assert!(hooks_dir.join("imported-from-claude.json").is_dir());
     }
 
     #[test]

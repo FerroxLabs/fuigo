@@ -5,6 +5,9 @@ version = "1.0.1"
 edition.workspace = true
 
 [dependencies]
+fuigo-auth = { workspace = true }
+# P145: owner-only ACL for the private npm cache directory on Windows.
+fuigo-secrets = { workspace = true }
 dunce = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
@@ -14,6 +17,7 @@ fuigo-extra-ca = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "time"] }
@@ -23,12 +27,17 @@ fuigo-dirs = { workspace = true }
 fuigo-shell = { workspace = true }
 fuigo-telemetry = { workspace = true }
 fuigo-tools = { workspace = true }
+fuigo-tty-utils = { workspace = true }
 fuigo-version = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
+
+# P145: npm runs in a kill-on-close job object (npm_command.rs).
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
 
 [dev-dependencies]
 semver = { workspace = true }
@@ -38,3 +47,6 @@ tempfile = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

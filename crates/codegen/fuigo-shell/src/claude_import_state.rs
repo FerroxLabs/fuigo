@@ -77,18 +77,50 @@ pub(crate) fn load_import_state() -> ImportState {
     }
 }
 
-/// Save the import state to disk (atomic write via tmp + rename).
-pub(crate) fn save_import_state(state: &ImportState) -> std::io::Result<()> {
-    let path = state_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-    // `.with_extension("json.tmp")` replaces `.json`, producing `claude_import_state.json.tmp` (the last extension is replaced)
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+/// Read-modify-write the import state through the shared helper
+/// (`fuigo_config::fs_atomic::edit_locked_with_lock`): `f` edits the state as
+/// it is on disk now, under the file's cross-process lock, so another Fuigo's
+/// entry for another project is kept; the new state is staged in a uniquely
+/// named temp (a fixed `.json.tmp` let two writers rename each other's
+/// half-written file) and renamed only over the version `f` saw. An
+/// unreadable or unparseable file counts as the default state, as on load.
+pub(crate) fn update_import_state(f: impl FnMut(&mut ImportState)) -> std::io::Result<()> {
+    update_import_state_at(&state_path(), f)
+}
+
+/// [`update_import_state`] at an explicit path.
+pub(crate) fn update_import_state_at(
+    path: &Path,
+    mut f: impl FnMut(&mut ImportState),
+) -> std::io::Result<()> {
+    use fuigo_config::fs_atomic::{Edit, EditError};
+    crate::util::config::edit_config_file_raw(
+        path,
+        |path, bytes| fuigo_config::fs_atomic::stage_atomically(path, bytes, None),
+        |current| {
+            let mut state = match current {
+                Ok(Some(bytes)) => serde_json::from_slice(bytes).unwrap_or_else(|e| {
+                    warn!(error = %e, "Failed to parse claude_import_state.json, using default");
+                    ImportState::default()
+                }),
+                Ok(None) => ImportState::default(),
+                Err(e) => {
+                    warn!(error = %e, "Failed to read claude_import_state.json, using default");
+                    ImportState::default()
+                }
+            };
+            f(&mut state);
+            let json = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
+            Ok(Edit::Replace {
+                contents: json.into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(|e| match e {
+        EditError::Lock(e) | EditError::Write(e) => e,
+        EditError::Edit(e) => std::io::Error::other(e.to_string()),
+    })
 }
 
 // Hash Computation
@@ -184,25 +216,24 @@ fn now_rfc3339() -> String {
 ///
 /// Called after a successful import or explicit dismiss.
 pub fn mark_imported(cwd: &Path) {
-    let mut state = load_import_state();
-
     let (global_hash, _) = compute_global_hash();
-    state.global = Some(ScopeState {
-        last_hash: global_hash,
-        last_checked: now_rfc3339(),
-    });
-
     let (project_hash, _) = compute_project_hash(cwd);
     let cwd_key = cwd.to_string_lossy().to_string();
-    state.projects.insert(
-        cwd_key,
-        ScopeState {
-            last_hash: project_hash,
-            last_checked: now_rfc3339(),
-        },
-    );
+    let checked = now_rfc3339();
 
-    if let Err(e) = save_import_state(&state) {
+    if let Err(e) = update_import_state(|state| {
+        state.global = Some(ScopeState {
+            last_hash: global_hash.clone(),
+            last_checked: checked.clone(),
+        });
+        state.projects.insert(
+            cwd_key.clone(),
+            ScopeState {
+                last_hash: project_hash.clone(),
+                last_checked: checked.clone(),
+            },
+        );
+    }) {
         warn!(error = %e, "Failed to save claude_import_state.json");
     }
 }

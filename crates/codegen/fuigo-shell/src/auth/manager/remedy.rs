@@ -20,6 +20,10 @@ pub(crate) enum AuthRemedy {
     ProviderLogin { label: Option<String> },
     /// Only a user-driven login can.
     ManualLogin,
+    /// P149 (S7/B11, Astra r1 #3): local policy refused the identity provider's token endpoint. The stored sign-in is
+    /// kept, but neither waiting nor signing in again helps until the provider's configuration changes, so the
+    /// advice is the refusal itself.
+    TokenEndpointRefused,
 }
 
 impl AuthRemedy {
@@ -27,10 +31,16 @@ impl AuthRemedy {
         matches!(self, Self::SelfHealing)
     }
 
+    /// Whether the session keeps its stored sign-in (start the session on it; the failure, if any, is per request).
+    pub(crate) fn keeps_session(&self) -> bool {
+        matches!(self, Self::SelfHealing | Self::TokenEndpointRefused)
+    }
+
     /// `error_type` for a turn that died on this credential.
     pub(crate) fn turn_error_type(&self) -> &'static str {
         match self {
-            Self::SelfHealing => "auth_transient",
+            // A refused token endpoint is not fixed by a sign-in prompt either.
+            Self::SelfHealing | Self::TokenEndpointRefused => "auth_transient",
             Self::ProviderLogin { .. } | Self::ManualLogin => "auth",
         }
     }
@@ -58,6 +68,11 @@ impl AuthRemedy {
                 Some(crate::auth::error::provider_login_message(label.as_deref()).into_owned())
             }
             Self::ManualLogin => None,
+            Self::TokenEndpointRefused => Some(
+                crate::auth::error::RefreshTokenFailedReason::TokenEndpointRefused
+                    .user_message()
+                    .into_owned(),
+            ),
         }
     }
 }
@@ -220,6 +235,12 @@ impl AuthManager {
     /// The provider arm deliberately ignores the recorded verdict.
     /// Real interactive-only binaries block until something kills them, so their run routinely ends with nothing recorded at all.
     pub(crate) fn auth_remedy(&self) -> AuthRemedy {
+        if let Some(AuthError::Refresh(crate::auth::error::RefreshTokenError::Permanent(e))) =
+            self.permanent_failure()
+            && e.reason == crate::auth::error::RefreshTokenFailedReason::TokenEndpointRefused
+        {
+            return AuthRemedy::TokenEndpointRefused;
+        }
         let provider_mints_sessions = self.is_external_provider_refresh_authority();
         let user_must_act = self.requires_manual_reauth()
             || (provider_mints_sessions && self.current_wire_valid().is_none());

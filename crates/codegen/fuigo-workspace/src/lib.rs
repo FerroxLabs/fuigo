@@ -42,6 +42,7 @@ pub(crate) mod telemetry;
 pub use status_config::{ProactiveRefreshConfig, StatusConfig};
 pub mod trust;
 pub(crate) mod upload;
+pub use upload::workspace_upload_scrub;
 pub mod util;
 pub mod workspace_ops;
 pub mod worktree;
@@ -86,38 +87,12 @@ pub fn init_metrics() {
 /// A per-module lock can't stop a peer test in another module clobbering `FUIGO_HOME` mid-test, so every env-mutating test module uses this one.
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-/// Crate-shared RAII guard for a single process env var in tests: sets (or unsets) it on construction and restores the prior value on drop.
+/// Crate-shared RAII guard for one process env var in tests: `fuigo_test_support::EnvGuard` (sets or unsets on construction, restores the prior value on drop).
+/// In this crate's lib test binary a write to a key in `fuigo_test_support::env::OWN_PROCESS_KEYS` (HOME, FUIGO_HOME, ...) panics unless the test runs in a process of its own: every other test reads those keys through production code without a lock, so a lock between writers cannot protect them.
+/// Start such a test with `if fuigo_test_support::env::rerun_in_own_process() { return; }`.
 /// Hold it together with [`ENV_TEST_LOCK`] for the test's lifetime, acquiring the lock FIRST so it drops LAST.
-/// The env restore (this guard) then runs before the lock releases, so no peer test observes the temporary value.
 #[cfg(test)]
-pub(crate) struct TestEnvGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-#[cfg(test)]
-impl TestEnvGuard {
-    /// Set `key` to `val`, restoring the prior value on drop.
-    pub(crate) fn set(key: &'static str, val: &std::path::Path) -> Self {
-        let prev = std::env::var_os(key);
-        unsafe { std::env::set_var(key, val) };
-        Self { key, prev }
-    }
-    /// Unset `key`, restoring the prior value on drop.
-    pub(crate) fn unset(key: &'static str) -> Self {
-        let prev = std::env::var_os(key);
-        unsafe { std::env::remove_var(key) };
-        Self { key, prev }
-    }
-}
-#[cfg(test)]
-impl Drop for TestEnvGuard {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            Some(prev) => unsafe { std::env::set_var(self.key, prev) },
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
-}
+pub(crate) use fuigo_test_support::EnvGuard as TestEnvGuard;
 /// Holds [`ENV_TEST_LOCK`] AND a set of [`TestEnvGuard`]s as ONE value; a test or fixture can return/bind it any way and stay correct.
 /// Struct fields drop in declaration order, so `_env` restores every env var BEFORE `_lock` releases the lock; no call site can reorder that.
 /// Acquire the lock first via [`lock`](Self::lock), then mutate env under it with the chained [`set`](Self::set) builder.

@@ -37,6 +37,11 @@ pub(super) enum OidcError {
     TokenExchangeHttp { status: u16, body: String },
     #[error("OIDC token refresh failed: HTTP {status} — {body}")]
     TokenRefreshHttp { status: u16, body: String },
+    /// Local policy refused the token endpoint (P99): discovery named one this client will not send a credential
+    /// to (decided before any request), or the admitted endpoint answered with a redirect that is not followed
+    /// (the credential stayed on the admitted origin). Neither says anything about the credential, which is kept.
+    #[error("{0}")]
+    TokenEndpointRefused(String),
     #[error("OIDC authentication failed: state mismatch")]
     StateMismatch,
     #[error("OIDC id_token uses unsupported algorithm: {0}")]
@@ -303,22 +308,86 @@ async fn discover_once(issuer_key: &str) -> anyhow::Result<Discovery> {
         &url,
     )
     .send_checked()
-    .await?;
+    .await
+    .map_err(fuigo_extra_ca::dispatch::DispatchError::without_url)?;
     if !resp.status().is_success() {
         return Err(anyhow::Error::new(OidcError::DiscoveryHttp {
             status: resp.status().as_u16(),
             url,
         }));
     }
-    let doc: Discovery = resp.json().await?;
+    let doc: Discovery = resp.json().await.map_err(reqwest::Error::without_url)?;
+    // The document is data from the network: log origin and path only, never userinfo or a query.
     tracing::debug!(
-        authorization_endpoint = %doc.authorization_endpoint,
-        token_endpoint = %doc.token_endpoint,
-        jwks_uri = ?doc.jwks_uri,
+        authorization_endpoint = %redacted_for_log(&doc.authorization_endpoint),
+        token_endpoint = %redacted_for_log(&doc.token_endpoint),
+        jwks_uri = ?doc.jwks_uri.as_deref().map(redacted_for_log),
         id_token_algs = ?doc.id_token_signing_alg_values_supported,
         "OIDC: discovery complete"
     );
     Ok(doc)
+}
+/// Origin and path of a discovery-named URL, for logs: no userinfo, no query, no fragment.
+/// Only http and https URLs are rendered: any other scheme (a `blob:` URL carries a whole URL in its path)
+/// is replaced by a fixed placeholder.
+fn redacted_for_log(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => {
+            format!("{}{}", url.origin().ascii_serialization(), url.path())
+        }
+        Ok(_) => "<not an http(s) URL>".to_owned(),
+        Err(_) => "<not a URL>".to_owned(),
+    }
+}
+/// The only way a credential (authorization code, PKCE verifier, refresh token) reaches a discovery-named token endpoint (P99).
+///
+/// Discovery is fetched from the issuer, but the document is data: it can name any URL.
+/// The endpoint must be https on the issuer's own origin with no userinfo, or the one built-in split-host pair
+/// (`fuigo_computer_hub_sdk::check_token_endpoint`, the same rule the workspace hub applies).
+/// The shared client then keeps every redirect on that origin (`fuigo_extra_ca` credential redirect policy).
+/// A refusal is [`OidcError::TokenEndpointRefused`]: nothing is sent and nothing stored is touched.
+pub(super) fn checked_token_endpoint(
+    issuer: &str,
+    token_endpoint: &str,
+) -> anyhow::Result<reqwest::Url> {
+    let refused = |reason: String| anyhow::Error::new(OidcError::TokenEndpointRefused(reason));
+    let url = reqwest::Url::parse(token_endpoint)
+        .map_err(|_| refused("OIDC token_endpoint is not a valid URL; nothing was sent".into()))?;
+    let allow_loopback_http = allow_loopback_http(
+        cfg!(test),
+        super::super::config::is_local_dev_issuer(issuer),
+    );
+    fuigo_computer_hub_sdk::check_token_endpoint(issuer, &url, allow_loopback_http)
+        .map_err(refused)?;
+    Ok(url)
+}
+/// Plain http to a loopback token endpoint (still on the issuer's own origin) is for in-process mock issuers in
+/// test builds, and for the local-dev accounts app that `FUIGO_LOCAL_AUTH` selects, when it is the issuer.
+/// It is never true for any other issuer in a shipped build.
+fn allow_loopback_http(test_build: bool, local_dev_issuer: bool) -> bool {
+    test_build || local_dev_issuer
+}
+/// A redirect the shared client refused to follow (another origin, or more hops than its limit on the same
+/// origin) is a refusal of the token endpoint, not a transport blip: the credential never left the admitted
+/// origin, so the caller must not retry it or count it against the credential.
+/// Every other transport error is passed on with its URL removed (a token endpoint URL may carry a query).
+fn refused_redirect(error: fuigo_extra_ca::dispatch::DispatchError) -> anyhow::Error {
+    match error {
+        fuigo_extra_ca::dispatch::DispatchError::Transport(error) if error.is_redirect() => {
+            // The policy's own static text (`fuigo_extra_ca` redirect policy) tells a loop from a refusal.
+            let too_many = std::error::Error::source(&error)
+                .is_some_and(|cause| cause.to_string().contains("redirect limit"));
+            let reason = if too_many {
+                "OIDC token_endpoint redirected too many times; \
+                 the credential was not sent outside the token endpoint's origin"
+            } else {
+                "OIDC token_endpoint answered with a redirect that Fuigo does not follow; \
+                 the credential was not sent outside the token endpoint's origin"
+            };
+            anyhow::Error::new(OidcError::TokenEndpointRefused(reason.into()))
+        }
+        other => anyhow::Error::new(other.without_url()),
+    }
 }
 #[cfg(test)]
 pub(super) fn clear_discovery_cache() {
@@ -382,7 +451,7 @@ pub(super) fn build_authorize_url(
     url.push_str(&format!("&referrer={}", urlencoding::encode(referrer)));
     url
 }
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub(super) struct TokenResponse {
     pub(super) access_token: String,
     #[serde(default)]
@@ -392,18 +461,45 @@ pub(super) struct TokenResponse {
     #[serde(default)]
     pub(super) expires_in: Option<u64>,
 }
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            access_token: _,
+            refresh_token,
+            id_token,
+            expires_in,
+        } = self;
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("id_token", &id_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_in", expires_in)
+            .finish()
+    }
+}
 pub(super) async fn exchange_code(
+    issuer: &str,
     token_endpoint: &str,
     code: &str,
     redirect_uri: &str,
     client_id: &str,
     code_verifier: &str,
 ) -> anyhow::Result<TokenResponse> {
-    tracing::debug!(token_endpoint = %token_endpoint, "OIDC: exchanging code for tokens");
+    // P99: the code and PKCE verifier go only to a token endpoint bound to the issuer.
+    // Logged after the check, so a refused URL (which may carry userinfo) is never written out.
+    let token_url = checked_token_endpoint(issuer, token_endpoint)?;
+    tracing::debug!(token_endpoint = %redacted_for_log(token_url.as_str()), "OIDC: exchanging code for tokens");
     let resp = with_alpha_test_key(
         crate::http::shared_client()
-            .post(token_endpoint)
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
+            .post(token_url)
+            // P43: identity-class header, FluxRouter-operated destinations only.
+            .headers(
+                fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(token_endpoint)
+                    .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+            )
             .form(&[
                 ("grant_type", "authorization_code"),
                 ("code", code),
@@ -415,7 +511,8 @@ pub(super) async fn exchange_code(
         token_endpoint,
     )
     .send_checked()
-    .await?;
+    .await
+    .map_err(refused_redirect)?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
@@ -424,7 +521,7 @@ pub(super) async fn exchange_code(
             body,
         }));
     }
-    Ok(resp.json().await?)
+    Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
 }
 /// Retry gate for `refresh_tokens`.
 /// Defers to `classify_terminal` (the single source of truth): only a recognized terminal code (`invalid_grant`, `invalid_client`) stops retries.
@@ -440,6 +537,12 @@ fn is_egress_policy_denial(error: &anyhow::Error) -> bool {
 
 fn is_transient_refresh_error(err: &anyhow::Error) -> bool {
     if is_egress_policy_denial(err) {
+        return false;
+    }
+    if matches!(
+        err.downcast_ref::<OidcError>(),
+        Some(OidcError::TokenEndpointRefused(_))
+    ) {
         return false;
     }
     let Some(OidcError::TokenRefreshHttp { status, body }) = err.downcast_ref::<OidcError>() else {
@@ -466,6 +569,7 @@ fn refresh_retry_policy() -> backon::ExponentialBuilder {
         .with_jitter()
 }
 pub(super) async fn refresh_tokens(
+    issuer: &str,
     token_endpoint: &str,
     refresh_token: &str,
     client_id: &str,
@@ -473,8 +577,12 @@ pub(super) async fn refresh_tokens(
     principal_id: Option<&str>,
 ) -> anyhow::Result<TokenResponse> {
     use backon::Retryable;
+    // P99: the refresh token goes only to a token endpoint bound to the issuer. Checked once, before
+    // the retry loop and before logging, so a refused URL (which may carry userinfo) is never written out.
+    let token_url = checked_token_endpoint(issuer, token_endpoint)?;
+    let token_url = &token_url;
     tracing::debug!(
-        token_endpoint = %token_endpoint,
+        token_endpoint = %redacted_for_log(token_url.as_str()),
         principal_type = ?principal_type,
         principal_id = ?principal_id,
         "OIDC: refreshing token"
@@ -482,7 +590,7 @@ pub(super) async fn refresh_tokens(
     let probe = super::refresh::SuspendProbe::start();
     (|| {
         refresh_tokens_once(
-            token_endpoint,
+            token_url,
             refresh_token,
             client_id,
             principal_type,
@@ -509,15 +617,18 @@ pub(super) async fn refresh_tokens(
     })
     .await
 }
-/// One unretried POST to `token_endpoint`.
+/// One unretried POST to a token endpoint that [`checked_token_endpoint`] admitted (P99): the only caller is
+/// [`refresh_tokens`], which hands over the checked URL.
 /// Errors carry the typed `OidcError::TokenRefreshHttp` so the retry classifier can read the status code and OAuth2 `error` field without re-parsing.
 async fn refresh_tokens_once(
-    token_endpoint: &str,
+    token_url: &reqwest::Url,
     refresh_token: &str,
     client_id: &str,
     principal_type: Option<&str>,
     principal_id: Option<&str>,
 ) -> anyhow::Result<TokenResponse> {
+    // P70b: an IdP's `error_description` can echo the refresh token and is logged; record it for the log sinks.
+    fuigo_telemetry::sent_credentials::record(refresh_token);
     let mut params = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -531,13 +642,14 @@ async fn refresh_tokens_once(
     }
     let resp = with_alpha_test_key(
         crate::http::shared_client()
-            .post(token_endpoint)
+            .post(token_url.clone())
             .form(&params)
             .timeout(StdDuration::from_secs(15)),
-        token_endpoint,
+        token_url.as_str(),
     )
     .send_checked()
-    .await?;
+    .await
+    .map_err(refused_redirect)?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
@@ -547,7 +659,7 @@ async fn refresh_tokens_once(
         tracing::warn!(
             http_status = status,
             oauth2_error = ?error_code,
-            rt_prefix = fuigo_auth::bearer_suffix(refresh_token),
+            rt_prefix = %fuigo_auth::bearer_fingerprint(refresh_token),
             client_id = %client_id,
             principal_type = ?principal_type,
             "OIDC: token refresh HTTP error"
@@ -557,7 +669,7 @@ async fn refresh_tokens_once(
             body,
         }));
     }
-    Ok(resp.json().await?)
+    Ok(resp.json().await.map_err(reqwest::Error::without_url)?)
 }
 #[derive(Debug, Deserialize)]
 pub(super) struct IdTokenClaims {
@@ -768,6 +880,14 @@ pub(super) async fn extract_user_info(
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+    /// P43 hostile: a token endpoint that is not FluxRouter-operated gets no client version.
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_exchange_sends_no_identity_to_a_non_fluxrouter_issuer() {
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let _ = exchange_code(&base, &format!("{base}/token"), "code", "http://127.0.0.1/cb", "id", "v").await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity_headers(&seen, "oidc_exchange_code");
+    }
     #[test]
     fn pkce_s256_challenge_matches_verifier() {
         let pkce = generate_pkce();
@@ -1191,8 +1311,9 @@ mod tests {
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let issuer = format!("http://127.0.0.1:{port}");
+        let token_endpoint = format!("{issuer}/token");
+        let resp = refresh_tokens(&issuer, &token_endpoint, "rt", "client", None, None)
             .await
             .expect("transient 5xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");
@@ -1228,8 +1349,9 @@ mod tests {
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let err = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let issuer = format!("http://127.0.0.1:{port}");
+        let token_endpoint = format!("{issuer}/token");
+        let err = refresh_tokens(&issuer, &token_endpoint, "rt", "client", None, None)
             .await
             .expect_err("invalid_grant is terminal");
         assert!(
@@ -1273,8 +1395,9 @@ mod tests {
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let token_endpoint = format!("http://127.0.0.1:{port}/token");
-        let resp = refresh_tokens(&token_endpoint, "rt", "client", None, None)
+        let issuer = format!("http://127.0.0.1:{port}");
+        let token_endpoint = format!("{issuer}/token");
+        let resp = refresh_tokens(&issuer, &token_endpoint, "rt", "client", None, None)
             .await
             .expect("a non-terminal coded 4xx must be retried until success");
         assert_eq!(resp.access_token, "new-at");
@@ -1308,6 +1431,282 @@ mod tests {
     }
 }
 
+/// P99: credentials reach a discovery-named token endpoint only when it is bound to the issuer.
+#[cfg(test)]
+mod token_endpoint_binding_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    type Bodies = Arc<parking_lot::Mutex<Vec<String>>>;
+
+    /// Records every request body and answers like a token endpoint, so a credential that
+    /// reaches it is both accepted and recorded.
+    async fn spawn_recorder() -> (String, Bodies, tokio::task::JoinHandle<()>) {
+        let bodies = Bodies::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback({
+            let bodies = bodies.clone();
+            move |body: String| {
+                bodies.lock().push(body);
+                async {
+                    axum::Json(serde_json::json!({
+                        "access_token": "recorder-access",
+                        "refresh_token": "recorder-refresh",
+                        "expires_in": 3600,
+                    }))
+                }
+            }
+        });
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, bodies, handle)
+    }
+
+    fn refusal(error: &anyhow::Error) -> &str {
+        match error.downcast_ref::<OidcError>() {
+            Some(OidcError::TokenEndpointRefused(reason)) => reason,
+            other => panic!("expected TokenEndpointRefused, got {other:?} / {error:#}"),
+        }
+    }
+
+    /// The shell's rule is the shared one: the issuer's own origin, or the one built-in pair.
+    #[test]
+    fn checked_token_endpoint_applies_the_shared_rule() {
+        for (issuer, endpoint) in [
+            ("https://acme.okta.com", "https://acme.okta.com/oauth2/v1/token"),
+            ("https://acme.okta.com/", "https://acme.okta.com:443/token"),
+            ("https://accounts.google.com", "https://oauth2.googleapis.com/token"),
+            // In-process mock issuers (test builds only).
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080/token"),
+        ] {
+            let url = checked_token_endpoint(issuer, endpoint)
+                .unwrap_or_else(|error| panic!("{issuer} -> {endpoint}: {error:#}"));
+            assert_eq!(url, reqwest::Url::parse(endpoint).unwrap());
+        }
+        for (issuer, endpoint, why) in [
+            ("https://acme.okta.com", "https://evil.example/token", "issuer's origin"),
+            ("https://acme.okta.com", "https://acme.okta.com.evil.example/token", "issuer's origin"),
+            ("https://acme.okta.com", "https://acme.okta.com:8443/token", "issuer's origin"),
+            ("https://acme.okta.com", "http://acme.okta.com/token", "not https"),
+            ("https://acme.okta.com", "https://user:pw@acme.okta.com/token", "userinfo"),
+            ("https://acme.okta.com", "https://oauth2.googleapis.com/token", "issuer's origin"),
+            ("https://accounts.google.com", "https://evil.oauth2.googleapis.com/token", "issuer's origin"),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:9090/token", "issuer's origin"),
+            ("https://acme.okta.com", "not a url", "not a valid URL"),
+            ("https://acme.okta.com", "/oauth2/token", "not a valid URL"),
+        ] {
+            let error = checked_token_endpoint(issuer, endpoint)
+                .expect_err(&format!("{issuer} -> {endpoint} must be refused"));
+            let reason = refusal(&error);
+            assert!(reason.contains(why), "{issuer} -> {endpoint}: {reason}");
+            assert!(reason.contains("nothing was sent"), "{reason}");
+        }
+    }
+
+    /// What reaches a log from a discovery-named URL: origin and path, never userinfo or a query.
+    #[test]
+    fn discovery_named_urls_are_redacted_for_logs() {
+        for (url, logged) in [
+            ("https://idp.example/oauth2/token", "https://idp.example/oauth2/token"),
+            ("https://user:secret@idp.example/token", "https://idp.example/token"),
+            ("https://idp.example:8443/token?key=secret#frag", "https://idp.example:8443/token"),
+            ("not a url", "<not a URL>"),
+            ("blob:https://user:secret@idp.example/token", "<not an http(s) URL>"),
+            ("ftp://user:secret@idp.example/token", "<not an http(s) URL>"),
+            ("data:text/plain,secret", "<not an http(s) URL>"),
+        ] {
+            let rendered = redacted_for_log(url);
+            assert_eq!(rendered, logged, "{url}");
+            assert!(!rendered.contains("secret"), "{url}: {rendered}");
+        }
+    }
+
+    /// A transport error from an admitted token endpoint does not carry the endpoint's URL (it may
+    /// hold a query) into the error text that the refresh path writes to its logs.
+    #[tokio::test]
+    async fn transport_errors_from_the_token_endpoint_do_not_carry_its_url() {
+        // A loopback port with nothing listening: the connection is refused.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let issuer = format!("http://127.0.0.1:{port}");
+        let endpoint = format!("{issuer}/token?tenant_key=query-secret");
+        let refresh = refresh_tokens(&issuer, &endpoint, "the-refresh-token", "client", None, None)
+            .await
+            .expect_err("nothing is listening");
+        let exchange = exchange_code(&issuer, &endpoint, "the-code", "http://127.0.0.1/cb", "client", "v")
+            .await
+            .expect_err("nothing is listening");
+        for error in [refresh, exchange] {
+            assert!(
+                error.downcast_ref::<OidcError>().is_none(),
+                "a refused connection is a transport error, not a refusal: {error:#}"
+            );
+            for text in [error.to_string(), format!("{error:#}"), format!("{error:?}")] {
+                assert!(!text.contains("query-secret"), "{text}");
+                assert!(!text.contains("tenant_key"), "{text}");
+                assert!(!text.contains("the-refresh-token"), "{text}");
+            }
+        }
+    }
+
+    /// The local-dev exemption needs BOTH the variable and the exact local issuer; any other
+    /// issuer never gets it, whatever the environment says, and the local issuer does not get it
+    /// without the variable.
+    #[test]
+    fn local_dev_http_exemption_is_only_for_the_local_dev_issuer() {
+        use crate::auth::config::{is_local_dev_issuer, is_local_dev_issuer_when};
+        for issuer in ["http://localhost:22255", "http://localhost:22255/"] {
+            assert!(is_local_dev_issuer_when(true, issuer), "{issuer}");
+            assert!(!is_local_dev_issuer_when(false, issuer), "{issuer}");
+        }
+        for issuer in [
+            "https://acme.okta.com",
+            "http://acme.okta.com",
+            "http://localhost:8080",
+            "http://127.0.0.1:22255",
+            "https://localhost:22255",
+            "http://localhost:22255.evil.example",
+            "http://evil.example/localhost:22255",
+        ] {
+            for local_auth in [false, true] {
+                assert!(!is_local_dev_issuer_when(local_auth, issuer), "{issuer}");
+            }
+            assert!(!is_local_dev_issuer(issuer), "{issuer}");
+        }
+    }
+
+    /// What a shipped build passes as `allow_loopback_http`: nothing but the local-dev issuer.
+    #[test]
+    fn a_shipped_build_admits_loopback_http_only_for_the_local_dev_issuer() {
+        assert!(!allow_loopback_http(false, false));
+        assert!(allow_loopback_http(false, true));
+        assert!(allow_loopback_http(true, false));
+        // The rule a shipped build then applies to any other issuer: http is refused, loopback or not.
+        for (issuer, endpoint) in [
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080/token"),
+            ("http://localhost:8080", "http://localhost:8080/token"),
+            ("http://idp.example", "http://idp.example/token"),
+        ] {
+            let url = reqwest::Url::parse(endpoint).unwrap();
+            let shipped = allow_loopback_http(
+                false,
+                crate::auth::config::is_local_dev_issuer_when(true, issuer),
+            );
+            let error = fuigo_computer_hub_sdk::check_token_endpoint(issuer, &url, shipped)
+                .expect_err(endpoint);
+            assert!(error.contains("not https"), "{endpoint}: {error}");
+        }
+        // The local-dev issuer with the variable set: its own loopback origin only.
+        let local = "http://localhost:22255";
+        let shipped = allow_loopback_http(
+            false,
+            crate::auth::config::is_local_dev_issuer_when(true, local),
+        );
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert_eq!(
+            fuigo_computer_hub_sdk::check_token_endpoint(
+                local,
+                &url("http://localhost:22255/oauth2/token"),
+                shipped
+            ),
+            Ok(())
+        );
+        for endpoint in [
+            "http://localhost:9999/token",
+            "http://127.0.0.1:22255/token",
+            "http://evil.example/token",
+            "https://evil.example/token",
+        ] {
+            assert!(
+                fuigo_computer_hub_sdk::check_token_endpoint(local, &url(endpoint), shipped)
+                    .is_err(),
+                "{endpoint}"
+            );
+        }
+    }
+
+    /// The authorization code and PKCE verifier are not sent to a token endpoint off the
+    /// issuer's origin, and the same call with the endpoint on the issuer's origin is sent.
+    #[tokio::test]
+    async fn exchange_code_sends_the_code_only_to_the_issuer_origin() {
+        let (issuer, own, own_server) = spawn_recorder().await;
+        let (foreign, foreign_bodies, foreign_server) = spawn_recorder().await;
+        let error = exchange_code(
+            &issuer,
+            &format!("{foreign}/token"),
+            "the-code",
+            "http://127.0.0.1/callback",
+            "client",
+            "the-verifier",
+        )
+        .await
+        .expect_err("a foreign token endpoint must be refused");
+        assert!(refusal(&error).contains("issuer's origin"), "{error:#}");
+        assert!(foreign_bodies.lock().is_empty(), "{:?}", foreign_bodies.lock());
+        assert!(own.lock().is_empty(), "a refusal sends nothing anywhere");
+
+        let tokens = exchange_code(
+            &issuer,
+            &format!("{issuer}/token"),
+            "the-code",
+            "http://127.0.0.1/callback",
+            "client",
+            "the-verifier",
+        )
+        .await
+        .expect("the issuer's own token endpoint is used");
+        assert_eq!(tokens.access_token, "recorder-access");
+        let own = own.lock().clone();
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert!(own[0].contains("code=the-code"), "{own:?}");
+        assert!(own[0].contains("code_verifier=the-verifier"), "{own:?}");
+        assert!(foreign_bodies.lock().is_empty());
+        own_server.abort();
+        foreign_server.abort();
+    }
+
+    /// The refresh token is not sent to a token endpoint off the issuer's origin: refused once,
+    /// with no retries, and the same call with the endpoint on the issuer's origin is sent.
+    #[tokio::test]
+    async fn refresh_tokens_sends_the_refresh_token_only_to_the_issuer_origin() {
+        let (issuer, own, own_server) = spawn_recorder().await;
+        let (foreign, foreign_bodies, foreign_server) = spawn_recorder().await;
+        let error = refresh_tokens(
+            &issuer,
+            &format!("{foreign}/token"),
+            "the-refresh-token",
+            "client",
+            None,
+            None,
+        )
+        .await
+        .expect_err("a foreign token endpoint must be refused");
+        assert!(refusal(&error).contains("issuer's origin"), "{error:#}");
+        assert!(!is_transient_refresh_error(&error), "a refusal is not retried");
+        assert!(foreign_bodies.lock().is_empty(), "{:?}", foreign_bodies.lock());
+        assert!(own.lock().is_empty(), "a refusal sends nothing anywhere");
+
+        let tokens = refresh_tokens(
+            &issuer,
+            &format!("{issuer}/token"),
+            "the-refresh-token",
+            "client",
+            None,
+            None,
+        )
+        .await
+        .expect("the issuer's own token endpoint is used");
+        assert_eq!(tokens.access_token, "recorder-access");
+        let own = own.lock().clone();
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert!(own[0].contains("refresh_token=the-refresh-token"), "{own:?}");
+        assert!(foreign_bodies.lock().is_empty());
+        own_server.abort();
+        foreign_server.abort();
+    }
+}
 #[cfg(test)]
 mod egress_policy_tests {
     use super::*;
@@ -1317,5 +1716,36 @@ mod egress_policy_tests {
             .context("refresh request");
         assert!(is_egress_policy_denial(&error));
         assert!(!is_transient_refresh_error(&error));
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn token_response_debug_redacts_every_token() {
+        let response: TokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "p70ac-FAKE-1a2b3c4d",
+            "refresh_token": "p70rf-FAKE-5e6f7a8b",
+            "id_token": "p70id-FAKE-9c0d1e2f",
+            "expires_in": 60,
+        }))
+        .expect("token response");
+        assert_redacted(&response, &["p70ac-FAKE-1a2b3c4d", "p70rf-FAKE-5e6f7a8b", "p70id-FAKE-9c0d1e2f"]);
     }
 }

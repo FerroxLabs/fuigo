@@ -1,5 +1,5 @@
 //! End-to-end tests for `maybe_fire_laziness_check`.
-//! Each test drives the actor against a non-listening `http://localhost` base URL.
+//! Each test drives the actor against a closed loopback port (`fuigo_test_support::refused_loopback_url`).
 //! The unified path's `prepare_chat_completion().conversation_collect()` call surfaces the connection failure as the `ClassifierError` abort.
 //! The tests observe state mutations and the per-test `events.jsonl`.
 //!
@@ -38,7 +38,7 @@ fn detector_entry(
 }
 
 /// Construct a test actor with events.jsonl rerouted into a tempdir and `current_model_id` pointing at a per-model config supplied by the caller.
-/// The sampling config points at a `http://localhost` base URL with nothing listening.
+/// The sampling config points at a closed loopback port (`create_test_actor` uses `fuigo_test_support::refused_loopback_url`).
 /// `prepare_chat_completion().conversation_collect()` therefore fails with a connect error, enough to exercise every abort/idle path.
 /// Returns the actor wrapped in `Arc` and the owned tempdir (so the file outlives the actor).
 async fn make_laziness_actor(
@@ -228,7 +228,7 @@ async fn turn_start_ms_chain_feeds_turn_elapsed_seconds_helper() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn sampler_error_aborts_with_classifier_error() {
-    // After the idle wait expires, `prepare_chat_completion(false).await?.conversation_collect(...)` hits a non-listening `http://localhost`
+    // After the idle wait expires, `prepare_chat_completion(false).await?.conversation_collect(...)` hits a closed loopback port
     // The connection failure surfaces as `SamplingError`, exercising the classifier-error abort arm of the unified path
     let local = tokio::task::LocalSet::new();
     local
@@ -508,7 +508,7 @@ async fn make_debug_actor(
 }
 
 /// Dev-flag contract gate 1: `cfg.enabled = false` MUST NOT short-circuit when `laziness_debug_log = Some(_)`.
-/// The classifier must reach the sampler, which fails in the test fixture against a non-listening `http://localhost`.
+/// The classifier must reach the sampler, which fails in the test fixture against a closed loopback port.
 /// The JSONL log must record exactly one line with `decision: aborted`.
 /// This prevents a future change that flips `&& !debug_mode` to `||` from silently disabling debug mode.
 #[tokio::test(flavor = "current_thread")]
@@ -544,7 +544,7 @@ async fn debug_mode_fires_classifier_even_with_per_model_enable_false() {
             assert_eq!(parsed["decision"], "aborted");
             assert_eq!(
                 parsed["abort_reason"], "classifier_error",
-                "non-listening localhost sampler must surface as classifier_error",
+                "refused loopback sampler must surface as classifier_error",
             );
             assert_eq!(nudges, 0, "no nudge possible when sampler fails");
             assert_eq!(
@@ -576,7 +576,7 @@ async fn debug_mode_bypasses_idle_wait() {
             let elapsed = started.elapsed();
             drop(Arc::try_unwrap(actor).ok().unwrap());
             // The bypass path still does a chat-state MPSC roundtrip, two tool-bridge reads, and `prepare_chat_completion` with a JWT refresh
-            // It then attempts a TCP connect against localhost and appends a JSONL line; all of that can run slowly on shared CI
+            // It then attempts a TCP connect against a closed loopback port and appends a JSONL line; all of that can run slowly on shared CI
             // 2s is still 30_000 times faster than the configured 60_000ms idle threshold, so the bypass signal is unambiguous
             assert!(
                 elapsed < std::time::Duration::from_millis(2000),

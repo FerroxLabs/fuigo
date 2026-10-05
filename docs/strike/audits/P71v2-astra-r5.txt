@@ -1,0 +1,112 @@
+P71v2 Astra audit, round 5 (cleaned: the brief as sent and the auditor's final report; the tool transcript between them is omitted).
+Command: codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+Raw transcript: 14468 lines, sha256 eb45b0c6a11bccab3fb758bfed36b0e1af627490cfc5d34d9af01a8185c47ff4; tokens used 156,442.
+
+===== BRIEF =====
+You are an independent security/code auditor. Repository: the current directory (a git worktree, branch strike/p71v2). Read-only: do not run cargo, do not modify files. Audit the diff `git diff 2eb33c17..HEAD` (packet P71v2, branch strike/p71v2-s19, ONE commit 37e125ec on top of P54-K 2eb33c17), reading whatever surrounding code you need.
+
+DESIGN (accepted by the owner; do not re-litigate the design, audit the implementation against it):
+Fuigo uploads session archives, traces, diagnostics, share bundles, heap profiles, review-comment records and a workspace environment record to "storage". The upload destination is one of three classes, decided by DESTINATION, never by content:
+ 1. a FluxRouter-operated storage proxy (decided ONLY by the existing P43/P54 helper `fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url).is_permitted()`): receives files unchanged;
+ 2. the operator's own bucket (`UploadMethod::Direct` GCS, `UploadMethod::S3`): receives files unchanged;
+ 3. ANY other storage proxy (including any URL that cannot be classified): receives NO file content at all (no connection, no request, no header carrying an object path). Local files untouched; the user is told once per process on stderr. The one-shot feedback archive has no bucket alternative, so ITS notice must not promise a bucket.
+The workspace environment record additionally keeps a field rule: for class 3 its identity fields are nulled before it is even enqueued.
+Uploads spilled to disk earlier and re-sent by startup recovery must be decided on the destination at SEND time.
+
+
+THIS IS ROUND 5. HEAD is 23c8c82c (the one commit was amended). Rounds 2-4 each found another way to write a direct `StorageClient` upload that a source-scanning guard would miss (round 4: comment markers inside strings, raw identifiers, a multi-line alias). That is an arms race a text scan cannot win, so the DESIGN OF THE ENFORCEMENT CHANGED in this round; audit it afresh:
+ - The destination gate now lives AT THE SINK: `StorageClient::gate(&self, object_path)` = `destination_gate::gate_proxy_url(&self.base_url, object_path)` is the FIRST statement of every `StorageClient` method that moves content to the proxy or names an object to it for upload: `upload`, `upload_file`, `upload_stream`, `upload_multipart`, `get_signed_upload_url`, `upload_via_signed_url`, `batch_upload`, `batch_upload_json` (`upload_bytes_signed` is the two signed methods). A caller that obtains a client by any route and calls it in any syntax is refused for a third-party proxy. The private multipart helpers are reachable only from `upload_multipart`.
+ - The gates that used to open the `gcs::upload_*` dispatchers were REMOVED (one layer, so removing any one gate fails a wire test): the dispatchers' Proxy arms all go through `StorageClient`; their Direct GCS and S3 arms are class 2 by construction.
+ - The guard no longer scans for storage-client method calls. It pins: each of those eight methods opens with the gate and the helper is the destination gate on `self.base_url`; every public async `StorageClient` method is either gated or one of five reviewed non-upload methods; the public functions of gcs.rs / s3.rs / storage_client.rs; the caller inventory of the gcs dispatchers (for wire-test review only: an aliased dispatcher is still gated); no `/storage` route or `x-storage-path` header literal outside the sink files and the two test-infrastructure crates; the test seam conditions.
+ - New wire test `a_storage_client_sends_nothing_to_a_third_party_proxy_through_any_method` drives all nine public upload methods of a client built on a third-party mock and requires zero connections.
+ Round 4's other points: R3-2 (S3 control) was verified resolved; the P54-K statement was confirmed.
+Questions for this round: (1) Is there ANY way for file content, or an object path, to reach a non-FluxRouter storage proxy through `StorageClient` (any method, public or private, including retries, redirects, the breaker, `check_exists` / `batch_check_exists` / `download_blob` / `get_upload_limits`, which are deliberately not gated: say whether any of them sends content or account-bearing object paths in production) or through anything else in `crates/` and `prod/` that talks to a storage proxy? (2) Did removing the dispatcher-level gates open anything (e.g. local side effects before the refusal that matter, a Proxy arm that does not use `StorageClient`)? (3) Do the gates run before any network I/O in each method? (4) Anything else new.
+
+CLAIMS to verify or refute:
+ C1. The gate (`crates/codegen/fuigo-file-utils/src/destination_gate.rs`) runs before any network I/O at the sink (see above). There is no code path in `crates/` or `prod/` (production, non-test code) that moves file content to a storage proxy without passing it: look for other HTTP clients hitting `/storage` routes, S3/GCS clients, other upload helpers, the upload queue worker, inline fallbacks, zstd streaming, startup recovery, share, feedback, review comments, heap profile, auth diagnostics, subagent metadata, tool definitions, per-turn artifacts, `fuigo trace` in the pager.
+ C2. A withheld upload is terminal in the upload queue (never retried, never parked), and `fuigo trace` does not retry it.
+ C3. The test seam (`cfg(any(test, feature = "test-loopback-operator"))`, hosts `127.0.0.1` / `[::1]` classified as FluxRouter) cannot be active in a shipped build: the feature is enabled only from `[dev-dependencies]` (workspace resolver = "2"), and `crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs` pins that.
+ C4. The guard `upload_gate_guard.rs` pins what is listed above. Its header states what its two source scans (caller inventory, route literal) cannot see. Report a guard finding only if a pin is wrong or can pass while the property it names is false (e.g. a `StorageClient` upload method that the pins would accept without a gate), not for forms of evading the two tripwire scans that the header already disclaims.
+ C5. The tests assert on what a recording mock endpoint RECEIVED (`gate_testkit.rs`), with a positive control for each path; find vacuous or flaky tests (timing assumptions, host assumptions such as 127.0.0.2 being bindable, process-global `Once`/notice state shared between tests in one test binary, tests that would pass with the gate removed).
+ C6. `WorkspaceEnvironment::for_method` (fuigo-workspace/src/upload/environment.rs) and its call in handle.rs: class 3 record carries no account id, team id, host, server id, cwd, repo root, remote URL, sandbox id/profile; classes 1 and 2 unchanged.
+ C7. Cargo changes are minimal: fuigo-file-utils gains dependency `fuigo-tty-utils` (stderr notice helper) and feature `test-loopback-operator = ["tokio/net"]`; fuigo-shell, fuigo-pager, fuigo-workspace gain a dev-dependency on fuigo-file-utils with that feature; Cargo.lock gains one line.
+ C8. No regression for class 1 and class 2 destinations, and no behaviour change other than the one described (e.g. error handling, logging, metrics, panics, the `fuigo/feedback/upload-trace` and `fuigo/review/*` handlers after the small refactor in fuigo-shell/src/extensions/feedback.rs).
+
+Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a concrete scenario (inputs, config, what leaves the machine or what breaks), and whether an existing test catches it. Also list every upload/egress path you examined and the gate it passes through. End with exactly one verdict line: LAND, LAND-WITH-FOLLOWUPS, or DO-NOT-LAND.
+
+===== REPORT =====
+Audited `2eb33c17..23c8c82c2629aac42257eae0c411145c4734c061`. Read-only; no Cargo, builds, or wire tests executed.
+
+1. **HIGH — `upload_via_signed_url` gates a different destination from the one receiving the bytes.**  
+   [storage_client.rs:2025](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:2025)
+
+   This public API permits:
+   ```rust
+   StorageClient::with_static_key("https://api.fluxrouter.ai/v1", "unused")
+       .upload_via_signed_url(
+           "https://third-party.example/storage/account-123/archive",
+           archive_bytes,
+           "application/gzip",
+       )
+       .await;
+   ```
+   The gate approves `self.base_url`; the raw client then PUTs the complete archive to the supplied third-party URL. No request to FluxRouter, signed-URL provenance, or bucket configuration is required. The request URL also discloses the supplied object path. `dispatch::send` does not enforce P71’s destination classification.
+
+   **Reachability qualification:** existing production callers obtain the URL through `get_signed_upload_url`; I found no current caller supplying this mismatched pair. This is a concrete public sink-API bypass of the stated any-caller guarantee, not an observed production disclosure.
+
+   **Existing tests:** do not catch it. The new nine-method test constructs the client itself on the third-party base; it never combines a permitted base with a third-party PUT destination.
+
+2. **MEDIUM — the public sink-surface pins can accept a new ungated upload method.**  
+   [upload_gate_guard.rs:345](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:345), [upload_gate_guard.rs:419](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:419)
+
+   Both inventories require visibility and function keywords on the same line. A valid method inside `impl StorageClient` beginning:
+   ```rust
+   pub
+   async fn unreviewed_upload(...)
+   ```
+   is invisible to both. Its body can directly use `self.http_client`, `/storage`, and `X-Storage-Path` without a gate. The route and caller scans exclude this sink file, and the eight existing first-statement pins remain satisfied.
+
+   I confirmed the unchanged inventories with a read-only, in-memory reproduction of the scanners. This concerns the claimed **sink-surface pin**, not either expressly disclaimed tripwire scan.
+
+   **Existing tests:** do not catch the added method; the wire test invokes only its fixed nine-method list.
+
+3. **LOW — the detached inline-fallback negative test can finish before an erroneous send.**  
+   [queue_tests.rs:4829](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/queue_tests.rs:4829)
+
+   The test waits for destination resolution, then sleeps 500 ms and asserts zero connections. Resolution is not task completion. With the gate removed and connection establishment delayed beyond that window, this individual test can pass before the detached task sends; runtime teardown then cancels it. The separate positive control does not synchronize completion of the negative task.
+
+   **Existing tests:** the awaited direct sink test would independently catch ordinary gate removal. This finding limits the inline-fallback test’s own evidence.
+
+The examined paths and enforcement are:
+
+| Upload / egress path | Gate or disposition |
+|---|---|
+| `StorageClient::upload`, `upload_file`, `upload_stream` | First statement calls `self.gate`; before requests, file opening, stream consumption, or breaker checks. |
+| `upload_multipart` → private init, proxy-part/direct-part uploads, completion | Entry gate precedes metadata and network I/O. Private helpers have no other production entry found. |
+| `get_signed_upload_url` | Entry gate precedes the object-path header and request. |
+| `upload_via_signed_url` | Entry gate checks the base URL; destination-binding defect above. |
+| `upload_bytes_signed` | Calls gated signed-URL acquisition and gated PUT. |
+| `batch_upload`, `batch_upload_json` | Entry gates precede encoding, compression, breaker checks, and requests. |
+| All five public `gcs.rs` upload dispatchers/helpers | Every Proxy arm reaches the corresponding `StorageClient` gate. |
+| Direct GCS bytes, file, streaming uploads | Class 2; unchanged direct GCS implementation. |
+| S3 bytes, file, streaming, batch and multipart uploads | Class 2; unchanged S3 implementation. |
+| Queue worker, owned snapshots, zstd streaming | Dispatchers → sink gates. Withheld errors remain typed and terminal. |
+| Four inline fallbacks: bytes, source file, blocking file, owned snapshot | Dispatchers → sink gates. |
+| Shell/workspace startup spill recovery | Re-enqueue → current resolver at send time → dispatcher → sink gate. |
+| Tool definitions, subagent metadata, per-turn artifacts, unified logs, metadata, plugin state, images and permission records | Direct `upload_bytes` or queue paths → sink gates. |
+| Workspace tool-state/tool-definition artifacts and environment record | Queue → sink gates; environment identity removal occurs before serialization/enqueue. |
+| Auth diagnostics | `upload_bytes` → `StorageClient::upload`, protecting both body and account-bearing object path. |
+| Share bundles | Signed dispatcher → signed acquisition/PUT gates. |
+| Feedback session archive | Feedback-specific early gate before packing, then sink gate. |
+| Review create/delete records | Shared `upload_review_record` → `upload_bytes` → sink gate. |
+| Heap profile and metadata | `upload_file` → file/multipart sink gates. |
+| Pager `fuigo trace` | `upload_bytes` → sink gate; withheld errors excluded from retries. |
+| `check_exists`, `batch_check_exists`, `download_blob` | Ungated and capable of sending supplied paths—header or JSON. **No production callers found**; restore currently uses a stub. They upload no file content. |
+| `get_upload_limits` | Ungated; sends neither file content nor an object path. |
+| Retry/auth middleware, breaker, redirects | Refusal occurs before upload retry/breaker activity. Existing production HTTP builders reject cross-origin redirects. |
+| Other storage-route/SDK usage in `crates/` and `prod/` | No additional production storage-proxy upload implementation found. |
+
+Removing dispatcher gates introduces metadata lookup/client construction before refusal, but I found no additional Proxy-arm network bypass. Class 1/2 regression freedom remains a source-review conclusion, not executed test evidence.
+
+DO-NOT-LAND
+codex_exit=0

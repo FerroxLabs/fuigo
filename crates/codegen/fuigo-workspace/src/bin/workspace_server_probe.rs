@@ -11,6 +11,9 @@
 //! The client connects to the *local* server the workspace-server reaches back to (e.g. `ws://localhost:10030/v1/tools`), using a bearer token.
 //! `servers.list` is scoped per-user on the server, so the bearer must resolve to the same user that owns the session; the
 //! access token from `~/.fuigo/auth.json` does (same identity).
+// Test probe: never shipped to users; its stdout/stderr are the e2e harness's channel, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use base64::Engine;
 use clap::Parser;

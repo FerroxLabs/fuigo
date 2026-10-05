@@ -1,0 +1,317 @@
+diff --git a/crates/codegen/fuigo-pager/src/headless.rs b/crates/codegen/fuigo-pager/src/headless.rs
+index a1b40a66..2abd5f44 100644
+--- a/crates/codegen/fuigo-pager/src/headless.rs
++++ b/crates/codegen/fuigo-pager/src/headless.rs
+@@ -117,6 +117,13 @@ pub enum HeadlessDenialRule {
+     HeadlessNeverApproves,
+     /// `--yolo` auto-approves, but this request offered no allow option to select.
+     YoloHadNoAllowOption,
++    /// The execution's token-budget guard refused the next model request (Contract D.4). The shell
++    /// reports it as the turn's ACP error with `data.code = "execution_budget_denied"`
++    /// ([`fuigo_shell::acp_error::ExecutionBudgetDenial`]); the inner rule is the shell's own.
++    ExecutionBudget(fuigo_shell::acp_error::ExecutionBudgetRule),
++    /// A token-budget denial whose rule this build does not know (a newer agent). Still a denial —
++    /// the shell's stable `data.code` says so — so it still exits with the denial code.
++    ExecutionBudgetUnrecognized,
+ }
+ 
+ impl HeadlessDenialRule {
+@@ -125,6 +132,8 @@ impl HeadlessDenialRule {
+         match self {
+             Self::HeadlessNeverApproves => "headless_never_approves",
+             Self::YoloHadNoAllowOption => "yolo_had_no_allow_option",
++            Self::ExecutionBudget(rule) => rule.id(),
++            Self::ExecutionBudgetUnrecognized => fuigo_shell::acp_error::EXECUTION_BUDGET_DENIED_CODE,
+         }
+     }
+ 
+@@ -139,6 +148,11 @@ impl HeadlessDenialRule {
+                 "a deny rule or protected path left the request with no allow option — remove the \
+                  matching entry from --deny-rules or the permissions config"
+             }
++            Self::ExecutionBudget(rule) => rule.remedy(),
++            Self::ExecutionBudgetUnrecognized => {
++                "the agent's token budget refused the request under a rule this build does not \
++                 know; the agent's error message names it and its remedy"
++            }
+         }
+     }
+ }
+@@ -176,6 +190,28 @@ impl HeadlessDenial {
+         }
+     }
+ 
++    /// A model request refused by the execution's token-budget guard (Contract D.4): no tool call
++    /// asked, so there is no title, id or option list.
++    pub fn from_budget_rule(rule: HeadlessDenialRule) -> Self {
++        debug_assert!(matches!(
++            rule,
++            HeadlessDenialRule::ExecutionBudget(_) | HeadlessDenialRule::ExecutionBudgetUnrecognized
++        ));
++        Self {
++            rule,
++            tool_title: None,
++            tool_call_id: String::new(),
++            offered_option_kinds: Vec::new(),
++        }
++    }
++
++    fn is_budget(&self) -> bool {
++        matches!(
++            self.rule,
++            HeadlessDenialRule::ExecutionBudget(_) | HeadlessDenialRule::ExecutionBudgetUnrecognized
++        )
++    }
++
+     /// The exit code a run blocked by this denial must produce (D.2.1).
+     pub fn exit_code(&self) -> i32 {
+         PERMISSION_DENIED_EXIT_CODE
+@@ -184,6 +220,9 @@ impl HeadlessDenial {
+     /// What was requested, for the human line. The title is the agent's own wording; the tool-call
+     /// id is the join key a reader needs when several calls are in flight.
+     pub fn requested(&self) -> String {
++        if self.is_budget() {
++            return "the next model request".to_string();
++        }
+         match self.tool_title.as_deref() {
+             Some(title) if !title.is_empty() => format!("{title} (tool call {})", self.tool_call_id),
+             _ => format!("tool call {}", self.tool_call_id),
+@@ -195,6 +234,16 @@ impl HeadlessDenial {
+     /// Written by the process exit path to stderr for every `--output-format`, and **never** gated
+     /// on a TTY: headless is a mode, not an inference (D.3).
+     pub fn human_line(&self) -> String {
++        if self.is_budget() {
++            return format!(
++                "fuigo: blocked — the execution's token budget refused {}. \
++                 Denied by rule `{}`. Remedy: {}. Exiting {}.",
++                self.requested(),
++                self.rule.id(),
++                self.rule.remedy(),
++                self.exit_code(),
++            );
++        }
+         format!(
+             "fuigo: blocked — permission denied in headless mode: {}. \
+              Denied by rule `{}`. Remedy: {}. Exiting {}.",
+@@ -297,6 +346,9 @@ enum TurnStop {
+     MaxTurns,
+     /// The turn stopped because a permission request was dismissed.
+     PermissionCancelled,
++    /// The turn ended because the execution's token-budget guard refused a model request (D.4),
++    /// read from the shell's `data.code = "execution_budget_denied"` on the prompt error.
++    BudgetDenied(HeadlessDenialRule),
+ }
+ 
+ /// Every non-headless command path finishes with `()`; this is the one conversion to the outcome
+@@ -1834,7 +1886,13 @@ pub async fn run_single_turn(
+ 
+     // Held rather than returned immediately so the denial latch below is still consulted: the flush
+     // drives the same ACP handler and can be the thing that hits a permission denial.
+-    let flush_error = if options.memory_flush && outcome.is_ok() {
++    // A budget-denied run has no budget left for the flush's own model request: it would be refused
++    // too and turn a denial into `exit(1)`.
++    let flush_error = if options.memory_flush
++        && outcome
++            .as_ref()
++            .is_ok_and(|stop| !matches!(stop, TurnStop::BudgetDenied(_)))
++    {
+         run_headless_memory_flush(
+             &acp_tx,
+             &mut acp_rx,
+@@ -1900,9 +1958,13 @@ fn headless_run_outcome(
+     // exactly one line on stderr. `main` writes the fuller one (remedy plus exit code) on the
+     // `PermissionDenied` arm; every other path writes the notice here.
+     match (denial, stop) {
+-        (Some(denial), TurnStop::PermissionCancelled) => {
++        // `finish_turn` latched the budget denial itself, so a latched one here IS it.
++        (Some(denial), TurnStop::PermissionCancelled | TurnStop::BudgetDenied(_)) => {
+             Ok(HeadlessOutcome::PermissionDenied(denial))
+         }
++        (None, TurnStop::BudgetDenied(rule)) => Ok(HeadlessOutcome::PermissionDenied(
++            HeadlessDenial::from_budget_rule(rule),
++        )),
+         (Some(denial), TurnStop::Ended | TurnStop::MaxTurns) => {
+             crate::best_effort_stderr::eprint_line(&denial.notice_line());
+             Ok(HeadlessOutcome::Finished)
+@@ -1955,6 +2017,38 @@ fn finish_turn(
+             stop => Ok(stop),
+         },
+         Some(Err(err)) => {
++            if fuigo_shell::acp_error::ExecutionBudgetDenial::is_budget_denial(&err) {
++                // Contract D.4: the shell's token-budget guard refused a model request. That is a
++                // denial with the same reporting contract as a permission denial — exit 3, the record
++                // on the terminal document, one English line — not a failed run. Keyed on the stable
++                // `data.code`, so a rule this build does not know is still a denial.
++                let rule = fuigo_shell::acp_error::ExecutionBudgetDenial::from_acp_error(&err)
++                    .map_or(HeadlessDenialRule::ExecutionBudgetUnrecognized, |budget| {
++                        HeadlessDenialRule::ExecutionBudget(budget.rule)
++                    });
++                if let Some(earlier) = emitter
++                    .permission_denial
++                    .replace(HeadlessDenial::from_budget_rule(rule))
++                {
++                    crate::best_effort_stderr::eprint_line(&earlier.notice_line());
++                }
++                if let Some(usage) = fuigo_shell::sampling::error::prompt_usage_from_error(&err)
++                    && let Ok(v) = serde_json::to_value(&usage)
++                {
++                    emitter.usage = Some(v);
++                }
++                // Plain writes nothing to stdout and its error goes to stderr, where `main` already
++                // writes the denial's one line (D.2.3): a second line here would be two. The one
++                // exception is a rule this build does not know: `main`'s line can only say "a budget
++                // refused it", so the agent's own message — which names the rule and its remedy —
++                // is the line that carries them.
++                if emitter.format != OutputFormat::Plain
++                    || rule == HeadlessDenialRule::ExecutionBudgetUnrecognized
++                {
++                    emitter.on_error(&fuigo_shell::sampling::error::acp_error_text(&err), None);
++                }
++                return Ok(TurnStop::BudgetDenied(rule));
++            }
+             let msg = if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
+                 let detail = err.data.as_ref().and_then(error_detail_from_data);
+                 crate::app::sanitize_user_error(&format_rate_limited_user_message(
+diff --git a/crates/codegen/fuigo-pager/src/headless_tests.rs b/crates/codegen/fuigo-pager/src/headless_tests.rs
+index 81b39e9c..ae121e5e 100644
+--- a/crates/codegen/fuigo-pager/src/headless_tests.rs
++++ b/crates/codegen/fuigo-pager/src/headless_tests.rs
+@@ -2204,4 +2204,138 @@ mod permission_denial {
+             "a real error is still a real error"
+         );
+     }
++
++
++    /// Contract D.4 (P02e): the shell's token-budget denial, as the prompt error the shell sends.
++    fn budget_denied_error(
++        rule: fuigo_shell::acp_error::ExecutionBudgetRule,
++    ) -> acp::Error {
++        fuigo_shell::acp_error::ExecutionBudgetDenial {
++            rule,
++            total_token_limit: Some(100),
++            total_tokens_used: 120,
++            output_token_limit: None,
++            output_tokens_used: 0,
++            unknown_usage: false,
++        }
++        .to_acp_error()
++    }
++
++    /// A budget denial ends the run through the SAME contract as a permission denial: exit 3, the
++    /// record on the one JSON document, the rule and remedy recoverable without reading prose.
++    #[test]
++    fn a_budget_denied_turn_exits_three_with_the_denial_record() {
++        use fuigo_shell::acp_error::ExecutionBudgetRule;
++        for rule in ExecutionBudgetRule::ALL {
++            let (captured, mut emitter) = captured_emitter();
++            let stop = crate::headless::finish_turn(
++                &mut emitter,
++                Some(Err(budget_denied_error(rule))),
++                false,
++                None,
++                &acp::SessionId::new("sess-1"),
++                false,
++            )
++            .expect("a budget denial is an outcome, not a failed run");
++            assert_eq!(stop, TurnStop::BudgetDenied(HeadlessDenialRule::ExecutionBudget(rule)));
++            let doc: serde_json::Value = serde_json::from_str(captured.text().trim())
++                .unwrap_or_else(|e| panic!("one JSON document ({e}): {}", captured.text()));
++            assert_eq!(doc["permissionDenied"]["rule"], rule.id(), "{doc}");
++            assert_eq!(doc["permissionDenied"]["remedy"], rule.remedy(), "{doc}");
++            assert_eq!(doc["permissionDenied"]["exitCode"], PERMISSION_DENIED_EXIT_CODE, "{doc}");
++
++            let outcome =
++                headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
++                    .expect("not a crash");
++            let HeadlessOutcome::PermissionDenied(denial) = outcome else {
++                panic!("a budget-denied run must not exit 0: {outcome:?}");
++            };
++            assert_eq!(denial.rule, HeadlessDenialRule::ExecutionBudget(rule));
++            assert_eq!(denial.exit_code(), 3);
++            let line = denial.human_line();
++            assert!(line.contains(rule.id()) && line.contains(rule.remedy()), "{line}");
++            assert!(!line.contains("permission denied"), "it was a budget, not a permission: {line}");
++            assert_eq!(line.lines().count(), 1, "{line}");
++        }
++    }
++
++    /// The budget denial is the outcome the run ENDED at, so it wins over a permission denial
++    /// latched earlier (which still gets its own stderr notice); and any other prompt error is still
++    /// a failed run, `exit(1)`.
++    #[test]
++    fn only_the_budget_denial_code_turns_a_prompt_error_into_a_denial() {
++        use fuigo_shell::acp_error::ExecutionBudgetRule;
++        let (_captured, mut emitter) = captured_emitter();
++        emitter.record_permission_denial(denial());
++        let stop = crate::headless::finish_turn(
++            &mut emitter,
++            Some(Err(budget_denied_error(ExecutionBudgetRule::TokenUsageUnknown))),
++            false,
++            None,
++            &acp::SessionId::new("sess-1"),
++            false,
++        )
++        .expect("an outcome");
++        let outcome = headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
++            .expect("not a crash");
++        assert_eq!(
++            outcome.denial().map(|d| d.rule),
++            Some(HeadlessDenialRule::ExecutionBudget(ExecutionBudgetRule::TokenUsageUnknown))
++        );
++
++        for other in [
++            fuigo_shell::acp_error::execution_incomplete("Execution stopped with bounded capacity"),
++            acp::Error::invalid_params().data(serde_json::json!({
++                "message": "invalid configuration: execution admission denied or could not be persisted",
++                "error_kind": "api",
++            })),
++        ] {
++            let (_captured, mut emitter) = captured_emitter();
++            assert!(
++                crate::headless::finish_turn(&mut emitter, Some(Err(other)), false, None,
++                    &acp::SessionId::new("sess-1"), false).is_err(),
++                "an error without the denial code is still a failed run"
++            );
++        }
++    }
++
++    /// A newer agent's rule this build does not know is still a denial: the stable `data.code` is
++    /// what decides, so it still exits 3 rather than falling back to `exit(1)`.
++    #[test]
++    fn an_unrecognized_budget_rule_is_still_a_denial() {
++        let mut wire = serde_json::to_value(budget_denied_error(
++            fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
++        ))
++        .unwrap();
++        wire["data"]["rule"] = serde_json::json!("execution_wall_clock_budget_exhausted");
++        let err: acp::Error = serde_json::from_value(wire).unwrap();
++        let (_captured, mut emitter) = captured_emitter();
++        let stop = crate::headless::finish_turn(
++            &mut emitter, Some(Err(err)), false, None, &acp::SessionId::new("sess-1"), false,
++        )
++        .expect("an outcome, not a failed run");
++        assert_eq!(stop, TurnStop::BudgetDenied(HeadlessDenialRule::ExecutionBudgetUnrecognized));
++        let outcome = headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
++            .expect("not a crash");
++        assert_eq!(outcome.denial().map(HeadlessDenial::exit_code), Some(3));
++    }
++
++    /// `--output-format plain`: stdout stays empty and the budget denial writes nothing itself —
++    /// `main` writes its one stderr line — so the run produces exactly one line, not two.
++    #[test]
++    fn a_plain_budget_denial_leaves_the_one_line_to_main() {
++        let captured = super::CapturedOut::default();
++        let mut emitter =
++            HeadlessEmitter::with_writer(OutputFormat::Plain, false, Box::new(captured.clone()));
++        let stop = crate::headless::finish_turn(
++            &mut emitter,
++            Some(Err(budget_denied_error(
++                fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
++            ))),
++            false, None, &acp::SessionId::new("sess-1"), false,
++        )
++        .expect("an outcome");
++        assert!(matches!(stop, TurnStop::BudgetDenied(_)));
++        assert_eq!(captured.text(), "", "plain writes nothing to stdout");
++    }
+ }

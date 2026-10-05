@@ -1,5 +1,7 @@
 //! Compiled only in `#[cfg(test)]` builds. Import via `crate::test_util`.
 use std::path::{Path, PathBuf};
+// The SSH re-exec helpers live in `fuigo-test-support` so every crate shares one implementation.
+pub use fuigo_test_support::reexec::{rerun_with_ssh_env, rerun_without_ambient_ssh};
 /// Minimal `AgentView` for unit tests outside the dispatch/handler modules (which keep their own richer factories).
 pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent_view::AgentView {
     use crate::app::agent::{AgentId, AgentSession, AgentState};
@@ -93,6 +95,23 @@ pub fn assert_path_column_aligned(text: &str, row_marker: &str) {
     }
     assert!(rows > 0, "no table rows matched {row_marker:?} in: {text}");
 }
+/// A temp dir on tmpfs where one exists (Linux `/dev/shm`), else the ordinary temp dir.
+/// For tests that make several threads queue on `config.toml.lock`: every writer `fsync`s inside the lock, and on a loaded
+/// disk nine queued fsyncs exceed the lock's 2 s give-up, so the test saw `TimedOut` rather than the property it asserts.
+/// Memory-backed storage removes the disk latency; the lock, the production code and the assertions are unchanged.
+pub fn memory_backed_tempdir() -> tempfile::TempDir {
+    #[cfg(target_os = "linux")]
+    if let Ok(dir) = tempfile::tempdir_in("/dev/shm") {
+        return dir;
+    }
+    tempfile::tempdir().expect("tempdir")
+}
+/// Refuse a write to a variable every test in this binary reads (`FUIGO_HOME`, `HOME`, the endpoint URLs) unless the caller is a test running alone in a child process.
+/// `fuigo_dirs::fuigo_home()` follows `FUIGO_HOME` live, so a write in the shared process redirects tests running beside it, and a restore (or a deleted tempdir) lands under them too.
+/// Start the test with `if fuigo_test_support::env::rerun_in_own_process() { return; }`.
+pub fn require_own_process_for(key: &str) {
+    fuigo_test_support::env::require_own_process_for(key);
+}
 /// RAII guard for temporarily overriding an environment variable: captures the original value on construction and restores it on drop.
 /// Used by theme and persist tests to redirect `HOME`/`USERPROFILE` to temp directories without affecting the real user config.
 pub struct EnvVarGuard {
@@ -102,6 +121,7 @@ pub struct EnvVarGuard {
 impl EnvVarGuard {
     /// Override `key` to `value` (paths, URLs, flags, anything that converts to `OsStr`), returning a guard that restores the original on drop.
     pub fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        require_own_process_for(key);
         let original = std::env::var_os(key);
         unsafe {
             std::env::set_var(key, value);
@@ -126,8 +146,10 @@ impl Drop for EnvVarGuard {
 /// *resolved* home (possibly the real `~/.fuigo` when another test pinned the
 /// cache first); cwd-encoded dirnames are tempdir-unique, and cleanup runs on
 /// drop so it survives assertion panics.
-/// Callers must hold `#[serial_test::serial(FUIGO_HOME)]`.
+/// Callers must hold `#[serial_test::serial(FUIGO_HOME)]` and run in their own process (`rerun_in_own_process`); the variable is restored on drop.
 pub struct FuigoHomeFixture {
+    /// Declared before `_home` so the variable is restored before its directory is deleted.
+    _env: EnvVarGuard,
     _home: tempfile::TempDir,
     cwd: tempfile::TempDir,
     cleanup: Vec<std::path::PathBuf>,
@@ -147,9 +169,10 @@ impl Default for FuigoHomeFixture {
 impl FuigoHomeFixture {
     pub fn new() -> Self {
         let home = tempfile::tempdir().expect("home tempdir");
-        unsafe { std::env::set_var("FUIGO_HOME", home.path()) };
+        let env = EnvVarGuard::set("FUIGO_HOME", home.path());
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         Self {
+            _env: env,
             _home: home,
             cwd,
             cleanup: Vec::new(),
@@ -308,5 +331,48 @@ fn copy_dir_all(src: &Path, dst: &Path) {
         } else {
             std::fs::copy(entry.path(), to).unwrap();
         }
+    }
+}
+
+/// P149 (Astra r1): the process-wide sent-credential registry is shared by every test in this binary, and some
+/// tests clear it (`sent_credentials::clear_for_tests`). Every test that records a credential and then expects it
+/// replaced, and every test that clears the registry, holds this lock, so a clear can never land in between.
+pub(crate) fn sent_credentials_lock() -> std::sync::MutexGuard<'static, ()> {
+    static REGISTRY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    REGISTRY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod own_process_tests {
+    use super::*;
+
+    /// The fixture used to leave `FUIGO_HOME` pointing at its deleted tempdir for every later test in the process.
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn the_home_fixture_restores_fuigo_home_on_drop() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let before = std::env::var_os("FUIGO_HOME");
+        let during = {
+            let _fixture = FuigoHomeFixture::new();
+            std::env::var_os("FUIGO_HOME")
+        };
+        assert_ne!(during, before, "the fixture must redirect FUIGO_HOME while alive");
+        assert_eq!(std::env::var_os("FUIGO_HOME"), before, "and put it back on drop");
+    }
+
+    /// The guard that makes the class impossible to reintroduce: a write to a process-wide variable from the shared test process is refused.
+    #[test]
+    fn writing_fuigo_home_in_the_shared_process_is_refused() {
+        if std::env::var_os("FUIGO_TEST_OWN_PROCESS").is_some() {
+            return; // in an own-process child the write is the permitted case
+        }
+        let before = std::env::var_os("FUIGO_HOME");
+        let refused = std::panic::catch_unwind(|| {
+            let _guard = EnvVarGuard::set("FUIGO_HOME", "/nonexistent-p21");
+        });
+        assert!(refused.is_err(), "the shared-process write must panic");
+        assert_eq!(std::env::var_os("FUIGO_HOME"), before, "and must not have changed the variable");
     }
 }

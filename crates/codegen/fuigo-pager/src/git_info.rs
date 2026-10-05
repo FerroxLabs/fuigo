@@ -626,6 +626,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[test]
     fn compute_cwd_git_info_nested_repo_does_not_inherit_db_record() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         // serial(FUIGO_HOME) orders peers; EnvVarGuard restores on drop so later `open_default()` callers do not see a deleted temp home
         let _fuigo_home = crate::test_util::EnvVarGuard::set("FUIGO_HOME", home.path());

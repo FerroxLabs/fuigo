@@ -41,7 +41,7 @@ fn counted_handler(
 }
 
 fn client_short_open_duration(addr: SocketAddr, open_duration: Duration) -> StorageClient {
-    StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+    StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
         .with_breaker_open_duration(open_duration)
 }
 
@@ -395,7 +395,7 @@ async fn breaker_emits_exactly_one_warn_on_open_and_one_info_on_close() {
     );
     let (addr, _) = start_server(router).await;
     let observer = Arc::new(RecordingObserver::default());
-    let client = StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
         .with_breaker_for_testing(TEST_OPEN_DURATION, observer.clone());
 
     // 10 attempts: 5 wire 401s open the breaker, 5 short-circuit.

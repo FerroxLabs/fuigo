@@ -1,15 +1,37 @@
 //! Outbound updates for `SessionActor`: `send_update` and its buffered/transient/direct variants.
 //! Also Ferrox Labs-notification handling and the gateway-bridge dispatch shims.
 use super::*;
-/// Hook / image-intake diagnostics and background_tasks snapshots leave the no-output rewind window open; every other variant closes it.
+/// Hook / image-intake diagnostics, the load-time history repair note and background_tasks snapshots leave the no-output rewind window open; every other variant closes it.
 pub(super) fn closes_cancel_rewind_window(update: &FuigoSessionUpdate) -> bool {
     !matches!(
         update,
         FuigoSessionUpdate::HookExecution { .. }
             | FuigoSessionUpdate::ImageCompressed { .. }
             | FuigoSessionUpdate::ImageDropped { .. }
+            | FuigoSessionUpdate::HistoryRepaired { .. }
             | FuigoSessionUpdate::BackgroundTasks { .. }
     )
+}
+impl SessionActor {
+    /// A change to the session (`what`) was made in memory and its rewrite of `chat_history.jsonl` is refused while a
+    /// load-time repair still owes its backup (P96). Tells the user once, instead of only logging the refusal (P123, K14).
+    pub(super) async fn note_history_not_rewritten(&self, what: &str) {
+        self.note_history_not_rewritten_with(what, true).await;
+    }
+    /// [`Self::note_history_not_rewritten`] for a change a resumed session does not make again (`reapplied_on_resume`
+    /// false), whose note must not say it does (P135).
+    pub(super) async fn note_history_not_rewritten_with(&self, what: &str, reapplied_on_resume: bool) {
+        use crate::session::storage::jsonl::load_repair as repair;
+        let note = if reapplied_on_resume {
+            repair::note_for_refused_rewrite(&self.session_info, what)
+        } else {
+            repair::note_for_refused_unrepeated_rewrite(&self.session_info, what)
+        };
+        if let Some(message) = note {
+            self.send_fuigo_notification(FuigoSessionUpdate::HistoryRepaired { message })
+                .await;
+        }
+    }
 }
 fn scrub_inbound_session_summary(
     notification: &mut crate::extensions::notification::SessionNotification,
@@ -575,7 +597,9 @@ impl SessionActor {
     /// Must **not** stamp an `eventId`: a reconnect cursor that points at an id absent from `updates.jsonl` never resolves and forces a full replay.
     /// See `ensure_event_id_meta`.
     /// Timestamp-only meta keeps the client clock without advancing the cursor.
-    pub(super) fn send_fuigo_notification_transient(&self, update: FuigoSessionUpdate) {
+    pub(super) fn send_fuigo_notification_transient(&self, mut update: FuigoSessionUpdate) {
+        // P70b display sink: credentials sent upstream never reach the client in error text.
+        update.scrub_sent_credentials();
         let notification = FuigoSessionNotification {
             session_id: self.session_info.id.clone(),
             update,
@@ -747,6 +771,8 @@ impl SessionActor {
             notification.meta = meta_map.map(serde_json::Value::Object);
         }
         scrub_inbound_session_summary(&mut notification);
+        // P70b display sink: a forwarded child notification is persisted below; error text in it is scrubbed.
+        notification.update.scrub_sent_credentials();
         match &notification.update {
             FuigoSessionUpdate::SubagentSpawned {
                 subagent_id,
@@ -1070,10 +1096,13 @@ impl SessionActor {
     #[tracing::instrument(skip_all)]
     pub(super) async fn send_fuigo_notification_with_extra_meta(
         &self,
-        update: FuigoSessionUpdate,
+        mut update: FuigoSessionUpdate,
         extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
         durability: crate::session::storage::jsonl::AppendDurability,
     ) {
+        // P70b display sink, before the fan-out: the client, `updates.jsonl`, the retry mirror and the notification
+        // hooks all get error text with every credential this process sent upstream replaced (exact match).
+        update.scrub_sent_credentials();
         if closes_cancel_rewind_window(&update) {
             self.close_rewind_window().await;
         }

@@ -23,11 +23,15 @@ use crate::types::RequestId;
 pub(crate) fn messages_event_has_meaningful_content(event: &MessageStreamEvent) -> bool {
     match event {
         MessageStreamEvent::Ping => false,
+        // A block whose type this client does not model is NOT progress, however often it
+        // arrives: counting it would let a provider streaming an unmodelled block refresh the
+        // content clock forever while producing nothing the user can see. Tolerating an unknown
+        // variant must never buy a stalled turn an unlimited extension.
+        MessageStreamEvent::ContentBlockStart { content_block, .. } => content_block.known().is_some(),
+        MessageStreamEvent::ContentBlockDelta { delta, .. } => delta.known().is_some(),
         MessageStreamEvent::MessageStart { .. }
         | MessageStreamEvent::MessageDelta { .. }
         | MessageStreamEvent::MessageStop
-        | MessageStreamEvent::ContentBlockStart { .. }
-        | MessageStreamEvent::ContentBlockDelta { .. }
         | MessageStreamEvent::ContentBlockStop { .. }
         | MessageStreamEvent::Error { .. } => true,
     }
@@ -43,6 +47,13 @@ struct BlockState {
     args_acc: String,
     thinking_acc: String,
     signature: String,
+    /// The wire `type` of the first delta on THIS block that this client does not model, if any.
+    ///
+    /// An unmodelled delta is dropped rather than fatal, so the block's accumulators have a hole in
+    /// them while the block state itself survives to be finalized. Whether that hole is tolerable
+    /// depends entirely on what the block becomes, so the drop is recorded here and
+    /// `ContentBlockStop` decides. See the `BlockType::ToolUse` arm.
+    dropped_unknown_delta: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,14 +181,17 @@ pub fn stream_messages<'a>(
                     };
                 }
 
+                // `content_block` is `Open`: a block type this client does not model is skipped
+                // and the turn survives, while a modelled type with a malformed body has already
+                // failed the parse upstream
                 MessageStreamEvent::ContentBlockStart {
                     index,
                     content_block,
-                } => match content_block {
-                    ContentBlock::Thinking {
+                } => match content_block.into_known() {
+                    Some(ContentBlock::Thinking {
                         thinking,
                         signature,
-                    } => {
+                    }) => {
                         blocks.insert(
                             index,
                             BlockState {
@@ -188,6 +202,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: thinking.clone(),
                                 signature: signature.clone(),
+                                dropped_unknown_delta: None,
                             },
                         );
                         if !first_token_emitted {
@@ -197,7 +212,7 @@ pub fn stream_messages<'a>(
                             };
                         }
                     }
-                    ContentBlock::Text { text, .. } => {
+                    Some(ContentBlock::Text { text, .. }) => {
                         blocks.insert(
                             index,
                             BlockState {
@@ -208,6 +223,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                dropped_unknown_delta: None,
                             },
                         );
                         if !first_token_emitted {
@@ -217,7 +233,7 @@ pub fn stream_messages<'a>(
                             };
                         }
                     }
-                    ContentBlock::ToolUse { id, name, .. } => {
+                    Some(ContentBlock::ToolUse { id, name, .. }) => {
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
                         block_to_tool_index.insert(index, tool_index);
@@ -234,6 +250,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                dropped_unknown_delta: None,
                             },
                         );
 
@@ -249,13 +266,41 @@ pub fn stream_messages<'a>(
                     // Encrypted reasoning the model chose to redact
                     // The `RedactedThinking` wire variant exists so a stream containing one deserializes instead of failing the whole event parse
                     // Its opaque `data` blob is not forwarded as a `SamplingEvent`; no consumer claims redacted_thinking support
-                    ContentBlock::RedactedThinking { .. } => {}
+                    Some(ContentBlock::RedactedThinking { .. }) => {}
                     // Image / ToolResult are not expected in assistant streams.
-                    _ => {}
+                    Some(_) => {}
+                    // A content-block type this client does not model: no block state is opened,
+                    // so its deltas are ignored too, and the rest of the turn proceeds
+                    None => {}
                 },
 
+                // `delta` is `Open`: an unmodelled delta type is dropped rather than failing the
+                // parse. But dropping one is DATA LOSS on a block that stays open, so the drop is
+                // recorded against that block before it is discarded. `ContentBlockStop` is where
+                // the loss is judged -- a hole in streamed text is a visible gap, a hole in
+                // streamed tool arguments is a silently altered tool call.
                 MessageStreamEvent::ContentBlockDelta { index, delta } => {
-                    if let Some(state) = blocks.get_mut(&index) {
+                    // Keyed on "this delta is not modelled", NOT on "a tag could be read off it":
+                    // an `Open::Unknown` that somehow carries no string `type` is still a dropped
+                    // delta, and it must not be the one case that slips through unrecorded.
+                    if delta.known().is_none() {
+                        let tag = delta.unknown_tag().unwrap_or("<untagged>");
+                        tracing::warn!(
+                            block_index = index,
+                            unknown_delta_type = %tag,
+                            "Dropping a content-block delta this client does not model"
+                        );
+                        // Keep the FIRST tag: it is the one that names where the hole started, and
+                        // a block with several holes is no more acceptable than a block with one.
+                        if let Some(state) = blocks.get_mut(&index)
+                            && state.dropped_unknown_delta.is_none()
+                        {
+                            state.dropped_unknown_delta = Some(tag.to_owned());
+                        }
+                    }
+                    if let Some(state) = blocks.get_mut(&index)
+                        && let Some(delta) = delta.into_known()
+                    {
                         match delta {
                             StreamDelta::ThinkingDelta { thinking } => {
                                 if !thinking.is_empty() {
@@ -317,6 +362,14 @@ pub fn stream_messages<'a>(
                 MessageStreamEvent::ContentBlockStop { index } => {
                     if let Some(state) = blocks.remove(&index) {
                         match state.block_type {
+                            // Text and Thinking deliberately TOLERATE a dropped delta where ToolUse
+                            // refuses one. The asymmetry is the point: a hole in streamed text is a
+                            // visible gap in prose a human reads, already warned about in the log,
+                            // and nothing executes it -- failing the turn over it would throw away
+                            // a complete billed response for a cosmetic defect, which is the exact
+                            // harm this packet was written to stop. A hole in streamed tool
+                            // arguments changes what a program DOES, invisibly. Only the second one
+                            // is worth a dead turn.
                             BlockType::Text => {
                                 if !state.text_acc.is_empty() {
                                     if !assistant_text.is_empty() {
@@ -362,6 +415,42 @@ pub fn stream_messages<'a>(
                                 }
                             }
                             BlockType::ToolUse => {
+                                // A tool call is EXECUTED, and `args_acc` is a plain concatenation
+                                // of streamed fragments. A delta dropped from the MIDDLE of that
+                                // sequence therefore does not produce a detectable error: with
+                                // `{"a":1,` + <dropped `"b":2,`> + `"c":3}` the concatenation is
+                                // `{"a":1,"c":3}`, syntactically valid JSON with one parameter
+                                // silently absent. An `Edit` that loses `old_string`, or a `Write`
+                                // that loses part of `content`, would then run with arguments the
+                                // model never sent and the turn would report success. (A drop from
+                                // the TAIL is the harmless case -- it yields invalid JSON, which is
+                                // loud at the tool boundary. Correctness cannot rest on which.)
+                                //
+                                // Forward compatibility exists to keep a paid-for turn alive
+                                // through a variant we do not model. It must never buy a turn that
+                                // ACTS on altered arguments: that is a strictly worse outcome than
+                                // the loud abort this replaced. `serde_helpers`' own design note
+                                // forbids exactly this for a corrupt modelled `tool_use` block;
+                                // this extends it to a dropped delta ON a well-formed one, which is
+                                // the case that note did not reach.
+                                let dropped = state.dropped_unknown_delta.as_ref().map(|tag| {
+                                    SamplingErrorInfo::from(&SamplingError::serialization_message(
+                                        format!(
+                                            "tool_use block {index} (`{name}`) dropped an unmodelled \
+                                             `{tag}` content-block delta, so its streamed arguments \
+                                             are incomplete; refusing to report a tool call whose \
+                                             arguments may differ from what the model sent",
+                                            name = state.tool_name,
+                                        ),
+                                    ))
+                                });
+                                if let Some(error) = dropped {
+                                    yield SamplingEvent::Failed {
+                                        request_id: request_id.clone(),
+                                        error,
+                                    };
+                                    return;
+                                }
                                 assistant_tool_calls.push(ToolCall {
                                     id: std::sync::Arc::<str>::from(state.tool_id),
                                     name: state.tool_name,
@@ -407,6 +496,20 @@ pub fn stream_messages<'a>(
                             tracing::warn!(
                                 wire_stop_reason = "model_context_window_exceeded",
                                 "context window hit mid-generation; mapping to the Length stop class"
+                            );
+                            StopReason::Length
+                        }
+                        // An unmodelled stop_reason that NAMES A TOKEN LIMIT is a length stop, not a
+                        // clean completion. `Length` is what drives truncation handling and
+                        // compaction, and a gateway fronting this backend spells the same stop
+                        // `MAX_TOKENS`, `length` or `length_limit`; reading any of those as `Stop`
+                        // presents a truncated tail as the model's final answer.
+                        messages::StopReason::Unknown(wire)
+                            if fuigo_sampling_types::types::is_length_stop_alias(&wire) =>
+                        {
+                            tracing::warn!(
+                                wire_stop_reason = %wire,
+                                "unrecognized stop_reason names a token limit; mapping to the Length stop class"
                             );
                             StopReason::Length
                         }

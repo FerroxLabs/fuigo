@@ -80,14 +80,7 @@ pub(super) fn credit_limit_upsell_mode(
 /// - 402 Payment Required always means a credit or spend block here (Build pool and IC spend blocks); no message filter.
 /// - 403 counts only when the body contains "run out of credits" (legacy IC spend wording); other 403s (content-safety, ZDR, …) are excluded.
 pub(crate) fn is_credit_limit_error(http_status: Option<u16>, message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    let legacy = m.contains("run out of credits");
-    match http_status {
-        Some(402) => true,
-        Some(403) if legacy => true,
-        // Retry notifications embed "status 402" / "status 403" in the body without a separate status field
-        None | Some(_) => m.contains("status 402") || (m.contains("status 403") && legacy),
-    }
+    fuigo_shell::sampling::error_verdicts::is_credit_limit_error(http_status, message)
 }
 
 /// Option id for Try Again. Submit routes on this sentinel, not on

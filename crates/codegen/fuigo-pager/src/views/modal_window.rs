@@ -24,22 +24,43 @@ use crate::theme::Theme;
 
 pub use crate::modal_window_state::{ModalWindowState, ShortcutHitArea};
 
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// When set, [`render_modal_window`] renders **borderless** ("embedded"): no centered popup box, no border, no close button.
 /// The modal's content fills the given `area` directly.
 /// Minimal mode sets this once at startup so it never shows a floating modal frame; the full TUI leaves it off and keeps the bordered popup.
+#[cfg(not(test))]
 static EMBEDDED: AtomicBool = AtomicBool::new(false);
+
+// In this crate's own tests the flag is per thread, not per process.
+// Every modal, dropdown and prompt render reads it, and the tests run concurrently in one process, one thread each.
+// As a process global, the few tests that turn it on (directly, or through `apply_screen_mode_globals`) widened and un-wrapped whatever modal another test was rendering at that moment (P78: `footer_total_height_grows_when_hints_wrap`, "got first=29 last=29").
+// `#[serial]` on the writers cannot prevent that: the readers are not serial, and there are hundreds of them.
+#[cfg(test)]
+thread_local! {
+    static EMBEDDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Enable/disable borderless ("embedded") modal rendering.
 /// Set `true` for minimal mode (called once at terminal init).
 pub fn set_embedded(on: bool) {
+    #[cfg(not(test))]
     EMBEDDED.store(on, Ordering::Relaxed);
+    #[cfg(test)]
+    EMBEDDED.set(on);
 }
 
 /// Whether modals should render borderless (minimal mode). See [`set_embedded`].
+#[cfg(not(test))]
 pub fn embedded() -> bool {
     EMBEDDED.load(Ordering::Relaxed)
+}
+
+/// Whether modals should render borderless, as set on this test thread. See the note on the test-build `EMBEDDED`.
+#[cfg(test)]
+pub fn embedded() -> bool {
+    EMBEDDED.get()
 }
 
 /// Resolved list-row styling for the embedded ("resume-list") look shared by the dropdown / picker widgets.
@@ -1105,10 +1126,56 @@ mod tests {
         assert!(off.is_empty(), "no i hint when vim-mode is off");
     }
 
+    /// A test that turns embedded rendering on must not change what a test on another thread renders (P78).
+    /// The other thread holds the flag on until this one has looked, so the outcome does not depend on scheduling.
+    #[test]
+    fn embedded_set_on_one_test_thread_is_not_seen_on_another() {
+        let _theme = crate::theme::cache::pin_theme();
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let (on_tx, on_rx) = std::sync::mpsc::channel();
+        let (looked_tx, looked_rx) = std::sync::mpsc::channel::<()>();
+        let other = std::thread::spawn(move || {
+            set_embedded(true);
+            let on_there = embedded();
+            on_tx.send(()).unwrap();
+            // Keep it on until the reader has rendered (or died: a closed channel also ends the wait).
+            let _ = looked_rx.recv();
+            set_embedded(false);
+            on_there
+        });
+        on_rx.recv().unwrap();
+
+        let seen_here = embedded();
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut state = ModalWindowState::new();
+        let rendered = render_modal_window(&mut buf, area, &mut state, &dummy_config(), &theme);
+        drop(looked_tx);
+        assert!(
+            other.join().unwrap(),
+            "the writer itself must see what it set"
+        );
+
+        assert!(
+            !seen_here,
+            "another test's `set_embedded(true)` leaked into this thread"
+        );
+        assert!(rendered.is_some(), "the popup renders");
+        assert_ne!(
+            state.popup_area,
+            Some(area),
+            "this thread still gets the centered popup while another test has embedded on"
+        );
+    }
+
     /// Embedded mode (minimal) fills the given area with no centered popup box; the default (full TUI) renders a smaller, centered popup.
     #[test]
     #[serial_test::serial]
     fn embedded_fills_area_without_centering() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -1152,6 +1219,7 @@ mod tests {
 
     #[test]
     fn centered_tip_footer_centers_and_clips() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

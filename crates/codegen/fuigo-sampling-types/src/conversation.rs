@@ -57,7 +57,7 @@ use crate::tool_overrides::{ToolOverrides, WebSearchOptions, XSearchOptions, dro
 use crate::types::{
     ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage, FinishReason,
     ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition, TraceContext,
-    Usage,
+    Usage, is_length_stop_alias,
 };
 
 // ============================================================================
@@ -939,6 +939,16 @@ impl StopReason {
     }
 }
 
+/// `StopReason` is Fuigo's own normalized, closed vocabulary; `FinishReason` is the provider's
+/// open one. An unmodelled wire value normalizes to `Stop` -- the response itself is intact and
+/// must not be discarded -- and the verbatim string is logged so the next incident is diagnosable
+/// from logs alone.
+///
+/// `Stop` is the fallback, NOT the blanket answer. An open vocabulary that collapses every
+/// unrecognized value to "completed cleanly" trades a loud wrong answer for a silent one: a length
+/// stop spelled the provider's way (`max_tokens`, `MAX_TOKENS`, `length_limit`) would be reported as
+/// a finished turn, and `Length` is precisely what drives truncation handling and compaction. So the
+/// length family is recognized by value first -- see [`is_length_stop_alias`].
 impl From<FinishReason> for StopReason {
     fn from(fr: FinishReason) -> Self {
         match fr {
@@ -946,6 +956,20 @@ impl From<FinishReason> for StopReason {
             FinishReason::Length => StopReason::Length,
             FinishReason::ToolCalls | FinishReason::FunctionCall => StopReason::ToolCalls,
             FinishReason::ContentFilter => StopReason::ContentFilter,
+            FinishReason::Unknown(ref raw) if is_length_stop_alias(raw) => {
+                tracing::warn!(
+                    finish_reason = %raw,
+                    "Unmodelled finish_reason names a token limit; normalizing to `length`"
+                );
+                StopReason::Length
+            }
+            FinishReason::Unknown(ref raw) => {
+                tracing::warn!(
+                    finish_reason = %raw,
+                    "Normalizing an unmodelled finish_reason to `stop`"
+                );
+                StopReason::Stop
+            }
         }
     }
 }
@@ -3645,6 +3669,65 @@ mod tests {
             StopReason::from(FinishReason::ContentFilter),
             StopReason::ContentFilter
         );
+    }
+
+    /// An unmodelled `finish_reason` that names a token limit must normalize to `Length`, not to
+    /// `Stop`.
+    ///
+    /// `Length` is what drives truncation handling and compaction. Before `FinishReason` gained its
+    /// open `Unknown` arm these values aborted the terminal chunk: wrong, but LOUD. Collapsing them
+    /// to `Stop` makes a truncated response indistinguishable from a complete one, and nothing ever
+    /// asks for the rest -- a silent wrong answer, which is worse. Each spelling below is a real
+    /// provider's, and the casing matters: Vertex/Gemini SHOUT, Bedrock and LiteLLM-style shims
+    /// snake_case.
+    #[test]
+    fn unmodelled_token_limit_finish_reasons_normalize_to_length() {
+        for wire in [
+            // Vertex AI / Gemini
+            "MAX_TOKENS",
+            "MAX_OUTPUT_TOKENS",
+            // Anthropic Messages proxied verbatim by an OpenAI-compatible shim
+            "max_tokens",
+            "max_output_tokens",
+            // gateways that name the limit rather than the cause
+            "length_limit",
+            // Anthropic's mid-generation context overflow
+            "model_context_window_exceeded",
+            // whitespace a shim left on the value
+            " max_tokens ",
+        ] {
+            assert_eq!(
+                StopReason::from(FinishReason::Unknown(wire.to_owned())),
+                StopReason::Length,
+                "`{wire}` names a token limit and must map to Length; mapping it to Stop reports a \
+                 truncated response as a complete one"
+            );
+        }
+    }
+
+    /// The tolerant fallback survives: a value that is NOT a token limit still normalizes to `Stop`
+    /// rather than erroring, which is the whole point of the open vocabulary. The length recognizer
+    /// must not become a greedy substring match.
+    #[test]
+    fn other_unmodelled_finish_reasons_still_normalize_to_stop() {
+        for wire in [
+            // real gateway / self-hosted values
+            "eos",
+            "end_turn",
+            "stop_sequence",
+            "guardrail_intervened",
+            "error",
+            // near-misses that must NOT be read as a token limit
+            "max_tokens_per_minute",
+            "length_of_conversation",
+            "",
+        ] {
+            assert_eq!(
+                StopReason::from(FinishReason::Unknown(wire.to_owned())),
+                StopReason::Stop,
+                "`{wire}` is not a token limit and must keep the tolerant Stop fallback"
+            );
+        }
     }
 
     #[test]

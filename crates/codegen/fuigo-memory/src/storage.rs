@@ -31,6 +31,65 @@ pub struct MemoryStorage {
     /// When true, workspace writes are silently skipped (temp-dir CWDs).
     ephemeral: bool,
     global_enabled: bool,
+    /// Legacy folders this start left in place, not yet shown to the user before (P97).
+    legacy_notices: Vec<LegacyMemoryNotice>,
+    /// Pre-P91 folder names this workspace could have (P124): see [`MemoryStorage::stranded_legacy_folders`].
+    legacy_dirs: Vec<PathBuf>,
+}
+
+/// Why a pre-P91 `org/repo` memory folder was not moved to its host-qualified name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyMemoryOutcome {
+    /// The folder was proven to belong to this host and was moved.
+    Adopted,
+    /// The folder cannot be shown to belong to this host and was left untouched.
+    NotAdopted { reason: String },
+    /// The folder was proven but the move itself failed; it was left in place.
+    MoveFailed { error: String },
+    /// The host-qualified folder already exists and an older version has since written notes under
+    /// the legacy name again (a downgrade after the move, R110). The two are never merged here.
+    Stranded,
+}
+
+/// A one-time notice about a legacy memory folder that was not adopted (P97), or that an older
+/// version wrote again after the move (R110). Shown once per legacy folder: a marker file in the
+/// memory root records that it was shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyMemoryNotice {
+    pub legacy: PathBuf,
+    pub new: PathBuf,
+    pub outcome: LegacyMemoryOutcome,
+}
+
+impl LegacyMemoryNotice {
+    /// The text shown to the user. Names both folders and points at the user guide.
+    pub fn message(&self) -> String {
+        let why = match &self.outcome {
+            LegacyMemoryOutcome::Adopted => return String::new(),
+            LegacyMemoryOutcome::NotAdopted { .. } => {
+                "Fuigo could not show that it belongs to this repository's host, so it was not used"
+            }
+            LegacyMemoryOutcome::MoveFailed { .. } => "Fuigo could not move it, so it was not used",
+            LegacyMemoryOutcome::Stranded => {
+                return format!(
+                    "Fuigo: found memory written by an older version of Fuigo at {}, after this \
+                     repository's memory had moved to {}. Fuigo uses the new folder and did not \
+                     merge the two. If the old notes are yours, move them into the new folder by \
+                     hand (see the Memory page of the user guide). Nothing was deleted.",
+                    self.legacy.display(),
+                    self.new.display()
+                );
+            }
+        };
+        format!(
+            "Fuigo: found memory from an older version at {}. {why}. \
+             Memory for this repository now lives at {}. If the old memory is yours, move its \
+             contents to the new folder by hand (see the Memory page of the user guide). \
+             Nothing was deleted.",
+            self.legacy.display(),
+            self.new.display()
+        )
+    }
 }
 
 impl MemoryStorage {
@@ -52,14 +111,31 @@ impl MemoryStorage {
         let global_dir = root_override
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| fuigo_home().join("memory"));
+        let ephemeral = use_workspace_hash && is_ephemeral_cwd(cwd);
+        let mut legacy_notices = Vec::new();
+        let mut legacy_dirs = Vec::new();
         let workspace_dir = if use_workspace_hash {
-            let workspace_hash = compute_workspace_hash(cwd);
-            global_dir.join(&workspace_hash)
+            let identity = workspace_identity(cwd);
+            let workspace_dir = global_dir.join(&identity.dir_name);
+            // Not skipped for ephemeral cwds: adoption is proof-gated, and a temp
+            // worktree of a proven clone may legitimately be the first to start.
+            if let Some(remote) = &identity.remote {
+                let candidates: Vec<PathBuf> = identity
+                    .legacy_dir_names
+                    .iter()
+                    .map(|name| global_dir.join(name))
+                    .collect();
+                legacy_notices =
+                    migrate_legacy_workspace_dirs(&global_dir, &candidates, &workspace_dir, remote);
+                legacy_dirs = candidates;
+                for notice in &legacy_notices {
+                    fuigo_file_utils::destination_gate::announce_notice(&notice.message());
+                }
+            }
+            workspace_dir
         } else {
             global_dir.clone()
         };
-
-        let ephemeral = use_workspace_hash && is_ephemeral_cwd(cwd);
 
         Self {
             global_dir,
@@ -67,7 +143,56 @@ impl MemoryStorage {
             workspace_path: cwd.to_path_buf(),
             ephemeral,
             global_enabled: true,
+            legacy_notices,
+            legacy_dirs,
         }
+    }
+
+    /// Legacy memory folders this start left in place that the user has not yet been told
+    /// about (empty on every later start). Each was already announced through the startup
+    /// notice queue when this storage was created.
+    pub fn legacy_notices(&self) -> &[LegacyMemoryNotice] {
+        &self.legacy_notices
+    }
+
+    /// Legacy memory folders (the pre-P91 `org/repo` names of this workspace) that exist beside the
+    /// workspace folder and hold notes (P124). They were left by an older version, or were never
+    /// adopted; Fuigo reads and deletes none of them. `fuigo memory clear` names them as not cleared.
+    /// Empty for a flat root, a repository without a remote, and for folders an older version only
+    /// initialised (template, index files, write lock, empty `sessions/`).
+    pub fn stranded_legacy_folders(&self) -> Vec<PathBuf> {
+        self.legacy_dirs
+            .iter()
+            .filter(|legacy| {
+                legacy.as_path() != self.workspace_dir
+                    && legacy.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+                    && holds_notes(legacy)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The text `fuigo memory clear` prints about [`Self::stranded_legacy_folders`] (P124): the path
+    /// of each folder, that it was not cleared, and how to remove it. `None` when there is none.
+    pub fn stranded_legacy_clear_notice(&self) -> Option<String> {
+        let folders = self.stranded_legacy_folders();
+        if folders.is_empty() {
+            return None;
+        }
+        let mut text = String::from(
+            "Not cleared: memory written by an older version of Fuigo is still on disk. \
+             Fuigo does not read or delete it, so `fuigo memory clear` leaves it alone:",
+        );
+        for folder in &folders {
+            text.push_str(&format!("\n  {}", folder.display()));
+        }
+        text.push_str(
+            "\nIf you do not want those notes, remove the folder yourself (for example with rm -r \
+             on the path above). Memory for this repository now lives at ",
+        );
+        text.push_str(&self.workspace_dir.display().to_string());
+        text.push('.');
+        Some(text)
     }
 
     /// Create a `MemoryStorage` with explicit paths (for testing).
@@ -79,6 +204,8 @@ impl MemoryStorage {
             workspace_path: PathBuf::from("/test/workspace"),
             ephemeral: false,
             global_enabled: true,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
         }
     }
 
@@ -223,6 +350,7 @@ impl MemoryStorage {
             return Ok(path);
         }
 
+        validate_entry(content)?;
         update_file(&path, |old| {
             if append && !old.is_empty() {
                 let timestamp = chrono::Utc::now().format("%H:%M:%S UTC");
@@ -259,6 +387,7 @@ impl MemoryStorage {
             }
         };
 
+        validate_entry(content)?;
         update_file(&path, |_| content.to_owned())?;
         tracing::debug!(path = %path.display(), scope = ?scope, "wrote long-term memory");
 
@@ -271,6 +400,7 @@ impl MemoryStorage {
         if self.ephemeral {
             return Err(std::io::Error::other("ephemeral workspace"));
         }
+        validate_entry(content)?;
         let path = self.workspace_memory_file();
         update_file_checked(&path, |old| {
             if old != expected {
@@ -312,6 +442,7 @@ impl MemoryStorage {
             return Ok(());
         }
 
+        validate_entry(content)?;
         let normalized = normalize_memory_content(content);
         if normalized.is_empty() {
             return Ok(());
@@ -342,6 +473,8 @@ impl MemoryStorage {
 
     /// Read a memory file, optionally returning only a range of lines.
     ///
+    /// Rejected lines are blanked before selecting a range; original line offsets remain valid.
+    ///
     /// - `from`: 0-based start line (default 0)
     /// - `lines`: max number of lines to return (default: all)
     ///
@@ -363,7 +496,7 @@ impl MemoryStorage {
         }
 
         // Read the canonicalized path, not the original, to prevent TOCTOU races.
-        let content = std::fs::read_to_string(&canonical)?;
+        let content = crate::safety::filter_memory_lines(&std::fs::read_to_string(&canonical)?);
 
         let from = from.unwrap_or(0);
         match lines {
@@ -663,6 +796,16 @@ fn is_empty_workspace(dir: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
 }
 
+fn validate_entry(content: &str) -> std::io::Result<()> {
+    if !crate::safety::is_safe_memory(content) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "new memory entry rejected: credential material or instruction override detected",
+        ));
+    }
+    Ok(())
+}
+
 /// Serialize read-modify-replace across threads/processes. A crash before rename
 /// leaves the original intact; the OS releases the stable sidecar lock on exit.
 pub(crate) fn update_file(path: &Path, update: impl FnOnce(&str) -> String) -> std::io::Result<()> {
@@ -707,12 +850,6 @@ fn update_file_checked(
         Err(e) => return Err(e),
     };
     let content = update(&old)?;
-    if !crate::safety::is_safe_memory(&content) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "unsafe memory content rejected",
-        ));
-    }
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(content.as_bytes())?;
     temp.as_file().sync_all()?;
@@ -805,93 +942,669 @@ fn is_ephemeral_cwd(cwd: &Path) -> bool {
         || (s.contains("/private/var/folders/") && s.contains("/T/"))
 }
 
-/// Compute a human-friendly workspace directory name.
-///
-/// Format: `{slug}-{hash8}` where:
-/// - `slug` is the repo or directory name, slugified (max 40 chars)
-/// - `hash8` is 8 hex chars from blake3 for uniqueness
-///
-/// **Identity strategy:** the git remote `org/repo` is preferred, so every clone, worktree, and copy of a repository shares one memory directory.
-/// It falls back to the filesystem path when not inside a git repo or when no `origin` remote is configured.
-fn compute_workspace_hash(cwd: &Path) -> String {
-    let identity = extract_repo_identity(cwd);
-
-    let (slug, hash_input) = match identity {
-        Some(ref repo_id) => {
-            let slug_source = repo_id.rsplit('/').next().unwrap_or(repo_id);
-            (slugify(slug_source, 40), repo_id.as_str().to_string())
-        }
-        None => {
-            // Windows-only, non-git cwds: dunce changes the hash input, so the old-form dir is orphaned until gc() reaps it after max_age_days
-            // That orphan is accepted over an unverifiable rename migration (Unix unchanged)
-            let canonical = dunce::canonicalize(cwd).unwrap_or_else(|_| {
-                tracing::warn!(
-                    path = %cwd.display(),
-                    "could not canonicalize workspace path for memory hash; using raw path"
-                );
-                cwd.to_path_buf()
-            });
-            let dir_name = canonical
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("workspace");
-            (
-                slugify(dir_name, 40),
-                canonical.to_string_lossy().to_string(),
-            )
-        }
-    };
-
-    let slug = if slug.is_empty() { "workspace" } else { &slug };
-    let hash = blake3::hash(hash_input.as_bytes());
-    let hash8 = &hash.to_hex()[..8];
-
-    format!("{slug}-{hash8}")
+/// Where a workspace's memory lives, and the pre-P91 name it may have used.
+struct WorkspaceIdentity {
+    /// `{slug}-{hash16}` for a remote identity, `{slug}-{hash8}` for a path identity.
+    dir_name: String,
+    /// Host-qualified remote identity (`host/org/repo`), when the directory is a
+    /// Git repository with a usable `origin` remote.
+    remote: Option<String>,
+    /// `{slug}-{hash8(org/repo)}`: the host-less names this repository may have
+    /// used before P91 (`org/repo`, and `org/repo.git` from an origin ending in
+    /// `.git/`). Only for remote identities; path identities did not change.
+    legacy_dir_names: Vec<String>,
 }
 
-/// Extract a normalized `org/repo` identifier from the git remote URL.
+/// Hex digits of the blake3 hash in a REMOTE identity's directory name. 64 bits:
+/// a remote host is attacker-choosable, so a 32-bit suffix could be ground to
+/// collide with a victim's `host/org/repo` (Astra P91 r1 #4). Path identities and
+/// the pre-P91 names keep 8.
+const REMOTE_HASH_HEX: usize = 16;
+const PATH_HASH_HEX: usize = 8;
+
+fn dir_name(slug: &str, hash_input: &str, hex: usize) -> String {
+    let slug = if slug.is_empty() { "workspace" } else { slug };
+    let hash = blake3::hash(hash_input.as_bytes());
+    format!("{slug}-{}", &hash.to_hex()[..hex])
+}
+
+/// Compute a human-friendly workspace directory name.
+///
+/// Format: `{slug}-{hash}` where:
+/// - `slug` is the repo or directory name, slugified (max 40 chars)
+/// - `hash` is hex from blake3 of the identity: 16 chars for a remote identity, 8 for a path identity
+///
+/// **Identity strategy:** the git `origin` remote as `host/org/repo` is preferred, so every clone, worktree, and
+/// copy of a repository from the SAME host shares one memory directory (ssh, https and `.git` forms of one host
+/// map together). A remote with the same `org/repo` on a different host never shares it.
+/// It falls back to the filesystem path when not inside a git repo or when no `origin` remote is configured.
+#[cfg(test)]
+fn compute_workspace_hash(cwd: &Path) -> String {
+    workspace_identity(cwd).dir_name
+}
+
+fn workspace_identity(cwd: &Path) -> WorkspaceIdentity {
+    if let Some(remote) = extract_repo_identity(cwd) {
+        let slug = slugify(remote.rsplit('/').next().unwrap_or(&remote), 40);
+        // Every URL form that maps to this identity had one of two pre-P91 keys:
+        // `org/repo`, or `org/repo.git` for an origin ending in `.git/` (whose slug
+        // was `repo-git`). Both are candidates, so equivalent clones agree on them.
+        let path = remote.split_once('/').map_or(remote.as_str(), |(_, path)| path);
+        let legacy_dir_names = [path.to_owned(), format!("{path}.git")]
+            .iter()
+            .map(|legacy| {
+                let legacy_slug = slugify(legacy.rsplit('/').next().unwrap_or(legacy), 40);
+                dir_name(&legacy_slug, legacy, PATH_HASH_HEX)
+            })
+            .collect();
+        return WorkspaceIdentity {
+            dir_name: dir_name(&slug, &remote, REMOTE_HASH_HEX),
+            legacy_dir_names,
+            remote: Some(remote),
+        };
+    }
+    // Windows-only, non-git cwds: dunce changes the hash input, so the old-form dir is orphaned until gc() reaps it after max_age_days
+    // That orphan is accepted over an unverifiable rename migration (Unix unchanged)
+    let canonical = dunce::canonicalize(cwd).unwrap_or_else(|_| {
+        tracing::warn!(
+            path = %cwd.display(),
+            "could not canonicalize workspace path for memory hash; using raw path"
+        );
+        cwd.to_path_buf()
+    });
+    let dir = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    WorkspaceIdentity {
+        dir_name: dir_name(&slugify(dir, 40), &canonical.to_string_lossy(), PATH_HASH_HEX),
+        remote: None,
+        legacy_dir_names: Vec::new(),
+    }
+}
+
+/// Extract the normalized `host/org/repo` identifier from the git remote URL.
 ///
 /// Uses `git2` to discover the repository from `cwd` and read the `origin` remote URL.
 /// Returns `None` if not a git repo, no `origin` remote, or the URL can't be normalized.
 pub(crate) fn extract_repo_identity(cwd: &Path) -> Option<String> {
     let repo = git2::Repository::discover(cwd).ok()?;
     let remote = repo.find_remote("origin").ok()?;
-    let url = remote.url()?;
-    normalize_remote_url(url)
+    normalize_remote_url(remote.url()?)
 }
 
-/// Normalize a git remote URL to `org/repo` form.
+/// Split a git remote URL into `(host, path)`.
 ///
-/// Strips protocol prefix, host, and trailing `.git`:
-/// - `git@github.com:acme/widgets.git`       → `"acme/widgets"`
-/// - `https://github.com/acme/widgets.git`   → `"acme/widgets"`
-/// - `ssh://git@github.com/acme/widgets`     → `"acme/widgets"`
-fn normalize_remote_url(url: &str) -> Option<String> {
-    let path = if let Some(colon_pos) = url.find(':') {
-        // SSH format: git@github.com:org/repo.git
-        if url[..colon_pos].contains('@') && !url[..colon_pos].contains('/') {
-            &url[colon_pos + 1..]
-        } else {
-            // HTTPS/SSH-with-scheme: https://github.com/org/repo.git
-            url.split("//")
-                .nth(1)
-                .and_then(|after_scheme| after_scheme.split_once('/'))
-                .map(|(_, path)| path)?
+/// Scheme (`https`, `ssh`, `git`, ...), user info and port are dropped and the host is lowercased, so
+/// `git@github.com:acme/widgets.git`, `ssh://git@github.com:22/acme/widgets` and
+/// `https://github.com/acme/widgets` all give `("github.com", "acme/widgets.git"/...)`.
+/// `file://` URLs give an empty host. Anything that is not a URL or scp-like `user@host:path` gives `None`.
+fn split_remote_url(url: &str) -> Option<(String, &str)> {
+    let url = url.trim();
+    let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.is_empty()
+            || !scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        {
+            return None;
         }
+        rest.split_once('/')?
     } else {
-        return None;
+        // scp-like: user@host:path (the `@` keeps Windows drive paths like C:\x out)
+        let colon = url.find(':')?;
+        if !url[..colon].contains('@') || url[..colon].contains('/') {
+            return None;
+        }
+        (&url[..colon], &url[colon + 1..])
     };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = if let Some(bracketed) = host.strip_prefix('[') {
+        // IPv6 literal, optionally followed by :port
+        bracketed.split_once(']').map_or(bracketed, |(ip, _)| ip)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    Some((host.trim_end_matches('.').to_ascii_lowercase(), path))
+}
 
+/// `org/repo` from a remote URL path. A trailing `/` is dropped before `.git`, so
+/// `…/repo.git/` and `…/repo` are the same identity (pre-P91 code kept the `.git`
+/// in that case; see `WorkspaceIdentity::legacy_dir_names`).
+fn clean_remote_path(path: &str) -> Option<&str> {
     let cleaned = path
+        .trim_end_matches('/')
         .trim_end_matches(".git")
         .trim_end_matches('/')
         .trim_start_matches('/');
+    (!cleaned.is_empty() && cleaned.contains('/')).then_some(cleaned)
+}
 
-    if cleaned.is_empty() || !cleaned.contains('/') {
-        return None;
+/// Normalize a git remote URL to `host/org/repo` form.
+///
+/// - `git@github.com:acme/widgets.git`       → `"github.com/acme/widgets"`
+/// - `https://github.com/acme/widgets.git`   → `"github.com/acme/widgets"`
+/// - `ssh://git@github.com/acme/widgets`     → `"github.com/acme/widgets"`
+/// - `https://evil.example/acme/widgets`     → `"evil.example/acme/widgets"` (a different identity)
+fn normalize_remote_url(url: &str) -> Option<String> {
+    let (host, path) = split_remote_url(url)?;
+    Some(format!("{host}/{}", clean_remote_path(path)?))
+}
+
+
+/// Bounds on the evidence read from a legacy directory, so startup stays cheap.
+/// Evidence beyond them is not skipped: it makes ownership unprovable.
+const LEGACY_EVIDENCE_MAX_FILES: usize = 4096;
+const LEGACY_EVIDENCE_MAX_BYTES: u64 = 8 << 20;
+
+/// Workspace paths recorded inside a legacy memory directory: the path in the
+/// `# Project Memory — <path>` header that [`MemoryStorage::ensure_initialized`]
+/// writes, and the `workspace` field of every captured-claim provenance comment.
+/// `None` when the evidence could not be read COMPLETELY (too many or too large
+/// files, a symlink or other non-file entry, an unreadable file, an unparsable
+/// provenance record): a partial read could hide another host's record, so the
+/// caller must then treat ownership as unproven (Astra P91 r1 #2).
+fn recorded_workspace_paths(legacy_dir: &Path) -> Option<std::collections::BTreeSet<PathBuf>> {
+    const HEADER: &str = "# Project Memory — ";
+    const PROVENANCE: &str = "<!-- fuigo-memory-provenance ";
+    let mut files = Vec::new();
+    match legacy_dir.join("MEMORY.md").symlink_metadata() {
+        Ok(_) => files.push(legacy_dir.join("MEMORY.md")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
     }
+    match std::fs::read_dir(legacy_dir.join("sessions")) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry.ok()?.path();
+                if path.extension().is_some_and(|ext| ext == "md") {
+                    files.push(path);
+                }
+                if files.len() > LEGACY_EVIDENCE_MAX_FILES {
+                    return None;
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for file in files {
+        let meta = file.symlink_metadata().ok()?;
+        if !meta.is_file() || meta.len() > LEGACY_EVIDENCE_MAX_BYTES {
+            return None;
+        }
+        let text = std::fs::read_to_string(&file).ok()?;
+        if let Some(path) = text.lines().next().and_then(|line| line.strip_prefix(HEADER)) {
+            paths.insert(PathBuf::from(path.trim()));
+        }
+        for comment in text.split(PROVENANCE).skip(1) {
+            let (json, _) = comment.split_once(" -->")?;
+            // Every record must name its workspace: a record that does not is
+            // evidence we cannot read, not evidence we may ignore (Astra P91 r2 #3).
+            let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+            paths.insert(PathBuf::from(value.get("workspace")?.as_str()?));
+        }
+    }
+    Some(paths)
+}
 
-    Some(cleaned.to_string())
+/// SQLite index files of a memory directory: `index.sqlite` and the per-host
+/// network-mode sibling `index.h-<host>.sqlite`, each with its `-wal`, `-shm`
+/// and `-journal` sidecars. Exact names only, so no user note is ever matched.
+fn is_index_file(name: &str) -> bool {
+    let base = ["-wal", "-shm", "-journal"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    base == "index.sqlite"
+        || base
+            .strip_prefix("index.h-")
+            .and_then(|rest| rest.strip_suffix(".sqlite"))
+            .is_some_and(|host| !host.is_empty() && !host.contains(['/', '\\']))
+}
+
+/// Move a pre-P91 memory directory (keyed by `org/repo` only, host dropped) to the
+/// host-qualified name, but only when that is provably the same project.
+///
+/// The legacy directory did not record the remote host, so it could have been
+/// filled by a clone of `org/repo` from ANY host, including a hostile one. It is
+/// adopted only when (a) its evidence could be read completely, (b) at least one
+/// workspace path recorded inside it still exists on this machine and its `origin`
+/// now has exactly the current `host/org/repo` identity, and (c) no recorded path
+/// that still exists resolves to a different identity. Otherwise it is left
+/// untouched (nothing is deleted) and a warning names both directories, so the
+/// user can move it by hand if it is theirs.
+///
+/// The search index inside holds absolute paths to the old location, so before the
+/// directory is published under its new name its index files are moved aside into a
+/// fresh `.pre-p91-index-<pid>-<time>/` (a dot directory, never read by memory tools);
+/// a session that opens the new directory therefore never meets an index that is
+/// about to change. Migrations are serialised by `.memory-migrate.lock` in the root.
+fn migrate_legacy_workspace_dirs(
+    root: &Path,
+    candidates: &[PathBuf],
+    workspace_dir: &Path,
+    identity: &str,
+) -> Vec<LegacyMemoryNotice> {
+    let is_dir = |path: &Path| path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
+    let published = || workspace_dir.symlink_metadata().is_ok();
+    let mut notices = Vec::new();
+    // A legacy folder that is gone (merged by hand, or never recreated) is news again if it ever
+    // reappears: forget that it was announced. Done before any early return, so it also happens
+    // when the new folder is absent too (Astra P110 r1 #4).
+    for legacy in candidates {
+        if legacy.as_path() != workspace_dir && !is_dir(legacy) {
+            let _ = std::fs::remove_file(stranded_marker(root, legacy, workspace_dir));
+            let _ = std::fs::remove_file(p97_marker(root, legacy, workspace_dir));
+        }
+    }
+    if !candidates.iter().any(|legacy| is_dir(legacy)) {
+        return notices;
+    }
+    if published() {
+        // Under the migration lock too: an adopter retires both markers under it, so a start that
+        // reads the P97 marker here cannot interleave with that retirement and leave a stranded
+        // marker behind that silences the next recreation for good (Astra P110 r4 #1). If the lock
+        // cannot be taken, decide anyway: a repeated notice is better than a silent one.
+        //
+        // Not taken at all when no legacy folder holds notes (P124): then there is nothing to decide,
+        // and a lingering template-only folder must not cost every start the lock.
+        if !candidates
+            .iter()
+            .any(|legacy| legacy.as_path() != workspace_dir && is_dir(legacy) && holds_notes(legacy))
+        {
+            return notices;
+        }
+        let _lock = migration_lock(root);
+        return stranded_legacy_notices(root, candidates, workspace_dir);
+    }
+    // One migration at a time per memory root (Astra P91 r2 #5, r3 #3). Every
+    // starter whose identity has ANY pending legacy candidate takes the lock, so an
+    // equivalent clone cannot publish an empty destination while another starter
+    // is moving the legacy directory there; after the lock each decides on the
+    // current state (destination published, or legacy still pending).
+    let Some(_lock) = migration_lock(root) else {
+        return notices;
+    };
+    for legacy in candidates {
+        if published() {
+            break;
+        }
+        if legacy.as_path() != workspace_dir && is_dir(legacy) {
+            let outcome = migrate_legacy_workspace_dir(legacy, workspace_dir, identity);
+            if outcome == LegacyMemoryOutcome::Adopted {
+                // The folder announced earlier (if any) is gone now: a later recreation under this
+                // name is news (Astra P110 r2 #3). P97's marker first: a start that runs between the
+                // two removals then finds the stranded marker still there and stays silent, instead of
+                // re-creating it from the P97 marker and suppressing the next notice (r3 #1).
+                let _ = std::fs::remove_file(p97_marker(root, legacy, workspace_dir));
+                let _ = std::fs::remove_file(stranded_marker(root, legacy, workspace_dir));
+            } else if first_notice(root, legacy, workspace_dir) {
+                // Announced now: once the new folder exists, the check below must not announce the
+                // same folder a second time. Only written together with a notice: a silent start
+                // writes no marker, so retiring the P97 marker can never leave a marker behind that
+                // silences a later recreation (Astra P110 r5 #1 #2).
+                let notes = notes_fingerprint(legacy);
+                let _ = create_marker(&stranded_marker(root, legacy, workspace_dir), &notes);
+                notices.push(LegacyMemoryNotice {
+                    legacy: legacy.clone(),
+                    new: workspace_dir.to_path_buf(),
+                    outcome,
+                });
+            }
+        }
+    }
+    notices
+}
+
+/// The per-root migration lock, held until the returned file is dropped. `None` if it cannot be
+/// opened or locked.
+fn migration_lock(root: &Path) -> Option<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join(".memory-migrate.lock"))
+        .ok()?;
+    lock.lock().ok()?;
+    Some(lock)
+}
+
+/// Record, under the migration lock, that the notice for this legacy folder (towards this
+/// destination) has been shown. True only the first time. If the marker cannot be written the
+/// notice is shown anyway: a repeated notice is better than a silent one.
+fn first_notice(root: &Path, legacy: &Path, workspace_dir: &Path) -> bool {
+    create_marker(&p97_marker(root, legacy, workspace_dir), &notes_fingerprint(legacy))
+}
+
+/// Marker of [`first_notice`] (P97; its name is unchanged so markers written by earlier versions count).
+fn p97_marker(root: &Path, legacy: &Path, workspace_dir: &Path) -> PathBuf {
+    let key = format!("{}\n{}", legacy.display(), workspace_dir.display());
+    root.join(format!(".legacy-notice-{}", &blake3::hash(key.as_bytes()).to_hex()[..16]))
+}
+
+/// R110 (M1): the host-qualified folder exists, so P91 adoption never runs again. A legacy folder
+/// that also exists was recreated by an older version after the move (a downgrade, or an old binary
+/// sharing `~/.fuigo`) or was never adopted. When it holds notes, say so once, naming both folders;
+/// never merge or move anything (P91's adoption rule is unchanged). The caller removes the marker
+/// whenever the legacy folder is found absent, so a later recreation is announced again.
+fn stranded_legacy_notices(root: &Path, candidates: &[PathBuf], workspace_dir: &Path) -> Vec<LegacyMemoryNotice> {
+    let mut notices = Vec::new();
+    for legacy in candidates {
+        if legacy.as_path() == workspace_dir || !legacy.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        // The cheap check first (P124, Fable phase 7 round 2 F3): a folder an older version only
+        // initialised holds no notes, so it is neither announced nor hashed. Without this a legacy
+        // folder that lingers forever was read and hashed on every start. Nothing else changes: a
+        // folder without notes never produced a notice, whatever its markers say.
+        if !holds_notes(legacy) {
+            continue;
+        }
+        let marker = stranded_marker(root, legacy, workspace_dir);
+        let notes = notes_fingerprint(legacy);
+        if marker_is_current(&p97_marker(root, legacy, workspace_dir), &notes) {
+            // P97 already told the user about this very folder (possibly before this version
+            // existed, so only its own marker is there): do not announce it again (Astra P110 r1 #3).
+            // No marker of our own: the P97 marker suppresses for as long as it exists, and a copy
+            // would outlive its retirement and silence a later recreation (Astra P110 r5 #1 #2).
+            continue;
+        }
+        if !create_marker(&marker, &notes) {
+            continue;
+        }
+        tracing::warn!(
+            legacy = %legacy.display(),
+            new = %workspace_dir.display(),
+            "MEMORY_MIGRATE: an older version wrote memory under the legacy name after the move; \
+             it was not merged into the host-qualified directory"
+        );
+        notices.push(LegacyMemoryNotice {
+            legacy: legacy.clone(),
+            new: workspace_dir.to_path_buf(),
+            outcome: LegacyMemoryOutcome::Stranded,
+        });
+    }
+    notices
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many legacy folders this thread hashed (P124 test seam for the stranded-notice cost).
+    pub(crate) static FINGERPRINT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Marker for [`stranded_legacy_notices`]; distinct from the P97 marker of [`first_notice`].
+fn stranded_marker(root: &Path, legacy: &Path, workspace_dir: &Path) -> PathBuf {
+    let key = format!("{}\n{}", legacy.display(), workspace_dir.display());
+    root.join(format!(".legacy-stranded-notice-{}", &blake3::hash(key.as_bytes()).to_hex()[..16]))
+}
+
+/// What a notice told the user about: a hash of every note in the legacy folder (each file's path
+/// and contents; a symlink's target; what [`holds_notes`] treats as empty at the top level is left
+/// out). A marker suppresses a notice only for exactly the notes it was written for, so new or
+/// changed notes are announced again however the folder came back: recreated by an older version,
+/// left behind by another clone's adoption, or a reused inode (Astra P110 r6, r7). A folder that
+/// cannot be read gets a fingerprint that matches nothing: a doubt produces a notice.
+fn notes_fingerprint(dir: &Path) -> String {
+    #[cfg(test)]
+    FINGERPRINT_CALLS.with(|calls| calls.set(calls.get() + 1));
+    /// A name or link target exactly as the filesystem stores it, so two different names never hash
+    /// alike (a lossy conversion maps every invalid byte to the same character; Astra P110 r8 #3).
+    fn raw(name: &std::ffi::OsStr) -> Vec<u8> {
+        #[cfg(unix)]
+        {
+            std::os::unix::ffi::OsStrExt::as_bytes(name).to_vec()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::ffi::OsStrExt::encode_wide(name).flat_map(u16::to_le_bytes).collect()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            name.to_string_lossy().into_owned().into_bytes()
+        }
+    }
+    fn walk(dir: &Path, rel: &[u8], top: bool, hasher: &mut blake3::Hasher) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        let mut listed = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            listed.push(entry);
+        }
+        listed.sort_by_key(|entry| entry.file_name());
+        for entry in listed {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let path = entry.path();
+            // A failed P91 index move leaves a fresh `.pre-p91-index-*` folder on every attempt: it
+            // holds index files, not notes, and must not make the same notes look new (r8 #1).
+            if top
+                && (name.starts_with(".pre-p91-index-")
+                    || match name.as_ref() {
+                        "MEMORY.md" => is_memory_template(&path),
+                        ".memory-write.lock" => path.symlink_metadata().is_ok_and(|meta| meta.is_file()),
+                        other => is_index_file(other),
+                    })
+            {
+                continue;
+            }
+            let mut rel = rel.to_vec();
+            rel.push(b'/');
+            rel.extend_from_slice(&raw(&file_name));
+            let Ok(meta) = path.symlink_metadata() else {
+                return false;
+            };
+            hasher.update(&(rel.len() as u64).to_le_bytes());
+            hasher.update(&rel);
+            if meta.is_dir() {
+                hasher.update(b"d");
+                if !walk(&path, &rel, false, hasher) {
+                    return false;
+                }
+            } else if meta.is_symlink() {
+                let Ok(target) = std::fs::read_link(&path) else {
+                    return false;
+                };
+                let target = raw(target.as_os_str());
+                hasher.update(b"l");
+                hasher.update(&(target.len() as u64).to_le_bytes());
+                hasher.update(&target);
+            } else if meta.is_file() {
+                let Ok(file) = std::fs::File::open(&path) else {
+                    return false;
+                };
+                hasher.update(b"f");
+                hasher.update(&meta.len().to_le_bytes());
+                if hasher.update_reader(file).is_err() {
+                    return false;
+                }
+            } else {
+                // A FIFO, socket or device: never opened (opening a FIFO with no writer blocks start-up
+                // while the migration lock is held; Astra P110 r8 #2). Its presence is what counts.
+                hasher.update(b"o");
+            }
+        }
+        true
+    }
+    let mut hasher = blake3::Hasher::new();
+    if walk(dir, b"", true, &mut hasher) {
+        hasher.finalize().to_hex().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// True when `marker` exists and records exactly these notes. An empty marker (a write cut short, or
+/// one written before markers recorded notes; no released version wrote any) and an empty
+/// fingerprint (notes that could not be read) match nothing: a doubt produces a notice.
+fn marker_is_current(marker: &Path, notes: &str) -> bool {
+    match std::fs::read_to_string(marker) {
+        Ok(recorded) => !notes.is_empty() && recorded == notes,
+        Err(_) => false,
+    }
+}
+
+/// Claim `marker` for these notes; true unless it already recorded them. A marker for other notes is
+/// taken over (written to a temporary file and renamed into place, so it is never left empty). As in
+/// [`first_notice`], a marker that cannot be written means the notice is shown anyway.
+fn create_marker(marker: &Path, notes: &str) -> bool {
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(marker) {
+        Ok(mut file) => {
+            let _ = std::io::Write::write_all(&mut file, notes.as_bytes());
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if marker_is_current(marker, notes) {
+                return false;
+            }
+            let staged = marker.with_extension(format!("tmp-{}", std::process::id()));
+            if std::fs::write(&staged, notes).is_err() || std::fs::rename(&staged, marker).is_err() {
+                let _ = std::fs::remove_file(&staged);
+            }
+            true
+        }
+        Err(_) => true,
+    }
+}
+
+/// True when a memory folder holds anything beyond what an older version creates before it writes
+/// a note: its `MEMORY.md` template, search index files, the write lock and an empty `sessions/`.
+/// Anything unreadable counts as notes, so a doubt produces a notice rather than silence.
+fn holds_notes(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        let empty = match name.as_ref() {
+            "MEMORY.md" => is_memory_template(&path),
+            "sessions" => is_empty_workspace(&path),
+            ".memory-write.lock" => path.symlink_metadata().is_ok_and(|meta| meta.is_file()),
+            other => is_index_file(other),
+        };
+        if !empty {
+            return true;
+        }
+    }
+    false
+}
+
+/// The `MEMORY.md` template [`MemoryStorage::ensure_initialized`] writes (and 1.0.20 wrote), with
+/// nothing added.
+fn is_memory_template(path: &Path) -> bool {
+    const HEADER: &str = "# Project Memory \u{2014} ";
+    const NOTE: &str = "> Auto-populated by dream consolidation. Edit freely.";
+    if !path.symlink_metadata().is_ok_and(|meta| meta.is_file() && meta.len() <= 4096) {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut lines = text.lines();
+    lines.next().is_some_and(|line| line.starts_with(HEADER))
+        && lines.all(|line| line.trim().is_empty() || line.trim() == NOTE)
+}
+
+/// One candidate; the caller holds `.memory-migrate.lock` and has checked that the
+/// destination does not exist and the legacy directory does.
+fn migrate_legacy_workspace_dir(
+    legacy_dir: &Path,
+    workspace_dir: &Path,
+    identity: &str,
+) -> LegacyMemoryOutcome {
+    let refuse = |reason: &str, detail: &[String]| {
+        tracing::warn!(
+            legacy = %legacy_dir.display(),
+            new = %workspace_dir.display(),
+            identity,
+            reason,
+            detail = ?detail,
+            "MEMORY_MIGRATE: legacy workspace memory was not adopted: it cannot be shown to belong to this \
+             remote host only; move it to the new directory by hand if it is yours"
+        );
+        LegacyMemoryOutcome::NotAdopted { reason: reason.to_owned() }
+    };
+    let Some(recorded) = recorded_workspace_paths(legacy_dir) else {
+        return refuse("evidence could not be read completely", &[]);
+    };
+    let mut proven = false;
+    let mut foreign = Vec::new();
+    for path in recorded {
+        if !path.is_absolute() || !path.exists() {
+            continue;
+        }
+        match extract_repo_identity(&path) {
+            Some(other) if other == identity => proven = true,
+            Some(other) => foreign.push(format!("{} ({other})", path.display())),
+            None => {}
+        }
+    }
+    if !foreign.is_empty() {
+        return refuse("recorded by a clone of another host", &foreign);
+    }
+    if !proven {
+        return refuse("no recorded clone of this host still exists", &[]);
+    }
+    // A FRESH directory we create ourselves (create_dir fails on anything already
+    // there, including a symlink), so nothing is followed or overwritten (r2 #4).
+    let aside = legacy_dir.join(format!(
+        ".pre-p91-index-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let mut aside_created = false;
+    if let Ok(entries) = std::fs::read_dir(legacy_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !is_index_file(&name) {
+                continue;
+            }
+            let mut move_aside = || -> std::io::Result<()> {
+                if !aside_created {
+                    std::fs::create_dir(&aside)?;
+                    aside_created = true;
+                }
+                std::fs::rename(entry.path(), aside.join(name.as_ref()))
+            };
+            let moved = move_aside();
+            if let Err(error) = moved {
+                // Never publish a directory whose stale index is still in place.
+                refuse(&format!("could not move index file {name} aside: {error}"), &[]);
+                return LegacyMemoryOutcome::MoveFailed { error: format!("index file {name}: {error}") };
+            }
+        }
+    }
+    if let Err(error) = std::fs::rename(legacy_dir, workspace_dir) {
+        tracing::warn!(
+            legacy = %legacy_dir.display(),
+            new = %workspace_dir.display(),
+            %error,
+            "MEMORY_MIGRATE: could not move legacy workspace memory"
+        );
+        return LegacyMemoryOutcome::MoveFailed { error: error.to_string() };
+    }
+    tracing::info!(
+        legacy = %legacy_dir.display(),
+        new = %workspace_dir.display(),
+        identity,
+        "MEMORY_MIGRATE: moved legacy workspace memory to its host-qualified directory"
+    );
+    LegacyMemoryOutcome::Adopted
 }
 
 /// Generate a URL-safe slug (e.g., from the first user message): lowercase, non-alphanumerics become `-`, consecutive dashes collapse.
@@ -1515,7 +2228,7 @@ mod tests {
     fn test_normalize_ssh_url() {
         assert_eq!(
             normalize_remote_url("git@github.com:acme/widgets.git"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1523,7 +2236,7 @@ mod tests {
     fn test_normalize_https_url() {
         assert_eq!(
             normalize_remote_url("https://github.com/acme/widgets.git"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1531,7 +2244,7 @@ mod tests {
     fn test_normalize_https_no_dot_git() {
         assert_eq!(
             normalize_remote_url("https://github.com/acme/widgets"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1539,7 +2252,7 @@ mod tests {
     fn test_normalize_ssh_with_scheme() {
         assert_eq!(
             normalize_remote_url("ssh://git@github.com/acme/widgets"),
-            Some("acme/widgets".to_string())
+            Some("github.com/acme/widgets".to_string())
         );
     }
 
@@ -1547,7 +2260,7 @@ mod tests {
     fn test_normalize_self_hosted() {
         assert_eq!(
             normalize_remote_url("git@gitlab.example.com:team/project.git"),
-            Some("team/project".to_string())
+            Some("gitlab.example.com/team/project".to_string())
         );
     }
 
@@ -1570,7 +2283,7 @@ mod tests {
     fn test_normalize_deep_path() {
         assert_eq!(
             normalize_remote_url("https://github.com/acme/tools/sub.git"),
-            Some("acme/tools/sub".to_string())
+            Some("github.com/acme/tools/sub".to_string())
         );
     }
 
@@ -1601,7 +2314,7 @@ mod tests {
             "should detect repo identity from git directory with origin remote"
         );
         let id = identity.unwrap();
-        assert_eq!(id, "example/demo");
+        assert_eq!(id, "github.com/example/demo");
     }
 
     #[test]
@@ -1693,6 +2406,8 @@ mod tests {
             workspace_dir: workspace_dir.clone(),
             workspace_path: PathBuf::from("/tmp/test"),
             ephemeral: true,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
         };
 
         // write_daily_log returns Ok but must not create the file
@@ -1726,6 +2441,8 @@ mod tests {
             workspace_dir: workspace_dir.clone(),
             workspace_path: PathBuf::from("/tmp/test"),
             ephemeral: true,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
         };
 
         // Workspace append should be skipped
@@ -1753,6 +2470,8 @@ mod tests {
             workspace_dir: workspace_dir.clone(),
             workspace_path: PathBuf::from("/tmp/test"),
             ephemeral: true,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
         };
 
         storage.ensure_initialized().unwrap();

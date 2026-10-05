@@ -1064,6 +1064,8 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
 /// Paste-then-immediate-send race (dashboard dispatch): the same guarantee
 /// for the dashboard's session-spawning input: the new session must carry
 /// the pasted image even when Enter beats the deferred probe.
+// The `open_dashboard` helper reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests (P78).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1159,6 +1161,8 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
 /// same probe window must both survive (the old single slot let the second
 /// stash silently overwrite the first) and both re-issue on completion:
 /// dispatch first, then peek.
+// The `open_dashboard` helper reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests (P78).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_second_stash_does_not_overwrite_first() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1395,6 +1399,8 @@ fn dashboard_peek_cycle_does_not_retire_the_nudge() {
         "the dashboard peek must not retire (or attribute) the nudge",
     );
 }
+// `dispatch_open_dashboard` reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     let repo = crate::test_util::TempGitRepo::init("main");
@@ -1416,6 +1422,8 @@ fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     );
     assert_eq!(agent.current_branch.as_deref(), Some("main"));
 }
+// `dispatch_open_dashboard` reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() {
     let repo = crate::test_util::TempGitRepo::init("main");
@@ -1437,6 +1445,8 @@ fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() 
     );
     assert_eq!(agent.current_branch.as_deref(), Some("main"));
 }
+// `dispatch_open_dashboard` reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_detects_standalone_fuigo_worktree() {
     let main = crate::test_util::TempGitRepo::init("main-only");
@@ -1515,6 +1525,8 @@ fn dashboard_open_without_leader_fetches_local_sessions() {
         "non-leader dashboard open must fetch the local idle-session list",
     );
 }
+// `dispatch_open_dashboard` reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
     let mut app = test_app_with_agent();
@@ -1557,6 +1569,8 @@ fn workspace_snapshot_load_requests_live_adoption() {
     assert!(app.workspace_snapshot.is_some());
     assert!(app.workspace_sync_requested);
 }
+// `dispatch_open_dashboard` reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests.
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn workspace_dashboard_reopens_store_when_only_stale_snapshot_remains() {
     let mut app = test_app_with_agent();
@@ -2820,6 +2834,8 @@ fn dashboard_dispatch_stale_auto_degrades_when_gate_is_off() {
         }
     )));
 }
+// The `open_dashboard` helper reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests (P78).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn auto_gate_kill_switch_clears_staged_dashboard_auto() {
     use crate::views::dashboard::DashboardDispatchMode;
@@ -5233,6 +5249,8 @@ fn dashboard_row_stop_during_send_over_wake_cancels_wake_not_local_turn() {
         "auto-resend would hit the promoted user turn"
     );
 }
+// The `open_dashboard` helper reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests (P78).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_double_press_deletes_top_level() {
     let mut app = test_app();

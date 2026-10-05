@@ -458,6 +458,7 @@ mod tests {
 
     #[test]
     fn render_auth_shows_url_and_code() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 12);
         let mut buf = Buffer::empty(area);
@@ -478,6 +479,7 @@ mod tests {
 
     #[test]
     fn render_auth_shows_trust_question() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 14);
         let mut buf = Buffer::empty(area);

@@ -20,7 +20,9 @@
 //!   lower: `<overlay-root>/fuse-lower`  (FUSE mount)
 //!   upper: `<overlay-root>/upper`       (btrfs subvolume)
 //!   mount: `<workspace>/repo`           (overlayfs)
-
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};

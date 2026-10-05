@@ -145,7 +145,9 @@ async fn catalog_retry_recovers_after_endpoint_returns() {
 }
 
 #[tokio::test]
+#[serial]
 async fn disk_cache_reload_applies_without_fetching() {
+    let _api_key = api_key_env_unset();
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingEndpoint {
@@ -1563,8 +1565,29 @@ fn test_cache_manager(dir: &std::path::Path) -> ModelsCacheManager {
     ModelsCacheManager::at(dir.join(MODELS_CACHE_FILE), CACHE_TTL)
 }
 
+/// The precondition of every test that persists a catalog under one cache
+/// identity and then lets `reload_from_*` / `load_fresh` recompute it, or that
+/// compares two computations of it.
+///
+/// `models_cache_identity` hashes `FUIGO_API_KEY` (falling back to
+/// `FUIGO_CODE_API_KEY`) at CALL time, and about fifteen tests in the unnamed
+/// `#[serial]` group set that variable. A test outside the group can see a
+/// writer land between its two computations: the identities differ,
+/// `load_fresh` misses, and `reload_from_disk_cache_applies_external_catalog`
+/// failed exactly that way in full runs. So the test must be `#[serial]` (which
+/// excludes those writers) and must hold the key unset (which makes the value it
+/// assumes true, instead of inheriting it from whatever ran before).
+fn api_key_env_unset() -> [EnvGuard; 2] {
+    [
+        EnvGuard::unset("FUIGO_API_KEY"),
+        EnvGuard::unset("FUIGO_CODE_API_KEY"),
+    ]
+}
+
 #[test]
+#[serial]
 fn reload_from_disk_cache_applies_external_catalog() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let tmp = tempfile::TempDir::new().unwrap();
     let cache = test_cache_manager(tmp.path());
@@ -1587,7 +1610,9 @@ fn reload_from_disk_cache_applies_external_catalog() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_recomputes_allowlist_excludes_all() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let cfg = config_from_toml("[models]\nallowed_models = [\"keep-*\"]");
 
@@ -1619,7 +1644,9 @@ fn reload_from_disk_cache_recomputes_allowlist_excludes_all() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_resolves_default_on_first_catalog() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     assert!(!mgr.has_fetched_real_catalog());
     let cfg = config_from_toml("[models]\ndefault = \"keep-1\"");
@@ -1647,7 +1674,9 @@ fn reload_from_disk_cache_resolves_default_on_first_catalog() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_skips_identical_catalog_and_adopts_etag() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let cfg = config::Config::default();
     let prefetched = make_prefetched(&["grok-3", "grok-4"]);
@@ -1680,7 +1709,9 @@ fn reload_from_disk_cache_skips_identical_catalog_and_adopts_etag() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_ignores_stale_cache() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let tmp = tempfile::TempDir::new().unwrap();
     let cache = test_cache_manager(tmp.path());
@@ -1703,7 +1734,9 @@ fn reload_from_disk_cache_ignores_stale_cache() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_ignores_auth_method_mismatch() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let tmp = tempfile::TempDir::new().unwrap();
     let cache = test_cache_manager(tmp.path());
@@ -1727,7 +1760,9 @@ fn reload_from_disk_cache_ignores_auth_method_mismatch() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_ignores_origin_mismatch() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let tmp = tempfile::TempDir::new().unwrap();
     let cache = test_cache_manager(tmp.path());
@@ -1747,7 +1782,9 @@ fn reload_from_disk_cache_ignores_origin_mismatch() {
 }
 
 #[test]
+#[serial]
 fn reload_from_disk_cache_ignores_legacy_cache_without_origin() {
+    let _api_key = api_key_env_unset();
     let mgr = test_manager();
     let tmp = tempfile::TempDir::new().unwrap();
     let cache = test_cache_manager(tmp.path());
@@ -2491,7 +2528,9 @@ fn a_cache_without_an_identity_is_a_miss() {
 }
 
 #[test]
+#[serial]
 fn models_cache_identity_tracks_the_credential_without_naming_it() {
+    let _api_key = api_key_env_unset();
     let base = config::Config::default().endpoints;
     let mut with_deployment_key = base.clone();
     with_deployment_key.deployment_key = Some("deployment-key-b".to_string());
@@ -2628,7 +2667,9 @@ async fn ttl_renewal_still_stamps_an_untouched_cache() {
 // ── round 2: cross-path cache identity + a locked TTL renewal ───────────────
 
 #[test]
+#[serial]
 fn cache_identity_uses_the_same_auth_accessor_as_the_write_paths() {
+    let _api_key = api_key_env_unset();
     // The catalog cache is only useful if the identity a WRITE stamps is the
     // identity a later READ computes. The write paths resolve their auth with
     // `AuthManager::current()` -- `resolve_disk_auth` for the startup prefetch,
@@ -2775,4 +2816,55 @@ async fn a_persist_cannot_land_inside_the_ttl_renewals_read_modify_write() {
         "the freshly persisted catalog must survive the renewal",
     );
     assert!(!on_disk.models.contains_key("stale-catalog"));
+}
+
+/// P08: a key an ACP client supplied over `authenticate` (held in memory, not in the environment) makes the
+/// catalog fetch use the API key, exactly as an injected `FUIGO_API_KEY` does.
+#[test]
+#[serial]
+fn resolve_api_key_used_for_a_runtime_key_alone() {
+    let _unset = EnvGuard::unset("FUIGO_API_KEY");
+    let _unset_legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
+    let endpoints = config::EndpointsConfig::default();
+    let before = ModelFetchAuth::resolve(&endpoints, false);
+    let _ = crate::agent::auth_method::set_runtime_api_key(Some("p08-models-runtime-FAKE".to_owned()));
+    let with_runtime = ModelFetchAuth::resolve(&endpoints, false);
+    let _ = crate::agent::auth_method::set_runtime_api_key(None);
+    assert_eq!(before, ModelFetchAuth::Session, "precondition: nothing configured");
+    assert_eq!(with_runtime, ModelFetchAuth::ApiKey);
+}
+
+/// P121 (K6). Helper clients are resolved against the catalog, so a catalog reload is a reason to
+/// rebuild them, and it is a different event from a model switch.
+#[tokio::test]
+async fn a_catalog_reload_moves_the_helper_epoch_and_a_model_switch_does_too() {
+    let mgr = test_manager();
+    let start = mgr.helper_epoch();
+    assert_eq!(start, mgr.helper_epoch(), "reading the epoch changes nothing");
+    mgr.apply_config(config::Config::default());
+    let after_reload = mgr.helper_epoch();
+    assert_ne!(after_reload, start, "a reloaded catalog must move the epoch");
+    assert!(after_reload.catalog_reload > start.catalog_reload, "the reload counter itself moved");
+    mgr.set_current_model_id(acp::ModelId::new("grok-4"));
+    let after_switch = mgr.helper_epoch();
+    assert_ne!(after_switch, after_reload, "a model switch must move the epoch");
+    assert_eq!(after_switch.catalog_reload, after_reload.catalog_reload, "it is not a reload");
+    mgr.set_current_model_id(acp::ModelId::new("grok-4"));
+    assert_eq!(mgr.helper_epoch(), after_switch, "selecting the same model is not a switch");
+}
+
+/// P132 (P121 follow-up): one session's `/model` is not a catalog reload. It must still move the helper epoch (the
+/// session's classifier route is rebuilt lazily), but it must not wake the catalog-reload watcher, which rebuilds the
+/// title client of EVERY resident session, one `GetLiveSamplerConfig` round trip at a time.
+#[tokio::test]
+async fn a_session_model_switch_does_not_look_like_a_catalog_reload() {
+    let mgr = test_manager();
+    let mut reloads = mgr.subscribe_catalog_reload();
+    let start = mgr.helper_epoch();
+    mgr.note_session_model_switch();
+    assert_ne!(mgr.helper_epoch(), start, "the helper epoch still moves, so classifier routes are rebuilt");
+    assert_eq!(mgr.catalog_reload_generation(), start.catalog_reload, "it is not a catalog reload");
+    assert!(!reloads.has_changed().unwrap(), "the all-sessions rebuild must not be woken");
+    mgr.apply_config(config::Config::default());
+    assert!(reloads.has_changed().unwrap(), "a real reload still wakes the watcher");
 }

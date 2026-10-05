@@ -511,6 +511,7 @@ mod tests {
 
     #[test]
     fn multi_key_shared_mod_compact_join_slash_uses_label_style() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::style::Modifier;
 
         let theme = Theme::current();
@@ -562,6 +563,7 @@ mod tests {
 
     #[test]
     fn multi_key_ignores_custom_display() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::style::Modifier;
 
         let theme = Theme::current();
@@ -589,6 +591,7 @@ mod tests {
 
     #[test]
     fn custom_display_with_slash_is_fully_key_styled() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::style::Modifier;
 
         let theme = Theme::current();
@@ -617,6 +620,7 @@ mod tests {
 
     #[test]
     fn bare_slash_key_is_fully_key_styled() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::style::Modifier;
 
         let theme = Theme::current();
@@ -636,6 +640,7 @@ mod tests {
 
     #[test]
     fn ctrl_slash_key_is_fully_key_styled() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::style::Modifier;
 
         let theme = Theme::current();
@@ -661,6 +666,7 @@ mod tests {
 
     #[test]
     fn multi_key_different_mods_uses_full_forms() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::style::Modifier;
 
         let theme = Theme::current();

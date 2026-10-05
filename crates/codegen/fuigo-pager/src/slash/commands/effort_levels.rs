@@ -41,6 +41,15 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
         .collect()
 }
 
+/// `'a'` for the first row through `'z'` for the 26th; every later row shares `'z'`.
+/// The prefix only breaks matcher ties in menu order, so a shared tail prefix costs nothing
+/// a reasoning-effort menu will notice, and the arithmetic can never leave `u8`.
+pub(crate) fn sort_prefix_for(idx: usize) -> char {
+    const LAST: u8 = b'z' - b'a';
+    char::from(b'a' + u8::try_from(idx).unwrap_or(LAST).min(LAST))
+}
+
+
 /// Build effort rows for autocomplete from a per-model option list.
 ///
 /// - `mark_active` and `current_effort` mark the current session effort with `(active)`.
@@ -64,7 +73,9 @@ pub(crate) fn build_effort_arg_items(
             let insert_text = insert_text_for(option);
             // Sort-key prefix: 'a' for top row, 'b' for next, etc
             // Only affects matcher tiebreak ordering, never rendered
-            let sort_prefix = char::from(b'a' + idx as u8);
+            // Rows past the 26th share 'z': the server list is a handful of levels, and an
+            // unbounded `b'a' + idx` overflowed `u8` at the 160th option (a debug-build panic)
+            let sort_prefix = sort_prefix_for(idx);
             ArgItem {
                 display: format!("{}{active_suffix}", option.label),
                 match_text: format!("{sort_prefix} {insert_text}"),
@@ -73,4 +84,40 @@ pub(crate) fn build_effort_arg_items(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sort_prefix_runs_a_to_z_then_saturates() {
+        assert_eq!(sort_prefix_for(0), 'a');
+        assert_eq!(sort_prefix_for(3), 'd');
+        assert_eq!(sort_prefix_for(25), 'z');
+        assert_eq!(sort_prefix_for(26), 'z');
+        assert_eq!(sort_prefix_for(159), 'z');
+        assert_eq!(sort_prefix_for(usize::MAX), 'z');
+    }
+
+    /// 160 valid options used to overflow `b'a' + idx as u8` (debug panic, release wrap into
+    /// control characters); now every row builds and the first 26 keep their order.
+    #[test]
+    fn one_hundred_sixty_effort_options_build_without_overflow() {
+        let options: Vec<ReasoningEffortOption> = (0..160)
+            .map(|i| ReasoningEffortOption {
+                id: format!("level-{i}"),
+                value: ReasoningEffort::Medium,
+                label: format!("Level {i}"),
+                description: None,
+                default: false,
+            })
+            .collect();
+        let items = build_effort_arg_items(&options, None, false, |o| o.id.clone());
+        assert_eq!(items.len(), 160);
+        assert!(items[0].match_text.starts_with("a "));
+        assert!(items[25].match_text.starts_with("z "));
+        assert!(items[159].match_text.starts_with("z "));
+        assert!(items.iter().all(|i| i.match_text.chars().next().is_some_and(|c| c.is_ascii_lowercase())));
+    }
 }

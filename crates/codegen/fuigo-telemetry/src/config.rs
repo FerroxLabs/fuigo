@@ -103,7 +103,7 @@ pub fn env_telemetry_mode(name: &str) -> Option<TelemetryMode> {
     let value = std::env::var(name).ok()?;
     TelemetryMode::parse(&value)
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
     /// Declared for `serde_ignored`. Actual toggle is `[features] telemetry`.
@@ -133,6 +133,49 @@ pub struct TelemetryConfig {
     pub otel_log_user_prompts: Option<bool>,
     /// External OTEL content gate (admins can pin to `false` via requirements).
     pub otel_log_tool_details: Option<bool>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            events_url,
+            events_api_key,
+            mixpanel_token,
+            mixpanel_enabled,
+            trace_upload,
+            otel_enabled,
+            otel_metrics_exporter,
+            otel_logs_exporter,
+            otel_endpoint,
+            otel_protocol,
+            otel_certificate,
+            otel_client_certificate,
+            otel_client_key,
+            otel_log_user_prompts,
+            otel_log_tool_details,
+        } = self;
+        f.debug_struct("TelemetryConfig")
+            .field("enabled", enabled)
+            .field("events_url", &events_url.as_deref().map(fuigo_auth::redact_url))
+            .field("events_api_key", &events_api_key.as_ref().map(|_| "<redacted>"))
+            .field("mixpanel_token", &mixpanel_token.as_ref().map(|_| "<redacted>"))
+            .field("mixpanel_enabled", mixpanel_enabled)
+            .field("trace_upload", trace_upload)
+            .field("otel_enabled", otel_enabled)
+            .field("otel_metrics_exporter", otel_metrics_exporter)
+            .field("otel_logs_exporter", otel_logs_exporter)
+            .field("otel_endpoint", &otel_endpoint.as_deref().map(fuigo_auth::redact_url))
+            .field("otel_protocol", otel_protocol)
+            .field("otel_certificate", otel_certificate)
+            .field("otel_client_certificate", otel_client_certificate)
+            .field("otel_client_key", otel_client_key)
+            .field("otel_log_user_prompts", otel_log_user_prompts)
+            .field("otel_log_tool_details", otel_log_tool_details)
+            .finish()
+    }
 }
 fn internal_defaults() -> (Option<String>, Option<String>, Option<String>, bool) {
     (None, None, None, false)
@@ -253,5 +296,39 @@ mod tests {
         assert_eq!(cfg.events_url, url);
         assert_eq!(cfg.events_api_key, key);
         assert_eq!(cfg.mixpanel_token, token);
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn telemetry_and_exporter_config_debug_redact() {
+        let cfg = TelemetryConfig {
+            events_api_key: Some("p70ev-FAKE-2a3b4c5d".into()),
+            mixpanel_token: Some("p70mx-FAKE-6e7f8a9b".into()),
+            ..TelemetryConfig::default()
+        };
+        assert_redacted(&cfg, &["p70ev-FAKE-2a3b4c5d", "p70mx-FAKE-6e7f8a9b"]);
+        let exporter = crate::otel_layer::OtelExporterConfig {
+            extra_headers: vec![("authorization".into(), "Bearer p70ox-FAKE-0c1d2e3f".into())],
+            ..Default::default()
+        };
+        assert_redacted(&exporter, &["p70ox-FAKE-0c1d2e3f"]);
     }
 }

@@ -12,12 +12,28 @@ fn default_true() -> bool {
     true
 }
 
+/// A credential an MCP server's config names by environment variable (P70a): an HTTP server's
+/// `bearer_token_env_var`, and the OAuth `oauth_client_secret_env_var` / `[oauth] client_secret_env_var`. Resolved
+/// through `fuigo_config`'s installable resolver, which the shell installs when it holds the user's saved first-party
+/// key in memory: `FUIGO_API_KEY` then resolves to that key exactly where it used to be found in the agent's
+/// environment (the agent no longer copies it there), and any other name reads the environment. Uninstalled, names
+/// resolve via `std::env::var`. The same resolver serves explicit `${FUIGO_API_KEY}` references in config strings.
+pub use fuigo_config::install_credential_env_resolver;
+
+/// Read a credential variable an MCP server's config names. The name is denied to every child process from here on
+/// (P113, E2), as P86 does for a model's `env_key`: the token belongs to the destination it is written for, not to the
+/// model's shell, another server, a hook or a language server.
+fn resolve_credential_env_var(var: &str) -> Option<String> {
+    fuigo_tools::util::shell_env_policy::register_credential_env_names([var]);
+    fuigo_config::resolve_credential_env_var(var)
+}
+
 /// Read an MCP OAuth client secret from the named env var. `McpServerConfig` is its only caller.
 fn resolve_oauth_client_secret(env_var: Option<&String>) -> Option<String> {
     let env_var = env_var?;
-    match std::env::var(env_var) {
-        Ok(secret) => Some(secret),
-        Err(_) => {
+    match resolve_credential_env_var(env_var) {
+        Some(secret) => Some(secret),
+        None => {
             tracing::warn!(
                 env_var = env_var.as_str(),
                 "MCP OAuth client_secret env var is configured but not set in the environment; \
@@ -28,7 +44,7 @@ fn resolve_oauth_client_secret(env_var: Option<&String>) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum McpServerTransportConfig {
     Stdio {
@@ -62,6 +78,46 @@ pub enum McpServerTransportConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         oauth_scopes: Option<Vec<String>>,
     },
+}
+
+/// `url` with userinfo, query and fragment replaced by `<redacted>` (P70): an MCP server URL may carry a key. A leaf-crate
+/// copy of `fuigo_auth::redact_url`'s rule for the parts that matter here.
+fn url_without_credentials(url: &str) -> String {
+    // Fail closed on anything carrying userinfo or a backslash: transport parsers normalize odd spellings
+    // (`https:/user:pw@host`, `\\`) that a string scan here could misread.
+    if url.contains(['@', '\\']) {
+        return "<redacted url>".to_owned();
+    }
+    match url.find(['?', '#']) {
+        Some(i) => format!("{}{}<redacted>", &url[..i], &url[i..=i]),
+        None => url.to_owned(),
+    }
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. MCP server `env` values and `args` often carry API keys, so they print by name / count only.
+/// The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for McpServerTransportConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio { command, args, env, cwd } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", &format_args!("<{} args redacted>", args.len()))
+                .field("env", &env.as_ref().map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()))
+                .field("cwd", cwd)
+                .finish(),
+            Self::StreamableHttp { url, transport_type, bearer_token_env_var, headers, oauth_client_id, oauth_client_secret_env_var, oauth_scopes } => f
+                .debug_struct("StreamableHttp")
+                .field("url", &url_without_credentials(url))
+                .field("transport_type", transport_type)
+                .field("bearer_token_env_var", bearer_token_env_var)
+                .field("headers", &headers.as_ref().map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()))
+                .field("oauth_client_id", oauth_client_id)
+                .field("oauth_client_secret_env_var", oauth_client_secret_env_var)
+                .field("oauth_scopes", oauth_scopes)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -228,9 +284,45 @@ pub struct McpServerConfig {
     /// It roughly doubles the tokens per image. `_meta.mcpConfig.<server>.exposeImageBase64` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expose_image_base64: Option<bool>,
+    /// P118: this definition came from a source that may not name the saved API key (a project config, a plugin, a
+    /// project `.mcp.json`). Set by the loader of such a source; it travels with the definition, and
+    /// [`McpServerConfig::to_acp_mcp_server`] refuses every reference to the key in the final strings.
+    /// Written only when set (P133): a definition an ACP client upserted is saved to the user's config, which may
+    /// name the key, so the mark must survive the save or a value that composes a reference only under a different
+    /// environment would be bound the key after a restart.
+    #[serde(default, rename = "__fuigo_untrusted_source", skip_serializing_if = "std::ops::Not::not")]
+    pub untrusted_source: bool,
 }
 
 impl McpServerConfig {
+    /// The environment variables this config names as holding a credential: `bearer_token_env_var`,
+    /// `oauth_client_secret_env_var` and `[oauth] client_secret_env_var`.
+    pub fn credential_env_var_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        if let McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var,
+            oauth_client_secret_env_var,
+            ..
+        } = &self.transport
+        {
+            names.extend(bearer_token_env_var.as_deref());
+            names.extend(oauth_client_secret_env_var.as_deref());
+        }
+        if let Some(block) = &self.oauth {
+            names.extend(block.client_secret_env_var.as_deref());
+        }
+        names
+    }
+
+    /// Deny [`Self::credential_env_var_names`] to every child process spawned from now on (P113, E2). Called by the
+    /// config loaders when they parse a server and before a server is built from this config, whether or not it is
+    /// enabled: a stdio server started before the HTTP server that names a token must not inherit it either.
+    pub fn deny_credential_env_vars_to_children(&self) {
+        fuigo_tools::util::shell_env_policy::register_credential_env_names(
+            self.credential_env_var_names(),
+        );
+    }
+
     /// The transport field (`command` or `url`) that is present but blank, if
     /// any. Such a server can never connect, so the loader drops it.
     pub fn blank_transport_field(&self) -> Option<&'static str> {
@@ -369,7 +461,9 @@ impl McpServerConfig {
                 env,
                 cwd,
             } => {
-                *command = sub(command);
+                // P147: `command` and `cwd` never receive the saved key, so a `${FUIGO_API_KEY:-default}` there is its
+                // default (as without a key in 1.0.20); `args` and `env` keep it for the spawn to resolve.
+                *command = fuigo_config::apply_first_party_key_defaults(&sub(command)).into_owned();
                 for arg in args.iter_mut() {
                     *arg = sub(arg);
                 }
@@ -379,11 +473,11 @@ impl McpServerConfig {
                     }
                 }
                 if let Some(cwd) = cwd.as_mut() {
-                    *cwd = sub(cwd);
+                    *cwd = fuigo_config::apply_first_party_key_defaults(&sub(cwd)).into_owned();
                 }
             }
             McpServerTransportConfig::StreamableHttp { url, headers, .. } => {
-                *url = sub(url);
+                *url = fuigo_config::apply_first_party_key_defaults(&sub(url)).into_owned();
                 if let Some(headers) = headers.as_mut() {
                     for value in headers.values_mut() {
                         *value = sub(value);
@@ -393,7 +487,72 @@ impl McpServerConfig {
         }
     }
 
+    /// This definition with every reference to the saved API key removed, when it came from an untrusted source. It
+    /// runs on the FINAL strings (after setup, version overrides and `$VAR` expansion), the last point before a spawn.
+    /// `None` when the cleaned definition cannot be rebuilt: fail closed.
+    fn refused_for_untrusted_source(&self, name: &str) -> Option<McpServerConfig> {
+        self.refused_for_untrusted_source_reported(name, fuigo_config::key_naming::report_refusals)
+    }
+
+    /// [`Self::refused_for_untrusted_source`], recording the refusals with `report` (the note wording depends on the source).
+    fn refused_for_untrusted_source_reported(
+        &self,
+        name: &str,
+        report: fn(&[fuigo_config::key_naming::RefusedKeyReference]),
+    ) -> Option<McpServerConfig> {
+        let mut json = serde_json::to_value(self).ok()?;
+        let label = format!("MCP server `{name}`");
+        let mut refused = fuigo_config::key_naming::refuse_key_references_in_server_json(&mut json, &label);
+        // P136 (Astra r1 #3): text that only became the key's VALUE on expansion (a persisted `${SWITCH:-$}{FUIGO_API_KEY}`
+        // loaded while the key is exported) holds no reference: remove the value too.
+        refused.extend(fuigo_config::key_naming::refuse_key_values_in_server_json(&mut json, &label));
+        if refused.is_empty() {
+            return Some(self.clone());
+        }
+        report(&refused);
+        let mut cleaned: McpServerConfig = serde_json::from_value(json).ok()?;
+        cleaned.untrusted_source = true;
+        Some(cleaned)
+    }
+
+    /// This definition as a source that may not name the saved key would have it: marked untrusted, every reference to
+    /// the saved key removed (with a recorded note). For a server an ACP client hands over (`mcp/upsert`), whose origin
+    /// is not the user's own config file. `None` when the cleaned definition cannot be rebuilt: fail closed.
+    pub fn without_saved_key_references(&self, name: &str) -> Option<McpServerConfig> {
+        let mut marked = self.clone();
+        marked.untrusted_source = true;
+        // P152: the notes name this source (`/mcps` Add or an editor) and give the remedy that fits it.
+        let mut cleaned = marked.refused_for_untrusted_source_reported(
+            name,
+            fuigo_config::key_naming::report_added_server_refusals,
+        )?;
+        // The cleaned definition may be written to the user's own config, which is loaded with `$VAR` expansion and may
+        // name the key: a value that composes a reference only when expanded must not get there.
+        let mut json = serde_json::to_value(&cleaned).ok()?;
+        let refused = fuigo_config::key_naming::refuse_composed_key_references_in_server_json(
+            &mut json,
+            &format!("MCP server `{name}`"),
+            &fuigo_config::expand_env_vars_in_string,
+        );
+        if !refused.is_empty() {
+            fuigo_config::key_naming::report_added_server_refusals(&refused);
+            cleaned = serde_json::from_value(json).ok()?;
+            cleaned.untrusted_source = true;
+        }
+        Some(cleaned)
+    }
+
     pub fn to_acp_mcp_server(&self, name: impl Into<String>) -> Option<acp::McpServer> {
+        if self.untrusted_source {
+            let name: String = name.into();
+            let cleaned = self.refused_for_untrusted_source(&name)?;
+            return cleaned.to_acp_mcp_server_inner(name);
+        }
+        self.to_acp_mcp_server_inner(name)
+    }
+
+    fn to_acp_mcp_server_inner(&self, name: impl Into<String>) -> Option<acp::McpServer> {
+        self.deny_credential_env_vars_to_children();
         if !self.enabled || self.setup.is_some() {
             return None;
         }
@@ -441,14 +600,14 @@ impl McpServerConfig {
 
                 // Add bearer token from environment variable if specified
                 if let Some(env_var) = bearer_token_env_var {
-                    match std::env::var(env_var) {
-                        Ok(token) => {
+                    match self.credential_from_env_var(env_var) {
+                        Some(token) => {
                             http_headers.push(acp::HttpHeader::new(
                                 "Authorization",
                                 format!("Bearer {}", token),
                             ));
                         }
-                        Err(_) => {
+                        None => {
                             tracing::warn!(
                                 "MCP server '{}': bearer_token_env_var '{}' not set in environment",
                                 name,
@@ -476,8 +635,39 @@ impl McpServerConfig {
         }
     }
 
-    /// Extract OAuth configuration for this server, if any OAuth fields are set.
+    /// The credential the variable `var` names, as this definition may have it (P136, Astra r3 #1). Every place a
+    /// definition's own field becomes a credential (`bearer_token_env_var`, both OAuth client-secret variables) reads
+    /// it through here. A definition from a source that may not name the saved API key (`untrusted_source`) never
+    /// gets the key: not by its name (also after any later `$VAR` expansion of the selector, which ran before this
+    /// point), and not by another variable that holds the same value.
+    fn credential_from_env_var(&self, var: &str) -> Option<String> {
+        if self.untrusted_source && fuigo_config::key_naming::names_saved_key(var) {
+            tracing::warn!(env_var = var, "an untrusted MCP server definition names the saved API key as a credential; ignored");
+            return None;
+        }
+        let value = resolve_credential_env_var(var)?;
+        // The value may hold the key, or a reference a destination would still resolve to it (`${FUIGO_API_KEY}` as the
+        // text of another variable, Astra P136 r1 #2): either is the key.
+        if self.untrusted_source && fuigo_config::key_naming::holds_saved_key(&value) {
+            tracing::warn!(env_var = var, "an untrusted MCP server definition's credential holds the saved API key; ignored");
+            return None;
+        }
+        Some(value)
+    }
+
+    /// [`resolve_oauth_client_secret`] through [`Self::credential_from_env_var`].
+    fn oauth_client_secret(&self, env_var: Option<&String>) -> Option<String> {
+        let env_var = env_var?;
+        if self.untrusted_source {
+            return self.credential_from_env_var(env_var);
+        }
+        resolve_oauth_client_secret(Some(env_var))
+    }
+
+    /// Extract OAuth configuration for this server, if any OAuth fields are set. The client secret honours the
+    /// definition's provenance (P136): see [`Self::credential_from_env_var`].
     pub fn oauth_config(&self) -> Option<McpOAuthConfig> {
+        self.deny_credential_env_vars_to_children();
         if let McpServerTransportConfig::StreamableHttp {
             oauth_client_id,
             oauth_client_secret_env_var,
@@ -488,7 +678,7 @@ impl McpServerConfig {
         {
             return Some(McpOAuthConfig {
                 client_id: oauth_client_id.clone(),
-                client_secret: resolve_oauth_client_secret(oauth_client_secret_env_var.as_ref()),
+                client_secret: self.oauth_client_secret(oauth_client_secret_env_var.as_ref()),
                 scopes: oauth_scopes.clone(),
                 callback_port: None,
             });
@@ -499,7 +689,7 @@ impl McpServerConfig {
         {
             return Some(McpOAuthConfig {
                 client_id: block.client_id.clone(),
-                client_secret: resolve_oauth_client_secret(block.client_secret_env_var.as_ref()),
+                client_secret: self.oauth_client_secret(block.client_secret_env_var.as_ref()),
                 scopes: block.scopes.clone(),
                 callback_port: block.callback_port,
             });
@@ -614,6 +804,7 @@ mod tests {
             tool_timeout_sec: Some(20),
             tool_timeouts: Some(HashMap::from([("t".into(), 1)])),
             expose_image_base64: Some(true),
+            untrusted_source: false,
         };
         let http = McpServerConfig {
             transport: McpServerTransportConfig::StreamableHttp {
@@ -632,6 +823,7 @@ mod tests {
             tool_timeout_sec: None,
             tool_timeouts: None,
             expose_image_base64: None,
+            untrusted_source: false,
         };
         for config in [stdio, http] {
             let value = serde_json::to_value(&config).unwrap();
@@ -739,6 +931,7 @@ mod tests {
             tool_timeout_sec: None,
             tool_timeouts: None,
             expose_image_base64: None,
+            untrusted_source: false,
         };
         let prefs = McpServerPreferences {
             values: HashMap::from([("site".to_string(), "us5".to_string())]),
@@ -797,6 +990,7 @@ mod tests {
             tool_timeout_sec: None,
             tool_timeouts: None,
             expose_image_base64: None,
+            untrusted_source: false,
         };
         assert!(matches!(
             config.resolve_setup(None),
@@ -805,3 +999,118 @@ mod tests {
         assert!(config.to_acp_mcp_server("x").is_none());
     }
 }
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    /// The resolver this test installs: one variable answers from "memory", every other name reads the environment.
+    /// It also answers the saved key (`FUIGO_API_KEY`) and an alias holding the same value, for the P136 tests: the
+    /// resolver is installed once per process, so every test of this binary installs this one.
+    pub(super) fn p70a_resolver(var: &str) -> Option<String> {
+        match var {
+            "P70A_MCP_BEARER_TEST_VAR" => Some("p70a-FAKE-resolved-bearer".to_owned()),
+            "FUIGO_API_KEY" | "P136_ALIAS_OF_THE_KEY" => Some(super::p136_tests::SAVED_KEY.to_owned()),
+            "P136_HOLDS_THE_KEY" => Some(format!("prefix-{}", super::p136_tests::SAVED_KEY)),
+            "P136_LITERAL_REFERENCE" => Some("${FUIGO_API_KEY}".to_owned()),
+            _ => std::env::var(var).ok(),
+        }
+    }
+
+    /// P70a (Astra r3, r4): `bearer_token_env_var` and both OAuth client-secret variables resolve through the
+    /// installed resolver, so the shell can answer `FUIGO_API_KEY` from the key it holds in memory (it is no longer
+    /// copied into the environment). The variable is set nowhere in the environment, so only the resolver can supply
+    /// the value.
+    #[test]
+    fn credential_env_vars_resolve_through_the_installed_resolver() {
+        assert!(std::env::var_os("P70A_MCP_BEARER_TEST_VAR").is_none(), "precondition: not in the environment");
+        install_credential_env_resolver(p70a_resolver);
+        let server = McpServerConfig {
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "https://mcp.p70.invalid/mcp".into(),
+                transport_type: None,
+                bearer_token_env_var: Some("P70A_MCP_BEARER_TEST_VAR".into()),
+                headers: None,
+                oauth_client_id: None,
+                oauth_client_secret_env_var: None,
+                oauth_scopes: None,
+            },
+            enabled: true,
+            oauth: None,
+            setup: None,
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
+            tool_timeouts: None,
+            expose_image_base64: None,
+            untrusted_source: false,
+        };
+        let Some(acp::McpServer::Http(http)) = server.to_acp_mcp_server("p70a") else {
+            panic!("an HTTP MCP server");
+        };
+        let auth: Vec<&acp::HttpHeader> = http.headers.iter().filter(|h| h.name == "Authorization").collect();
+        assert_eq!(auth.len(), 1, "one Authorization header: {:?}", http.headers.len());
+        assert_eq!(auth[0].value, "Bearer p70a-FAKE-resolved-bearer");
+        // The OAuth client secret, flat and in the `[oauth]` block.
+        let flat = McpServerConfig {
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "https://mcp.p70.invalid/mcp".into(),
+                transport_type: None,
+                bearer_token_env_var: None,
+                headers: None,
+                oauth_client_id: Some("p70a-client".into()),
+                oauth_client_secret_env_var: Some("P70A_MCP_BEARER_TEST_VAR".into()),
+                oauth_scopes: None,
+            },
+            ..server.clone()
+        };
+        let secret = flat.oauth_config().and_then(|c| c.client_secret);
+        assert_eq!(secret.as_deref(), Some("p70a-FAKE-resolved-bearer"), "oauth_client_secret_env_var");
+        let block: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "url": "https://mcp.p70.invalid/mcp",
+            "oauth": { "clientId": "p70a-client", "clientSecretEnvVar": "P70A_MCP_BEARER_TEST_VAR" }
+        }))
+        .expect("an [oauth] block");
+        let secret = block.oauth_config().and_then(|c| c.client_secret);
+        assert_eq!(secret.as_deref(), Some("p70a-FAKE-resolved-bearer"), "[oauth] client_secret_env_var");
+    }
+
+    /// P70 (Astra r1): MCP server env values, args and headers routinely carry API keys.
+    #[test]
+    fn mcp_transport_debug_redacts_env_args_and_headers() {
+        let stdio = McpServerTransportConfig::Stdio {
+            command: "p70-server".into(),
+            args: vec!["--token".into(), "p70ma-FAKE-3e4f5a6b".into()],
+            env: Some([("P70_TOKEN".to_owned(), "p70me-FAKE-7c8d9e0f".to_owned())].into_iter().collect()),
+            cwd: None,
+        };
+        assert_redacted(&stdio, &["p70ma-FAKE-3e4f5a6b", "p70me-FAKE-7c8d9e0f"]);
+        let http = McpServerTransportConfig::StreamableHttp {
+            url: "https://p70u:p70mu-FAKE-5b6c7d8e@p70.invalid/mcp/@team?key=p70mq-FAKE-9f0a1b2c".into(),
+            transport_type: None,
+            bearer_token_env_var: Some("P70_ENV_NAME".into()),
+            headers: Some([("Authorization".to_owned(), "Bearer p70mh-FAKE-1a2b3c4d".to_owned())].into_iter().collect()),
+            oauth_client_id: None,
+            oauth_client_secret_env_var: None,
+            oauth_scopes: None,
+        };
+        assert_redacted(&http, &["p70mh-FAKE-1a2b3c4d", "p70mu-FAKE-5b6c7d8e", "p70mq-FAKE-9f0a1b2c"]);
+    }
+}
+
+#[cfg(test)]
+#[path = "mcp_p136_tests.rs"]
+mod p136_tests;

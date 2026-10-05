@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 mod attempt_runner;
 mod spawn;
 pub(crate) use spawn::{
-    ChildRunOutput, StartedChild, emit_subagent_notification, spawn_subagent_coordinator,
+    ChildRunOutput, StartedChild, emit_subagent_notification, subagent_coordinator_task,
     subagent_coordinator_channel, worker_runtime,
 };
 mod attempt_store;
@@ -600,9 +600,10 @@ async fn resolve_effective_model_config(
 }
 /// Truncate an API key to a safe prefix for logging.
 /// Counts characters, not bytes: a configured key with a multi-byte character would panic a byte slice, and this only ever runs to build a log line.
+/// The fingerprint of a model credential for the subagent-resolution logs (P70: was its first 8 characters).
 fn key_prefix(key: &Option<String>) -> String {
     match key {
-        Some(k) => k.chars().take(8).collect(),
+        Some(k) => fuigo_auth::bearer_fingerprint(k),
         None => "<none>".to_string(),
     }
 }
@@ -636,6 +637,8 @@ fn log_subagent_model_resolution(
 /// Session-token bearer resolver for a subagent config, over the parent's `AuthManager` (wire-valid only).
 /// Without it the subagent runs forever on the `api_key` frozen at spawn and 401s once the parent rotates the token.
 /// Gated exactly like the parent session's resolver (`auth_method::session_token_auth_gate`); all three subagent config paths go through this.
+/// P42: the destination is decided by the one session-delivery predicate (`session_delivery::session_may_reach`), not the broad
+/// host-only `is_fuigo_api_url`, and it bounds `NotByok` as well as `Unknown`.
 fn session_bearer_resolver(
     ctx: &SubagentSpawnContext,
     byok: crate::agent::auth_method::ModelByok,
@@ -645,7 +648,7 @@ fn session_bearer_resolver(
     auth_method::session_token_auth_gate(
         auth_method::is_session_based_method(&ctx.auth_method_id),
         byok,
-        crate::util::is_fuigo_api_url(base_url),
+        crate::auth::session_delivery::session_may_reach(base_url),
     )
     .then(|| {
         crate::auth::credential_provider::WireValidBearerResolver::shared(ctx.auth_manager.clone())
@@ -700,8 +703,16 @@ async fn read_parent_sampling_config(
                 &cfg.api_backend,
                 &cfg.base_url,
             );
+            // P42: the parent's buffered key was resolved for the parent's destination at some earlier turn.
+            // Withholding the resolver below does not withhold this seed, so re-check it here.
+            let inherited_api_key = crate::auth::session_delivery::withhold_session_bearer(
+                creds.api_key,
+                &cfg.base_url,
+                Some(ctx.auth_manager.as_ref()),
+                "subagent_inherit_live",
+            );
             let mut inherited = fuigo_sampler::SamplerConfig {
-                api_key: creds.api_key,
+                api_key: inherited_api_key,
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
                 max_completion_tokens: cfg.max_completion_tokens,
@@ -785,6 +796,13 @@ async fn read_parent_sampling_config(
         })),
     );
     let mut fallback = ctx.sampling_config.clone();
+    // P42: same send-time re-check for the spawn-context baseline's seed key.
+    fallback.api_key = crate::auth::session_delivery::withhold_session_bearer(
+        fallback.api_key.take(),
+        &fallback.base_url,
+        Some(ctx.auth_manager.as_ref()),
+        "subagent_inherit_fallback",
+    );
     fallback.bearer_resolver = if ctx.would_strip_fallback_key(fallback.api_key.as_deref()) {
         None
     } else {
@@ -1060,7 +1078,7 @@ fn stamp_live_fork_session_metadata(
     summary.inherited_prefix_len = inherited_prefix_len;
     summary.forked_at = Some(chrono::Utc::now());
     if let Ok(bytes) = serde_json::to_vec_pretty(summary)
-        && let Err(e) = std::fs::write(&summary_path, bytes)
+        && let Err(e) = fuigo_config::write_file_owner_only(&summary_path, bytes)
     {
         tracing::warn!(error = %e, "live fork: failed to write forked session summary");
     }
@@ -2236,7 +2254,9 @@ fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
-    std::fs::create_dir_all(parent)?;
+    // `<session>/subagents/<id>/` sits in the session folder: owner-only folders like it (P150, S14). The file is a
+    // `NamedTempFile`, created 0600.
+    fuigo_config::create_dir_all_owner_only(parent)?;
     let tmp = tempfile::NamedTempFile::new_in(parent)?;
     std::fs::write(tmp.path(), contents)?;
     tmp.persist(path)?;
@@ -2350,7 +2370,11 @@ fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &Gc
         meta.duration_ms = Some(result.duration_ms);
         meta.tool_calls = Some(result.tool_calls);
         meta.turns = Some(result.turns);
-        meta.error = result.error.clone();
+        // P70b: `meta.json` is a persisted, uploaded sink; credentials sent upstream are replaced.
+        meta.error = result
+            .error
+            .clone()
+            .map(fuigo_telemetry::sent_credentials::scrub_owned);
         write_subagent_meta(dir, &meta);
         if let (Some(bucket), Some(method)) = (&gcs_ctx.bucket_url, &gcs_ctx.upload_method) {
             let gcs_meta = SubagentSessionMetadata::from_meta(
@@ -2653,3 +2677,20 @@ pub(crate) async fn reconcile_live_orphaned_subagents(
 }
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+#[path = "inline_mcp_p133_tests.rs"]
+mod inline_mcp_p133_tests;
+
+/// P150 (S14): `<session>/subagents/<id>/` is created owner-only, and its files 0600.
+#[cfg(all(test, unix))]
+#[test]
+fn p150_subagent_folder_and_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("subagents").join("sa-p150");
+    assert!(write_subagent_output(&dir, "done"));
+    assert_eq!(mode(&tmp.path().join("subagents")), 0o700);
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&dir.join("output.json")), 0o600);
+}

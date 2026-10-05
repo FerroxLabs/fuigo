@@ -1,0 +1,763 @@
+992
+### agent-client-protocol-schema 0.11.4 (4)
+    /src/nes.rs:2137: "fn main() {\n    println!(\"hello\");\n}\n",
+    /src/nes.rs:2148: "text": "fn main() {\n    println!(\"hello\");\n}\n"
+    /src/nes.rs:2195: "fn main() {\n    let x = 42;\n    println!(\"hello\");\n}\n",
+    /src/nes.rs:2208: "text": "fn main() {\n    let x = 42;\n    println!(\"hello\");\n}\n"
+### anstream 0.6.21 (4)
+    /src/adapter/strip.rs:494: dbg!(&s);
+    /src/adapter/strip.rs:495: dbg!(s.as_bytes());
+    /src/adapter/strip.rs:504: dbg!(&s);
+    /src/adapter/strip.rs:505: dbg!(s.as_bytes());
+### anstyle 1.0.13 (10)
+    /src/effect.rs:389: dbg!(size_of::<Effects>());
+    /src/effect.rs:390: dbg!(size_of::<EffectsDisplay>());
+    /src/color.rs:660: dbg!(size_of::<Color>());
+    /src/color.rs:661: dbg!(size_of::<AnsiColor>());
+    /src/color.rs:662: dbg!(size_of::<Ansi256Color>());
+    /src/color.rs:663: dbg!(size_of::<RgbColor>());
+### arboard 3.6.1 (1)
+    /src/platform/linux/x11.rs:1168: eprintln!("{msg}");
+### arrayref 0.3.9 (1)
+    /src/lib.rs:315: println!("I am checking that I can dereference bar[0] = {}", bar[0]);
+### async-std 1.13.2 (3)
+    /src/io/read/mod.rs:329: println!("{}", byte.unwrap());
+    /src/stream/stream/mod.rs:574: .inspect(|x| println!("about to filter {}", x))
+    /src/stream/stream/mod.rs:576: .inspect(|x| println!("made it through filter: {}", x))
+### aws-config 1.8.8 (6)
+    /src/test_case.rs:414: eprintln!("test case: {}. {}", self.metadata.name, self.metadata.docs);
+    /src/profile/credentials/repr.rs:497: print!("checking: {}...", test_case.docs);
+    /src/profile/credentials/repr.rs:499: println!("ok")
+    /src/sts/assume_role.rs:381: let _ = dbg!(provider.provide_credentials().await);
+    /src/sts/assume_role.rs:412: let _ = dbg!(provider.provide_credentials().await);
+    /src/sts/assume_role.rs:443: let _ = dbg!(provider.provide_credentials().await);
+### aws-lc-rs 1.16.2 (16)
+    /src/lib.rs:318: eprintln!("Raw Error -- {error_msg:?}\nErr: {err}, Lib: {lib}, Reason: {reason}, Func: {func}");
+    /src/pqdsa.rs:112: println!("key size: {:?}", key.as_const().key_size_bytes());
+    /src/pqdsa.rs:120: println!("public marshall: {public_buffer:?}");
+    /src/pqdsa.rs:128: println!("private marshall: {private_buffer:?}");
+    /src/pqdsa.rs:134: println!("raw public size: {}", raw_public_buffer.len());
+    /src/pqdsa.rs:144: println!("raw private size: {}", raw_private_buffer.len());
+### aws-lc-sys 0.39.1 (12)
+    /builder/cc_builder.rs:800: println!("cargo:root={}", self.out_dir.display());
+    /builder/cmake_builder.rs:209: println!("cargo:rustc-link-arg=/ignore:4099");
+    /builder/cmake_builder.rs:421: eprintln!("{}", result.stdout);
+    /builder/cmake_builder.rs:424: eprintln!("{}", result.stdout);
+    /builder/cmake_builder.rs:538: eprintln!(
+    /builder/cmake_builder.rs:545: eprintln!(
+### aws-runtime 1.5.12 (5)
+    /src/env_config/source.rs:248: eprintln!("test: {}", i);
+    /src/env_config/source.rs:328: println!(
+    /src/env_config/section.rs:295: eprintln!("test: {}", i);
+    /src/env_config/section.rs:449: eprintln!("Test case failed: {:#?}", copy);
+    /src/env_config/section.rs:450: eprintln!("failure: {}", e);
+### aws-sdk-s3 1.109.0 (10)
+    /src/operation/create_multipart_upload.rs:326: let _ = dbg!(result);
+    /src/operation/put_bucket_lifecycle_configuration.rs:402: let _ = dbg!(result);
+    /src/operation/head_object.rs:361: let _ = dbg!(result);
+    /src/operation/put_object.rs:381: let _ = dbg!(result);
+    /src/operation/put_object.rs:413: let _ = dbg!(result);
+    /src/operation/delete_object_tagging.rs:313: let _ = dbg!(result);
+### aws-sigv4 1.3.5 (1)
+    /src/http_request/test.rs:431: println!("Loading `{}` for test case...", path);
+### aws-smithy-eventstream 0.60.18 (2)
+    /src/frame.rs:726: match dbg!(decoder.decode_frame(&mut segmented)).unwrap() {
+    /src/frame.rs:746: println!("chunk size: {chunk_size}");
+### aws-smithy-http-client 1.1.9 (4)
+    /src/test_util/never.rs:221: assert!(dbg!(err).is_timeout());
+    /src/test_util/never.rs:245: assert!(dbg!(err).is_timeout());
+    /src/test_util/wire.rs:283: dbg!(event)
+    /src/test_util/wire.rs:403: println!("looking up {req:?}, replying with {socket_addr:?}");
+### aws-smithy-http 0.62.6 (1)
+    /src/event_stream/receiver.rs:482: println!("[{start}, {boundary1}], [{boundary1}, {boundary2}], [{boundary2}, {end}]");
+### aws-smithy-runtime-api 1.11.3 (1)
+    /src/client/runtime_plugin.rs:478: dbg!(&resp);
+### aws-smithy-runtime 1.9.3 (10)
+    /src/client/waiters.rs:479: match dbg!(orchestrator.orchestrate().await) {
+    /src/client/waiters/backoff.rs:98: let backoff = dbg!(Backoff::new(
+    /src/client/waiters/backoff.rs:107: println!("attempt: {attempt}, delay: {delay}, time: {time}");
+    /src/client/http/body/minimum_throughput/throughput.rs:471: let report = dbg!(&mut logs).report(now);
+    /src/client/http/body/minimum_throughput/throughput.rs:485: assert_eq!(i, dbg!(&logs).buffer.counts().pending);
+    /src/client/http/body/minimum_throughput/throughput.rs:494: let report = dbg!(&mut logs).report(now);
+### aws-smithy-types 1.4.3 (3)
+    /src/config_bag.rs:836: println!("{final_bag:#?}");
+    /src/date_time/mod.rs:544: println!("Test case: {test_case:?}");
+    /src/date_time/mod.rs:562: println!("Test case: {test_case:?}");
+### axum-macros 0.5.0 (1)
+    /src/lib.rs:750: eprintln!("{tokens}");
+### axum 0.8.6 (5)
+    /src/json.rs:284: println!("testing {content_type:?}");
+    /src/test_helpers/test_client.rs:21: println!("Listening on {addr}");
+    /src/test_helpers/counting_cloneable_state.rs:46: println!("AppState::Clone:\n===============\n{bt}\n");
+    /src/extract/ws.rs:1114: ws.on_failed_upgrade(|_error: Error| println!("oops!"))
+    /src/serve/mod.rs:522: eprintln!("failed to set TCP_NODELAY on incoming connection: {err:#}");
+### backtrace 0.3.76 (4)
+    /src/capture.rs:615: println!("{:?}", frame.ip());
+    /src/capture.rs:616: println!("{:?}", frame.symbol_address());
+    /src/capture.rs:617: println!("{:?}", frame.module_base_address());
+    /src/capture.rs:618: println!("{:?}", frame.symbols());
+### blake3 1.8.2 (13)
+    /src/hazmat.rs:609: dbg!(subtree_chunks);
+    /src/hazmat.rs:616: dbg!(case);
+    /src/traits.rs:215: dbg!(input_len);
+    /src/test.rs:126: dbg!(counter);
+    /src/test.rs:165: dbg!(n);
+    /src/test.rs:204: dbg!(n);
+### brotli-decompressor 4.0.3 (1)
+    /src/ffi/alloc_util.rs:49: print!("leaking memory block of length {} element size: {}\n", self.0.len(), core::mem::size_of::<Ty
+### brotli-decompressor 5.0.0 (1)
+    /src/ffi/alloc_util.rs:49: print!("leaking memory block of length {} element size: {}\n", self.0.len(), core::mem::size_of::<Ty
+### brotli 7.0.0 (5)
+    /src/enc/brotli_bit_stream.rs:198: println!(
+    /src/enc/brotli_bit_stream.rs:209: println!(
+    /src/enc/test.rs:571: println!("{output_buffer:?}");
+    /src/enc/context_map_entropy.rs:393: /*eprintln!("TRIAL {} {}", cm, combined);
+    /src/enc/context_map_entropy.rs:395: eprintln!("{},{} costs {:?}", SPEEDS_TO_SEARCH[i], MAXES_TO_SEARCH[i], self.singleton_costs[cost_typ
+### brotli 8.0.2 (5)
+    /src/enc/brotli_bit_stream.rs:198: println!(
+    /src/enc/brotli_bit_stream.rs:209: println!(
+    /src/enc/test.rs:604: println!("{output_buffer:?}");
+    /src/enc/context_map_entropy.rs:393: /*eprintln!("TRIAL {} {}", cm, combined);
+    /src/enc/context_map_entropy.rs:395: eprintln!("{},{} costs {:?}", SPEEDS_TO_SEARCH[i], MAXES_TO_SEARCH[i], self.singleton_costs[cost_typ
+### bstr 1.12.1 (1)
+    /src/lib.rs:94: println!("{:?}", bytes.as_bstr());
+### cached 0.56.0 (4)
+    /src/macros.rs:209: println!("{}", return_value);
+    /src/proc_macro.rs:171: Err(e) => eprintln!("error: {:?}", e),
+    /src/proc_macro.rs:173: println!("value: {:?}, was cached: {}", *r, r.was_cached);
+    /src/proc_macro.rs:197: println!("value: {:?}, was cached: {}", *a, a.was_cached);
+### chrono 0.4.44 (6)
+    /src/datetime/serde.rs:1346: dbg!(&encoded);
+    /src/format/parse.rs:1764: eprintln!("Test input: {date:?}\n    Expect: {checkdate:?}");
+    /src/format/strftime.rs:751: eprintln!("test_strftime_items: parse_and_collect({s:?})");
+    /src/format/strftime.rs:1210: println!("{:?}", item);
+    /src/offset/mod.rs:625: dbg!(offset_hour);
+    /src/offset/local/tz_info/timezone.rs:762: dbg!(&time_zone);
+### clap_builder 4.5.53 (6)
+    /src/parser/matches/arg_matches.rs:1992: dbg!(&a_index);
+    /src/parser/matches/arg_matches.rs:1996: dbg!(&a_value);
+    /src/parser/matches/arg_matches.rs:1998: dbg!(a);
+    /src/parser/matches/arg_matches.rs:2004: dbg!(&b_index);
+    /src/parser/matches/arg_matches.rs:2008: dbg!(&b_value);
+    /src/parser/matches/arg_matches.rs:2010: dbg!(b);
+### clap_complete 4.6.5 (2)
+    /src/macros.rs:4: eprint!("[{:>w$}] \t", module_path!(), w = 28);
+    /src/macros.rs:5: eprintln!($($arg)*)
+### console 0.16.1 (1)
+    /src/unix_term.rs:393: print!("\x1b]0;{title}\x07");
+### cpp_demangle 0.4.5 (4)
+    /src/ast.rs:43: println!();
+    /src/ast.rs:107: println!();
+    /src/logging.rs:4: println!($fmt);
+    /src/logging.rs:7: println!($fmt, $($x)*);
+### crc-fast 1.9.0 (9)
+    /src/lib.rs:1675: eprintln!("Skipping test due to write error: {}", e);
+    /src/lib.rs:1698: eprintln!("Skipping test due to write error: {}", e);
+    /src/lib.rs:1747: eprintln!("Skipping test due to write error: {}", e);
+    /src/lib.rs:1849: eprintln!("Skipping test on Windows");
+    /src/crc64/utils.rs:25: println!("{}={:#016x}{:016x}", prefix, temp[1], temp[0]);
+    /src/crc64/utils.rs:34: println!("{}={:#016x}{:016x}", prefix, temp[1], temp[0]);
+### curve25519-dalek 4.1.3 (54)
+    /src/backend/vector/ifma/edwards.rs:266: println!("Testing point addition:");
+    /src/backend/vector/ifma/edwards.rs:267: println!("P = {:?}", P);
+    /src/backend/vector/ifma/edwards.rs:268: println!("Q = {:?}", Q);
+    /src/backend/vector/ifma/edwards.rs:269: println!("cached Q = {:?}", cached_Q);
+    /src/backend/vector/ifma/edwards.rs:270: println!("R = P + Q = {:?}", &P + &Q);
+    /src/backend/vector/ifma/edwards.rs:272: println!("R_vector = {:?}", R_vector);
+### dirs 5.0.1 (21)
+    /src/lin.rs:33: println!("{:?} exists: {:?}", user_dirs_file, user_dirs_file.exists());
+    /src/lib.rs:307: println!("home_dir:       {:?}", ::home_dir());
+    /src/lib.rs:308: println!();
+    /src/lib.rs:309: println!("cache_dir:      {:?}", ::cache_dir());
+    /src/lib.rs:310: println!("config_dir:     {:?}", ::config_dir());
+    /src/lib.rs:311: println!("data_dir:       {:?}", ::data_dir());
+### dirs 6.0.0 (21)
+    /src/lin.rs:33: println!("{:?} exists: {:?}", user_dirs_file, user_dirs_file.exists());
+    /src/lib.rs:307: println!("home_dir:       {:?}", ::home_dir());
+    /src/lib.rs:308: println!();
+    /src/lib.rs:309: println!("cache_dir:      {:?}", ::cache_dir());
+    /src/lib.rs:310: println!("config_dir:     {:?}", ::config_dir());
+    /src/lib.rs:311: println!("data_dir:       {:?}", ::data_dir());
+### email_address 0.2.9 (12)
+    /src/lib.rs:1271: println!(">> test case: {}", test_case);
+    /src/lib.rs:1272: println!("     <{}>", address);
+    /src/lib.rs:1274: println!(">> <{}>", address);
+    /src/lib.rs:1281: println!(">> test case: {}", test_case);
+    /src/lib.rs:1282: println!("     <{}>", address);
+    /src/lib.rs:1284: println!(">> <{}>", address);
+### env_filter 0.1.4 (1)
+    /src/filter.rs:111: eprintln!("warning: {error}, ignoring it");
+### env_logger 0.11.8 (2)
+    /src/fmt/writer/buffer.rs:74: print!("{buf}");
+    /src/fmt/writer/buffer.rs:90: eprint!("{buf}");
+### fancy-regex 0.14.0 (8)
+    /src/lib.rs:947: RegexImpl::Wrap { inner, .. } => println!("wrapped {:?}", inner),
+    /src/vm.rs:213: println!("{:3}: {:?}", i, insn);
+    /src/vm.rs:313: println!("saves: {:?}", self.saves);
+    /src/vm.rs:399: println!("stack after {}: {:?}", operation, self.stack);
+    /src/vm.rs:440: println!("pos\tinstruction");
+    /src/vm.rs:450: println!("{}\t{} {:?}", ix, pc, prog.body[pc]);
+### fancy-regex 0.16.2 (6)
+    /src/vm.rs:342: println!("saves: {:?}", self.saves);
+    /src/vm.rs:428: println!("stack after {}: {:?}", operation, self.stack);
+    /src/vm.rs:513: println!("pos\tinstruction");
+    /src/vm.rs:523: println!("{}\t{} {:?}", ix, pc, prog.body[pc]);
+    /src/vm.rs:533: println!("saves: {:?}", state.saves);
+    /src/vm.rs:787: println!("fail");
+### fastrace 0.7.18 (1)
+    /src/collector/console_reporter.rs:12: eprintln!("{span:#?}");
+### fax 0.2.6 (5)
+    /src/lib.rs:10: println!($($arg),*)
+    /src/lib.rs:151: println!("partial: {:0w$b}, valid: {}", self.partial & ((1 << self.valid) - 1), self.valid, w=self.v
+    /src/lib.rs:153: print!("{:08b} ", b);
+    /src/lib.rs:155: println!();
+    /src/lib.rs:158: println!("partial: {:0w$b}, valid: {}", self.partial & ((1 << self.valid) - 1), self.valid, w=self.v
+### fdeflate 0.3.7 (2)
+    /src/decompress.rs:1202: println!("Random data: {:?}", data);
+    /src/decompress.rs:1267: println!("compressed len: {}", compressed.len());
+### findshlibs 0.10.2 (9)
+    /src/windows/mod.rs:377: println!("shlib = {:?}", shlib.name());
+    /src/windows/mod.rs:381: println!("    segment = {:?}", seg.name());
+    /src/linux/mod.rs:449: println!("{:?}", shlib);
+    /src/linux/mod.rs:470: println!("no id found for {:?}", name);
+    /src/linux/mod.rs:489: println!("{}: {}", path.display(), gnu_build_id);
+    /src/linux/mod.rs:496: println!("shlib = {:?}", shlib.name());
+### fraction 0.15.3 (13)
+    /src/fraction/unicode_str_io.rs:433: println!("{} ?= {}", string, frac);
+    /src/fraction/unicode_str_io.rs:435: println!("{} ?= {}", string, frac);
+    /src/fraction/unicode_str_io.rs:489: println!("{} ?= {}", string, frac);
+    /src/fraction/unicode_str_io.rs:503: println!("{} ?= {}", string, frac);
+    /src/fraction/unicode_str_io.rs:505: println!("{} ?= {}", string, frac);
+    /src/fraction/unicode_str_io.rs:518: println!("{} ?= {}", string, frac);
+### gcloud-storage 1.3.0 (4)
+    /src/client.rs:306: println!("uploading={url:?}");
+    /src/client.rs:324: println!("downloading={url:?}");
+    /src/client.rs:363: println!("uploading={url:?}");
+    /src/client.rs:388: println!("downloading={url:?}");
+### gimli 0.32.3 (7)
+    /src/write/unit.rs:2061: println!("{:?}", sections.debug_str);
+    /src/write/unit.rs:2062: println!("{:?}", sections.debug_info);
+    /src/write/unit.rs:2063: println!("{:?}", sections.debug_abbrev);
+    /src/write/unit.rs:2636: println!("{:?}", sections.debug_info);
+    /src/write/unit.rs:2637: println!("{:?}", sections.debug_abbrev);
+    /src/write/unit.rs:2822: println!("{:?}", sections.debug_info);
+### git2 0.20.2 (19)
+    /src/tree.rs:482: println!("iter entry {:?}", entry.name());
+    /src/tracing.rs:151: dbg!(level, msg);
+    /src/stash.rs:228: println!("using path {:?}", p);
+    /src/stash.rs:284: println!("{:?}", progress);
+    /src/repo.rs:3841: println!("created oid1 {:?}", oid1);
+    /src/repo.rs:3850: println!("using path {:?}", p);
+### gix-features 0.48.1 (1)
+    /src/cache.rs:44: eprintln!(
+### hashbrown 0.14.5 (3)
+    /src/map.rs:8588: println!("MyAlloc freed.");
+    /src/map.rs:8616: println!("{}, {}", k, v);
+    /src/raw/mod.rs:4692: println!("MyAlloc freed.");
+### hashbrown 0.15.5 (3)
+    /src/map.rs:6204: println!("MyAlloc freed.");
+    /src/map.rs:6232: println!("{k}, {v}");
+    /src/raw/mod.rs:4311: println!("MyAlloc freed.");
+### hashbrown 0.16.1 (3)
+    /src/map.rs:6303: println!("MyAlloc freed.");
+    /src/map.rs:6331: println!("{k}, {v}");
+    /src/raw/mod.rs:4498: println!("MyAlloc freed.");
+### hashbrown 0.17.0 (3)
+    /src/raw.rs:4503: println!("MyAlloc freed.");
+    /src/map.rs:6515: println!("MyAlloc freed.");
+    /src/map.rs:6545: println!("{k}, {v}");
+### heapless 0.8.0 (1)
+    /src/spsc.rs:638: println!("{}", v);
+### hostname 0.4.1 (1)
+    /src/lib.rs:29: println!("{:?}", name);
+### html5ever 0.29.1 (12)
+    /src/tokenizer/mod.rs:1481: println!("\nTokenizer profile, in nanoseconds");
+    /src/tokenizer/mod.rs:1482: println!(
+    /src/tokenizer/mod.rs:1486: println!("\n{total:12}         total in tokenizer");
+    /src/tokenizer/mod.rs:1490: println!("{v:12}  {pct:4.1}%  {k:?}");
+    /src/tree_builder/mod.rs:295: println!("dump_state on {label}");
+    /src/tree_builder/mod.rs:296: print!("    open_elems:");
+### html5ever 0.38.0 (12)
+    /src/tokenizer/mod.rs:1776: println!("\nTokenizer profile, in nanoseconds");
+    /src/tokenizer/mod.rs:1777: println!(
+    /src/tokenizer/mod.rs:1781: println!("\n{total:12}         total in tokenizer");
+    /src/tokenizer/mod.rs:1785: println!("{v:12}  {pct:4.1}%  {k:?}");
+    /src/tree_builder/mod.rs:295: println!("dump_state on {label}");
+    /src/tree_builder/mod.rs:296: print!("    open_elems:");
+### httpdate 1.0.3 (1)
+    /src/lib.rs:130: println!("{:?}", s);
+### hyper 1.8.1 (2)
+    /src/ffi/macros.rs:19: eprintln!("panic unwind caught, aborting");
+    /src/ffi/http_types.rs:678: println!("{}", std::str::from_utf8(&vec).unwrap());
+### iana-time-zone 0.1.64 (1)
+    /src/lib.rs:117: println!("current: {}", get_timezone().unwrap());
+### icu_properties 2.0.1 (1)
+    /src/code_point_set.rs:301: println!("{category:?} {subcategories:?}");
+### ignore 0.4.24 (3)
+    /src/lib.rs:25: Ok(entry) => println!("{}", entry.path().display()),
+    /src/lib.rs:26: Err(err) => println!("ERROR: {}", err),
+    /src/lib.rs:40: println!("{:?}", result);
+### image 0.25.10 (2)
+    /src/codecs/openexr.rs:417: eprintln!("warning: to run all the openexr tests, activate the hdr feature flag");
+    /src/codecs/bmp/decoder.rs:1414: println!("len:{len} i:{i} read:{read} calc:{calc}");
+### image-webp 0.2.4 (1)
+    /src/encoder.rs:800: println!("Testing {params:?}");
+### itertools 0.12.1 (1)
+    /src/groupbylazy.rs:88: println!("client={}, bottom_group={}, oldest_buffered_group={}, top_group={}, buffers=[{}]",
+### itertools 0.13.0 (1)
+    /src/groupbylazy.rs:89: println!("client={}, bottom_group={}, oldest_buffered_group={}, top_group={}, buffers=[{}]",
+### itertools 0.14.0 (1)
+    /src/groupbylazy.rs:89: println!("client={}, bottom_group={}, oldest_buffered_group={}, top_group={}, buffers=[{}]",
+### jiff 0.2.28 (22)
+    /src/lib.rs:170: println!("{now}");
+    /src/lib.rs:216: println!("{now}");
+    /src/lib.rs:230: println!("{now}");
+    /src/lib.rs:249: println!("{zdt}");
+    /src/lib.rs:261: println!("{zdt}");
+    /src/lib.rs:273: println!("{zdt}");
+### kstring 2.0.2 (8)
+    /src/string_cow.rs:381: println!("KStringCow: {}", std::mem::size_of::<KStringCow<'static>>());
+    /src/lib.rs:61: println!(
+    /src/lib.rs:65: println!(
+    /src/lib.rs:69: println!(
+    /src/lib.rs:73: println!("str: {}", std::mem::size_of::<&'static str>());
+    /src/lib.rs:74: println!(
+### landlock 0.4.4 (9)
+    /src/ruleset.rs:922: println!("level: {:?}", level);
+    /src/lib.rs:151: println!("Checking ABI {abi:?}: received {ret:#?}");
+    /src/lib.rs:170: println!("Expecting ruleset status {ruleset_status:?}");
+    /src/lib.rs:171: println!("Expecting Landlock status {landlock_status:?}");
+    /src/lib.rs:186: println!("Expecting error {errno:?}");
+    /src/compat.rs:302: eprintln!("Current kernel should support this Landlock ABI according to $LANDLOCK_CRATE_TEST_ABI");
+### lazy_static 1.5.0 (3)
+    /src/lib.rs:79: println!("The map has {} entries.", *COUNT);
+    /src/lib.rs:80: println!("The entry for `0` is \"{}\".", HASHMAP.get(&0).unwrap());
+    /src/lib.rs:81: println!("A expensive calculation on a static results in: {}.", *NUMBER);
+### libm 0.2.15 (21)
+    /configure.rs:70: println!("cargo:rustc-check-cfg=cfg(intrinsics_enabled)");
+    /configure.rs:75: println!("cargo:rustc-cfg=intrinsics_enabled");
+    /configure.rs:82: println!("cargo:rustc-check-cfg=cfg(arch_enabled)");
+    /configure.rs:86: println!("cargo:rustc-cfg=arch_enabled");
+    /configure.rs:92: println!("cargo:rustc-check-cfg=cfg(optimizations_enabled)");
+    /configure.rs:95: println!("cargo:rustc-cfg=optimizations_enabled");
+### libz-sys 1.1.22 (10)
+    /zng/cc.rs:453: eprintln!("{err}");
+    /zng/cc.rs:472: println!("cargo:root={}", dst.display());
+    /zng/cc.rs:473: println!("cargo:rustc-link-search=native={}", lib.display());
+    /zng/cc.rs:474: println!("cargo:include={}", include.display());
+    /zng/cc.rs:477: println!("cargo:rustc-cfg=zng");
+    /zng/cmake.rs:51: println!(
+### mac 0.1.1 (1)
+    /src/inspect.rs:47: println!("{}:{} - {}{:?}", file!(), line!(), $prefix, val);
+### memo-map 0.3.3 (2)
+    /src/lib.rs:499: dbg!(key, val);
+    /src/lib.rs:518: dbg!(key, val);
+### mid 4.0.0 (1)
+    /src/utils.rs:8: println!($($arg)*);
+### moka 0.12.11 (2)
+    /.ci_extras/build_linux_cross.rs:4: println!(
+    /src/common/time/clock.rs:134: dbg!(mock.origin + duration)
+### nom 7.1.3 (8)
+    /src/error.rs:600: println!("{}: Error({:?}) at:\n{}", context, e, i.to_hex(8));
+    /src/error.rs:662: println!("parser codes: {}", print_codes(&colors, &HashMap::new()));
+    /src/error.rs:663: println!("{}", print_offsets(input, 0, &v));
+    /src/error.rs:665: println!("not an error");
+    /src/number/complete.rs:1990: println!("now parsing: {} -> {}", test, expected32);
+    /src/number/complete.rs:2120: println!("testing {}", s);
+### nom 8.0.0 (10)
+    /src/error.rs:502: println!("{}: Error({:?}) at:\n{}", context, e, i.to_hex(8));
+    /src/error.rs:633: println!("parser codes: {}", print_codes(&colors, &HashMap::new()));
+    /src/error.rs:634: println!("{}", print_offsets(input, 0, &v));
+    /src/error.rs:636: println!("not an error");
+    /src/multi/mod.rs:1417: println!("got size: {size}");
+    /src/number/mod.rs:1452: println!("now parsing: {} -> {}", test, expected32);
+### notify 8.2.0 (7)
+    /src/lib.rs:509: println!("waiting for event at {}", file_path.display());
+    /src/lib.rs:519: println!("unexpected event: {event:?}");
+    /src/fsevent.rs:630: println!("is running -> {}", watcher.is_running());
+    /src/fsevent.rs:634: println!("is running -> {}", watcher.is_running());
+    /src/fsevent.rs:641: println!("debug => {:?} {:?}", e.kind, e.paths);
+    /src/fsevent.rs:644: println!("in test: {} works", file!());
+### nu-ansi-term 0.50.3 (2)
+    /src/debug.rs:138: println!("style_fmt_debug:\n{}", style_fmt_debug);
+    /src/debug.rs:139: println!("style_fmt_pretty:\n{}", style_fmt_pretty);
+### num-complex 0.4.6 (3)
+    /src/lib.rs:1822: println!("{:?} != {:?}", a, b);
+    /src/lib.rs:1872: println!("{:?} != {:?}", a, b);
+    /src/complex_float.rs:334: println!("{:?} != {:?}", a, b);
+### num_cpus 1.17.0 (1)
+    /src/linux.rs:15: println!($($args),*);
+### num-rational 0.4.2 (1)
+    /src/lib.rs:1935: println!("comparing {} and {}", a, b);
+### opentelemetry_sdk 0.32.1 (5)
+    /src/logs/logger_provider.rs:849: println!("---->Result: {shutdown_result:?}");
+    /src/metrics/mod.rs:578: println!("Testing with observable values: {values:?}");
+    /src/metrics/mod.rs:994: println!("resource_metrics: {resource_metrics:?}");
+    /src/metrics/mod.rs:2349: println!("resource_metrics: {resource_metrics:?}");
+    /src/trace/span.rs:762: println!("{res:?}");
+### opentelemetry 0.32.0 (16)
+    /src/global/internal_logging.rs:34: print!("otel_info: name={}\n", $name);
+    /src/global/internal_logging.rs:50: print!("otel_info: name={}", $name);
+    /src/global/internal_logging.rs:52: print!(", {}={}", stringify!($key), $value);
+    /src/global/internal_logging.rs:54: print!("\n");
+    /src/global/internal_logging.rs:85: print!("otel_warn: name={}\n", $name);
+    /src/global/internal_logging.rs:107: print!("otel_warn: name={}", $name);
+### parking_lot 0.12.5 (2)
+    /src/rwlock.rs:650: println!("lock upgrade");
+    /src/rwlock.rs:654: println!("lock upgrade");
+### pdf_oxide 0.3.46 (28)
+    /src/document.rs:16668: eprintln!("Skipping: fixture not found at {}", pdf_path);
+    /src/document.rs:16699: eprintln!("Skipping: fixture not found at {}", pdf_path);
+    /src/document.rs:16875: eprintln!("Skipping: AES-256 R=6 fixture not found at {pdf_path}");
+    /src/document.rs:16903: eprintln!("Skipping: AES-256 widget fixture not found at {pdf_path}");
+    /src/document.rs:16925: eprintln!("Skipping: fixture not found at {}", pdf_path);
+    /src/document.rs:16951: eprintln!("Skipping: fixture not found at {}", pdf_path);
+### petgraph 0.6.5 (26)
+    /src/csr.rs:853: println!("{:?}", m);
+    /src/csr.rs:880: println!("{:?}", m);
+    /src/csr.rs:892: println!("{:?}", m);
+    /src/csr.rs:900: println!("{:?}", m);
+    /src/csr.rs:907: println!("{:?}", m);
+    /src/csr.rs:929: println!("{:?}", m);
+### petgraph 0.8.3 (33)
+    /src/csr.rs:925: println!("{m:?}");
+    /src/csr.rs:952: println!("{m:?}");
+    /src/csr.rs:964: println!("{m:?}");
+    /src/csr.rs:972: println!("{m:?}");
+    /src/csr.rs:979: println!("{m:?}");
+    /src/csr.rs:1000: println!("{m:?}");
+### png 0.18.0 (1)
+    /src/encoder.rs:1810: eprintln!("{}", path.display());
+### portable-pty 0.9.0 (5)
+    /src/cmdbuilder.rs:775: println!("package_authors: {:?}", package_authors);
+    /src/cmdbuilder.rs:782: println!("iterated_envs: {:?}", iterated_envs);
+    /src/cmdbuilder.rs:790: println!("iterated_envs: {:?}", iterated_envs);
+    /src/cmdbuilder.rs:799: println!("iterated_envs: {:?}", iterated_envs);
+    /src/cmdbuilder.rs:808: println!("iterated_envs: {:?}", iterated_envs);
+### procfs-core 0.17.0 (8)
+    /src/lib.rs:1177: println!("{:?}", r);
+    /src/lib.rs:1186: println!("{:?}", r);
+    /src/lib.rs:1199: println!("{:?}", r);
+    /src/net.rs:1708: println!("{res:?}");
+    /src/net.rs:1729: println!("{res:?}");
+    /src/crypto.rs:470: eprintln!("{block:?}");
+### procfs 0.17.0 (44)
+    /src/lib.rs:511: println!("{:?}", crate::sys::kernel::Version::cached());
+    /src/lib.rs:517: println!("{:?}", load);
+    /src/lib.rs:533: println!("{:#?}", config);
+    /src/lib.rs:548: println!("{}", err);
+    /src/lib.rs:568: println!("{:#?}", stat);
+    /src/lib.rs:616: println!("{:?}", stat);
+### prometheus 0.14.0 (1)
+    /src/lib.rs:42: println!("{}", String::from_utf8(buffer).unwrap());
+### pxfm 0.1.25 (7)
+    /src/pow_exec.rs:769: println!("{}", k.to_f64());
+    /src/pow_exec.rs:770: println!("{}", f_expm1(2.543543543543));
+    /src/bessel/j0f.rs:414: println!("0x{:8x}", f32::EPSILON.to_bits().wrapping_shl(1));
+    /src/bessel/y0f_coeffs.rs:163: println!(
+    /src/bessel/j1_coeffs.rs:164: println!(
+    /src/bessel/j0f_coeffs.rs:164: println!(
+### qcms 0.3.0 (5)
+    /src/iccread.rs:1410: eprintln!("cicp_tc: {:?}", cicp_tc);
+    /src/iccread.rs:1411: eprintln!("icc_tc: {:?}", icc_tc);
+    /src/iccread.rs:1426: eprintln!("{} / {} off by one", off_by_one, cicp_out.len());
+    /src/transform_util.rs:329: let g2_2 = dbg!(Param::new(&[2.2, 0.9, -0.52]));
+    /src/transform_util.rs:331: let g2_2 = dbg!(Param::new(&[2.2, 0.9, -0.52, 0.1]));
+### quick-xml 0.38.3 (4)
+    /src/escape.rs:2147: dbg!((input, &description));
+    /src/escape.rs:2180: dbg!((input, &description));
+    /src/escape.rs:2216: dbg!((input, &description));
+    /src/de/mod.rs:3592: dbg!(source);
+### quick-xml 0.39.4 (4)
+    /src/escape.rs:2149: dbg!((input, &description));
+    /src/escape.rs:2182: dbg!((input, &description));
+    /src/escape.rs:2219: dbg!((input, &description));
+    /src/de/mod.rs:3551: dbg!(source);
+### rand 0.8.5 (1)
+    /src/rngs/adapter/read.rs:148: println!("Error: {}", result.unwrap_err());
+### ratatui-core 0.1.0 (9)
+    /src/buffer/buffer.rs:694: println!("{result}");
+    /src/buffer/buffer.rs:704: println!("{result}");
+    /src/buffer/buffer.rs:734: println!("{result}");
+    /src/buffer/buffer.rs:1295: dbg!(input);
+    /src/buffer/buffer.rs:1296: dbg!(input.len());
+    /src/buffer/buffer.rs:1297: dbg!(
+### ratatui 0.29.0 (12)
+    /src/buffer/buffer.rs:659: println!("{result}");
+    /src/buffer/buffer.rs:669: println!("{result}");
+    /src/buffer/buffer.rs:699: println!("{result}");
+    /src/buffer/buffer.rs:1255: dbg!(input);
+    /src/buffer/buffer.rs:1256: dbg!(input.len());
+    /src/buffer/buffer.rs:1257: dbg!(input
+### rayon-core 1.13.0 (1)
+    /src/unwind.rs:28: eprintln!("Rayon: detected unexpected panic; aborting");
+### rayon 1.12.0 (1)
+    /src/iter/test.rs:2154: println!("counted {} repeats", repeat(()).count());
+### regex-lite 0.1.8 (2)
+    /src/lib.rs:103: println!("no match!");
+    /src/lib.rs:106: println!("The name is: {}", &caps["name"]);
+### regex 1.12.4 (2)
+    /src/lib.rs:105: println!("no match!");
+    /src/lib.rs:108: println!("The name is: {}", &caps["name"]);
+### regress 0.11.1 (2)
+    /src/lib.rs:25: println!("{}", &text[m.range()])
+    /src/lib.rs:44: println!("Year: {}", &text[group]);
+### reqwest 0.12.24 (10)
+    /src/blocking/multipart.rs:427: println!(
+    /src/blocking/multipart.rs:431: println!("START EXPECTED\n{expected}\nEND EXPECTED");
+    /src/blocking/multipart.rs:460: println!(
+    /src/blocking/multipart.rs:464: println!("START EXPECTED\n{expected}\nEND EXPECTED");
+    /src/blocking/multipart.rs:487: println!(
+    /src/blocking/multipart.rs:491: println!("START EXPECTED\n{expected}\nEND EXPECTED");
+### reqwest 0.13.4 (10)
+    /src/blocking/multipart.rs:427: println!(
+    /src/blocking/multipart.rs:431: println!("START EXPECTED\n{expected}\nEND EXPECTED");
+    /src/blocking/multipart.rs:460: println!(
+    /src/blocking/multipart.rs:464: println!("START EXPECTED\n{expected}\nEND EXPECTED");
+    /src/blocking/multipart.rs:487: println!(
+    /src/blocking/multipart.rs:491: println!("START EXPECTED\n{expected}\nEND EXPECTED");
+### rhai_codegen 3.2.0 (127)
+    /ui_tests/export_mod_bad_attr.rs:23: println!("yes");
+    /ui_tests/export_mod_bad_attr.rs:25: println!("no");
+    /ui_tests/export_mod_bad_value.rs:23: println!("yes");
+    /ui_tests/export_mod_bad_value.rs:25: println!("no");
+    /ui_tests/rhai_mod_unknown_type_return.rs:23: println!("yes");
+    /ui_tests/rhai_mod_unknown_type_return.rs:25: println!("no");
+### rhai 1.25.1 (5)
+    /src/engine.rs:309: engine.print = Some(Box::new(|s| println!("{s}")));
+    /src/engine.rs:311: (Some(source), crate::Position::NONE) => println!("{source} | {s}"),
+    /src/engine.rs:313: (Some(source), pos) => println!("{source} @ {pos:?} | {s}"),
+    /src/engine.rs:314: (None, crate::Position::NONE) => println!("{s}"),
+    /src/engine.rs:316: (None, pos) => println!("{pos:?} | {s}"),
+### rmcp 3.2.0 (1)
+    /src/transport/async_rw.rs:663: println!("Standard notifications are preserved, non-standard are handled gracefully");
+### rusqlite 0.37.0 (15)
+    /src/vtab/vtablog.rs:44: println!(
+    /src/vtab/vtablog.rs:98: println!("VTabLog::drop({})", self.i_inst);
+    /src/vtab/vtablog.rs:115: println!(
+    /src/vtab/vtablog.rs:131: println!(
+    /src/vtab/vtablog.rs:156: println!("VTabLog::destroy({})", self.i_inst);
+    /src/vtab/vtablog.rs:163: println!("VTabLog::delete({}, {arg:?})", self.i_inst);
+### rustc-demangle 0.1.26 (6)
+    /src/lib.rs:382: println!("\n{}\n!=\n{}\n", s, expected);
+    /src/lib.rs:387: println!("error demangling");
+    /src/lib.rs:396: println!("succeeded in demangling");
+    /src/legacy.rs:221: println!("\n{}\n!=\n{}\n", s, expected);
+    /src/legacy.rs:226: println!("error demangling");
+    /src/legacy.rs:235: println!("succeeded in demangling");
+### rustls-pki-types 1.14.0 (1)
+    /src/server_name.rs:869: println!("test: {input:?} expected valid? {expected:?}");
+### rustls 0.23.37 (33)
+    /src/suites.rs:253: println!("{:?}", super::provider::ALL_CIPHER_SUITES);
+    /src/compress.rs:486: println!(
+    /src/compress.rs:506: println!("{compressed:?}");
+    /src/error.rs:1364: println!("{err:?}:");
+    /src/error.rs:1365: println!("  fmt '{err}'");
+    /src/crypto/ring/quic.rs:296: hpk.encrypt_in_place(sample, &mut first[0], dbg!(rest))
+### rustls-webpki 0.103.13 (8)
+    /src/verify_cert.rs:947: required: dbg!(KeyUsage::required(EKU_SERVER_AUTH)), // Cover Debug impl
+    /src/verify_cert.rs:983: dbg!(build_and_verify_degenerate_chain(
+    /src/crl/types.rs:1156: println!("{actual:?}");
+    /src/crl/types.rs:1180: println!("{crl:?}"); // BorrowedCertRevocationList should be debug.
+    /src/crl/types.rs:1183: println!("{owned_crl:?}"); // OwnedCertRevocationList should be debug.
+    /src/crl/types.rs:1187: println!("{revoked_certs:?}"); // RevokedCert should be debug.
+### same-file 1.0.6 (2)
+    /src/lib.rs:44: println!("{:?} is stdout!", candidate);
+    /src/lib.rs:46: println!("{:?} is NOT stdout!", candidate);
+### sentry-core 0.42.0 (2)
+    /src/macros.rs:60: eprint!("[sentry] ");
+    /src/macros.rs:61: eprintln!($($arg)*);
+### sentry-types 0.42.0 (1)
+    /src/protocol/envelope.rs:353: eprintln!(
+### sharded-slab 0.1.7 (5)
+    /src/macros.rs:7: println!("[PANIC {:>17}:{:<3}] {}", file!(), line!(), format_args!($($arg)*))
+    /src/macros.rs:9: println!("[{:?} {:>17}:{:<3}] {}", crate::Tid::<crate::DefaultConfig>::current(), file!(), line!(), 
+    /src/macros.rs:33: eprintln!(
+    /src/cfg.rs:198: println!("{:?}", i);
+    /src/cfg.rs:210: println!("{}", i);
+### shlex 1.3.0 (1)
+    /src/lib.rs:337: println!("FAIL: for input <{}>, expected <{}>, got <{}>",
+### sigstore-crypto 0.6.6 (1)
+    /src/signing.rs:175: println!("Public key len: {}", bytes.len());
+### sigstore-trust-root 0.6.3 (1)
+    /src/signing_config.rs:277: println!("Best Rekor: {} v{}", rekor.url, rekor.major_api_version);
+### similar 2.7.0 (1)
+    /src/utils.rs:405: dbg!(&words);
+### simple_asn1 0.6.3 (5)
+    /src/lib.rs:1407: println!("Serialization error: {:?}", e);
+    /src/lib.rs:1413: println!("Parse error: {:?}", e);
+    /src/lib.rs:1419: println!("Original: {:?}", v);
+    /src/lib.rs:1420: println!("Constructed: {:?}", v2);
+    /src/lib.rs:1425: println!("Too many results returned.");
+### strum_macros 0.26.4 (2)
+    /src/lib.rs:26: println!("{}", toks);
+    /src/lib.rs:30: println!("{}", toks);
+### strum_macros 0.27.2 (2)
+    /src/lib.rs:26: println!("{}", toks);
+    /src/lib.rs:30: println!("{}", toks);
+### strum_macros 0.28.0 (2)
+    /src/lib.rs:26: println!("{}", toks);
+    /src/lib.rs:30: println!("{}", toks);
+### subsetter 0.2.3 (1)
+    /src/lib.rs:57: println!("Glyph {} has the ID {} in the new font", *glyph, remapper.get(*glyph).unwrap());
+### syntect 5.3.0 (31)
+    /src/util.rs:147: println!("{}", line.trim_end());
+    /src/util.rs:148: print!("{: <1$}", "", i);
+    /src/util.rs:151: println!("^ +{}", s);
+    /src/util.rs:154: println!("^ pop {}", count);
+    /src/util.rs:157: println!("^ clear {:?}", amount);
+    /src/util.rs:159: ScopeStackOp::Restore => println!("^ restore"),
+### taffy 0.10.1 (14)
+    /src/util/debug.rs:39: println!("{space:level$}{key}: {message}");
+    /src/util/debug.rs:47: println!("{space:level$}{key}: {label} {message}");
+    /src/util/debug.rs:55: println!("{space:level$}{key}: {message:?}");
+    /src/util/debug.rs:63: println!("{space:level$}{key}: {label} {message:?}");
+    /src/util/debug.rs:94: println!();
+    /src/util/print.rs:10: println!("{}", std::str::from_utf8(&buffer).unwrap());
+### thread_local 1.1.9 (2)
+    /src/lib.rs:622: println!("{:?}", item);
+    /src/lib.rs:628: println!("{:?}", item);
+### tiff 0.11.3 (1)
+    /src/decoder/ifd.rs:723: return Err(dbg!(TiffError::LimitsExceeded));
+### tikv-jemalloc-ctl 0.6.1 (7)
+    /src/lib.rs:39: println!("{} bytes allocated/{} bytes resident", allocated, resident);
+    /src/lib.rs:65: println!("{} bytes allocated/{} bytes resident", allocated, resident);
+    /src/macros.rs:81: println!(
+    /src/macros.rs:128: println!(
+    /src/macros.rs:177: println!(
+    /src/stats_print.rs:146: println!("{}", String::from_utf8(buf).unwrap());
+### tls_codec 0.4.2 (4)
+    /src/quic_vec.rs:713: println!("\n# {test:?}");
+    /src/quic_vec.rs:717: println!("{got}");
+    /src/quic_vec.rs:722: println!("{got}");
+    /src/quic_vec.rs:727: println!("{got}");
+### tokio-rustls 0.26.4 (7)
+    /src/common/test_stream.rs:56: dbg!("sent close notify");
+    /src/common/test_stream.rs:186: dbg!(tokio::io::copy_buf(&mut stream, &mut buf).await)?;
+    /src/common/test_stream.rs:188: dbg!(stream.read_to_end(&mut buf).await)?;
+    /src/common/test_stream.rs:192: dbg!(utils::write(&mut stream, b"Hello World!", vectored).await)?;
+    /src/common/test_stream.rs:195: dbg!(stream.shutdown().await)?;
+    /src/common/test_stream.rs:199: dbg!(server.process_new_packets()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+### tokio 1.52.3 (10)
+    /src/process/unix/pidfd_reaper.rs:253: eprintln!("pidfd is not available on this linux kernel, skip this test");
+    /src/process/unix/pidfd_reaper.rs:273: eprintln!("pidfd is not available on this linux kernel, skip this test");
+    /src/process/unix/pidfd_reaper.rs:295: eprintln!("pidfd is not available on this linux kernel, skip this test");
+    /src/runtime/scheduler/multi_thread/counters.rs:20: println!("---");
+    /src/runtime/scheduler/multi_thread/counters.rs:21: println!("notifies (local): {}", notifies_local);
+    /src/runtime/scheduler/multi_thread/counters.rs:22: println!(" unparks (local): {}", unparks_local);
+### toml_edit 0.22.27 (18)
+    /src/parser/mod.rs:212: dbg!(input);
+    /src/parser/mod.rs:234: dbg!(input);
+    /src/parser/mod.rs:250: dbg!(input);
+    /src/parser/numbers.rs:343: dbg!(input);
+    /src/parser/numbers.rs:362: dbg!(expected);
+    /src/parser/numbers.rs:363: dbg!(actual);
+### toml_parser 1.0.9+spec-1.1.0 (8)
+    /src/lexer/test.rs:22: dbg!(stream);
+    /src/lexer/test.rs:100: dbg!(stream);
+    /src/lexer/test.rs:182: dbg!(stream);
+    /src/lexer/test.rs:220: dbg!(stream);
+    /src/lexer/test.rs:298: dbg!(stream);
+    /src/lexer/test.rs:468: dbg!(stream);
+### tower-http 0.6.8 (1)
+    /src/compression/mod.rs:311: dbg!(should_compress)
+### tracing-appender 0.2.4 (13)
+    /src/non_blocking.rs:296: Err(SendTimeoutError::Timeout(e)) => println!(
+    /src/worker.rs:87: eprintln!("Failed to flush. Error: {}", e);
+    /src/rolling.rs:705: eprintln!("Error reading the log directory/files: {}", error);
+    /src/rolling.rs:719: eprintln!(
+    /src/rolling.rs:738: eprintln!("Couldn't flush previous writer: {}", err);
+    /src/rolling.rs:742: Err(err) => eprintln!("Couldn't create writer for logs: {}", err),
+### tracing-chrome 0.7.2 (1)
+    /src/lib.rs:236: eprintln!("tracing_chrome: Trace writing thread panicked.");
+### tracing-opentelemetry 0.33.0 (3)
+    /src/metrics.rs:189: eprintln!(
+    /src/layer/filtered.rs:118: println!("evaluating event with level {}", event.metadata().level());
+    /src/layer/filtered.rs:120: println!("processing event with level {}", event.metadata().level());
+### tracing-subscriber 0.3.23 (28)
+    /src/registry/sharded.rs:551: dbg!(format_args!("closing {:?}", id));
+    /src/registry/sharded.rs:617: println!(
+    /src/registry/sharded.rs:624: println!("close {} ({:?})", name, id);
+    /src/fmt/mod.rs:1222: eprintln!("Ignoring `RUST_LOG={:?}`: {}", var, e);
+    /src/fmt/mod.rs:1229: eprintln!("Ignoring `RUST_LOG`: {}", e);
+    /src/fmt/fmt_layer.rs:339: eprintln!("{}", ERROR);
+### tungstenite 0.28.0 (2)
+    /src/handshake/client.rs:347: println!("Generated random key 1: {k1}");
+    /src/handshake/client.rs:349: println!("Generated random key 2: {k2}");
+### two-face 0.4.5 (1)
+    /src/theme/mod.rs:450: println!("Getting: {:?}", theme_name);
+### unicode-script 0.5.8 (2)
+    /src/lib.rs:454: println!(
+    /src/lib.rs:458: println!(
+### usvg 0.47.0 (2)
+    /src/text/colr.rs:188: println!("Warning: sweep gradients are not supported.");
+    /src/text/colr.rs:288: println!("Warning: unsupported blend mode: {:?}", mode);
+### vsimd 0.8.0 (8)
+    /src/algorithm.rs:15: print!("     0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F");
+    /src/algorithm.rs:20: println!();
+    /src/algorithm.rs:21: print!("{:x} | ", c >> 4);
+    /src/algorithm.rs:25: print!("\x1b[1;31m{val:0>2X}\x1b[0m  ");
+    /src/algorithm.rs:27: print!("\x1b[1;36m{val:0>2X}\x1b[0m  ");
+    /src/algorithm.rs:29: print!("\x1b[1;32m{val:0>2X}\x1b[0m  ");
+### walkdir 2.5.0 (4)
+    /src/lib.rs:39: println!("{}", entry?.path().display());
+    /src/lib.rs:54: println!("{}", entry.path().display());
+    /src/lib.rs:70: println!("{}", entry?.path().display());
+    /src/lib.rs:97: println!("{}", entry?.path().display());
+### wayland-backend 0.3.12 (6)
+    /src/debug.rs:29: eprint!(" <- {}@{}.{}, ({})", interface, id, msg_name, DisplaySlice(args));
+    /src/debug.rs:32: eprintln!();
+    /src/debug.rs:50: eprint!("[discarded]");
+    /src/debug.rs:53: eprint!(" -> {}@{}.{}({})", interface, id, msg_name, DisplaySlice(args));
+    /src/debug.rs:56: eprintln!();
+    /src/debug.rs:83: eprint!("[{:7}.{:03}][rs]", time / 1000, time % 1000);
+### wayland-scanner 0.31.10 (3)
+    /src/server_gen.rs:294: print!("{}", diff.unified_diff().context_radius(10).header("reference", "generated"));
+    /src/interfaces.rs:138: print!("{}", diff.unified_diff().context_radius(10).header("reference", "generated"));
+    /src/client_gen.rs:333: print!("{}", diff.unified_diff().context_radius(10).header("reference", "generated"));
+### write-fonts 0.43.0 (2)
+    /src/tables/meta.rs:165: dbg!(readr);
+    /src/tables/glyf/simple.rs:719: dbg!(
+### x11rb-protocol 0.13.2 (13)
+    /src/resource_manager/parser.rs:625: eprintln!("While testing {data:?}");
+    /src/resource_manager/parser.rs:626: eprintln!("Expected: {expected:?}");
+    /src/resource_manager/parser.rs:627: eprintln!("Got:      {result:?}");
+    /src/resource_manager/parser.rs:628: eprintln!();
+    /src/resource_manager/parser.rs:658: eprintln!("While testing {data:?}");
+    /src/resource_manager/parser.rs:659: eprintln!("Expected: {expected:?}");
+### xmlparser 0.13.6 (1)
+    /src/lib.rs:9: println!("{:?}", token);
+### yaml-rust 0.4.5 (10)
+    /src/emitter.rs:364: println!("original:\n{}", s);
+    /src/emitter.rs:365: println!("emitted:\n{}", writer);
+    /src/emitter.rs:583: println!("original:\n{}", s);
+    /src/emitter.rs:584: println!("emitted:\n{}", writer);
+    /src/emitter.rs:607: println!("original:\n{}", s);
+    /src/emitter.rs:608: println!("emitted:\n{}", writer);
+### zbus 5.14.0 (2)
+    /src/proxy/mod.rs:1412: dbg!(v)
+    /src/fdo/mod.rs:133: dbg!(v)
+### zerotrie 0.2.2 (6)
+    /src/byte_phf/builder.rs:150: print!("'{c}'");
+    /src/byte_phf/builder.rs:152: print!("0x{byte:X}");
+    /src/byte_phf/builder.rs:179: println!("p_distr: {p_distr:?}");
+    /src/byte_phf/builder.rs:180: println!("q_distr: {q_distr:?}");
+    /src/byte_phf/builder.rs:199: println!("Results:");
+    /src/byte_phf/builder.rs:205: println!(" => l1 {l1} => q {q} => l2 {l2}");
+### zip 3.0.0 (2)
+    /src/write.rs:2301: zip.iter().copied().for_each(|x| print!("{x:02x}"));
+    /src/write.rs:2302: println!();
+### zlib-rs 0.5.5 (11)
+    /src/lib.rs:28: eprint!($($arg)*)
+    /src/inflate.rs:680: dbg!(msg);
+    /src/inflate.rs:695: eprintln!("Ok: writer is full ({} bytes)", self.writer.capacity());
+    /src/inflate.rs:815: eprintln!(
+    /src/inflate.rs:1452: eprintln!("Ok: writer is full ({} bytes)", self.writer.capacity());
+    /src/inflate.rs:1534: eprintln!(
+### zlib-rs 0.6.6 (11)
+    /src/lib.rs:51: eprint!($($arg)*)
+    /src/inflate.rs:696: dbg!(msg);
+    /src/inflate.rs:711: eprintln!("Ok: writer is full ({} bytes)", self.writer.capacity());
+    /src/inflate.rs:831: eprintln!(
+    /src/inflate.rs:1468: eprintln!("Ok: writer is full ({} bytes)", self.writer.capacity());
+    /src/inflate.rs:1550: eprintln!(

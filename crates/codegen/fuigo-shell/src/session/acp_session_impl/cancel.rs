@@ -215,6 +215,23 @@ impl SessionActor {
         total_tokens: u64,
         turn_stopped: bool,
     ) -> CancelOutcome {
+        // P121 (K8): a request dispatched before the Esc reports no usage and never will; account for
+        // it now (a conservative estimate under a token budget) instead of leaving it pending on the
+        // goal's execution, where it was never counted.
+        if let Some(execution) =
+            crate::session::execution_state::Execution::current(&self.session_info.id.to_string())
+        {
+            let _ = execution.charge_in_flight().await;
+        }
+        // A rewind treats the turn as unsent (no terminal, no hooks), but its `turn_started` is already in events.jsonl
+        // Close it there, or the next load reports the rewound turn as one lost with its process
+        // Both rewind rails (claimed and legacy) end here; `close_open_turn` writes only for a turn this actor began and
+        // has not closed, and carries no category so the `MidTurnAbort` dashboards do not count rewinds
+        self.events.close_open_turn(
+            crate::session::events::TurnOutcomeLabel::Cancelled,
+            None,
+            Some(serde_json::json!({ "rewind": true })),
+        );
         if let Some(mut snapshot) = self.chat_state_handle.snapshot().await {
             let target_prompt_index =
                 target_prompt_index.unwrap_or_else(|| snapshot.prompt_index.saturating_sub(1));
@@ -445,15 +462,11 @@ impl SessionActor {
         if kill_background_tasks {
             if self.startup_hints.is_subagent {
                 // Subagent teardown: only kill tasks owned by this session, not the parent's or sibling's tasks on the shared backend
-                self.agent
-                    .borrow()
-                    .tool_bridge()
+                self.tool_bridge_handle()
                     .kill_all_background_tasks_by_owner(&self.session_info.id.0)
                     .await;
             } else {
-                self.agent
-                    .borrow()
-                    .tool_bridge()
+                self.tool_bridge_handle()
                     .kill_all_background_tasks()
                     .await;
             }
@@ -793,6 +806,32 @@ impl SessionActor {
             },
             CancelFinalization::Rewind => None,
         };
+        // P144: the runtime limit passing cut this turn short (the supervisor cancels every resident
+        // session at the deadline). That is the limit ending the run, so every prompt this cancel
+        // answers ends as the runtime limit's typed denial (`fuigo -p` exits 3, B4) rather than as a
+        // `cancelled` stop that reads as a finished run. The figures are the running turn's execution's.
+        let runtime_limit_denial = if trigger
+            .as_ref()
+            .is_some_and(crate::session::CancelTrigger::is_runtime_limit)
+        {
+            let execution = cancelled_prompt_id.as_deref().and_then(|prompt_id| {
+                crate::session::execution_state::Execution::for_prompt(
+                    &self.session_info.id.to_string(),
+                    prompt_id,
+                )
+            });
+            let state = match execution {
+                Some(execution) => execution.snapshot().await.ok(),
+                None => None,
+            };
+            let rule = crate::acp_error::ExecutionBudgetRule::RuntimeLimit;
+            Some(match state {
+                Some(state) => crate::session::execution_state::budget_denial(&state, rule),
+                None => crate::acp_error::ExecutionBudgetDenial::without_token_figures(rule),
+            })
+        } else {
+            None
+        };
         if rewound_input.is_none()
             && let Some(prompt_id) = cancelled_prompt_id.or(no_task_pinned_prompt_id)
         {
@@ -800,7 +839,9 @@ impl SessionActor {
             // `MidTurnAbort` matches what the prompt's RPC resolves with below, so the event and the RPC agree
             self.emit_turn_completed(
                 prompt_id,
-                &Ok(acp::StopReason::Cancelled),
+                &runtime_limit_denial
+                    .as_ref()
+                    .map_or(Ok(acp::StopReason::Cancelled), |denial| Err(denial.to_acp_error())),
                 cancelled_usage.clone(),
                 trigger.as_ref().map(crate::session::CancelTrigger::as_str),
                 // A no-task pinned cancel reaches here too; only a torn-down task is a mid-turn abort.
@@ -832,6 +873,22 @@ impl SessionActor {
                 && let Some(reservations) = &self.tool_context.task_completion_reservations
             {
                 reservations.release(task_id);
+            }
+            if let Some(denial) = &runtime_limit_denial {
+                // A queued prompt never opened an execution: it gets no figures, not the running one's.
+                let (denial, usage) = if is_running_turn {
+                    (denial.clone(), cancelled_usage.clone())
+                } else {
+                    (
+                        crate::acp_error::ExecutionBudgetDenial::without_token_figures(denial.rule),
+                        None,
+                    )
+                };
+                let _ = input
+                    .respond_to
+                    .send(Err(crate::sampling::error::attach_prompt_usage(denial.to_acp_error(), usage)))
+                    .ok();
+                continue;
             }
             let _ = input
                 .respond_to
@@ -893,9 +950,7 @@ impl SessionActor {
         // Replying to another session's command would put an answer in this session's history for a question it never asked.
         let owner = Some(self.session_info.id.0.as_ref());
         let backgrounded = {
-            self.agent
-                .borrow()
-                .tool_bridge()
+            self.tool_bridge_handle()
                 .background_foreground_commands(owner)
                 .await
         };
@@ -923,15 +978,11 @@ impl SessionActor {
     #[tracing::instrument(name = "cancel.kill_foreground", skip_all)]
     async fn kill_foreground_commands_for_cancel(&self) {
         if self.startup_hints.is_subagent {
-            self.agent
-                .borrow()
-                .tool_bridge()
+            self.tool_bridge_handle()
                 .kill_foreground_commands_by_owner(&self.session_info.id.0)
                 .await;
         } else {
-            self.agent
-                .borrow()
-                .tool_bridge()
+            self.tool_bridge_handle()
                 .kill_foreground_commands()
                 .await;
         }

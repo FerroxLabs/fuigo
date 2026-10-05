@@ -163,7 +163,7 @@ pub fn parse_permission_rules_lenient(
 ) -> Vec<fuigo_workspace::permission::types::PermissionRule> {
     let (rules, errors) = parse_permission_rules_inner(allow, deny);
     for (flag, rule, err) in errors {
-        eprintln!("warning: {flag} \"{rule}\": {err}, skipping");
+        fuigo_tty_utils::cli_eprintln!("warning: {flag} \"{rule}\": {err}, skipping");
     }
     rules
 }

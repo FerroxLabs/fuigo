@@ -4,6 +4,7 @@ const path = require('path');
 const assert = require('assert/strict');
 const {execFileSync} = require('child_process');
 const {packageNotices} = require('./package-notices');
+const {repositoryProblems} = require('./release-metadata');
 const npmRoot = path.resolve(__dirname, '../..');
 const output = path.resolve(process.argv[2] || path.join(npmRoot, 'release-packages'));
 fs.mkdirSync(output, {recursive: true});
@@ -30,6 +31,13 @@ for (const platform of [...platforms, null]) {
         const actual = execFileSync('tar', ['-xOf', path.join(output, packed.filename), `package/${notice}`]);
         assert(actual.equals(fs.readFileSync(path.join(directory, notice))), `Stale ${notice}`);
     }
+    // The package.json that will be PUBLISHED (the one inside the tarball) must name this
+    // repository, or `npm publish --provenance` fails after the whole build matrix has run.
+    const packedManifest = JSON.parse(execFileSync('tar', ['-xOf', path.join(output, packed.filename),
+        'package/package.json']));
+    const problems = repositoryProblems(packedManifest, platform ? `fuigo-${platform}` : 'fuigo',
+        process.env.GITHUB_REPOSITORY);
+    assert.deepEqual(problems, [], problems.join('\n'));
     manifest.push({name: packed.name, version, filename: packed.filename,
         integrity: packed.integrity, shasum: packed.shasum, size: packed.size});
 }

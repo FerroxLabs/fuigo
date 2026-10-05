@@ -4,7 +4,9 @@
 //!
 //!   SUBAGENT_SOAK_CYCLES=20000 cargo test -p fuigo-tools \
 //!     [--features dhat-heap] --test test_subagent_soak -- --ignored --nocapture
-
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg(unix)]
 
 #[cfg(feature = "dhat-heap")]

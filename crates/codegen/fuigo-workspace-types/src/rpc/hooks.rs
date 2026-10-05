@@ -23,7 +23,7 @@ pub struct HookRegistryWire {
 }
 
 /// The compiled `matcher` is omitted; the `hook_spec_wire_covers_all_upstream_fields` test guards against drift.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HookSpecWire {
     pub name: String,
     pub event: HookEventNameWire,
@@ -40,6 +40,43 @@ pub struct HookSpecWire {
     /// `default` decodes a server that predates this field as `file`.
     #[serde(default = "default_layer")]
     pub layer: String,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there. This leaf crate has no URL redactor, so the hook URL prints as present / absent.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for HookSpecWire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            event,
+            handler_type,
+            configured_matcher,
+            enabled,
+            command,
+            command_raw,
+            url,
+            url_raw,
+            timeout_ms,
+            source_dir,
+            extra_env,
+            layer,
+        } = self;
+        f.debug_struct("HookSpecWire")
+            .field("name", name)
+            .field("event", event)
+            .field("handler_type", handler_type)
+            .field("configured_matcher", configured_matcher)
+            .field("enabled", enabled)
+            .field("command", &command.as_ref().map(|_| "<redacted>"))
+            .field("command_raw", &command_raw.as_ref().map(|_| "<redacted>"))
+            .field("url", &url.as_ref().map(|_| "<redacted>"))
+            .field("url_raw", &url_raw.as_ref().map(|_| "<redacted>"))
+            .field("timeout_ms", timeout_ms)
+            .field("source_dir", source_dir)
+            .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("layer", layer)
+            .finish()
+    }
 }
 
 fn default_layer() -> String {

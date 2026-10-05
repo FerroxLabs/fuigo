@@ -1,0 +1,43 @@
+{
+  "name": "p08_auth_wire_golden",
+  "description": "Contract E.7a / P08 acceptance 6: the P08 auth surface exactly as the live wire carried it. Captured (not hand-written) by the #[ignore] helper p08_auth_wire_capture in murage_conformance_acp.rs, run with --ignored --nocapture on hetzner-dsm lane p08 against the fuigo-pager binary built from strike/p08 a58e47edde922b32176ca09be68f4985a7988634 (capture-tip4.log), with Murage's argv and the two-model MockInferenceServer catalog. authMethods* and authenticateApiKeyCapability are initialize-response fields; authenticateReply and noCredentialError are the agent's replies; authenticateRequest is the exact params object the client wrote, with the key replaced by a placeholder before comparison. Compared as serde_json::Value; any added, removed or renamed key is a contract change.",
+  "wire": {
+    "authMethodsWithInjectedKey": [
+      {
+        "id": "fuigo.api_key",
+        "name": "fuigo.api_key",
+        "description": "FUIGO_API_KEY or api_key/env_key in config.toml"
+      }
+    ],
+    "authMethodsWithoutCredential": [],
+    "authenticateApiKeyCapability": {
+      "metaKey": "fuigo/apiKey",
+      "persistOptIn": true
+    },
+    "authenticateRequest": {
+      "methodId": "fuigo.api_key",
+      "_meta": {
+        "fuigo/apiKey": {
+          "key": "<api key>",
+          "persist": false
+        }
+      }
+    },
+    "authenticateReply": {
+      "_meta": {
+        "fuigo/apiKey": {
+          "persisted": false
+        }
+      }
+    },
+    "noCredentialError": {
+      "code": -32000,
+      "message": "Authentication required",
+      "data": {
+        "metaKey": "fuigo/apiKey",
+        "message": "fuigo.api_key has no API key. Send one in this request as `_meta[\"fuigo/apiKey\"] = {\"key\": \"<api key>\"}` (add `\"persist\": true` to also save it to auth.json), or start the agent with FUIGO_API_KEY in its environment.",
+        "error_kind": "auth"
+      }
+    }
+  }
+}

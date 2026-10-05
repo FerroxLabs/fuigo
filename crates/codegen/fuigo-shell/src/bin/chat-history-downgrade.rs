@@ -157,7 +157,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     writer.flush()?;
-    eprintln!("Done: {converted} messages converted");
+    fuigo_tty_utils::cli_eprintln!("Done: {converted} messages converted");
     Ok(())
 }
 

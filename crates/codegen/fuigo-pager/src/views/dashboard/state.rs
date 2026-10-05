@@ -4342,7 +4342,7 @@ pub fn load_persisted_from_path(path: &std::path::Path) -> Option<PersistedDashb
 /// MUST NOT overwrite it (the file may contain user data we cannot interpret).
 /// Without this guard, a single dashboard pin would clobber every other table in `~/.fuigo/config.toml` (`[ui]`, `[hints]`, `[mcpServers]`, …).
 ///
-/// Atomic write via `<path>.dashboard.tmp.<pid>` then rename, so concurrent readers never observe a half-truncated file.
+/// Replaced atomically (temp then rename), so concurrent readers never observe a half-truncated file.
 pub fn write_persisted(p: &PersistedDashboard) -> std::io::Result<()> {
     let path = config_path()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no fuigo home"))?;
@@ -4355,24 +4355,30 @@ pub fn write_persisted_to_path(
     p: &PersistedDashboard,
 ) -> std::io::Result<()> {
     // This writes `config.toml`, the same file `/provider`, `set_hint_at`, the
-    // agents modal and the shell's settings path all edit, so it takes the same
-    // lock they do. An advisory lock only serialises the writers that take it;
-    // one holdout would reintroduce exactly the lost update the lock exists to
-    // prevent.
-    fuigo_config::fs_atomic::locked_read_modify_write(path, || {
-        write_persisted_to_path_locked(path, p)
-    })?
-}
-
-/// Body of [`write_persisted_to_path`]; the caller holds the config write lock.
-fn write_persisted_to_path_locked(
-    path: &std::path::Path,
-    p: &PersistedDashboard,
-) -> std::io::Result<()> {
+    // agents modal and the shell's settings path all edit, so it goes through
+    // the same shared read-modify-write (`fuigo_config::fs_atomic::edit_locked`):
+    // the same lock, the temp synced outside it, renamed only over the version
+    // read, removed on failure. The replacement keeps the file's owner bits
+    // (`0600` for a new file) like the other pager writers; the old private
+    // writer recreated it with the umask's default mode.
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut doc = match crate::config_toml_edit::read_config_document_for_edit(path) {
+    fuigo_config::fs_atomic::edit_locked(
+        path,
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600),
+        |current| Ok::<_, std::io::Error>(persisted_dashboard_edit(path, current, p)),
+    )
+    .map_err(std::io::Error::from)
+}
+
+fn persisted_dashboard_edit(
+    path: &std::path::Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
+    p: &PersistedDashboard,
+) -> fuigo_config::fs_atomic::Edit<()> {
+    use fuigo_config::fs_atomic::Edit;
+    let mut doc = match crate::config_toml_edit::config_document_for_edit(path, current) {
         Some(d) => d,
         None => {
             // File exists but is unparseable
@@ -4381,12 +4387,12 @@ fn write_persisted_to_path_locked(
                 path = %path.display(),
                 "refusing to persist dashboard: config.toml is non-empty and unparseable"
             );
-            return Ok(());
+            return Edit::Keep(());
         }
     };
     let dash = doc.entry("dashboard").or_insert(toml_edit::table());
     let Some(t) = dash.as_table_mut() else {
-        return Ok(());
+        return Edit::Keep(());
     };
     t["enabled"] = toml_edit::value(p.enabled);
     t["grouping"] = toml_edit::value(match p.grouping {
@@ -4405,42 +4411,12 @@ fn write_persisted_to_path_locked(
     t["reorder"] = toml_edit::value(reorder_arr);
     // The onboarding hint was removed; drop the stale table so old configs don't carry a dead `[dashboard.onboarding]` key forever
     t.remove("onboarding");
-    atomic_write(path, doc.to_string().as_bytes())
+    Edit::Replace {
+        contents: doc.to_string().into_bytes(),
+        value: (),
+    }
 }
 
-/// Atomic write via `<path>.dashboard.tmp.<pid>` then `rename`.
-/// Concurrent readers see either the old file or the new file, never a partial truncated copy that would parse as `None` and trigger the catastrophic
-/// clobber on the next writer.
-///
-/// The bytes are explicitly `sync_all()`'d before the rename, so a power loss between the
-/// syscall return and the OS flush cannot leave behind a renamed-but-zero-length file.
-///
-/// Also fsync the parent directory after the rename so the metadata change (the rename itself) is durable across power loss on filesystems where the
-/// directory entry isn't implicitly synced by the file's `sync_all`.
-/// Best-effort: a failure to open or fsync the parent is logged at `debug` but does not propagate (the rename itself succeeded; durability of the
-/// directory entry is the only loss).
-fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let pid = std::process::id();
-    let tmp = path.with_extension(format!("toml.dashboard.tmp.{pid}"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        // Ensure the bytes are physically on disk before the rename.
-        // Without this, the rename can complete and the file system can later observe the renamed inode pointing at zeroed data
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    // Parent directory fsync (defense in depth on unusual filesystems / network mounts)
-    if let Some(parent) = path.parent()
-        && let Ok(dir) = std::fs::File::open(parent)
-    {
-        // sync_all on a directory is allowed on Unix and is a no-op on platforms that don't support it
-        // Swallow errors: the rename succeeded, and the durability question is moot if the OS won't fsync the directory
-        let _ = dir.sync_all();
-    }
-    Ok(())
-}
 
 fn config_path() -> Option<PathBuf> {
     let home = fuigo_shell::util::fuigo_home::fuigo_home();

@@ -515,6 +515,11 @@ mod tests {
     /// Folder trust gates project instructions and project skills at agent build: an untrusted cwd omits both, a trusted one loads both.
     #[tokio::test(flavor = "current_thread")]
     async fn untrusted_cwd_omits_project_instructions_and_skills() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // Trust reads the store under $FUIGO_HOME; hold a private one, exclusive process-wide.
+        let _home = fuigo_test_support::FuigoHome::new();
         let repo = tempfile::tempdir().unwrap();
         git2::Repository::init(repo.path()).unwrap();
         std::fs::write(

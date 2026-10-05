@@ -473,6 +473,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn grant_folder_trust_seeds_decisions_cache() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -490,6 +493,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn revoke_folder_trust_downgrades_cache() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // A mid-session untrust of a TRUSTED folder must take effect immediately
         // Revoke downgrades the in-process cache so `project_scope_allowed` flips to false at once
@@ -516,6 +522,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn revoke_never_trusted_folder_writes_no_deny() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -543,6 +552,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn revoke_on_unrecordable_home_root_records_no_deny() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // cwd == $HOME (git-inited so `workspace_key` resolves the home root, which the store refuses to record)
         // Revoke must NOT seed a cache deny
@@ -577,6 +589,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn envrc_gate_drops_untrusted_then_loads_when_store_trusted() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // The `.envrc` load sites gate on the folder-trust verdict
         // An `.envrc`-only untrusted clone resolves false (so the call site loads an empty env)
@@ -609,6 +624,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn claude_env_gate_drops_project_env_when_untrusted() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // The `.claude/settings.json` env load site mirrors `load_claude_env_with_project(cwd, project_scope_allowed(cwd))`
         // An untrusted clone's repo-tree env (which would feed BASH_ENV / GIT_SSH_COMMAND / ... to every subprocess) is dropped.
@@ -652,6 +670,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn claude_env_gate_drops_subdir_project_env_when_untrusted() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // RCE regression (subdir bypass)
         // A `.claude/settings.json` with `env` in a SUBDIR, the ONLY repo config, launched from that subdir must flip the folder untrusted
@@ -701,6 +722,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_agent_inline_hooks_gated_when_untrusted_but_user_kept() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // A cwd-discovered PROJECT agent's inline `hooks:` is gated on folder-trust (it can SHADOW a built-in subagent, near-auto RCE)
         // A user/built-in agent's hooks are kept
@@ -753,6 +777,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_denies_untrusted_repo_with_configs() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Fail-closed (the dangerous case)
         // The setup: a release-stamped build, the feature on by default, an untrusted folder shipping code-exec config (here `.fuigo/hooks`)
         // With no store grant that must be DENIED
@@ -773,6 +800,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_allows_repo_without_configs() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // The over-deny guard: a folder with NO repo-local code-exec config has nothing to gate
         // It must be ALLOWED even though its (provisional) Trusted verdict is never cached
         // A naive `.unwrap_or(false)` cache peek would wrongly deny it
@@ -791,6 +821,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_allows_store_trusted_repo() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A folder the user explicitly trusted is ALLOWED even with repo-local configs present
         // FUIGO_HOME-isolated so the seeded store is the temp one; FUIGO_FOLDER_TRUST unset so the default-on flag applies
         let _sim = simulate_release_build();
@@ -810,6 +843,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_allows_inert_local_build() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // On a local/dev build the whole feature is inert (auto-trust): a folder with repo-local configs and an empty store is still ALLOWED
         // Assert only when compiled unstamped (mirrors the inert tests elsewhere)
         // FUIGO_TEST_VERSION is unset so `is_local_build()` is genuinely true
@@ -830,6 +866,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_denies_untrusted_plugin_only_repo() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A plugin-only untrusted repo (just `.fuigo/plugins/<x>/`, no hooks/MCP/LSP, no store grant) is repo-controlled code-exec
         // It must be DENIED
         // That is the verdict the shell plugin call sites feed into discover_plugins/build_for_cwd/reload
@@ -849,6 +888,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_denies_untrusted_permission_only_repo() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Bridge: a clone whose ONLY repo-local config is `.fuigo/config.toml` `[permission]` (no MCP/hooks/plugins) must still gate
         // It produces untrusted via the real `repo_configs_present` / `decide` / `project_scope_allowed` path
         // Resolver unit tests inject `project_trusted = false` directly and miss this detector gap
@@ -876,6 +918,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_denies_untrusted_instruction_only_repo() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A clone whose ONLY project content is an AGENTS.md must gate: its instructions would otherwise reach the model ungated
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
@@ -894,6 +939,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn project_scope_allowed_denies_untrusted_skill_only_repo() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A clone whose ONLY project content is a `.fuigo/skills` skill must gate the same way
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
@@ -917,6 +965,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn project_scope_allowed_denies_workspace_user_only_instructions() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -997,6 +1048,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn kill_switch_allows_untrusted_repo_after_authoritative_resolve() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Regression (chat/load-path kill-switch)
         // An untrusted folder WITH repo configs under a remote kill-switch (folder_trust_enabled = Some(false)) must resolve ALLOWED
         // The session spawn path resolves once with the real RemoteSettings before any gate read, so the gate cache-hits that verdict
@@ -1034,6 +1088,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn build_for_cwd_with_trust_verdict_gates_active_project_plugin() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // Pins the SHELL plugin wiring end-to-end
         // The call-site expression is `build_for_cwd(cwd, &cfg, dirs, <folder-trust verdict>)`
@@ -1093,6 +1150,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn discover_hooks_gates_then_loads_project_hook_via_trust_verdict() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _sim = simulate_release_build();
         // End-to-end load path: the folder-trust verdict threaded into `discover_hooks` excludes a repo-local project hook while untrusted
         // It includes the hook after the folder is granted trust, the path where the regression historically re-opened
@@ -1311,6 +1371,110 @@ mod tests {
         }
     }
 
+    /// P06. The source the guard above deliberately leaves out.
+    ///
+    /// `project_scoped_mcp_names_cover_every_source` pins the three repo-local FILE
+    /// sources but excludes `~/.claude.json`, for a good reason it states outright: it
+    /// lives under `$HOME` and a test must not clobber the real user file. The result was
+    /// that the one MCP source living outside the repo had no regression test at all,
+    /// while Contract C.2 asserted it was "the genuinely ungated read".
+    ///
+    /// **It is not ungated.** Verified against this baseline before writing anything, as
+    /// C.2 requires. Both sides already gate it:
+    ///   - detection: `claude_project_mcp_present` is called inside
+    ///     `collect_repo_config_kinds`, which IS the gate via `repo_configs_present`;
+    ///   - consumption: `project_scoped_mcp_names` reads it, so an untrusted repo's
+    ///     entries are filtered like any other project source.
+    ///
+    /// So P06 does not change behaviour. It closes the coverage hole, which is the part
+    /// the baseline was actually missing: nothing stopped a refactor from dropping this
+    /// source and leaving `~/.claude.json` MCP servers ungated for an untrusted repo.
+    ///
+    /// `$HOME` is redirected to a temporary directory for the duration, so the real user
+    /// file is never read or written. `EnvGuard` mutates process-global state, so this
+    /// test must be `#[serial]`.
+    #[test]
+    #[serial_test::serial]
+    fn claude_json_project_mcp_is_covered_by_the_project_scope() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::env::EnvGuard;
+
+        let fake_home = tempfile::tempdir().unwrap();
+        let repo = repo_tmp();
+        let cwd = repo.path();
+
+        std::fs::write(
+            fake_home.path().join(".claude.json"),
+            serde_json::to_string(&serde_json::json!({
+                "projects": {
+                    cwd.to_string_lossy(): {
+                        "mcpServers": {
+                            "claudesrv": { "url": "https://claude.example.com/mcp" }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let _home = EnvGuard::set("HOME", fake_home.path());
+
+        // Sanity: the redirect took effect, so a failure below is about the gate and not
+        // about the test reading the developer's real home.
+        assert_eq!(
+            fuigo_dirs::home_dir().as_deref(),
+            Some(fake_home.path()),
+            "HOME redirect did not take effect; refusing to assert against the real user file"
+        );
+
+        let names = project_scoped_mcp_names(cwd);
+        assert!(
+            names.contains("claudesrv"),
+            "~/.claude.json projects.<cwd>.mcpServers is no longer project-scoped, so an \
+             untrusted repo's MCP servers would not be filtered; got {names:?}"
+        );
+    }
+
+    /// The other half: a `~/.claude.json` entry for a DIFFERENT cwd must not leak into
+    /// this repo's project scope, or an unrelated project's servers would be filtered.
+    #[test]
+    #[serial_test::serial]
+    fn claude_json_entries_for_another_cwd_are_not_project_scoped_here() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::env::EnvGuard;
+
+        let fake_home = tempfile::tempdir().unwrap();
+        let repo = repo_tmp();
+        let other = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            fake_home.path().join(".claude.json"),
+            serde_json::to_string(&serde_json::json!({
+                "projects": {
+                    other.path().to_string_lossy(): {
+                        "mcpServers": {
+                            "elsewhere": { "url": "https://elsewhere.example.com/mcp" }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let _home = EnvGuard::set("HOME", fake_home.path());
+        let names = project_scoped_mcp_names(repo.path());
+        assert!(
+            !names.contains("elsewhere"),
+            "another project's ~/.claude.json servers must not be scoped to this repo; got {names:?}"
+        );
+    }
+
     #[test]
     fn filter_untrusted_project_mcp_drops_only_project() {
         let merged = || {
@@ -1468,6 +1632,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn resolve_launch_dir_trust_matches_resolve_and_record() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // `resolve_launch_dir_trust` derives the launch-dir verdict from one gather
         // It must agree with `resolve_and_record(cwd, None, false)`
         // It must leave the provisional no-configs grant UNCACHED (the TOCTOU contract on the shared path)
@@ -1508,6 +1675,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn local_build_is_inert_launch_trust_auto_trusts() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // On a local/dev build the whole folder-trust system is inert
         // An untrusted repo that HAS repo-local configs (here an `.envrc`) with an EMPTY store still resolves trusted
         // `resolve_launch_dir_trust` returns true, and the `.envrc` loads without any grant
@@ -1549,6 +1719,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn prompt_warranted_true_for_untrusted_repo_with_configs() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Feature on (via remote), untrusted (empty store), repo configs present: the GUI prompt is warranted
         // FUIGO_HOME-isolated so the store starts empty; `#[serial]` because FUIGO_HOME is process-global
         let home = tempfile::tempdir().unwrap();
@@ -1569,6 +1742,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn prompt_warranted_false_when_feature_disabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // The remote kill-switch (folder_trust_enabled = Some(false)) disables the feature even on a release-stamped build
         // So no prompt is warranted even with repo configs present
         // Simulate a release build so the inert local-build path is not what's under test
@@ -1589,6 +1765,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn prompt_warranted_false_when_store_trusted() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A folder the user already trusted resolves Trusted, not Prompt.
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -1606,6 +1785,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn prompt_warranted_false_without_repo_configs() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Nothing repo-local to gate resolves Trusted, not Prompt
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("FUIGO_HOME", home.path());

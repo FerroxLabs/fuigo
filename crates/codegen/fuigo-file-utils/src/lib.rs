@@ -19,7 +19,11 @@ pub fn with_auth_retry(
         .with(fuigo_auth::AuthRetryMiddleware::new(credentials, 1))
         .build()
 }
+pub mod destination_gate;
+#[cfg(any(test, feature = "test-loopback-operator"))]
+pub mod gate_testkit;
 pub mod gcs;
+pub mod payload_filter;
 pub mod queue;
 pub mod s3;
 pub mod storage_client;

@@ -45,20 +45,13 @@ fn add_cli_chat_proxy_headers_blocking(
     alpha_test_key: Option<&str>,
     url: &str,
 ) -> reqwest::blocking::RequestBuilder {
-    let mut builder = builder
+    let _ = alpha_test_key;
+    // P43: identity only to a FluxRouter-operated destination.
+    let identity = super::account_identity_headers(url, &auth.user_id, auth.email.as_deref());
+    builder
         .header("Authorization", format!("Bearer {}", &auth.key))
         .header("X-XAI-Token-Auth", FuigoComConfig::default().token_header)
-        .header("x-userid", &auth.user_id)
-        .header("x-fuigo-client-version", fuigo_version::VERSION);
-    if let Some(email) = &auth.email {
-        builder = builder.header("x-email", email);
-    }
-    let _ = (alpha_test_key, url);
-    builder
-        .header(
-            "x-fuigo-client-identifier",
-            crate::http::process_client_identifier(),
-        )
+        .headers(identity)
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
@@ -76,37 +69,49 @@ async fn add_bundle_fetch_headers(
     deployment_key: Option<&str>,
     alpha_test_key: Option<&str>,
     url: &str,
-) -> reqwest::RequestBuilder {
+    service_base: &str,
+) -> Result<reqwest::RequestBuilder, BackendError> {
     let resolved_auth = match auth_manager {
         Some(am) if ActiveAuthBackend::default().is_fuigo_authority() => am.auth().await.ok(),
         _ => None,
     };
+    // P47: a session credential is attached only where the service-endpoint trust class admits the URL; the
+    // caller's base is the configured cli-chat-proxy base. A deployment key keeps its own rules.
+    if deployment_key.is_none()
+        && let Some(auth) = &resolved_auth
+    {
+        crate::auth::session_delivery::service_session_gate(auth, url, Some(service_base), "bundle_fetch")
+            .map_err(|refused| BackendError::SessionDestinationRefused(refused.to_string()))?;
+    }
     let mut credentials = crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(
         resolved_auth.as_ref().map(|auth| auth.key.clone()),
     );
     credentials.deployment_key = deployment_key.map(str::to_owned);
     credentials.alpha_test_key = alpha_test_key.map(str::to_owned);
-    let mut builder = credentials
-        .apply(builder, url)
-        .header("x-fuigo-client-version", fuigo_version::VERSION);
+    // P43: identity only to a FluxRouter-operated destination.
+    let identity = fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url);
+    let client_identifier = crate::http::process_client_identifier();
+    let mut pairs = vec![
+        ("x-fuigo-client-version", fuigo_version::VERSION),
+        ("x-fuigo-client-identifier", client_identifier.as_str()),
+    ];
     if deployment_key.is_none()
         && let Some(auth) = &resolved_auth
     {
-        builder = builder.header("x-userid", &auth.user_id);
+        pairs.push(("x-userid", auth.user_id.as_str()));
         if let Some(email) = &auth.email {
-            builder = builder.header("x-email", email);
+            pairs.push(("x-email", email.as_str()));
         }
     }
+    let mut builder = credentials
+        .apply(builder, url)
+        .headers(identity.header_map(pairs));
     builder = builder
-        .header(
-            "x-fuigo-client-identifier",
-            crate::http::process_client_identifier(),
-        )
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
         );
-    fuigo_file_utils::trace_context::inject_trace_context_into_request(builder)
+    Ok(fuigo_file_utils::trace_context::inject_trace_context_into_request(builder))
 }
 /// Fetch the bundled subagent cache payload from cli-chat-proxy `GET /v1/subagents/bundle`.
 ///
@@ -127,8 +132,9 @@ pub async fn fetch_subagent_bundle(
             deployment_key,
             alpha_test_key,
             &url,
+            cli_chat_proxy_base_url,
         )
-        .await,
+        .await?,
     )
     .await?;
     if !response.status().is_success() {
@@ -181,6 +187,8 @@ async fn fetch_bundle_inner(
                 am.clone(),
                 deployment_key.map(str::to_owned),
                 alpha_test_key.map(str::to_owned),
+                Some(cli_chat_proxy_base_url.to_owned()),
+                "bundle_archive",
             ),
         );
         crate::http::with_auth_retry(raw_client, provider)
@@ -189,26 +197,31 @@ async fn fetch_bundle_inner(
             .with(fuigo_auth::EgressMiddleware)
             .build()
     };
-    let mut request = client
+    // P43: identity only to a FluxRouter-operated destination.
+    let identity = fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&archive_url);
+    let current_auth = if deployment_key.is_none() {
+        auth_manager.and_then(|am| am.current())
+    } else {
+        None
+    };
+    let mut pairs = vec![("x-fuigo-client-version", fuigo_version::VERSION)];
+    if let Some(auth) = &current_auth {
+        pairs.push(("x-userid", auth.user_id.as_str()));
+        if let Some(email) = &auth.email {
+            pairs.push(("x-email", email.as_str()));
+        }
+    }
+    let request = client
         .get(&archive_url)
         .timeout(std::time::Duration::from_secs(30))
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        .headers(identity.header_map(pairs))
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
         );
-    if deployment_key.is_none()
-        && let Some(am) = auth_manager
-        && let Some(auth) = am.current()
-    {
-        request = request.header("x-userid", &auth.user_id);
-        if let Some(ref email) = auth.email {
-            request = request.header("x-email", email);
-        }
-    }
     let archive_response = request.send().await.map_err(|e| match e {
         reqwest_middleware::Error::Reqwest(e) => BackendError::Network(e),
-        reqwest_middleware::Error::Middleware(e) => BackendError::Auth(e.to_string()),
+        reqwest_middleware::Error::Middleware(e) => middleware_error(e),
     })?;
     if archive_response.status().is_success() {
         let bytes = archive_response.bytes().await?;
@@ -272,6 +285,29 @@ pub(crate) struct UpsertSessionRequest {
     pub session: SessionUpdate,
     pub agent_id: String,
 }
+/// The upsert body actually sent to `url` (P54). Every session-backend write that names the
+/// machine (history sync, share, fork, worktree resume) reaches the wire through
+/// [`BackendClient::upsert_session`], so this is the one place `agent_id` (the persisted machine
+/// id, a cross-destination identifier) is decided. A FluxRouter-operated backend receives it
+/// unchanged; any other backend (`FUIGO_CODE_BACKEND_URL` is operator-configured and is not
+/// FluxRouter by default) receives `IdentityDisclosure::body_key_for(url, agent_id)`, a pseudonym
+/// stable at that origin, so the backend can still group a machine's sessions. The field is
+/// required by the wire type, so it is substituted, never omitted.
+pub(crate) fn upsert_session_request(
+    url: &str,
+    metadata: &ExportedMetadata,
+    agent_id: &str,
+) -> UpsertSessionRequest {
+    UpsertSessionRequest {
+        session: SessionUpdate {
+            title: metadata.title.clone(),
+            cwd: Some(metadata.cwd.clone()),
+            status: Some("active".to_string()),
+            metadata: serde_json::to_value(metadata).ok(),
+        },
+        agent_id: fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for(url, agent_id),
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -302,10 +338,22 @@ pub enum BackendError {
     },
     #[error("Auth error: {0}")]
     Auth(String),
+    /// P47: the destination may not receive the session token, so the request was not made.
+    #[error("{0}")]
+    SessionDestinationRefused(String),
     /// The feature depends on a service Fuigo does not run by default and the
     /// operator has not pointed it anywhere. The message names the env var.
     #[error("{0}")]
     NotConfigured(String),
+}
+
+/// A middleware failure: P47's refused destination keeps its own variant (its text is the remedy), anything else
+/// is an auth failure as before.
+fn middleware_error(e: anyhow::Error) -> BackendError {
+    match fuigo_auth::find_bearer_refusal(e.as_ref()) {
+        Some(refused) => BackendError::SessionDestinationRefused(refused.0.clone()),
+        None => BackendError::Auth(e.to_string()),
+    }
 }
 
 impl From<fuigo_extra_ca::dispatch::DispatchError> for BackendError {
@@ -328,6 +376,14 @@ impl Default for BackendClient {
     fn default() -> Self {
         Self::new()
     }
+}
+/// Set once a backend has refused a save carrying compaction checkpoints and accepted it without them: later saves in
+/// this process leave the checkpoints out instead of failing twice.
+static CHECKPOINTS_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A 4xx that can mean "this backend does not take that message". Auth (401, 403) and transient (408, 429) failures
+/// are not refusals.
+fn is_checkpoint_refusal(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 401 | 403 | 408 | 429)
 }
 impl BackendClient {
     fn build_default_client() -> reqwest::Client {
@@ -381,6 +437,8 @@ impl BackendClient {
                     manager.clone(),
                     None,
                     None,
+                    self.base_url.clone(),
+                    "code_backend",
                 ),
             );
         self.client = crate::http::with_auth_retry(self.reqwest_client.clone(), credentials);
@@ -479,18 +537,30 @@ impl BackendClient {
         );
         Ok(headers)
     }
-    async fn send_with_auth(
+    /// The request `send_with_auth` sends. P43: the auth header map carries identity
+    /// (`x-userid`, `x-email`, client labels); the destination is final only once the request
+    /// is built, so the withholding happens here, on the request that goes on the wire.
+    async fn authed_request(
         &self,
         builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, BackendError> {
+    ) -> Result<reqwest::Request, BackendError> {
         let headers = self.auth_header_map().await?;
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(
             builder.timeout(DEFAULT_TIMEOUT).headers(headers),
         );
-        let request = builder.build()?;
+        let mut request = builder.build()?;
+        fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(request.url().as_str())
+            .withhold_from_header_map(request.headers_mut());
+        Ok(request)
+    }
+    async fn send_with_auth(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, BackendError> {
+        let request = self.authed_request(builder).await?;
         self.client.execute(request).await.map_err(|e| match e {
             reqwest_middleware::Error::Reqwest(e) => BackendError::Network(e),
-            reqwest_middleware::Error::Middleware(e) => BackendError::Auth(e.to_string()),
+            reqwest_middleware::Error::Middleware(e) => middleware_error(e),
         })
     }
     pub async fn upsert_session(
@@ -500,15 +570,7 @@ impl BackendClient {
         agent_id: &str,
     ) -> Result<(), BackendError> {
         let url = format!("{}/sessions/{}", self.base()?, session_id);
-        let request = UpsertSessionRequest {
-            session: SessionUpdate {
-                title: metadata.title.clone(),
-                cwd: Some(metadata.cwd.clone()),
-                status: Some("active".to_string()),
-                metadata: serde_json::to_value(metadata).ok(),
-            },
-            agent_id: agent_id.to_string(),
-        };
+        let request = upsert_session_request(&url, metadata, agent_id);
         let response = self
             .send_with_auth(self.reqwest_client.put(&url).json(&request))
             .await?;
@@ -519,7 +581,65 @@ impl BackendClient {
         }
         Ok(())
     }
+    /// Uploads a session's messages. Compaction checkpoints ride along as `_fuigo/compaction_checkpoint` messages; if
+    /// the backend refuses the save with a client error (an unknown method, a larger body), the save is retried once
+    /// without them, so a backend that predates them still stores every normal message. 401, 403, 408 and 429 are
+    /// auth or transient failures, not refusals, and are returned as before.
     pub(crate) async fn save_session_data(
+        &self,
+        session_id: &str,
+        messages: &[ExportedMessage],
+        metadata: Option<&ExportedMetadata>,
+    ) -> Result<(), BackendError> {
+        let has_checkpoints = messages.iter().any(ExportedMessage::is_compaction_checkpoint);
+        if !has_checkpoints {
+            return self.post_session_data(session_id, messages, metadata).await;
+        }
+        let only_checkpoints = messages.iter().all(ExportedMessage::is_compaction_checkpoint);
+        if CHECKPOINTS_REFUSED.load(std::sync::atomic::Ordering::Relaxed) {
+            if only_checkpoints {
+                // Nothing but checkpoints is left once they are filtered out: there is nothing to send.
+                return Ok(());
+            }
+            return self.post_without_checkpoints(session_id, messages, metadata).await;
+        }
+        match self.post_session_data(session_id, messages, metadata).await {
+            Err(BackendError::RequestFailed { status, .. }) if is_checkpoint_refusal(status) => {
+                // A batch of only checkpoints has no retry to prove anything with: a 4xx on it is the refusal, and
+                // the checkpoint is dropped from the pending set instead of being posted again on every flush.
+                if !only_checkpoints {
+                    self.post_without_checkpoints(session_id, messages, metadata).await?;
+                }
+                // Remember only once the retry proved the checkpoints were the problem.
+                // A 413 may mean only this one was too large, so it does not disable later (smaller) checkpoints.
+                let first = status == 413
+                    || !CHECKPOINTS_REFUSED.swap(true, std::sync::atomic::Ordering::Relaxed);
+                if first {
+                    tracing::warn!(
+                        status,
+                        "backend refused compaction checkpoints; the compaction summary is not stored remotely \
+                         (a session pulled from remote storage will resume without it)"
+                    );
+                }
+                Ok(())
+            }
+            other => other,
+        }
+    }
+    async fn post_without_checkpoints(
+        &self,
+        session_id: &str,
+        messages: &[ExportedMessage],
+        metadata: Option<&ExportedMetadata>,
+    ) -> Result<(), BackendError> {
+        let kept: Vec<ExportedMessage> = messages
+            .iter()
+            .filter(|m| !m.is_compaction_checkpoint())
+            .cloned()
+            .collect();
+        self.post_session_data(session_id, &kept, metadata).await
+    }
+    async fn post_session_data(
         &self,
         session_id: &str,
         messages: &[ExportedMessage],
@@ -614,13 +734,19 @@ pub enum SettingsFetch {
     /// Transient/ambiguous (network, 5xx exhausted, 403/429/other 4xx, unparseable 2xx): outcome unknown.
     /// Leave the gate closed (fail-closed), retry later.
     Retry,
+    /// P47: the settings URL may not receive the session token, so nothing was sent. Terminal like `Rejected` (no
+    /// remote policy can reach this leader) but NOT a credential rejection: no auth recovery, no re-fetch. Carries
+    /// the refusal text (origin and remedy).
+    DestinationRefused(String),
 }
 impl SettingsFetch {
     /// For callers that only want the settings and treat every failure alike.
     pub fn into_option(self) -> Option<crate::util::config::RemoteSettings> {
         match self {
             SettingsFetch::Fetched(s) => Some(*s),
-            SettingsFetch::Rejected | SettingsFetch::Retry => None,
+            SettingsFetch::Rejected | SettingsFetch::Retry | SettingsFetch::DestinationRefused(_) => {
+                None
+            }
         }
     }
 }
@@ -646,6 +772,17 @@ fn fetch_settings_blocking_with_attempts(
 ) -> SettingsFetch {
     let client = crate::http::shared_startup_blocking_client();
     let url = format!("{cli_chat_proxy_base_url}/settings");
+    // P47: the session token goes only where the service-endpoint trust class admits `/settings`. A refused
+    // destination is terminal (no retry can change it) and distinct from a 401: the request is not made, the
+    // refusal is logged with its remedy, and no auth recovery runs.
+    if let Err(refused) = crate::auth::session_delivery::service_session_gate(
+        auth,
+        &url,
+        Some(cli_chat_proxy_base_url),
+        "remote_settings",
+    ) {
+        return SettingsFetch::DestinationRefused(refused.to_string());
+    }
     let max_attempts = max_attempts.max(1);
     for attempt in 0u32..max_attempts {
         if attempt > 0 {
@@ -706,6 +843,28 @@ struct LoginConfigResponse {
     #[serde(default)]
     device_flow: Option<bool>,
 }
+/// The `GET /login-config` request. P43: the persisted machine id (`x-fuigo-agent-id`), the
+/// client version and the client identifier go only to a FluxRouter-operated destination.
+fn login_config_request(
+    client: &reqwest::Client,
+    url: &str,
+    agent_id: &str,
+) -> reqwest::RequestBuilder {
+    let identity = fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url);
+    let client_identifier = crate::http::process_client_identifier();
+    client
+        .get(url)
+        .timeout(std::time::Duration::from_millis(1500))
+        .headers(identity.header_map([
+            ("x-fuigo-agent-id", agent_id),
+            ("x-fuigo-client-version", fuigo_version::VERSION),
+            ("x-fuigo-client-identifier", client_identifier.as_str()),
+        ]))
+        .header(
+            crate::http::CLIENT_MODE_HEADER,
+            crate::http::process_client_mode(),
+        )
+}
 /// Fetch `fuigo_build_login_device_flow` from cli-chat-proxy `GET /v1/login-config`.
 ///
 /// Unauthenticated (pre-login); `x-fuigo-agent-id` is the per-install bucketing key.
@@ -715,23 +874,12 @@ pub async fn fetch_login_device_flow(cli_chat_proxy_base_url: &str) -> Option<bo
     let agent_id = tokio::task::spawn_blocking(fuigo_telemetry::id::agent_id)
         .await
         .ok()?;
-    let client = crate::http::shared_client();
     let url = format!("{}/login-config", cli_chat_proxy_base_url);
-    let response = fuigo_extra_ca::dispatch::send(
-        client
-            .get(&url)
-            .timeout(std::time::Duration::from_millis(1500))
-            .header("x-fuigo-agent-id", agent_id)
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
-            .header(
-                "x-fuigo-client-identifier",
-                crate::http::process_client_identifier(),
-            )
-            .header(
-                crate::http::CLIENT_MODE_HEADER,
-                crate::http::process_client_mode(),
-            ),
-    )
+    let response = fuigo_extra_ca::dispatch::send(login_config_request(
+        &crate::http::shared_client(),
+        &url,
+        &agent_id,
+    ))
     .await;
     let resp = match response {
         Ok(resp) if resp.status().is_success() => resp,

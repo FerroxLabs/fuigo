@@ -1592,6 +1592,7 @@ mod tests {
 
     #[test]
     fn filter_render_keeps_unicode_query_and_cursor_visible() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut state = MemoryModalState::new(build_test_entries());
         state.mode = MemoryModalMode::FilterFocused;
         let grapheme = "👩🏽\u{200d}💻";

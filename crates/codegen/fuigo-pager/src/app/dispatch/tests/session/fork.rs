@@ -534,6 +534,106 @@ fn dispatch_fork_no_flag_always_opens_question_modal() {
     );
 }
 
+/// Drive the open fork question with `keys` typed as text, then Enter; return the final outcome.
+fn p152_answer_fork_question_by_typing(app: &mut AppView, typed: &str) -> crate::app::app_view::InputOutcome {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    for c in typed.chars() {
+        let mods = if c.is_ascii_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+        let _ = agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char(c), mods));
+    }
+    agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+}
+
+/// P152 (e2e lane M #3): answering the `/fork` worktree question by typing `no` and Enter must fork WITHOUT a worktree.
+/// The RC ignored the typed letters (they are not selector keys) and the Enter then took the focused row, "Yes", so a
+/// worktree fork was created against the user's answer.
+#[test]
+fn p152_typing_no_to_the_fork_question_forks_without_a_worktree() {
+    for typed in ["no", "No", "n"] {
+        let mut app = fork_test_app();
+        app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Ask;
+        let _ = dispatch(Action::Fork(fork_args(None, None)), &mut app);
+        assert!(app.agents[&AgentId(0)].question_view.is_some(), "modal must be open");
+        match p152_answer_fork_question_by_typing(&mut app, typed) {
+            crate::app::app_view::InputOutcome::Action(Action::ForkAnswered {
+                worktree,
+                persist_mode,
+                ..
+            }) => {
+                assert!(!worktree, "typed {typed:?} must fork without a worktree");
+                assert!(persist_mode.is_none(), "typed {typed:?} must not persist a mode");
+            }
+            other => panic!("typed {typed:?}: expected ForkAnswered without a worktree, got {other:?}"),
+        }
+    }
+}
+
+/// P152 (Astra r1 #4): a typed `yes` / `y` is an answer too (on the worktree question `y` does not copy the label).
+#[test]
+fn p152_typing_yes_to_the_fork_question_forks_in_a_worktree() {
+    for typed in ["yes", "y", "Yes"] {
+        let mut app = fork_test_app();
+        app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Ask;
+        let _ = dispatch(Action::Fork(fork_args(None, None)), &mut app);
+        match p152_answer_fork_question_by_typing(&mut app, typed) {
+            crate::app::app_view::InputOutcome::Action(Action::ForkAnswered { worktree, .. }) => {
+                assert!(worktree, "typed {typed:?} must fork in a worktree")
+            }
+            other => panic!("typed {typed:?}: expected ForkAnswered, got {other:?}"),
+        }
+    }
+}
+
+/// P152: a typed answer that names no option forks nothing (the safe outcome); it never falls through to "Yes".
+#[test]
+fn p152_typing_an_unknown_answer_to_the_fork_question_creates_no_worktree() {
+    let mut app = fork_test_app();
+    app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Ask;
+    let _ = dispatch(Action::Fork(fork_args(None, None)), &mut app);
+    let outcome = p152_answer_fork_question_by_typing(&mut app, "abc");
+    assert!(
+        !matches!(
+            outcome,
+            crate::app::app_view::InputOutcome::Action(Action::ForkAnswered { worktree: true, .. })
+        ),
+        "an unrecognised typed answer must not create a worktree fork: {outcome:?}"
+    );
+}
+
+/// P152 (Astra r1 #4): the typed-answer fallback is for the worktree questions only. On an ACP `ask_user_question`
+/// card, letters that name no option (`e`, `s`) keep their base behaviour: they do not open the typed ("Other") answer
+/// and do not move the cursor, so a following Enter still answers with the focused option.
+#[test]
+fn p152_letters_on_an_acp_question_do_not_start_a_typed_answer() {
+    use crate::views::question_view::QuestionViewState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+    let mut app = fork_test_app();
+    let opt = |label: &str| QuestionOption {
+        label: label.into(),
+        description: String::new(),
+        preview: None,
+        id: None,
+    };
+    let q = Question {
+        question: "Which one?".into(),
+        options: vec![opt("alpha"), opt("beta")],
+        multi_select: Some(false),
+        id: None,
+    };
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let stashed = agent.prompt.stash();
+    agent.question_view = Some(QuestionViewState::new("acp-q".into(), vec![q], stashed));
+    assert!(!agent.question_view.as_ref().unwrap().no_freeform, "the ACP card offers a typed answer");
+    for c in "es".chars() {
+        let _ = agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let qv = agent.question_view.as_ref().expect("the ACP question stays open");
+    assert!(!qv.is_on_freeform_row(), "typed letters must not open the typed answer on an ACP question");
+    assert_eq!(qv.cursor(), 0, "the focused option is unchanged");
+}
+
 #[test]
 fn open_fork_question_refuses_when_existing_question_is_open() {
     let mut app = fork_test_app();

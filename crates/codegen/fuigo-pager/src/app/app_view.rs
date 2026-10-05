@@ -690,6 +690,17 @@ pub struct AppView {
     /// Hiding one critical reveals the next unhidden one, and a NEW id shows the banner again.
     pub hidden_announcement_ids: std::collections::BTreeSet<String>,
     pub announcements_last_gen: u64,
+    /// P125: the explanation of the relay the agent or the leader refused (which relay, why, how to trust it), shown
+    /// once in every session's scrollback.
+    pub relay_refusal: Option<String>,
+    /// P125: the sessions whose scrollback already shows [`Self::relay_refusal`].
+    pub relay_refusal_noted: std::collections::HashSet<AgentId>,
+    /// P125: relay-sync refusals by session id, until that session's scrollback shows them (the notice can arrive
+    /// before the session exists).
+    pub relay_sync_refusals: std::collections::HashMap<String, String>,
+    /// P142: one-off notices from the shared-session leader's process (`fuigo/leader/notice`: an old memory folder it
+    /// did not move, uploads it withheld) not shown yet. Each is shown once, in the active session once it is quiet.
+    pub leader_notices: Vec<String>,
     /// Selected welcome announcement for this pager launch.
     pub announcement: Option<fuigo_announcements::RemoteAnnouncement>,
     /// Cached changelog markdown (for `/release-notes`).
@@ -896,12 +907,6 @@ pub struct AppView {
     pub welcome_privacy_banner_opt_out_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_terms_rect: Option<ratatui::layout::Rect>,
     pub welcome_privacy_banner_policy_rect: Option<ratatui::layout::Rect>,
-    /// Hit-test rects for the welcome workspace-mode picker.
-    #[cfg(feature = "local-workspace")]
-    pub welcome_workspace_mode_rects: crate::views::welcome::WorkspaceModeHitRects,
-    /// Sticky hover flag for the workspace-mode picker (redraw on enter/leave).
-    #[cfg(feature = "local-workspace")]
-    pub welcome_on_workspace_mode: bool,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
     /// Sticky hover flag for the privacy banner buttons (redraw on enter/leave).
@@ -1008,22 +1013,6 @@ pub struct AppView {
     /// Stamps `_meta["fuigo/session"].kind = "chat"` and omits Build agent profiles on create/load while set.
     /// `/chat` does **not** set this (uses [`Self::deferred_startup`] one-shot state instead).
     pub chat_mode: bool,
-    /// Welcome picker mode; ignored when `local_workspace_startup_locked`.
-    #[cfg(feature = "local-workspace")]
-    pub welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
-    /// CLI/env already stamped local workspace; welcome must not override.
-    #[cfg(feature = "local-workspace")]
-    pub local_workspace_startup_locked: bool,
-    /// One-shot next-session stamp: `Some(None)` means sandbox, `Some(cfg)` means local.
-    #[cfg(feature = "local-workspace")]
-    pub welcome_session_local_workspace:
-        Option<Option<crate::app::session_startup::LocalWorkspaceConfig>>,
-    /// First-run Local ACK still pending in the TUI.
-    #[cfg(feature = "local-workspace")]
-    pub welcome_local_workspace_ack_pending: bool,
-    /// Next welcome history load is local-disk/build (does not set `chat_mode`).
-    #[cfg(feature = "local-workspace")]
-    pub welcome_history_load_as_build: bool,
     /// Whether mouse capture is currently enabled.
     /// Disabled during the Authenticating state so the terminal handles native text selection.
     pub mouse_captured: bool,
@@ -1571,6 +1560,10 @@ impl AppView {
             active_announcements: Vec::new(),
             hidden_announcement_ids: Default::default(),
             announcements_last_gen: 0,
+            relay_refusal: None,
+            relay_refusal_noted: Default::default(),
+            relay_sync_refusals: Default::default(),
+            leader_notices: Vec::new(),
             announcement: None,
             changelog_markdown: None,
             changelog_bullets: Vec::new(),
@@ -1610,10 +1603,6 @@ impl AppView {
             welcome_privacy_banner_opt_out_rect: None,
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
-            #[cfg(feature = "local-workspace")]
-            welcome_workspace_mode_rects: Default::default(),
-            #[cfg(feature = "local-workspace")]
-            welcome_on_workspace_mode: false,
             welcome_toast: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
@@ -1656,16 +1645,6 @@ impl AppView {
             subagents: false,
             ask_user: false,
             chat_mode: false,
-            #[cfg(feature = "local-workspace")]
-            welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
-            #[cfg(feature = "local-workspace")]
-            local_workspace_startup_locked: false,
-            #[cfg(feature = "local-workspace")]
-            welcome_session_local_workspace: None,
-            #[cfg(feature = "local-workspace")]
-            welcome_local_workspace_ack_pending: false,
-            #[cfg(feature = "local-workspace")]
-            welcome_history_load_as_build: false,
             mouse_captured: true,
             new_worktree_dialog: None,
             contextual_hints: Default::default(),
@@ -2309,6 +2288,131 @@ impl AppView {
             _ => None,
         }
     }
+    /// P125: remember the refused relay's explanation and put it in every open session's scrollback (a session opened
+    /// later gets it from [`Self::apply_relay_refusal`]). The same text shows once per session.
+    pub fn note_relay_refusal(&mut self, text: String) {
+        if self.relay_refusal.as_deref() != Some(text.as_str()) {
+            self.relay_refusal_noted.clear();
+        }
+        self.relay_refusal = Some(text);
+        let ids: Vec<AgentId> = self.agents.keys().copied().collect();
+        for id in ids {
+            self.apply_relay_refusal(id);
+        }
+    }
+    /// P125: the leader no longer refuses its relay (the user opted in): sessions opened from now on show nothing.
+    pub fn clear_relay_refusal(&mut self) {
+        self.relay_refusal = None;
+        self.relay_refusal_noted.clear();
+    }
+    /// P125: a session's relay sync was refused: shown in that session's scrollback only (now, or when the session
+    /// appears: the notice can arrive before the session exists).
+    pub fn note_relay_sync_refusal(&mut self, session_id: &str, text: String) {
+        self.relay_sync_refusals.insert(session_id.to_owned(), text);
+        let id = self
+            .agents
+            .iter()
+            .find(|(_, a)| a.session.session_id.as_ref().is_some_and(|s| &*s.0 == session_id))
+            .map(|(id, _)| *id);
+        if let Some(id) = id {
+            self.apply_relay_refusal(id);
+        }
+    }
+    /// P125: the sessions with a relay refusal still to show (the tick shows each when it is quiet).
+    fn relay_notice_targets(&self) -> Vec<AgentId> {
+        if self.relay_refusal.is_none() && self.relay_sync_refusals.is_empty() {
+            return Vec::new();
+        }
+        self.agents
+            .iter()
+            .filter(|(id, a)| {
+                (self.relay_refusal.is_some() && !self.relay_refusal_noted.contains(id))
+                    || a.session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|sid| self.relay_sync_refusals.contains_key(&*sid.0))
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+    /// P125: show the pending relay refusals in every session that is quiet now; `true` when one was shown.
+    fn drain_relay_notices(&mut self) -> bool {
+        let mut shown = false;
+        for id in self.relay_notice_targets() {
+            let before = self.agents.get(&id).map_or(0, |a| a.scrollback.len());
+            self.apply_relay_refusal(id);
+            shown |= self.agents.get(&id).map_or(0, |a| a.scrollback.len()) != before;
+        }
+        shown
+    }
+    /// P142: a one-off notice from the leader's process. The leader runs the agent and its stderr is a log file, so
+    /// this is the only place the user sees it: once, as a system note in the session on screen, as soon as that session
+    /// is quiet. Nothing is put into a session that is not on screen (the home session behind the welcome screen is
+    /// thrown away when another one opens); a notice still pending when the TUI quits is printed after the terminal is
+    /// restored ([`crate::app::keep_unshown_leader_notices`]).
+    pub fn note_leader_notice(&mut self, text: String) {
+        self.leader_notices.push(text);
+        self.drain_leader_notices();
+    }
+    /// P142: show the pending leader notices in the session the user is looking at, if it is quiet; `true` when shown.
+    fn drain_leader_notices(&mut self) -> bool {
+        if self.leader_notices.is_empty() {
+            return false;
+        }
+        let ActiveView::Agent(id) = self.active_view else {
+            return false;
+        };
+        // Never into a running turn or a streaming wake turn (see `apply_relay_refusal`), nor while a fullscreen
+        // subagent hides this session's transcript; the tick tries again.
+        let Some(agent) = self
+            .agents
+            .get_mut(&id)
+            .filter(|a| a.session.state.is_idle() && !a.wake_turn_active() && a.active_subagent.is_none())
+        else {
+            return false;
+        };
+        for text in self.leader_notices.drain(..) {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(text));
+        }
+        true
+    }
+    /// P125: show the remembered relay refusals that concern session `id` in its scrollback, once each: the
+    /// leader's (every session) and its own relay sync's.
+    pub fn apply_relay_refusal(&mut self, id: AgentId) {
+        if !self.agents.contains_key(&id) {
+            return;
+        }
+        // Never into a running turn or a streaming wake turn: a block appended mid-answer makes minimal mode commit
+        // the partial answer. The notice stays pending; `tick` shows it as soon as the session is quiet.
+        if !self
+            .agents
+            .get(&id)
+            .is_some_and(|a| a.session.state.is_idle() && !a.wake_turn_active())
+        {
+            return;
+        }
+        let mut texts = Vec::new();
+        if let Some(text) = self.relay_refusal.clone()
+            && self.relay_refusal_noted.insert(id)
+        {
+            texts.push(text);
+        }
+        if let Some(agent) = self.agents.get(&id)
+            && let Some(sid) = agent.session.session_id.as_ref()
+            && let Some(text) = self.relay_sync_refusals.remove(&*sid.0)
+        {
+            texts.push(text);
+        }
+        if let Some(agent) = self.agents.get_mut(&id) {
+            for text in texts {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(text));
+            }
+        }
+    }
     /// Show a toast on the currently active view.
     ///
     /// From the dashboard, toasts route into the dispatch input's inline error slot.
@@ -2860,8 +2964,6 @@ impl AppView {
             self.session_picker_loading,
             &self.session_picker_lanes,
         );
-        #[cfg(feature = "local-workspace")]
-        let session_picker_open = self.session_picker_entries.is_some() || sp_loading;
         let outcome = match self.active_view {
             ActiveView::Welcome => handle_welcome_input(
                 ev,
@@ -2933,22 +3035,6 @@ impl AppView {
                     sp_source_filter: &mut self.session_picker_source_filter,
                     sp_pending_delete: &mut self.session_picker_pending_delete,
                     chat_mode: self.chat_mode,
-                    #[cfg(feature = "local-workspace")]
-                    workspace_mode: &mut self.welcome_workspace_mode,
-                    #[cfg(feature = "local-workspace")]
-                    workspace_mode_rects: &self.welcome_workspace_mode_rects,
-                    #[cfg(feature = "local-workspace")]
-                    on_workspace_mode: &mut self.welcome_on_workspace_mode,
-                    #[cfg(feature = "local-workspace")]
-                    workspace_mode_startup_locked: self.local_workspace_startup_locked,
-                    #[cfg(feature = "local-workspace")]
-                    workspace_mode_ack_pending: &mut self.welcome_local_workspace_ack_pending,
-                    #[cfg(feature = "local-workspace")]
-                    history_load_as_build: &mut self.welcome_history_load_as_build,
-                    #[cfg(feature = "local-workspace")]
-                    deferred_startup: &mut self.deferred_startup,
-                    #[cfg(feature = "local-workspace")]
-                    session_picker_open,
                 },
             ),
             ActiveView::Agent(id) => {
@@ -3568,22 +3654,6 @@ struct WelcomeInputCtx<'a> {
     sp_pending_delete: &'a mut Option<crate::views::session_picker::PendingDelete>,
     /// Process-wide `--chat`: the session picker hides its source filter (conversations-only list), so `f` must not cycle it.
     chat_mode: bool,
-    #[cfg(feature = "local-workspace")]
-    workspace_mode: &'a mut crate::views::welcome::WelcomeWorkspaceMode,
-    #[cfg(feature = "local-workspace")]
-    workspace_mode_rects: &'a crate::views::welcome::WorkspaceModeHitRects,
-    #[cfg(feature = "local-workspace")]
-    on_workspace_mode: &'a mut bool,
-    #[cfg(feature = "local-workspace")]
-    workspace_mode_startup_locked: bool,
-    #[cfg(feature = "local-workspace")]
-    workspace_mode_ack_pending: &'a mut bool,
-    #[cfg(feature = "local-workspace")]
-    history_load_as_build: &'a mut bool,
-    #[cfg(feature = "local-workspace")]
-    deferred_startup: &'a mut crate::app::session_startup::DeferredStartupActions,
-    #[cfg(feature = "local-workspace")]
-    session_picker_open: bool,
 }
 /// Welcome view input: auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
@@ -3740,83 +3810,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             return InputOutcome::Changed;
         }
         return InputOutcome::Unchanged;
-    }
-    #[cfg(feature = "local-workspace")]
-    if *ctx.workspace_mode_ack_pending
-        && matches!(ctx.auth_state, AuthState::Done)
-        && ctx.has_access
-        && !ctx.is_zdr_blocked
-    {
-        if let Event::Key(key) = ev {
-            if key.kind == KeyEventKind::Release {
-                return InputOutcome::Unchanged;
-            }
-            if key!('y').matches(key) || key!('Y').matches(key) || key!(Enter).matches(key) {
-                return InputOutcome::Action(Action::ConfirmWelcomeLocalWorkspaceAck);
-            }
-            if key!('n').matches(key) || key!('N').matches(key) || key!(Esc).matches(key) {
-                *ctx.workspace_mode_ack_pending = false;
-                *ctx.workspace_mode = crate::views::welcome::WelcomeWorkspaceMode::Sandbox;
-                let was_worktree = ctx.deferred_startup.worktree;
-                ctx.deferred_startup.worktree = false;
-                ctx.deferred_startup.worktree_label = None;
-                ctx.deferred_startup.worktree_ref = None;
-                if was_worktree {
-                    ctx.deferred_startup.session = None;
-                    ctx.deferred_startup.preferred_session_id = None;
-                }
-                *ctx.history_load_as_build = false;
-                ctx.deferred_startup.history_load_as_build = false;
-                crate::views::welcome::workspace_mode::log_welcome_ack("cancelled");
-                return InputOutcome::Changed;
-            }
-            return InputOutcome::Unchanged;
-        }
-        if matches!(ev, Event::Resize(_, _)) {
-            return InputOutcome::Changed;
-        }
-        return InputOutcome::Unchanged;
-    }
-    #[cfg(feature = "local-workspace")]
-    if crate::views::welcome::workspace_mode::picker_interactive(
-        ctx.chat_mode,
-        ctx.has_access,
-        matches!(ctx.auth_state, AuthState::Done),
-        ctx.is_zdr_blocked,
-        ctx.session_picker_open,
-        ctx.workspace_mode_startup_locked,
-    ) {
-        if let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key!('e', CONTROL).matches(key)
-        {
-            *ctx.workspace_mode = ctx.workspace_mode.cycle_next();
-            crate::views::welcome::workspace_mode::log_welcome_mode_selected(
-                *ctx.workspace_mode,
-                "ctrl_e",
-                ctx.workspace_mode_startup_locked,
-            );
-            return InputOutcome::Changed;
-        }
-        if let Event::Mouse(mouse) = ev
-            && matches!(
-                mouse.kind,
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
-            )
-            && let Some(mode) = crate::views::welcome::hit_test_workspace_mode(
-                ctx.workspace_mode_rects,
-                mouse.column,
-                mouse.row,
-            )
-        {
-            *ctx.workspace_mode = mode;
-            crate::views::welcome::workspace_mode::log_welcome_mode_selected(
-                mode,
-                "click",
-                ctx.workspace_mode_startup_locked,
-            );
-            return InputOutcome::Changed;
-        }
     }
     if (ctx.sp_entries.is_some() || ctx.sp_loading) && matches!(ctx.auth_state, AuthState::Done) {
         use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
@@ -4447,20 +4440,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                     *ctx.on_upgrade_cta = over_upgrade;
                     return InputOutcome::Changed;
                 }
-                #[cfg(feature = "local-workspace")]
-                {
-                    let over_ws = ctx
-                        .workspace_mode_rects
-                        .row
-                        .is_some_and(|r| r.contains(pos));
-                    if over_ws != *ctx.on_workspace_mode {
-                        *ctx.on_workspace_mode = over_ws;
-                        return InputOutcome::Changed;
-                    }
-                    if over_ws {
-                        return InputOutcome::Changed;
-                    }
-                }
                 let over_banner = ctx
                     .privacy_banner_opt_in_rect
                     .is_some_and(|r| r.contains(pos))
@@ -5014,12 +4993,6 @@ impl AppView {
                             welcome_announcement_expanded: self.welcome_announcement.expanded,
                             upgrade_cta: hero_cta.map(|(_owner, label, _)| label),
                             privacy_banner,
-                            #[cfg(feature = "local-workspace")]
-                            workspace_mode: self.welcome_workspace_mode,
-                            #[cfg(feature = "local-workspace")]
-                            workspace_mode_startup_locked: self.local_workspace_startup_locked,
-                            #[cfg(feature = "local-workspace")]
-                            workspace_mode_ack_pending: self.welcome_local_workspace_ack_pending,
                         };
                         let result = crate::views::welcome::render_welcome(
                             view_area,
@@ -5046,10 +5019,6 @@ impl AppView {
                             result.privacy_banner_opt_out_rect;
                         self.welcome_privacy_banner_terms_rect = result.privacy_banner_terms_rect;
                         self.welcome_privacy_banner_policy_rect = result.privacy_banner_policy_rect;
-                        #[cfg(feature = "local-workspace")]
-                        {
-                            self.welcome_workspace_mode_rects = result.workspace_mode_rects;
-                        }
                         self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
                             crate::views::welcome::paint_welcome_toast(
@@ -5741,6 +5710,8 @@ impl AppView {
     /// Also when a pending action expires (to clear the "press again" hint) or new tracing entries arrive via the channel.
     pub fn tick(&mut self) -> bool {
         let mut needs_redraw = false;
+        needs_redraw |= self.drain_relay_notices();
+        needs_redraw |= self.drain_leader_notices();
         needs_redraw |= self.minimal_state.transcript.is_some();
         needs_redraw |= self.poll_clipboard_focus_tip();
         if matches!(self.active_view, ActiveView::Welcome) {
@@ -6103,7 +6074,25 @@ impl AppView {
     /// (The ~12fps welcome logo shimmer and the macOS Cmd link-hover poll.)
     /// An app that *looks* idle thus doesn't spin a 30fps loop for them.
     pub fn tick_demand(&self) -> TickDemand {
-        self.view_tick_demand().max(self.status_line_tick_demand())
+        // P125: a relay refusal waits for its session to be quiet (`tick` shows it).
+        let relay_notice = if self.relay_notice_targets().is_empty() {
+            TickDemand::None
+        } else {
+            TickDemand::Slow
+        };
+        // P142: a leader notice waits for the session on screen to be quiet (`tick` shows it). Not on the welcome
+        // screen or the dashboard: opening a session is an event, after which this is asked again.
+        let leader_notice = if !self.leader_notices.is_empty()
+            && matches!(self.active_view, ActiveView::Agent(_))
+        {
+            TickDemand::Slow
+        } else {
+            TickDemand::None
+        };
+        self.view_tick_demand()
+            .max(self.status_line_tick_demand())
+            .max(relay_notice)
+            .max(leader_notice)
     }
     fn view_tick_demand(&self) -> TickDemand {
         if self.pending_action.is_some() {

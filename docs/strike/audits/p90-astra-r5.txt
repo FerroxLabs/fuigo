@@ -1,0 +1,36 @@
+Astra round 5 (codex 0.160.0 project-local, model gpt-6-astra, --sandbox read-only, run from the Mac worktree), audited fc3ccb94..e7ac917d.
+Brief: docs/strike/audits/p90-astra-brief-r5.txt. Raw transcript (10353 lines) not committed; sha256 923f2a7a3f68f6fa535a80a4301e9f86d419f84d344f465086cc8c165b02e1eb; copy at hetzner-dsm:/root/fuigo-builds/p90-audits/p90-astra-r5.raw.txt
+
+Round 5: **two HIGH F6 defects remain, plus a MEDIUM test-coverage gap.** Audited `fc3ccb94..e7ac917d`; worktree remains clean. No builds, Cargo, tests, or file modifications.
+
+1. **HIGH — Default title helper retains its paid route after switching to a subscription.**  
+   [agent_ops.rs:217](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:217), [summary.rs:77](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/summary.rs:77).
+
+   Create an API session with a usable default summary helper, switch to ChatGPT/xAI before sending the first prompt, then send it. `build_summary_client` resolves against the original API configuration. Persistence retains that client; model switching updates metadata but never replaces it. Title generation therefore sends the subscription-session prompt through the cached paid route. `/rename --auto` can retrigger the same problem later.
+
+   This is an existing lifecycle gap left unresolved by F6, distinct from the accepted unusable-explicit-helper fallback. **No reviewed test catches it:** the stamping tests supply the current configuration directly and never switch an established session.
+
+2. **HIGH — Classifier catalog check can approve a cached fallback that is not the configured model’s route.**  
+   [sampler_turn.rs:953](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:953), [config.rs:5869](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:5869).
+
+   Start an API session with explicit `classifier_model = "private-helper"` absent from the catalog and an available gateway key. Auxiliary resolution caches the gateway fallback. Add a keyless local `[model.private-helper]` through the supported models reload, then switch the session to a subscription. The new guard sees that the slug is now cataloged and returns `Keep`, retaining the old gateway client and key. Classifier input goes to the gateway instead of the newly configured local endpoint.
+
+   Catalog membership does not establish the cached client’s provenance. Re-resolve the explicit route after catalog changes, or validate its captured catalog generation. **No reviewed test catches this sequence:** the test checks `Explicit + in_catalog → Keep` without constructing the cached client.
+
+3. **MEDIUM — The three Round 4 production wiring changes lack regression-sensitive tests.**  
+   [config_tests.rs:8500](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config_tests.rs:8500), [config_tests.rs:8564](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config_tests.rs:8564), [config_tests.rs:8574](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config_tests.rs:8574).
+
+   These tests directly invoke `publish_helper_models`, `explicit_helper_route`, and `cached_helper_route`. Removing their respective calls from settings refresh, summary construction, or the classifier worker would leave these assertions unaffected. The settings-refresh test also stops at the agent configuration, before publication to `ModelsManager`.
+
+   The helpers receive useful unit coverage, but the original three production regressions could return undetected. Add caller-level cases observing the resulting route and refreshed image-helper choice.
+
+The three `e7ac917d` changes correctly address their original scenarios in source: summary construction applies the catalog guard, classifier requests recheck the current subscription state, and settings refresh publishes helper fields after reapplication.
+
+**F2/F3/F5: no new defects found.** Their tests exercise production callback handling, injected bind failures, real refresh/storage locking, stash cleanup, and the CLI logout process. They would detect the principal behavioral reversions described in those claims. This is source-based assessment, not an executed test result.
+
+`git diff --check` reports only an extra blank line at `util/config/campaigns.rs:869`.
+
+DO-NOT-LAND
+
+
+exit=0

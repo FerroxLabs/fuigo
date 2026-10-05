@@ -3,6 +3,9 @@
 //! Exits nonzero iff any cell failed or an xfail cell passed.
 //! The curated tier also runs in CI as `tests/scroll_matrix_curated.rs`.
 //! This binary is the local entry point for the full sweep and for one-off cell reruns (`--filter`).
+// PTY test harness: never shipped; its stdout/stderr are the harness's report channel, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::PathBuf;
 use std::process::ExitCode;

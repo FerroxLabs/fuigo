@@ -1,0 +1,6 @@
+# actionlint configuration. `windows-11-arm` is GitHub's hosted Windows-on-Arm runner image, which the
+# bundled actionlint label list (1.7.7) does not know yet; without this every workflow that uses it
+# (release.yml, verify-release-windows.yml, windows-process-check.yml) fails `actionlint`.
+self-hosted-runner:
+  labels:
+    - windows-11-arm

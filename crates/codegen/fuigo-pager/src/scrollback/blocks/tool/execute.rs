@@ -789,6 +789,7 @@ mod tests {
 
     #[test]
     fn header_line_uses_header_display_when_set_command_stays_full() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut block = ExecuteToolCallBlock::new("cd /proj && echo hi");
         block.header_display = Some("echo hi".into());
         assert_eq!(block.command, "cd /proj && echo hi");
@@ -805,6 +806,7 @@ mod tests {
 
     #[test]
     fn label_header_with_description_shows_title_then_command() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = ExecuteToolCallBlock::new("cargo test --lib")
             .with_description("Run the unit test suite");
         let theme = Theme::current();
@@ -823,6 +825,7 @@ mod tests {
 
     #[test]
     fn collapsed_header_with_description_hides_command() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = ExecuteToolCallBlock::new("cargo test --lib")
             .with_description("Run the unit test suite");
         let theme = Theme::current();
@@ -841,6 +844,7 @@ mod tests {
 
     #[test]
     fn shell_header_with_description_shows_title_then_command() {
+        let _theme = crate::theme::cache::pin_theme();
         let block =
             ExecuteToolCallBlock::new("git status -sb").with_description("Check git status");
         let theme = Theme::current();
@@ -855,6 +859,7 @@ mod tests {
 
     #[test]
     fn label_header_without_description_is_single_run_command_line() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = ExecuteToolCallBlock::new("echo hi");
         let theme = Theme::current();
         let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, false);
@@ -866,6 +871,7 @@ mod tests {
 
     #[test]
     fn label_header_lines_flattens_command_newlines() {
+        let _theme = crate::theme::cache::pin_theme();
         // Single-line header path must never embed raw `\n` (ratatui drops them).
         let block = ExecuteToolCallBlock::new("cargo test \\\n  --all");
         let theme = Theme::current();
@@ -882,6 +888,7 @@ mod tests {
 
     #[test]
     fn label_expanded_soft_wraps_multiline_command_like_permission_panel() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = ExecuteToolCallBlock::new(
             "git status --short --branch && cargo test --workspace --all-features",
         );
@@ -929,6 +936,7 @@ mod tests {
 
     #[test]
     fn empty_description_treated_as_absent() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = ExecuteToolCallBlock::new("echo hi").with_description("   \n  ");
         let theme = Theme::current();
         let headers = block.header_lines(&theme, ExecuteHeaderStyle::Label, false, false);
@@ -938,6 +946,7 @@ mod tests {
 
     #[test]
     fn label_bash_mode_with_description_keeps_user_marker_on_title() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut block = ExecuteToolCallBlock::new("ls -la").with_description("List files");
         block.bash_mode = true;
         let theme = Theme::current();

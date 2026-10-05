@@ -649,8 +649,7 @@ pub fn current_value_for(
                 .unwrap_or(ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED),
         )),
         // default_selected_permission: maps `[ui].default_selected_permission` onto one of the four registry canonicals
-        // `None` or an unrecognised value on disk falls back to `always_allow_all_sessions`, the effective default
-        // The cursor lands on the "Always allow on all sessions" row, picked explicitly in `enqueue_permission`
+        // `None` or an unrecognised value on disk falls back to `allow_once`, the effective default (P152)
         "default_selected_permission" => Some(SettingValue::Enum(
             crate::appearance::permission_cursor::DefaultSelectedPermission::from_config_value(
                 ui.default_selected_permission
@@ -1144,8 +1143,8 @@ mod tests {
                         "scroll_lines default drifts from UiConfig::default()"
                     );
                 }
-                // default_selected_permission: Option<String>; None reads as "always_allow_all_sessions", the effective default
-                // The first prompt's cursor lands on the "Always allow on all sessions" row, picked explicitly in `enqueue_permission`
+                // default_selected_permission: Option<String>; None reads as "allow_once", the effective default (P152)
+                // The first prompt's cursor lands on the least permissive approve row, never on always-approve mode
                 ("default_selected_permission", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         ui.default_selected_permission, None,
@@ -1153,12 +1152,17 @@ mod tests {
                     );
                     assert_eq!(
                         *default,
-                        crate::appearance::permission_cursor::DefaultSelectedPermission::AlwaysAllowAllSessions
+                        crate::appearance::permission_cursor::DefaultSelectedPermission::AllowOnce
                             .as_canonical(),
                         "default_selected_permission registry default must be \
-                         `always_allow_all_sessions` — the on-disk source of truth is \
+                         `allow_once` — the on-disk source of truth is \
                          `UiConfig::default_selected_permission: Option<String>` (defaults to \
-                         None, mapped to the `always_allow_all_sessions` canonical)",
+                         None, mapped to the `allow_once` canonical)",
+                    );
+                    assert_eq!(
+                        crate::appearance::permission_cursor::DefaultSelectedPermission::from_config_value(""),
+                        crate::appearance::permission_cursor::DefaultSelectedPermission::AllowOnce,
+                        "an unset value must read back as the registry default",
                     );
                 }
                 // fork_secondary_model: the empty-string default means "no opinion"

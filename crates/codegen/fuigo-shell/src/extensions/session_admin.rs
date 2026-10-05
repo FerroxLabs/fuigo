@@ -7,7 +7,6 @@
 //! - `fuigo/session/rename`                  rename a session locally and remote
 //! - `fuigo/session/delete`                  delete a session locally and remote
 //! - `fuigo/session/update_mcp_servers`      mid-session MCP server swap
-//! - `fuigo/session/add_local_workspace`     mid-session local workspace add-only (chat)
 //! - `fuigo/session/fork`                    fork a session into a new one
 //! - `fuigo/internal/reload_all_mcp_servers` config hot-reload, all sessions
 //! - `fuigo/internal/reload_project_mcp_servers` config hot-reload, cwd-scoped
@@ -46,8 +45,6 @@ pub(crate) async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResul
         "fuigo/session/rename" => handle_session_rename(agent, args).await,
         "fuigo/session/delete" => handle_session_delete(agent, args).await,
         "fuigo/session/update_mcp_servers" => handle_update_mcp_servers(agent, args).await,
-        #[cfg(feature = "local-workspace")]
-        "fuigo/session/add_local_workspace" => handle_add_local_workspace(agent, args).await,
         "fuigo/session/fork" => handle_session_fork(agent, args).await,
         "fuigo/plugins/reload" => handle_plugins_reload(agent).await,
         "fuigo/commands/list" => handle_commands_list(agent, args).await,
@@ -571,14 +568,31 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     };
 
     let compat = agent.cfg.borrow().compat_resolved;
-    let admitted =
-        crate::session::managed_mcp::admit_client_mcp_servers(params.mcp_servers, &cwd, &compat);
-    let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-        admitted.clone(),
-        &cwd,
-        agent.plugin_registry_handle().snapshot().as_deref(),
-        &compat,
-    );
+    // P136 (Astra r1 #4): the refusals this update records are this session's, and it is told.
+    let notice_scope = fuigo_config::key_naming::NoticeScope::new();
+    let (seed, merged) = notice_scope.run(|| {
+        let crate::session::managed_mcp::AdmittedClientServers { seed, merged } =
+            crate::session::managed_mcp::admit_client_mcp_servers_for_seed(
+                params.mcp_servers,
+                &cwd,
+                &compat,
+                agent.plugin_registry_handle().snapshot().as_deref(),
+            );
+        (seed, merged)
+    });
+    for notice in notice_scope.notes() {
+        let _ = handle.cmd_tx.send(SessionCommand::NotifyConfigNotice { notice });
+    }
+
+    // Store the admitted (not raw) client set: hot-reloads re-merge from this seed
+    // A raw list would re-spawn a previously rejected vendor server once on-disk attribution vanishes
+    // P141 (Astra r1, r2): the actor's plugin reload re-merges its own copy of the seed, so it gets the new one too, and
+    // BEFORE the update: the actor handles commands in order, so no plugin reload can re-merge the old seed once this
+    // update is queued (MCP initialization runs asynchronously and a `ReloadPlugins` may be handled meanwhile).
+    let _ = handle.cmd_tx.send(SessionCommand::SetClientMcpSeed { seed: seed.clone() });
+    agent.with_resident_mut(&params.session_id, |h| {
+        h.initial_client_mcp_servers = seed;
+    });
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
@@ -596,48 +610,7 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
             crate::acp_error::internal_error(crate::sampling::error::acp_error_text(&e))
         })?;
 
-    // Store the admitted (not raw) client set: hot-reloads re-merge from this seed
-    // A raw list would re-spawn a previously rejected vendor server once on-disk attribution vanishes
-    agent.with_resident_mut(&params.session_id, |h| {
-        h.initial_client_mcp_servers = admitted;
-    });
-
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
-        .to_ext_response()
-        .map_err(|e| crate::acp_error::internal_error(e.to_string()))
-}
-
-// session/add_local_workspace (add-only; local-workspace feature)
-
-#[cfg(feature = "local-workspace")]
-async fn handle_add_local_workspace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Params {
-        session_id: acp::SessionId,
-        #[serde(default)]
-        meta: Option<acp::Meta>,
-    }
-
-    let params: Params = parse_params(args)?;
-    let cwd = {
-        let h = agent
-            .resident_handle(&params.session_id)
-            .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
-        std::path::PathBuf::from(&h.info.cwd)
-    };
-    // Gate on actual chat kind, not `requires_gateway` (true for non-chat GatewayAttach; false for unknown ids)
-    if !agent.is_chat_kind_session(&params.session_id) {
-        return Err(crate::acp_error::invalid_params_with_code(
-            "local_workspace_chat_only",
-            "fuigo/session/add_local_workspace is only available on chat-kind sessions",
-        ));
-    }
-
-    let result = agent
-        .add_local_workspace_mid_session(&params.session_id, params.meta, &cwd)
-        .await?;
-    ExtMethodResult::success(result)
         .to_ext_response()
         .map_err(|e| crate::acp_error::internal_error(e.to_string()))
 }
@@ -791,7 +764,7 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// Re-reads config from disk, re-runs the `new_with_models()` resolution logic for user TOML config entries, and swaps the model list in-place.
 /// Prefetched (API) and default models are NOT re-fetched; only BYOK entries from config are updated.
 fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
-    let disk_config = crate::config::load_effective_config()
+    let (disk_config, campaign_free) = crate::config::load_effective_config_with_campaign_free()
         .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
     let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
@@ -801,10 +774,11 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     // Runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI flags) are preserved; only model-related TOML fields are refreshed
     {
         let agent_config = agent.cfg.borrow();
-        let overrides = crate::config::ModelOverrideConfig::resolve(
+        let overrides = crate::config::ModelOverrideConfig::resolve_with_user_config(
             agent_config.web_search_model_override.as_deref(),
             agent_config.session_summary_model_override.as_deref(),
             &disk_config,
+            Some(&campaign_free),
             agent_config.remote_settings.as_ref(),
         );
         drop(agent_config);
@@ -815,6 +789,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         agent_config.session_summary_model = overrides.session_summary;
         agent_config.image_description_model = overrides.image_description;
         agent_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
+        agent_config.explicit_helper_models = overrides.explicit;
     }
     // Recompute the campaign overlay and `pre_campaign_default` (the catalog-miss fallback) so reload matches spawn
     // `new_from_toml_cfg` reset it to None

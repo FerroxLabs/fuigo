@@ -22,6 +22,7 @@ use serde::Serialize;
 use fuigo_sampling_types::error::{
     parse_error_code, try_parse_stream_error, user_facing_api_error_message,
 };
+use fuigo_sampling_types::serde_helpers::parse_sse_event;
 use fuigo_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DEFAULT_EXACT_REPETITION_MIN_TOKENS,
@@ -32,7 +33,8 @@ use fuigo_sampling_types::{
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 use crate::events::SamplingErrorInfo;
-use fuigo_auth::bearer_suffix;
+use fuigo_auth::BearerFingerprint;
+use fuigo_extra_ca::fluxrouter::IdentityDisclosure;
 
 pub use fuigo_sampling_types::ApiBackend;
 
@@ -41,7 +43,124 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "fuigo-shell";
 
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "fuigo-shell";
-const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+/// Header the Anthropic Messages API requires on every request.
+///
+/// Choosing `api_backend = "messages"` chooses this header with it: the wire
+/// protocol is not selectable separately from its own preconditions.
+/// `key_discovery`'s `anthropic` entry writes the same pair into a
+/// `/provider`-generated config; this constant is what a HAND-WRITTEN
+/// `[model_providers.x] api_backend = "messages"` gets, which previously got
+/// nothing and produced a request Anthropic rejects.
+pub const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
+
+/// Value sent for [`ANTHROPIC_VERSION_HEADER`] when the config names none.
+/// `2023-06-01` is the only Messages API version Anthropic has published; a
+/// config that needs another one sets `extra_headers` and wins over this.
+pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// `max_tokens` for a Messages request that carries none and whose config sets
+/// no `max_completion_tokens` at any layer.
+///
+/// This is a FLOOR, not a target. `max_tokens` is a hard per-model ceiling on
+/// api.anthropic.com, and Fuigo cannot know which model a BYOK `[model.<id>]`
+/// names: the built-in catalogue (`fuigo-models/default_models.json`) carries
+/// no `messages`-backend model at all, and the remote catalogue that supplies
+/// `max_completion_tokens` (`extract_model_metadata`) speaks only for the
+/// configured endpoint, not for a third-party host. So the default has to be a
+/// value every model the backend can reach accepts.
+///
+/// 32_000 is the smallest published `max_output_tokens` across Anthropic's
+/// non-retired models as of 2026-09 (Claude Opus 4 / 4.1 = 32K; Sonnet 4 / 4.5,
+/// Opus 4.5, Haiku 4.5 = 64K; the Opus 4.6+, Sonnet 4.6+ and Fable 5 families =
+/// 128K). The previous value, 128_000, is the CURRENT family's ceiling and was
+/// inherited from upstream, where the Messages shape pointed at a route
+/// upstream controlled; against api.anthropic.com it 400s on every older model,
+/// and the `/provider` flow that writes the config had no key to fix it with.
+///
+/// Direction of failure decides the number: too small truncates one response,
+/// which the caller sees as a `Length` stop and can raise; too large rejects
+/// every turn with no in-product remedy. Three layers raise it —
+/// `[model.<id>].max_completion_tokens`, `[model_providers.<id>].max_completion_tokens`
+/// (which `/provider` now writes), and the global `[models].max_completion_tokens`.
+///
+/// Deliberately NOT derived from `context_window`: an output cap and a context
+/// window are different quantities, and conflating them is the bug a separate
+/// packet exists to remove. `ClientDefaults` holds no context window, so this
+/// function structurally cannot read one.
+const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 32_000;
+
+/// Per-request correlation header: the conversation id.
+pub(crate) const H_CONV_ID: &str = "x-fuigo-conv-id";
+/// Per-request correlation header: the request id.
+pub(crate) const H_REQ_ID: &str = "x-fuigo-req-id";
+/// Per-request correlation header: the session id.
+pub(crate) const H_SESSION_ID: &str = "x-fuigo-session-id";
+/// Per-request correlation header: the 0-based turn index within the session.
+pub(crate) const H_TURN_IDX: &str = "x-fuigo-turn-idx";
+/// Per-request correlation header: the turn-level resubmit attempt.
+pub(crate) const H_TRANSIENT_RETRY: &str = "x-fuigo-transient-retry";
+/// Per-request routing hint: a copy of the request body's `model` field.
+pub(crate) const H_MODEL_OVERRIDE: &str = "x-fuigo-model-override";
+/// Per-request IDENTITY header: a persisted machine id that survives logout.
+pub(crate) const H_AGENT_ID: &str = "x-fuigo-agent-id";
+/// IDENTITY header: the tenant deployment UUID.
+pub(crate) const H_DEPLOYMENT_ID: &str = "x-fuigo-deployment-id";
+/// IDENTITY header: the Ferrox account id.
+pub(crate) const H_USER_ID: &str = "x-fuigo-user-id";
+/// Client-level IDENTITY header: the Fuigo version, for version gating at the proxy.
+pub(crate) const H_CLIENT_VERSION: &str = "x-fuigo-client-version";
+/// Client-level IDENTITY header: which Ferrox client is calling.
+pub(crate) const H_CLIENT_IDENTIFIER: &str = "x-fuigo-client-identifier";
+
+/// The per-request `x-fuigo-*` names that go to **every** destination.
+///
+/// `cfg(test)` because the product reads the individual `H_*` consts directly; this array is
+/// the enumeration that `per_request_namespace_splits_by_disclosure` asserts `apply` against,
+/// so a header added to `apply` without being classified fails the test by name.
+///
+/// P15-R. Each is either a per-session random or a per-turn counter, or (in
+/// [`H_MODEL_OVERRIDE`]'s case) a verbatim copy of a field already in the request body.
+/// None of them identifies anybody across two destinations, so withholding them buys no
+/// privacy — and all of them are load-bearing off the FluxRouter-operated route:
+/// [`H_TRANSIENT_RETRY`] is how a self-hosted gateway tells a resubmit from a new turn when
+/// it accounts for retry traffic, and the integration harness classifies foreground against
+/// auxiliary calls on [`H_TURN_IDX`]/[`H_REQ_ID`] (`fuigo_test_support::inference_override`),
+/// falling through to a body heuristic when they are absent rather than erroring.
+///
+/// [`H_MODEL_OVERRIDE`] is here on purpose and the reasoning is worth stating, because it is
+/// the only member that is neither random nor a counter: its value is `payload.model`, which
+/// `body()` serializes into the same request. Withholding the header could not hide the model
+/// id from a destination that is already being told it, so the header discloses exactly
+/// nothing extra — and its documented job (`session/commands.rs`, `OverrideModelName`) is to
+/// carry an *opaque third-party routing name* alongside BYOK headers such as
+/// `x-openrouter-api-key`. Gating it would break the one case it exists for.
+#[cfg(test)]
+const PER_REQUEST_UNGATED_HEADERS: [&str; 6] = [
+    H_CONV_ID,
+    H_REQ_ID,
+    H_SESSION_ID,
+    H_TURN_IDX,
+    H_TRANSIENT_RETRY,
+    H_MODEL_OVERRIDE,
+];
+
+/// The per-request `x-fuigo-*` names withheld from a destination that is not FluxRouter-operated.
+///
+/// `cfg(test)`, for the reason given on `PER_REQUEST_UNGATED_HEADERS`.
+///
+/// [`H_AGENT_ID`] is the one P15 was most right about: it is a persisted machine id that
+/// survives logout, so it correlates a user across providers even when nobody is signed in.
+#[cfg(test)]
+const PER_REQUEST_IDENTITY_HEADERS: [&str; 3] = [H_AGENT_ID, H_DEPLOYMENT_ID, H_USER_ID];
+
+/// The client-level `x-fuigo-*` names withheld from a destination that is not FluxRouter-operated, i.e.
+/// exactly what [`apply_identity_headers`] writes, and what its M10 refusal log names.
+const CLIENT_IDENTITY_HEADERS: [&str; 4] = [
+    H_CLIENT_VERSION,
+    H_DEPLOYMENT_ID,
+    H_USER_ID,
+    H_CLIENT_IDENTIFIER,
+];
 
 /// Per-request `x-fuigo-*` headers. Optional fields are skipped when empty/`None`.
 struct FuigoRequestHeaders<'a> {
@@ -55,27 +174,63 @@ struct FuigoRequestHeaders<'a> {
     agent_id: &'a str,
     deployment_id: Option<&'a str>,
     user_id: Option<&'a str>,
+    /// Whether the destination may receive the identity half
+    /// ([`fuigo_extra_ca::fluxrouter::IdentityDisclosure`], decided by the compiled
+    /// FluxRouter-operated host check).
+    ///
+    /// A field rather than an argument on purpose: the compiler then forces every
+    /// construction site to state the destination's trust, so a new call site cannot
+    /// silently inherit "send everything". P15. A type rather than a `bool` since P30, so
+    /// a user-configured-origin answer (`fuigo_shell_base::util::is_fuigo_api_bearer_url`,
+    /// which decides credential delivery) cannot be passed here by mistake.
+    identity: IdentityDisclosure,
 }
 
 impl FuigoRequestHeaders<'_> {
+    /// Writes the per-request `x-fuigo-*` namespace, **split by what each header discloses**.
+    ///
+    /// `PER_REQUEST_UNGATED_HEADERS` go to every destination;
+    /// `PER_REQUEST_IDENTITY_HEADERS` only to a FluxRouter-operated one. Those two arrays are the
+    /// enumeration of this namespace and `per_request_namespace_splits_by_disclosure` pins
+    /// this function against them, so a header added here must land in one list or the other
+    /// and the test names which.
+    ///
+    /// P15 returned `builder` untouched for every other destination, withholding all
+    /// nine. That was wrong in both directions. It over-withheld: five of the nine are
+    /// per-session randoms or per-turn counters that identify nobody across destinations, so
+    /// withholding them bought no privacy. And it broke two live behaviours —
+    /// `x-fuigo-transient-retry` is retry accounting at every self-hosted gateway, and the
+    /// integration harness routes scripted responses off `-turn-idx`/`-req-id`, silently
+    /// misrouting them (not erroring) once they vanished. Every integration test points the
+    /// sampler at loopback, which the gate correctly refuses, so the blanket return dropped
+    /// the headers the harness correlates on. See `PER_REQUEST_UNGATED_HEADERS` for why
+    /// `x-fuigo-model-override` is in the ungated half.
     fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Ungated: correlation and routing. No identity, and load-bearing everywhere.
         let mut b = builder
-            .header("x-fuigo-conv-id", self.conv_id)
-            .header("x-fuigo-req-id", self.req_id)
-            .header("x-fuigo-model-override", self.model_id)
-            .header("x-fuigo-session-id", self.session_id)
-            .header("x-fuigo-agent-id", self.agent_id);
+            .header(H_CONV_ID, self.conv_id)
+            .header(H_REQ_ID, self.req_id)
+            .header(H_SESSION_ID, self.session_id)
+            .header(H_MODEL_OVERRIDE, self.model_id);
         if let Some(idx) = self.turn_idx {
-            b = b.header("x-fuigo-turn-idx", idx);
+            b = b.header(H_TURN_IDX, idx);
         }
         if let Some(attempt) = self.transient_retry {
-            b = b.header("x-fuigo-transient-retry", attempt);
+            b = b.header(H_TRANSIENT_RETRY, attempt);
         }
+        // Gated: identity. `agent_id` is a persisted machine id that survives logout,
+        // `deployment_id` the tenant UUID, `user_id` the Ferrox account id — all three are
+        // stable and identical across every provider a user configures, which is exactly
+        // what makes them a cross-provider correlator.
+        if !self.identity.is_permitted() {
+            return b;
+        }
+        b = b.header(H_AGENT_ID, self.agent_id);
         if let Some(id) = self.deployment_id.filter(|s| !s.is_empty()) {
-            b = b.header("x-fuigo-deployment-id", id);
+            b = b.header(H_DEPLOYMENT_ID, id);
         }
         if let Some(id) = self.user_id.filter(|s| !s.is_empty()) {
-            b = b.header("x-fuigo-user-id", id);
+            b = b.header(H_USER_ID, id);
         }
         b
     }
@@ -88,12 +243,20 @@ impl FuigoRequestHeaders<'_> {
 /// Deserialize a Responses API SSE event, with a fallback for Ferrox Labs-specific tool types (e.g., `x_search`) that `async_openai` can't parse.
 /// The API echoes the request's `tools` array in `ResponseCreated` and `ResponseCompleted` events.
 /// If we sent `{"type": "x_search"}`, `rs::Tool` deserialization fails, so we strip unrecognized tools from the raw JSON and retry.
-fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+/// `Ok(None)` means "a well-formed event whose `type` this client does not model": skip it.
+fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
     // Programmatic-tool-calling items (`program`, `program_output`) have no typed variant; rewrite them into carriers first
     let transcoded = crate::stream::responses_ptc::transcode_sse(data);
     let data = transcoded.as_deref().unwrap_or(data);
-    let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
-        Ok(event) => event,
+    // An SSE event stream is forward-compatible: the server may introduce event types at any
+    // time, and OpenAI now emits `keepalive` during long reasoning turns. An unknown `type` is
+    // benign and MUST be skipped -- failing here aborts the entire turn, which selects precisely
+    // for the longest turns, the ones most expensive to lose. `parse_sse_event` is the one place
+    // that decision is made, shared with the Messages backend, and it still fails closed on a
+    // MODELLED `type` whose body is malformed.
+    let mut event = match parse_sse_event::<rs::ResponseStreamEvent>("responses", data) {
+        Ok(Some(event)) => event,
+        Ok(None) => return Ok(None),
         Err(first_err) => {
             // Try sanitizing: parse as Value, strip unknown tools, retry.
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
@@ -107,19 +270,14 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                 }
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                     apply_terminal_event_overrides(&mut event, data);
-                    return Ok(event);
+                    return Ok(Some(event));
                 }
             }
-            tracing::error!(
-                error = %first_err,
-                raw_data = %data,
-                "Failed to deserialize ResponseStreamEvent from stream"
-            );
-            return Err(SamplingError::Serialization(first_err));
+            return Err(serde_failure("ResponseStreamEvent from stream", &first_err, data.len()));
         }
     };
     apply_terminal_event_overrides(&mut event, data);
-    Ok(event)
+    Ok(Some(event))
 }
 
 /// On `response.completed` / `response.incomplete`, rewrite `usage.total_tokens` to the live context length from `context_details`.
@@ -173,7 +331,53 @@ fn extract_context_total(value: &serde_json::Value) -> Option<u32> {
 fn record_stream_request_failure(err: &reqwest::Error) {
     let span = tracing::Span::current();
     span.record("success", false);
-    span.record("error", err.to_string().as_str());
+    span.record("error", transport_error_for_log(err).as_str());
+}
+
+/// A parser error as category and position only (P70a): `Data error at line 1 column 347`. serde's own text quotes
+/// the offending value out of the body it was parsing, so neither the log line nor the returned error may carry it.
+/// An error serde raised without a position (the body of an internally tagged enum is parsed from a buffered copy)
+/// is the category alone: `Data error`.
+fn serde_error_summary(error: &serde_json::Error) -> String {
+    if error.line() == 0 {
+        return format!("{:?} error", error.classify());
+    }
+    format!("{:?} error at line {} column {}", error.classify(), error.line(), error.column())
+}
+
+/// A response body or stream chunk that failed to deserialize (P70a): logged as its length and the parser error's
+/// category and position, never the body or serde's own message, and returned as a `Serialization` error holding
+/// the same summary. The variant is unchanged, so the error is handled exactly as before; only its text differs.
+fn serde_failure(what: &str, error: &serde_json::Error, body_len: usize) -> SamplingError {
+    let message = serde_error_summary(error);
+    tracing::error!(error = %message, body_len, "Failed to deserialize {what}");
+    SamplingError::Serialization(<serde_json::Error as serde::de::Error>::custom(message))
+}
+
+/// `error`'s text for a log line or span field (P70a): reqwest prints the request URL in its `Display`, and a base
+/// URL or a configured query parameter may carry a key. Only the logged text is redacted; the error value that is
+/// returned to the caller is left as it is.
+fn transport_error_for_log(error: &reqwest::Error) -> String {
+    request_url_redacted(error.to_string(), error)
+}
+
+/// `text` (which embeds `error`'s rendering) with the request URL redacted. The URL is the one the error itself
+/// reports, replaced as an exact string, so no guess about where a URL ends in running text is involved; text from
+/// an error that reports no URL is scanned for URLs instead.
+fn request_url_redacted(text: String, error: &reqwest::Error) -> String {
+    match error.url() {
+        Some(url) => text.replace(url.as_str(), &fuigo_auth::redact_url(url.as_str())),
+        None => fuigo_auth::redact_urls_in_text(&text),
+    }
+}
+
+/// A dispatch failure's text for the debug log (P70a): see [`transport_error_for_log`].
+fn dispatch_error_for_log(error: &fuigo_extra_ca::dispatch::DispatchError) -> String {
+    let text = error.to_string();
+    match error {
+        fuigo_extra_ca::dispatch::DispatchError::Transport(transport) => request_url_redacted(text, transport),
+        fuigo_extra_ca::dispatch::DispatchError::Denied(_) => fuigo_auth::redact_urls_in_text(&text),
+    }
 }
 
 /// Local egress denial is configuration policy, not a retryable network outage.
@@ -181,7 +385,7 @@ fn dispatch_error(
     error: fuigo_extra_ca::dispatch::DispatchError,
     streaming: bool,
 ) -> SamplingError {
-    tracing::debug!("HTTP dispatch failed: {}", error);
+    tracing::debug!("HTTP dispatch failed: {}", dispatch_error_for_log(&error));
     match error {
         fuigo_extra_ca::dispatch::DispatchError::Denied(reason) => {
             SamplingError::InvalidConfiguration(reason)
@@ -238,7 +442,7 @@ fn splice_extra_tool_entries(
 /// the retry ladder's own backoff.
 ///
 /// Capped at 120s, the same cap the standard header gets.
-fn extract_retry_after(
+pub(crate) fn extract_retry_after(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
 ) -> Option<u64> {
@@ -330,7 +534,7 @@ fn parse_reset_duration_millis(raw: &str) -> Option<f64> {
     saw_component.then_some(total_ms)
 }
 
-fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
+pub(crate) fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
     headers
         .get("x-should-retry")
         .and_then(|v| v.to_str().ok())
@@ -353,7 +557,7 @@ fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
 const CONTEXT_WINDOW_HEADER: &str = "x-grok-context-window";
 const MAX_COMPLETION_TOKENS_HEADER: &str = "x-grok-max-completion-tokens";
 
-fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<ResponseModelMetadata> {
+pub(crate) fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<ResponseModelMetadata> {
     let context_window = headers
         .get(CONTEXT_WINDOW_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -439,6 +643,23 @@ fn append_response_includes(body: &mut serde_json::Value, extra_includes: &[Stri
     }
 }
 
+/// Process-wide resolver for `env_http_headers` variable names (P08). The shell installs one that answers the
+/// first-party key names (`FUIGO_API_KEY`, legacy) from the key an ACP client supplied in memory, so a header mapped
+/// to them follows the same precedence as the rest of credential resolution. Unset, names resolve via `std::env::var`.
+static ENV_HEADER_RESOLVER: std::sync::OnceLock<fn(&str) -> Option<String>> = std::sync::OnceLock::new();
+
+/// Install the [`ENV_HEADER_RESOLVER`]. The first install wins; later calls are no-ops.
+pub fn install_env_header_resolver(resolver: fn(&str) -> Option<String>) {
+    let _ = ENV_HEADER_RESOLVER.set(resolver);
+}
+
+fn resolve_env_header_var(var: &str) -> Option<String> {
+    match ENV_HEADER_RESOLVER.get() {
+        Some(resolver) => resolver(var),
+        None => std::env::var(var).ok(),
+    }
+}
+
 /// Resolve `env_http_headers` (`header -> env var`) into `headers` via `getenv`, skipping unset/blank/invalid entries and trimming values.
 fn apply_env_http_headers(
     env_http_headers: &IndexMap<String, String>,
@@ -490,13 +711,19 @@ pub struct SamplingClient {
     endpoint: EndpointTemplate,
     /// Whether every request body carries [`CacheBypass`]: only for FluxRouter's API host, and never on a subscription transport.
     fluxrouter_cache_bypass: bool,
+    /// Whether this client's destination may receive `x-fuigo-*` identity headers. P15, P30.
+    identity_disclosure: IdentityDisclosure,
     first_use_noted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// P70b: the values of configured headers (`extra_headers`, `env_http_headers`) that are really in
+    /// `default_headers`, i.e. that no client-composed header replaced. Recorded as sent credentials on every
+    /// request, whatever name they were configured under. Never logged (`Debug` is hand-written above).
+    configured_header_values: Vec<String>,
 }
 
 impl std::fmt::Debug for SamplingClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SamplingClient")
-            .field("base_url", &self.base_url)
+            .field("base_url", &fuigo_auth::redact_url(&self.base_url))
             .field("defaults", &self.defaults)
             .field(
                 "has_attribution_callback",
@@ -522,7 +749,7 @@ struct ClientDefaults {
 }
 
 /// Endpoint URL builder, resolved once at client construction so each request only appends its path.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum EndpointTemplate {
     /// No query params and no query on the base URL (or an unparseable base): append the path to the base verbatim.
     Plain(String),
@@ -530,6 +757,20 @@ enum EndpointTemplate {
     /// `suffix` starts with `?` and folds any base-URL params; a configured key wins over the same key in `base_url`.
     /// Pairs are percent-encoded with no duplicates.
     WithQuery { prefix: String, suffix: String },
+}
+
+/// Hand-written `Debug` (P70): the base URL and its folded query may carry a key, so both print through `redact_url`.
+impl std::fmt::Debug for EndpointTemplate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(base) => f.debug_tuple("Plain").field(&fuigo_auth::redact_url(base)).finish(),
+            Self::WithQuery { prefix, suffix } => f
+                .debug_struct("WithQuery")
+                .field("prefix", &fuigo_auth::redact_url(prefix))
+                .field("suffix", &fuigo_auth::redact_url(&format!("x:{suffix}")).trim_start_matches("x:"))
+                .finish(),
+        }
+    }
 }
 
 impl EndpointTemplate {
@@ -544,7 +785,7 @@ impl EndpointTemplate {
             Ok(url) => url,
             Err(error) => {
                 tracing::warn!(
-                    url = %base,
+                    url = %fuigo_auth::redact_url(&base),
                     %error,
                     "failed to parse base URL for endpoint; sending without folded query"
                 );
@@ -659,21 +900,106 @@ pub fn user_agent_string_for(origin: &OriginClientInfo) -> String {
 /// Only an explicit `sent_bearer: None` (a send the builder provably stamped no credential onto) reaches the uncharged lane via [`auth_rejected`].
 struct SentRequest {
     builder: reqwest::RequestBuilder,
-    /// Tail fragment of the credential in the built headers (`None` means no credential header).
-    sent_bearer: Option<String>,
+    /// Fingerprint of the credential in the built headers (`None` means no credential header).
+    sent_bearer: Option<BearerFingerprint>,
 }
 
 /// The one way a 401 becomes a `SamplingError::Auth` with a wire-derived credential classification: from the fragment its [`SentRequest`] captured.
-fn auth_rejected(message: String, sent_bearer: Option<&str>) -> SamplingError {
+fn auth_rejected(message: String, sent_bearer: Option<&BearerFingerprint>) -> SamplingError {
     SamplingError::Auth {
         message,
-        credential: SentCredential::from_sent_fragment(sent_bearer),
+        credential: SentCredential::from_sent_fragment(sent_bearer.map(BearerFingerprint::as_str)),
     }
 }
 
 // =============================================================================
 // SamplingClient
 // =============================================================================
+
+/// The client-level `x-fuigo-*` identity headers, applied only to a FluxRouter-operated destination.
+///
+/// Enumerated by [`CLIENT_IDENTITY_HEADERS`]. Every name this writes is identity: there is no
+/// ungated half here, unlike [`FuigoRequestHeaders::apply`], because none of these is a
+/// per-session value.
+///
+/// P15. These were previously written unconditionally, so a BYOK request to
+/// `api.openai.com`, `api.anthropic.com` or `openrouter.ai` carried the Ferrox account id
+/// and the tenant deployment UUID. Both are stable and identical across every provider a
+/// user configures, which made them a cross-provider correlator letting unrelated third
+/// parties link one user's traffic — and disclosed Ferrox tenancy to vendors with no
+/// business holding it.
+///
+/// The comment this block used to carry, *"for version gating at the proxy"*, stated the
+/// single-destination assumption outright. It was true of the CLI this was forked from and
+/// stopped being true when BYOK providers became a first-class feature.
+///
+/// A free function, not a method, so it is directly testable for both destination classes
+/// without building a client or a network.
+fn apply_identity_headers(
+    headers: &mut HeaderMap,
+    config: &SamplerConfig,
+    identity: IdentityDisclosure,
+) {
+    if !identity.is_permitted() {
+        // M10. The gate used to refuse in total silence, which contradicted the
+        // justification it carries: "the cost is telemetry going dark, which is VISIBLE and
+        // recoverable". Nothing made it visible. The sibling destination refusals in
+        // `fuigo-shell`'s `session_may_be_sent_to` each `warn` and name the remedy, for the
+        // same reason — a legitimate setup that silently loses a feature is undiagnosable.
+        //
+        // Severity is split on whether there was anything to withhold, so the log says
+        // something in the case that matters and stays quiet in the case that does not. A
+        // plain BYOK user has no `deployment_id` or `user_id`; warning on every client they
+        // build would be noise, and noise is how a real warning gets missed. A MANAGED
+        // deployment does have them, and it is precisely the case the doc calls recoverable.
+        let downgraded = fuigo_extra_ca::fluxrouter::is_fluxrouter_url(&config.base_url);
+        if config.deployment_id.is_some() || config.user_id.is_some() {
+            tracing::warn!(
+                base_url = %fuigo_auth::redact_url(&config.base_url),
+                scheme_downgrade = downgraded,
+                withheld = ?CLIENT_IDENTITY_HEADERS,
+                "x-fuigo-* identity headers were withheld: this inference base URL is not \
+                 https://api.fluxrouter.ai. Proxy-side version gating and telemetry go dark \
+                 for this client. Point the inference base URL at \
+                 `https://api.fluxrouter.ai` to restore them."
+            );
+        } else {
+            tracing::debug!(
+                base_url = %fuigo_auth::redact_url(&config.base_url),
+                scheme_downgrade = downgraded,
+                withheld = ?CLIENT_IDENTITY_HEADERS,
+                "x-fuigo-* identity headers withheld: destination is not FluxRouter-operated"
+            );
+        }
+        return;
+    }
+    // Version gating at the proxy — the proxy being the FluxRouter-operated route alone.
+    if let Some(client_version) = config.client_version.as_ref()
+        && let Ok(header_value) = HeaderValue::from_str(client_version)
+    {
+        headers.insert(HeaderName::from_static(H_CLIENT_VERSION), header_value);
+    }
+
+    if let Some(deployment_id) = config.deployment_id.as_ref()
+        && let Ok(header_value) = HeaderValue::from_str(deployment_id)
+    {
+        headers.insert(HeaderName::from_static(H_DEPLOYMENT_ID), header_value);
+    }
+
+    if let Some(user_id) = config.user_id.as_ref()
+        && let Ok(header_value) = HeaderValue::from_str(user_id)
+    {
+        headers.insert(HeaderName::from_static(H_USER_ID), header_value);
+    }
+
+    let client_id = config
+        .client_identifier
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
+    if let Ok(header_value) = HeaderValue::from_str(&client_id) {
+        headers.insert(HeaderName::from_static(H_CLIENT_IDENTIFIER), header_value);
+    }
+}
 
 impl SamplingClient {
     /// Grabs the process-wide shared `reqwest::Client` (HTTP/2 by default, HTTP/1.1 when `config.force_http1` is set).
@@ -688,6 +1014,9 @@ impl SamplingClient {
             config.extra_headers.clear();
             config.env_http_headers.clear();
         }
+        // P15: decided once, from the destination host, before any header is assembled.
+        // P30: by the compiled FluxRouter-operated check, never by configured trust.
+        let identity = IdentityDisclosure::for_destination(&config.base_url);
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(ref api_key) = config.api_key {
@@ -735,49 +1064,31 @@ impl SamplingClient {
         }
 
         // Resolve here, not into `extra_headers`, so an env-sourced secret stays out of persisted state
-        apply_env_http_headers(
-            &config.env_http_headers,
-            |var| std::env::var(var).ok(),
-            &mut headers,
+        apply_env_http_headers(&config.env_http_headers, resolve_env_header_var, &mut headers);
+        // P70b: a configured header may carry a credential under ANY name, including one the per-request recorder
+        // treats as client-composed (`user-agent`, an `x-fuigo-*` name). Snapshot what configuration put under each
+        // configured name; whatever of it survives the client-composed headers below is recorded on every request.
+        let configured = crate::sent_credentials::configured_snapshot(
+            &headers,
+            config.extra_headers.keys().chain(config.env_http_headers.keys()),
         );
 
-        // Add x-fuigo-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(client_version)
+        // The Messages wire protocol requires `anthropic-version`. Supplied
+        // here rather than only in the `/provider` discovery table so a
+        // hand-written `[model_providers.x] api_backend = "messages"` produces
+        // a well-formed request instead of one the server rejects. Inserted
+        // only when absent, so `extra_headers` / `env_http_headers` above still
+        // decide the value when the config names one.
+        if config.api_backend == ApiBackend::Messages
+            && !headers.contains_key(HeaderName::from_static(ANTHROPIC_VERSION_HEADER))
         {
             headers.insert(
-                HeaderName::from_static("x-fuigo-client-version"),
-                header_value,
+                HeaderName::from_static(ANTHROPIC_VERSION_HEADER),
+                HeaderValue::from_static(ANTHROPIC_VERSION),
             );
         }
 
-        if let Some(deployment_id) = config.deployment_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(deployment_id)
-        {
-            headers.insert(
-                HeaderName::from_static("x-fuigo-deployment-id"),
-                header_value,
-            );
-        }
-
-        if let Some(user_id) = config.user_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(user_id)
-        {
-            headers.insert(HeaderName::from_static("x-fuigo-user-id"), header_value);
-        }
-
-        {
-            let client_id = config
-                .client_identifier
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CLIENT_IDENTIFIER.to_string());
-            if let Ok(header_value) = HeaderValue::from_str(&client_id) {
-                headers.insert(
-                    HeaderName::from_static("x-fuigo-client-identifier"),
-                    header_value,
-                );
-            }
-        }
+        apply_identity_headers(&mut headers, &config, identity);
 
         // Always set User-Agent: per-session origin if available, else fallback.
         {
@@ -788,8 +1099,22 @@ impl SamplingClient {
                     version: Some(agent_version()),
                 }),
             };
-            if let Ok(v) = HeaderValue::from_str(&ua_string) {
-                headers.insert(USER_AGENT, v);
+            // P70: the `User-Agent` this client sends is always its own. An origin that does not form a header value
+            // (a control character in the product name) falls back to the agent's own string, so a `user-agent`
+            // configured in `extra_headers` (which may hold anything, a credential included) never survives here.
+            let own = || {
+                HeaderValue::from_str(&user_agent_string_for(&OriginClientInfo {
+                    product: AGENT_PRODUCT.to_string(),
+                    version: Some(agent_version()),
+                }))
+            };
+            match HeaderValue::from_str(&ua_string).or_else(|_| own()) {
+                Ok(v) => {
+                    headers.insert(USER_AGENT, v);
+                }
+                Err(_) => {
+                    headers.remove(USER_AGENT);
+                }
             }
         }
 
@@ -809,7 +1134,7 @@ impl SamplingClient {
         tracing::info!(
             target: crate::sampling_log::TARGET,
             event = "client_new",
-            base_url = %config.base_url,
+            base_url = %fuigo_auth::redact_url(&config.base_url),
             model = %config.model,
             api_backend = ?config.api_backend,
             auth_scheme = ?config.auth_scheme,
@@ -838,6 +1163,9 @@ impl SamplingClient {
         let fluxrouter_cache_bypass = config.subscription.is_none()
             && fuigo_extra_ca::fluxrouter::is_fluxrouter_url(&config.base_url);
 
+        let configured_header_values =
+            crate::sent_credentials::surviving_configured_values(configured, &headers);
+
         Ok(Self {
             subscription: config.subscription,
             subscription_resolver: config.subscription_resolver,
@@ -850,7 +1178,9 @@ impl SamplingClient {
             header_injector: config.header_injector,
             endpoint,
             fluxrouter_cache_bypass,
+            identity_disclosure: identity,
             first_use_noted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            configured_header_values,
         })
     }
 
@@ -875,6 +1205,7 @@ impl SamplingClient {
             return crate::subscription::dispatch(kind, self.subscription_resolver.as_ref(), request).await;
         }
         crate::request_accounting::clamp_deadline(&mut request)?;
+        crate::sent_credentials::record_request(&request, &self.configured_header_values);
         crate::request_accounting::dispatched();
         fuigo_extra_ca::dispatch::execute(&self.http, request).await.map_err(|error| dispatch_error(error, streaming))
         };
@@ -926,26 +1257,27 @@ impl SamplingClient {
             }
         }
         {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
+            // A fixed label for the `Authorization` scheme, never text taken from the header (P08): a value with no
+            // recognised scheme may be the credential itself, or start with part of it.
+            let auth_header_scheme = headers.get(AUTHORIZATION).map(|v| {
+                let scheme = v.to_str().ok().and_then(|s| s.split_once(' ')).map(|(scheme, _)| scheme);
+                match scheme {
+                    Some(s) if s.eq_ignore_ascii_case("bearer") => "bearer",
+                    Some(s) if s.eq_ignore_ascii_case("basic") => "basic",
+                    _ => "other",
+                }
+            });
             tracing::info!(
                 target: crate::sampling_log::TARGET,
                 event = "client_post",
-                base_url = %self.base_url,
+                base_url = %fuigo_auth::redact_url(&self.base_url),
                 model = %self.defaults.model,
                 api_backend = ?self.defaults.api_backend,
                 auth_scheme = ?self.defaults.auth_scheme,
                 has_bearer_resolver = self.bearer_resolver.is_some(),
                 has_authorization_header = headers.get(AUTHORIZATION).is_some(),
                 has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
+                auth_header_scheme = auth_header_scheme.unwrap_or("none"),
             );
         }
         let sent_bearer = Self::sent_fragment_from_headers(&headers, &self.defaults.auth_scheme);
@@ -958,9 +1290,8 @@ impl SamplingClient {
         }
     }
 
-    /// Tail fragment of the credential in `headers`: `x-api-key` (Messages-API scheme) or `Authorization`.
-    /// The fragment length is [`crate::attribution::BEARER_SUFFIX_LEN`].
-    fn sent_fragment_from_headers(headers: &HeaderMap, scheme: &AuthScheme) -> Option<String> {
+    /// [`BearerFingerprint`] of the credential in `headers`: `x-api-key` (Messages-API scheme) or `Authorization`.
+    fn sent_fragment_from_headers(headers: &HeaderMap, scheme: &AuthScheme) -> Option<BearerFingerprint> {
         let raw = match scheme {
             AuthScheme::XApiKey => headers
                 .get(HeaderName::from_static("x-api-key"))
@@ -970,19 +1301,19 @@ impl SamplingClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ")),
         };
-        raw.map(|s| bearer_suffix(s).to_string())
+        raw.map(BearerFingerprint::of)
     }
 
     /// Best-effort *build-time* view of what the next request would carry (resolver-authoritative).
     /// For request-start diagnostics ([`Self::auth_info`]) only.
     /// 401 attribution must use the fragment captured by [`Self::post`], which cannot race a recovery.
-    fn current_sent_bearer_suffix(&self) -> Option<String> {
+    fn current_sent_bearer_fingerprint(&self) -> Option<BearerFingerprint> {
         if self.bearer_resolver.is_some() {
             return self
                 .bearer_resolver
                 .as_ref()
                 .and_then(|r| r.current_bearer())
-                .map(|s| bearer_suffix(&s).to_string());
+                .map(|s| BearerFingerprint::of(&s));
         }
         Self::sent_fragment_from_headers(&self.default_headers, &self.defaults.auth_scheme)
     }
@@ -991,59 +1322,43 @@ impl SamplingClient {
     /// Each of the six UNAUTHORIZED arms in this file calls this helper immediately before returning `SamplingError::Auth(...)`.
     /// The emit happens at the lowest layer that saw the status, so higher layers that react to a 401 must not emit a duplicate event.
     ///
-    /// `sent_suffix` is the fragment [`Self::post`] captured for the rejected request.
-    /// It is already tail-truncated; the full bearer never crosses this boundary.
+    /// `sent` is the fingerprint [`Self::post`] captured for the rejected request.
+    /// Neither the bearer nor any fragment of it crosses this boundary.
     fn record_401_attribution(
         &self,
         consumer: crate::attribution::SamplingConsumer,
-        sent_suffix: Option<&str>,
+        sent: Option<&BearerFingerprint>,
     ) {
         if let Some(cb) = self.attribution_callback.as_ref() {
-            cb.record_401(consumer, sent_suffix);
+            cb.record_401(consumer, sent);
         }
     }
 
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_suffix();
-        let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
+        let auth_type = match (&self.defaults.auth_scheme, self.current_sent_bearer_fingerprint()) {
             (AuthScheme::XApiKey, Some(_)) => "x-api-key",
             (AuthScheme::Bearer, Some(_)) => "bearer",
             (_, None) => "none",
         };
-        crate::sampling_log::AuthInfo {
-            auth_type,
-            auth_prefix,
-        }
-    }
-
-    fn is_sensitive_header(name: &str) -> bool {
-        let lower = name.to_lowercase();
-        lower.contains("authorization")
-            || lower.contains("api-key")
-            || lower.contains("apikey")
-            || lower.contains("token")
-            || lower.contains("secret")
+        crate::sampling_log::AuthInfo { auth_type }
     }
 
     /// Short lossy body snippet for error logs (never user-facing).
+    /// P70b: the 500-char cap never cuts through a credential this process sent, so the log writer's exact-match
+    /// scrub still finds an echoed key whole.
     fn body_preview(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).chars().take(500).collect()
+        let text = String::from_utf8_lossy(bytes);
+        fuigo_secrets::sent_credentials::truncate_chars(&text, 500)
+            .0
+            .to_owned()
     }
 
-    /// Log all headers from a request at debug level (redacting sensitive values).
+    /// Log the NAMES of a request's headers at debug level (P70). No value is logged: any header, whatever its name,
+    /// may have been mapped to a credential by `extra_headers` / `env_http_headers`, and a name-based denylist
+    /// (`authorization`, `api-key`, `token`, `secret`) misses `Cookie`, `x-credential` and the like.
     fn log_request_headers(request: &reqwest::Request, endpoint_name: &str) {
-        for (name, value) in request.headers().iter() {
-            let value_str = if Self::is_sensitive_header(name.as_str()) {
-                "[REDACTED]"
-            } else {
-                value.to_str().unwrap_or("[non-utf8]")
-            };
-            tracing::debug!(
-                header_name = %name,
-                header_value = %value_str,
-                "Request header ({})",
-                endpoint_name
-            );
+        for name in request.headers().keys() {
+            tracing::debug!(header_name = %name, "Request header ({})", endpoint_name);
         }
     }
 
@@ -1086,7 +1401,7 @@ impl SamplingClient {
     async fn handle_response(
         &self,
         response: reqwest::Response,
-        sent_bearer: Option<&str>,
+        sent_bearer: Option<&BearerFingerprint>,
     ) -> Result<ChatCompletionResponse> {
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
@@ -1117,15 +1432,8 @@ impl SamplingClient {
             });
         }
 
-        let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize ChatCompletionResponse"
-            );
-            SamplingError::Serialization(e)
-        })?;
+        let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes)
+            .map_err(|e| serde_failure("ChatCompletionResponse", &e, bytes.len()))?;
         Ok(completion)
     }
 
@@ -1143,7 +1451,7 @@ impl SamplingClient {
         let model_id = payload.model.clone().unwrap_or_default();
 
         tracing::debug!(
-            base_url = %self.base_url,
+            base_url = %fuigo_auth::redact_url(&self.base_url),
             model_id = %model_id,
             "Sending chat completion request"
         );
@@ -1158,6 +1466,7 @@ impl SamplingClient {
             agent_id: payload.x_fuigo_agent_id.as_deref().unwrap_or_default(),
             deployment_id: payload.x_fuigo_deployment_id.as_deref(),
             user_id: payload.x_fuigo_user_id.as_deref(),
+            identity: self.identity_disclosure,
         };
         let SentRequest {
             builder,
@@ -1167,7 +1476,7 @@ impl SamplingClient {
 
         let response = self.dispatch_request(http_request.build().map_err(SamplingError::Http)?, false).await?;
 
-        self.handle_response(response, sent_bearer.as_deref()).await
+        self.handle_response(response, sent_bearer.as_ref()).await
     }
 
     /// Start a streaming chat completion request. Returns a stream of typed chunks.
@@ -1175,7 +1484,7 @@ impl SamplingClient {
         name = "http.chat_completion_stream",
         skip_all,
         fields(
-            endpoint = %self.endpoint("chat/completions"),
+            endpoint = %fuigo_auth::redact_url(&self.endpoint("chat/completions")),
             model_id = request.model.as_deref().unwrap_or(""),
             status_code = tracing::field::Empty,
             success = tracing::field::Empty,
@@ -1213,6 +1522,7 @@ impl SamplingClient {
             agent_id: payload.x_fuigo_agent_id.as_deref().unwrap_or_default(),
             deployment_id: payload.x_fuigo_deployment_id.as_deref(),
             user_id: payload.x_fuigo_user_id.as_deref(),
+            identity: self.identity_disclosure,
         };
         let SentRequest {
             builder,
@@ -1224,12 +1534,12 @@ impl SamplingClient {
             .json(&self.body(&streaming_request));
 
         let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
+            tracing::error!("Failed to build HTTP request: {}", transport_error_for_log(&e));
             SamplingError::Http(e)
         })?;
 
         tracing::debug!(
-            url = %built_request.url(),
+            url = %fuigo_auth::redact_url(built_request.url().as_str()),
             method = %built_request.method(),
             "Sending chat/completions request"
         );
@@ -1249,14 +1559,14 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ChatCompletionsStream,
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 );
                 let endpoint = self.endpoint("chat/completions");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 ));
             }
 
@@ -1325,12 +1635,7 @@ impl SamplingClient {
                         } else {
                             Some(
                                 serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
-                                    tracing::error!(
-                                        error = %e,
-                                        raw_data = %data,
-                                        "Failed to deserialize ChatCompletionChunk from stream"
-                                    );
-                                    SamplingError::Serialization(e)
+                                    serde_failure("ChatCompletionChunk from stream", &e, data.len())
                                 }),
                             )
                         }
@@ -1431,7 +1736,7 @@ impl SamplingClient {
         request.trace.take();
 
         tracing::debug!("create_response: {:?}", &request);
-        tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
+        tracing::debug!("endpoint: {:?}", fuigo_auth::redact_url(&self.endpoint("responses")));
 
         let fuigo_headers = FuigoRequestHeaders {
             conv_id: x_fuigo_conv_id,
@@ -1443,6 +1748,7 @@ impl SamplingClient {
             agent_id: request.x_fuigo_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
+            identity: self.identity_disclosure,
         };
         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
@@ -1474,13 +1780,13 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::Responses,
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 );
                 let endpoint = self.endpoint("responses");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 ));
             }
 
@@ -1502,15 +1808,8 @@ impl SamplingClient {
             });
         }
 
-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize rs::Response"
-            );
-            SamplingError::Serialization(e)
-        })?;
+        let response_obj = serde_json::from_slice::<rs::Response>(&bytes)
+            .map_err(|e| serde_failure("rs::Response", &e, bytes.len()))?;
         Ok(response_obj)
     }
 
@@ -1524,7 +1823,7 @@ impl SamplingClient {
         name = "http.create_response_stream",
         skip_all,
         fields(
-            endpoint = %self.endpoint("responses"),
+            endpoint = %fuigo_auth::redact_url(&self.endpoint("responses")),
             model_id = request.inner.model.as_deref().unwrap_or(""),
             status_code = tracing::field::Empty,
             success = tracing::field::Empty,
@@ -1552,7 +1851,7 @@ impl SamplingClient {
         request.trace.take();
 
         tracing::debug!(
-            base_url = %self.base_url,
+            base_url = %fuigo_auth::redact_url(&self.base_url),
             model_id = model_id.as_str(),
             "Sending responses API stream request"
         );
@@ -1567,6 +1866,7 @@ impl SamplingClient {
             agent_id: request.x_fuigo_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
+            identity: self.identity_disclosure,
         };
         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
@@ -1605,12 +1905,12 @@ impl SamplingClient {
         let http_request = http_request.json(&self.body(&request_body));
 
         let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
+            tracing::error!("Failed to build HTTP request: {}", transport_error_for_log(&e));
             SamplingError::Http(e)
         })?;
 
         tracing::debug!(
-            url = %built_request.url(),
+            url = %fuigo_auth::redact_url(built_request.url().as_str()),
             method = %built_request.method(),
             "Sending responses API stream request"
         );
@@ -1627,14 +1927,14 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ResponsesStream,
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 );
                 let endpoint = self.endpoint("responses");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 ));
             }
             let model_metadata = extract_model_metadata(response.headers());
@@ -1716,11 +2016,18 @@ impl SamplingClient {
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
                         } else {
-                            let mut parsed = deserialize_response_event(data);
-                            if let (Some(output), Ok(event)) = (&mut codex_output, &mut parsed) {
-                                output.observe(event);
+                            match deserialize_response_event(data) {
+                                // A well-formed event whose `type` we do not model: swallow it and
+                                // keep the stream alive, exactly as the doom-loop event above does.
+                                Ok(None) => Some(None),
+                                Ok(Some(mut event)) => {
+                                    if let Some(output) = &mut codex_output {
+                                        output.observe(&mut event);
+                                    }
+                                    Some(Some(Ok(event)))
+                                }
+                                Err(e) => Some(Some(Err(e))),
                             }
-                            Some(Some(parsed))
                         }
                     }
                     Err(e) => {
@@ -1778,7 +2085,7 @@ impl SamplingClient {
         request.trace.take();
 
         tracing::debug!("create_message: {:?}", &request.inner);
-        tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
+        tracing::debug!("endpoint: {:?}", fuigo_auth::redact_url(&self.endpoint("messages")));
 
         let fuigo_headers = FuigoRequestHeaders {
             conv_id: x_fuigo_conv_id,
@@ -1790,6 +2097,7 @@ impl SamplingClient {
             agent_id: request.x_fuigo_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
+            identity: self.identity_disclosure,
         };
         let SentRequest {
             builder,
@@ -1811,13 +2119,13 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::Messages,
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 );
                 let endpoint = self.endpoint("messages");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 ));
             }
 
@@ -1840,15 +2148,8 @@ impl SamplingClient {
         }
 
         let response_obj =
-            serde_json::from_slice::<messages::MessagesResponse>(&bytes).map_err(|e| {
-                let raw_body = String::from_utf8_lossy(&bytes);
-                tracing::error!(
-                    error = %e,
-                    raw_body = %raw_body,
-                    "Failed to deserialize MessagesResponse"
-                );
-                SamplingError::Serialization(e)
-            })?;
+            serde_json::from_slice::<messages::MessagesResponse>(&bytes)
+                .map_err(|e| serde_failure("MessagesResponse", &e, bytes.len()))?;
         Ok(response_obj)
     }
 
@@ -1857,7 +2158,7 @@ impl SamplingClient {
         name = "http.create_message_stream",
         skip_all,
         fields(
-            endpoint = %self.endpoint("messages"),
+            endpoint = %fuigo_auth::redact_url(&self.endpoint("messages")),
             model_id = request.inner.model.as_str(),
             status_code = tracing::field::Empty,
             success = tracing::field::Empty,
@@ -1883,7 +2184,7 @@ impl SamplingClient {
         request.trace.take();
 
         tracing::debug!(
-            base_url = %self.base_url,
+            base_url = %fuigo_auth::redact_url(&self.base_url),
             model_id = model_id.as_str(),
             "Sending Messages API stream request"
         );
@@ -1898,6 +2199,7 @@ impl SamplingClient {
             agent_id: request.x_fuigo_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
+            identity: self.identity_disclosure,
         };
         let SentRequest {
             builder,
@@ -1909,12 +2211,12 @@ impl SamplingClient {
             .json(&self.body(&request.inner));
 
         let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
+            tracing::error!("Failed to build HTTP request: {}", transport_error_for_log(&e));
             SamplingError::Http(e)
         })?;
 
         tracing::debug!(
-            url = %built_request.url(),
+            url = %fuigo_auth::redact_url(built_request.url().as_str()),
             method = %built_request.method(),
             "Sending messages API stream request"
         );
@@ -1931,14 +2233,14 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::MessagesStream,
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 );
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
-                    sent_bearer.as_deref(),
+                    sent_bearer.as_ref(),
                 ));
             }
             let model_metadata = extract_model_metadata(response.headers());
@@ -1985,6 +2287,9 @@ impl SamplingClient {
 
         // Map SSE events into MessageStreamEvent.
         // Uses `scan` so transport errors terminate the stream after the first error (same pattern as `chat_completion_stream`)
+        // The scan item is an `Option`: `Some(None)` skips an event type this client does not model
+        // without terminating the stream (`filter_map` below), exactly as the Responses backend does
+        // An outer `None` still ends the stream
         let events = event_stream
             .scan(false, |had_transport_error, event_res| {
                 if *had_transport_error {
@@ -2005,29 +2310,32 @@ impl SamplingClient {
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Err(stream_error))
+                            Some(Some(Err(stream_error)))
                         } else {
-                            Some(
-                                serde_json::from_str::<messages::MessageStreamEvent>(data).map_err(
-                                    |e| {
-                                        tracing::error!(
-                                            error = %e,
-                                            raw_data = %data,
-                                            "Failed to deserialize MessageStreamEvent from stream"
-                                        );
-                                        SamplingError::Serialization(e)
-                                    },
-                                ),
-                            )
+                            // Anthropic adds SSE event types without a version bump. An unmodelled
+                            // `type` is skipped so the turn survives; a MODELLED `type` carrying a
+                            // malformed body still fails closed, because silently dropping a
+                            // corrupt `message_stop` would hang the turn instead of erroring.
+                            match parse_sse_event::<messages::MessageStreamEvent>("messages", data)
+                            {
+                                Ok(Some(event)) => Some(Some(Ok(event))),
+                                Ok(None) => Some(None),
+                                Err(e) => Some(Some(Err(serde_failure(
+                                    "MessageStreamEvent from stream",
+                                    &e,
+                                    data.len(),
+                                )))),
+                            }
                         }
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                        Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
                 std::future::ready(item)
             })
+            .filter_map(std::future::ready)
             .boxed();
 
         Ok((events, model_metadata))
@@ -2464,6 +2772,260 @@ mod tests {
         );
     }
 
+    // ── P15: x-fuigo-* identity headers are FluxRouter-operated only ──────
+
+    /// The identity headers a FluxRouter-operated route legitimately needs.
+    fn identity_config(base_url: &str) -> SamplerConfig {
+        SamplerConfig {
+            base_url: base_url.to_string(),
+            client_version: Some("1.0.21".to_string()),
+            deployment_id: Some("dep-uuid-v5".to_string()),
+            user_id: Some("ferrox-account-id".to_string()),
+            client_identifier: Some("fuigo-cli".to_string()),
+            ..minimal_config()
+        }
+    }
+
+    fn built_identity_headers(base_url: &str) -> HeaderMap {
+        let config = identity_config(base_url);
+        let identity = IdentityDisclosure::for_destination(&config.base_url);
+        let mut headers = HeaderMap::new();
+        apply_identity_headers(&mut headers, &config, identity);
+        headers
+    }
+
+    /// THE LEAK. Fails on the baseline, where these were written unconditionally.
+    ///
+    /// `x-fuigo-user-id` is the Ferrox account id and `x-fuigo-deployment-id` the tenant
+    /// UUID. Both are stable and identical across every provider a user configures, so
+    /// sending them to third parties lets unrelated vendors correlate one user's traffic.
+    #[test]
+    fn third_party_destinations_receive_no_fuigo_identity_headers() {
+        for base_url in [
+            "https://api.openai.com/v1",
+            "https://api.anthropic.com/v1",
+            "https://api.x.ai/v1",
+            "https://openrouter.ai/api/v1",
+            "http://127.0.0.1:8080/v1",
+            "https://api.fluxrouter.ai.evil.example/v1",
+            "https://api.fluxrouter.ai@evil.example/v1",
+            // M11. The right host over cleartext: an observer on the path reads the
+            // account id, so the host being correct does not make it FluxRouter-operated.
+            "http://api.fluxrouter.ai/v1",
+        ] {
+            let headers = built_identity_headers(base_url);
+            assert!(
+                headers.is_empty(),
+                "{base_url} received x-fuigo-* identity headers: {headers:?}"
+            );
+            for name in [
+                "x-fuigo-user-id",
+                "x-fuigo-deployment-id",
+                "x-fuigo-client-version",
+                "x-fuigo-client-identifier",
+            ] {
+                assert!(
+                    !headers.contains_key(name),
+                    "{base_url} must not receive {name}"
+                );
+            }
+        }
+    }
+
+    /// The other half: gating must not break proxy version gating, which is a real feature.
+    #[test]
+    fn fluxrouter_operated_destination_still_receives_every_identity_header() {
+        let headers = built_identity_headers("https://api.fluxrouter.ai/v1");
+        for (name, expected) in [
+            ("x-fuigo-user-id", "ferrox-account-id"),
+            ("x-fuigo-deployment-id", "dep-uuid-v5"),
+            ("x-fuigo-client-version", "1.0.21"),
+            ("x-fuigo-client-identifier", "fuigo-cli"),
+        ] {
+            assert_eq!(
+                headers.get(name).and_then(|v| v.to_str().ok()),
+                Some(expected),
+                "FluxRouter-operated route lost {name}"
+            );
+        }
+    }
+
+    /// One `reqwest::Client` for every header probe in this module. A shared constructor
+    /// rather than one per test: `reqwest::Client::new` is a `clippy::disallowed_method` here
+    /// (the workspace routes real traffic through `fuigo_extra_ca::dispatch`), and these probes
+    /// never dispatch — they build a request and read its headers.
+    fn probe_builder(url: &str) -> reqwest::RequestBuilder {
+        reqwest::Client::new().post(url)
+    }
+
+    /// THE P15-R PIN. The per-request namespace splits by **what each header discloses**, not
+    /// by "is this `x-fuigo-*`".
+    ///
+    /// P15 returned the builder untouched for every other destination, so all nine went.
+    /// Five of them are per-session randoms or per-turn counters that identify nobody across
+    /// two destinations, and two live behaviours read them off the FluxRouter-operated route: a
+    /// self-hosted gateway counts retry traffic by `x-fuigo-transient-retry`, and
+    /// `fuigo_test_support::inference_override` classifies foreground against auxiliary calls
+    /// on `-turn-idx`/`-req-id` (falling through to a body heuristic when absent, so it
+    /// MISROUTES rather than failing). `x-fuigo-agent-id` is the one P15 was most right about:
+    /// a persisted machine id that survives logout.
+    ///
+    /// Asserted as set equality against [`PER_REQUEST_UNGATED_HEADERS`] and
+    /// [`PER_REQUEST_IDENTITY_HEADERS`], so a header added to `apply` without being classified
+    /// fails here and is named — this is the namespace enumeration, executable.
+    #[test]
+    fn per_request_namespace_splits_by_disclosure() {
+        fn header_names(identity: IdentityDisclosure) -> Vec<String> {
+            let h = FuigoRequestHeaders {
+                conv_id: "conv",
+                req_id: "req",
+                model_id: "model",
+                session_id: "session",
+                turn_idx: Some("1"),
+                transient_retry: Some("2"),
+                agent_id: "stable-machine-id",
+                deployment_id: Some("dep-uuid-v5"),
+                user_id: Some("ferrox-account-id"),
+                identity,
+            };
+            let request = h
+                .apply(probe_builder("https://example.test/v1"))
+                .build()
+                .expect("request builds");
+            let mut names: Vec<String> = request
+                .headers()
+                .keys()
+                .map(|k| k.as_str().to_string())
+                .filter(|k| k.starts_with("x-fuigo-"))
+                .collect();
+            names.sort();
+            names
+        }
+
+        let sorted = |names: &[&str]| {
+            let mut v: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+            v.sort();
+            v
+        };
+
+        // Third party / loopback: the ungated half, exactly, nothing more and nothing less.
+        assert_eq!(
+            header_names(IdentityDisclosure::WITHHELD),
+            sorted(&PER_REQUEST_UNGATED_HEADERS),
+            "a withheld-identity request does not carry exactly the ungated half"
+        );
+        for name in PER_REQUEST_IDENTITY_HEADERS {
+            assert!(
+                !header_names(IdentityDisclosure::WITHHELD).contains(&name.to_string()),
+                "a withheld-identity request carried the identity header {name}"
+            );
+        }
+
+        // FluxRouter-operated: both halves, so the gate cannot be "fixed" by simply turning it off in
+        // the other direction either.
+        let mut both: Vec<&str> = PER_REQUEST_UNGATED_HEADERS.to_vec();
+        both.extend(PER_REQUEST_IDENTITY_HEADERS);
+        assert_eq!(
+            header_names(IdentityDisclosure::for_destination("https://api.fluxrouter.ai/v1")),
+            sorted(&both),
+            "a FluxRouter-operated request does not carry the whole namespace"
+        );
+
+        // The two halves are disjoint, and every name is spelled inside the namespace.
+        for name in both {
+            assert!(
+                name.starts_with("x-fuigo-"),
+                "{name} is not an x-fuigo-* name"
+            );
+            assert!(
+                PER_REQUEST_UNGATED_HEADERS.contains(&name)
+                    != PER_REQUEST_IDENTITY_HEADERS.contains(&name),
+                "{name} is in both halves or neither"
+            );
+        }
+    }
+
+    /// The values must be the ones asked for, not just the names. A header written with the
+    /// wrong value correlates nothing and is as broken as a missing one.
+    #[test]
+    fn the_ungated_half_carries_its_values_to_a_third_party() {
+        let h = FuigoRequestHeaders {
+            conv_id: "conv-7f3a",
+            req_id: "req-91c2",
+            model_id: "an-opaque-third-party-routing-name",
+            session_id: "sess-4d0e",
+            turn_idx: Some("3"),
+            transient_retry: Some("2"),
+            agent_id: "stable-machine-id",
+            deployment_id: Some("dep-uuid-v5"),
+            user_id: Some("ferrox-account-id"),
+            identity: IdentityDisclosure::WITHHELD,
+        };
+        let request = h
+            .apply(probe_builder("https://api.openai.com/v1"))
+            .build()
+            .expect("request builds");
+        for (name, expected) in [
+            (H_CONV_ID, "conv-7f3a"),
+            (H_REQ_ID, "req-91c2"),
+            (H_SESSION_ID, "sess-4d0e"),
+            (H_TURN_IDX, "3"),
+            (H_TRANSIENT_RETRY, "2"),
+            (H_MODEL_OVERRIDE, "an-opaque-third-party-routing-name"),
+        ] {
+            assert_eq!(
+                request.headers().get(name).and_then(|v| v.to_str().ok()),
+                Some(expected),
+                "{name} did not reach a third-party destination with its value"
+            );
+        }
+    }
+
+    /// `turn_idx` and `transient_retry` are `Option`, and a first turn with no resubmit has
+    /// neither. Pinned so the "absent" case stays absent rather than becoming an empty header,
+    /// which `inference_override::classify` treats as not-present anyway (`nonempty_header`).
+    #[test]
+    fn absent_optional_correlators_are_omitted_not_empty() {
+        let h = FuigoRequestHeaders {
+            conv_id: "conv",
+            req_id: "req",
+            model_id: "model",
+            session_id: "session",
+            turn_idx: None,
+            transient_retry: None,
+            agent_id: "agent",
+            deployment_id: None,
+            user_id: None,
+            identity: IdentityDisclosure::WITHHELD,
+        };
+        let request = h
+            .apply(probe_builder("https://api.openai.com/v1"))
+            .build()
+            .expect("request builds");
+        assert!(request.headers().get(H_TURN_IDX).is_none());
+        assert!(request.headers().get(H_TRANSIENT_RETRY).is_none());
+        assert!(request.headers().get(H_CONV_ID).is_some());
+    }
+
+    /// The client-level half is enumerated too, so `CLIENT_IDENTITY_HEADERS` cannot drift from
+    /// what `apply_identity_headers` actually writes.
+    #[test]
+    fn client_identity_headers_enumerate_what_the_fluxrouter_operated_client_writes() {
+        let headers = built_identity_headers("https://api.fluxrouter.ai/v1");
+        let mut written: Vec<String> = headers.keys().map(|k| k.as_str().to_string()).collect();
+        written.sort();
+        let mut expected: Vec<String> = CLIENT_IDENTITY_HEADERS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(
+            written, expected,
+            "CLIENT_IDENTITY_HEADERS does not enumerate apply_identity_headers"
+        );
+    }
+
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {
             api_key: Some("test-key".to_string()),
@@ -2684,6 +3246,247 @@ mod tests {
         let body = body_rx.await.unwrap();
         server.abort();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    /// P70a: what the sampler LOGS holds no credential the request carried, and a body that fails to deserialize
+    /// is neither logged nor quoted in the error.
+    ///
+    /// The request's URL carries keys (base-URL query and configured `query_params`) and its headers carry
+    /// credentials under names a denylist misses (`Cookie`, `x-credential`, a well-known name mapped to a key).
+    /// Every span and event the client emits, at every level, is captured across: a 401, a 500, a 2xx body that does
+    /// not deserialize, malformed stream chunks on the Responses and Chat Completions backends, and a refused
+    /// connection. No eight-character run of any credential is in any record. Controls: the endpoint path and the
+    /// header NAMES were logged, and each failure was logged.
+    ///
+    /// Scope: logs only. The text of the errors RETURNED for a 401 or a transport failure still names the request
+    /// URL exactly as before (P70b decides what happens to error text); this test does not look at it.
+    #[tokio::test]
+    async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no_body() {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        struct Render<'a>(&'a mut String);
+        impl tracing::field::Visit for Render<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!(" {}={value:?}", field.name()));
+            }
+        }
+        impl<S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>> tracing_subscriber::Layer<S>
+            for Capture
+        {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut line = attrs.metadata().name().to_owned();
+                attrs.record(&mut Render(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+            fn on_record(
+                &self,
+                _: &tracing::Id,
+                values: &tracing::span::Record<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut line = "record".to_owned();
+                values.record(&mut Render(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+            fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+                let mut line = event.metadata().name().to_owned();
+                event.record(&mut Render(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        const SECRETS: [&str; 6] = [
+            "p70uq-FAKE-1a2b3c4d",
+            "p70qp-FAKE-5e6f7a8b",
+            "p70ck-FAKE-9c0d1e2f",
+            "p70xc-FAKE-3a4b5c6d",
+            "p70ak-FAKE-7e8f9a0b",
+            "p70ae-FAKE-Kq4ZtW8x",
+        ];
+        // Values a response body carries; serde's own error text would quote them.
+        const BODY_MARK: &str = "p70body-MARK-k3Vb9x";
+        const STREAM_MARK: &str = "p70strm-MARK-9ZqT4h";
+        const CHAT_MARK: &str = "p70chat-MARK-7HxN2c";
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(401));
+        let (seen, status_now) = (hits.clone(), status.clone());
+        let app = axum::Router::new().fallback(move || {
+            let (seen, status_now) = (seen.clone(), status_now.clone());
+            async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let code = status_now.load(std::sync::atomic::Ordering::SeqCst);
+                let (content_type, body) = match code {
+                    // A modelled Responses event with a malformed body, then (201) a malformed chat chunk.
+                    200 => (
+                        "text/event-stream",
+                        format!("data: {}\n\n", serde_json::json!({ "type": "response.created", "sequence_number": 0, "response": STREAM_MARK })),
+                    ),
+                    201 => ("text/event-stream", format!("data: {}\n\n", serde_json::json!({ "choices": CHAT_MARK }))),
+                    // A 2xx body that fails to deserialize.
+                    299 => (
+                        "application/json",
+                        serde_json::json!({ "id": "r", "object": "response", "created_at": BODY_MARK }).to_string(),
+                    ),
+                    _ => ("application/json", serde_json::json!({ "error": { "message": "denied" } }).to_string()),
+                };
+                let code = if code == 201 { 200 } else { code };
+                (axum::http::StatusCode::from_u16(code).unwrap(), [("content-type", content_type)], body)
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(captured.clone()));
+        let _guard = subscriber.set_default();
+        let client_config = SamplerConfig {
+            base_url: format!("http://{addr}/v1?key={}", SECRETS[0]),
+            api_backend: ApiBackend::Responses,
+            api_key: Some(SECRETS[4].to_owned()),
+            query_params: [("sig".to_owned(), SECRETS[1].to_owned())].into_iter().collect(),
+            extra_headers: [
+                ("Cookie".to_owned(), format!("session={}", SECRETS[2])),
+                ("x-credential".to_owned(), SECRETS[3].to_owned()),
+                // A well-known header NAME mapped to a credential: the old name-based denylist logged its value.
+                ("accept-encoding".to_owned(), SECRETS[5].to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(client_config.clone()).unwrap();
+        let request = rs::CreateResponse { input: rs::InputParam::Text("hi".to_owned()), ..Default::default() };
+
+        // 401 on the stream call (the path that logs the request URL and headers).
+        let err = client
+            .create_response_stream(CreateResponseWrapper::new(request.clone()))
+            .await
+            .err()
+            .expect("the 401 is an error");
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "control: the request reached the server");
+        assert!(matches!(err, SamplingError::Auth { .. }), "control: a 401, not a pre-dispatch failure: {err:?}");
+        // 500 on the unary call.
+        status.store(500, std::sync::atomic::Ordering::SeqCst);
+        let e = client.create_response(CreateResponseWrapper::new(request.clone())).await.expect_err("a 500 is an error");
+        assert!(matches!(e, SamplingError::Api { .. }), "control: {e:?}");
+        // A malformed 2xx body.
+        status.store(299, std::sync::atomic::Ordering::SeqCst);
+        let malformed = client
+            .create_response(CreateResponseWrapper::new(request.clone()))
+            .await
+            .expect_err("a malformed body is an error");
+        // A malformed modelled event in a Responses stream.
+        status.store(200, std::sync::atomic::Ordering::SeqCst);
+        let (mut stream, _, _) = client
+            .create_response_stream(CreateResponseWrapper::new(request.clone()))
+            .await
+            .expect("a 200 stream opens");
+        let stream_err = futures_util::StreamExt::next(&mut stream).await.expect("an item").expect_err("a malformed event");
+        // A malformed chunk in a Chat Completions stream.
+        status.store(201, std::sync::atomic::Ordering::SeqCst);
+        let chat_client =
+            SamplingClient::new(SamplerConfig { api_backend: ApiBackend::ChatCompletions, ..client_config.clone() }).unwrap();
+        let chat_request: ChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] }))
+                .expect("chat request");
+        let (mut chunks, _) = chat_client.chat_completion_stream(chat_request).await.expect("a 200 stream opens");
+        let chat_err = futures_util::StreamExt::next(&mut chunks).await.expect("an item").expect_err("a malformed chunk");
+        server.abort();
+        // A transport failure: reqwest's error text names the request URL, and the client logs that text.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+        // The path holds parentheses: text scanning that stops a URL at `)` would log the query after them.
+        let offline = SamplingClient::new(SamplerConfig {
+            base_url: format!("http://{closed_addr}/tenant(p70)/v1?key={}", SECRETS[0]),
+            api_backend: ApiBackend::Responses,
+            query_params: [("sig".to_owned(), SECRETS[1].to_owned())].into_iter().collect(),
+            ..minimal_config()
+        })
+        .unwrap();
+        let transport = offline
+            .create_response_stream(CreateResponseWrapper::new(request))
+            .await
+            .err()
+            .expect("a refused connection is an error");
+        assert!(matches!(transport, SamplingError::Http(_)), "control: a transport failure: {transport:?}");
+
+        // serde errors: category and position only, in the error and in its log line.
+        // (the body of a Responses event is an internally tagged enum: serde reports no position for it)
+        for (what, error, mark, positioned) in [
+            ("unary body", &malformed, BODY_MARK, true),
+            ("responses event", &stream_err, STREAM_MARK, false),
+            ("chat chunk", &chat_err, CHAT_MARK, true),
+        ] {
+            assert!(matches!(error, SamplingError::Serialization(_)), "control ({what}): {error:?}");
+            let shown = error.to_string();
+            let summary = shown.strip_prefix("serialization error: ").unwrap_or_else(|| panic!("{what}: {shown}"));
+            let (category, position) = summary.split_once(" error").unwrap_or_else(|| panic!("{what}: {shown}"));
+            assert!(["Data", "Syntax", "Eof", "Io"].contains(&category), "{what}: a category is shown: {shown}");
+            if positioned {
+                let column = position.strip_prefix(" at line 1 column ").unwrap_or_else(|| panic!("{what}: {shown}"));
+                assert!(column.parse::<u32>().is_ok_and(|c| c > 0), "{what}: a position is shown: {shown}");
+            } else {
+                assert_eq!(position, "", "{what}: nothing but the category: {shown}");
+            }
+            assert!(!format!("{shown} {error:?}").contains("MARK"), "{what}: the error quotes the body ({mark})");
+        }
+        let records = captured.lock().unwrap().clone();
+        let logs = records.join("\n");
+        let failures: Vec<&String> = records.iter().filter(|r| r.contains("Failed to deserialize")).collect();
+        assert_eq!(failures.len(), 3, "control: each deserialization failure was logged once: {failures:?}");
+        for record in failures {
+            assert!(record.contains(" error") && record.contains("body_len="), "{record}");
+            assert!(!record.contains("MARK"), "a deserialization failure logged the body: {record}");
+        }
+        // Nothing else logs a unary response body either. (Stream chunks are logged by the `sse_chunk` event, which
+        // P70a does not change.)
+        assert!(!logs.contains(BODY_MARK), "the malformed 2xx body was logged: {logs}");
+
+        assert!(logs.contains("/v1/responses"), "control: the endpoint was logged: {logs}");
+        for name in ["cookie", "x-credential", "accept-encoding", "authorization"] {
+            assert!(logs.contains(&format!("header_name={name}")), "control: the header name {name} was logged: {logs}");
+        }
+        assert!(!logs.contains("header_value"), "a header value field was logged: {logs}");
+        let dispatch_failure = records
+            .iter()
+            .find(|r| r.contains("HTTP dispatch failed"))
+            .unwrap_or_else(|| panic!("control: the transport failure was logged: {logs}"));
+        assert!(
+            dispatch_failure.contains("/tenant(p70)/v1/responses?key=<redacted>&sig=<redacted>"),
+            "control: the failed request's URL is in that line, redacted: {dispatch_failure}"
+        );
+        for secret in SECRETS {
+            let chars: Vec<char> = secret.chars().collect();
+            for w in chars.windows(8) {
+                let frag: String = w.iter().collect();
+                assert!(!logs.contains(&frag), "the sampler logged {frag:?} of a credential: {logs}");
+            }
+        }
+    }
+
+    /// P70 (Astra r11): a `User-Agent` configured in `extra_headers` never survives construction, even when the
+    /// session origin does not form a header value: the agent's own string is sent instead.
+    #[test]
+    fn configured_user_agent_never_survives_an_invalid_origin() {
+        let client = SamplingClient::new(SamplerConfig {
+            extra_headers: [("user-agent".to_owned(), "Ua7kQ9".to_owned())].into_iter().collect(),
+            origin_client: Some(OriginClientInfo { product: "bad\nclient".to_owned(), version: None }),
+            ..minimal_config()
+        })
+        .expect("build");
+        let sent = client.default_headers.get(USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned();
+        assert!(sent.starts_with(AGENT_PRODUCT), "the agent's own User-Agent is sent: {sent:?}");
+        assert!(!sent.contains("Ua7kQ9"), "the configured value survived: {sent:?}");
     }
 
     #[tokio::test]
@@ -3016,6 +3819,186 @@ mod tests {
         assert!(!url.contains("x/responses"), "url: {url}");
     }
 
+    /// P13: the Messages default was 128_000 -- the CURRENT Anthropic family's
+    /// ceiling, inherited from upstream where `messages` pointed at a route
+    /// upstream controlled. Against api.anthropic.com it exceeds the real
+    /// `max_output_tokens` of every model below Opus 4.6 / Sonnet 4.6, so a
+    /// `/provider`-written Anthropic entry 400'd on every turn and nothing the
+    /// flow wrote could correct it. The default must be a value every
+    /// non-retired Anthropic model accepts.
+    #[test]
+    fn messages_default_max_tokens_is_within_every_anthropic_models_output_cap() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            max_completion_tokens: None,
+            ..minimal_config()
+        })
+        .expect("client should build");
+
+        let mut request =
+            MessagesRequestWrapper::new(fuigo_sampling_types::messages::MessagesRequest::default());
+        client
+            .apply_message_defaults(&mut request)
+            .expect("defaults apply");
+
+        // The smallest published `max_output_tokens` across Anthropic's
+        // non-retired models as of 2026-09 (Opus 4 / 4.1 = 32K).
+        const SMALLEST_ANTHROPIC_OUTPUT_CAP: u32 = 32_000;
+        assert_eq!(
+            request.inner.max_tokens, SMALLEST_ANTHROPIC_OUTPUT_CAP,
+            "a Messages request with no max_tokens must default to a value every \
+             non-retired Anthropic model accepts"
+        );
+        assert!(
+            request.inner.max_tokens <= SMALLEST_ANTHROPIC_OUTPUT_CAP,
+            "max_tokens {} exceeds the smallest per-model output cap and would 400",
+            request.inner.max_tokens
+        );
+    }
+
+    /// The default is a floor, not a ceiling: a config that states a budget
+    /// still decides. This is the key `[model_providers.<id>].max_completion_tokens`
+    /// now reaches, so `/provider` output is correctable without hand-editing
+    /// a `[model.<id>]` table the flow never mentioned.
+    #[test]
+    fn configured_max_completion_tokens_beats_the_messages_default() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            max_completion_tokens: Some(64_000),
+            ..minimal_config()
+        })
+        .expect("client should build");
+
+        let mut request =
+            MessagesRequestWrapper::new(fuigo_sampling_types::messages::MessagesRequest::default());
+        client
+            .apply_message_defaults(&mut request)
+            .expect("defaults apply");
+        assert_eq!(request.inner.max_tokens, 64_000);
+    }
+
+    /// A request that already states `max_tokens` is untouched.
+    #[test]
+    fn an_explicit_max_tokens_survives_the_messages_defaults() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            ..minimal_config()
+        })
+        .expect("client should build");
+
+        let mut request = MessagesRequestWrapper::new(
+            fuigo_sampling_types::messages::MessagesRequest {
+                max_tokens: 1_234,
+                ..Default::default()
+            },
+        );
+        client
+            .apply_message_defaults(&mut request)
+            .expect("defaults apply");
+        assert_eq!(request.inner.max_tokens, 1_234);
+    }
+
+    /// P13 / packet §3.1: the output ceiling must NOT be derived from the
+    /// context window. They are different quantities, and a derivation would
+    /// couple this default to a type change owned by another packet. Two
+    /// clients whose context windows differ by two orders of magnitude must
+    /// produce the same `max_tokens`.
+    #[test]
+    fn the_messages_default_is_not_derived_from_the_context_window() {
+        let max_tokens_for = |context_window: u64| {
+            let client = SamplingClient::new(SamplerConfig {
+                api_backend: ApiBackend::Messages,
+                auth_scheme: AuthScheme::XApiKey,
+                max_completion_tokens: None,
+                context_window,
+                ..minimal_config()
+            })
+            .expect("client should build");
+            let mut request = MessagesRequestWrapper::new(
+                fuigo_sampling_types::messages::MessagesRequest::default(),
+            );
+            client
+                .apply_message_defaults(&mut request)
+                .expect("defaults apply");
+            request.inner.max_tokens
+        };
+        assert_eq!(
+            max_tokens_for(8_192),
+            max_tokens_for(1_000_000),
+            "max_tokens must not be a function of context_window"
+        );
+    }
+
+    /// P13 / divergence finding 6: `api_backend = "messages"` implies
+    /// `anthropic-version`. The `/provider` discovery table knew that; the
+    /// backend did not, so a HAND-WRITTEN `[model_providers.x] api_backend =
+    /// "messages"` with no `extra_headers` built a request with no version
+    /// header at all -- silently malformed, which is the defect.
+    #[test]
+    fn a_messages_client_sends_anthropic_version_without_any_configured_header() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            extra_headers: IndexMap::new(),
+            ..minimal_config()
+        })
+        .expect("client should build");
+        assert_eq!(
+            client
+                .default_headers
+                .get(HeaderName::from_static(ANTHROPIC_VERSION_HEADER))
+                .expect("a messages client must carry anthropic-version"),
+            ANTHROPIC_VERSION,
+        );
+    }
+
+    /// Supplied, not imposed: a config that names a version keeps it.
+    #[test]
+    fn a_configured_anthropic_version_is_not_overwritten() {
+        let mut extra_headers = IndexMap::new();
+        extra_headers.insert(
+            ANTHROPIC_VERSION_HEADER.to_string(),
+            "2099-01-01".to_string(),
+        );
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            extra_headers,
+            ..minimal_config()
+        })
+        .expect("client should build");
+        assert_eq!(
+            client
+                .default_headers
+                .get(HeaderName::from_static(ANTHROPIC_VERSION_HEADER))
+                .expect("header present"),
+            "2099-01-01",
+        );
+    }
+
+    /// The header belongs to the Messages wire protocol, so the other two
+    /// backends must not acquire it.
+    #[test]
+    fn non_messages_backends_do_not_send_anthropic_version() {
+        for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses] {
+            let client = SamplingClient::new(SamplerConfig {
+                api_backend: backend.clone(),
+                ..minimal_config()
+            })
+            .expect("client should build");
+            assert!(
+                client
+                    .default_headers
+                    .get(HeaderName::from_static(ANTHROPIC_VERSION_HEADER))
+                    .is_none(),
+                "{backend:?} must not carry anthropic-version"
+            );
+        }
+    }
+
     #[test]
     fn messages_plus_anthropic_api_key_uses_x_api_key_and_not_authorization() {
         let cfg = SamplerConfig {
@@ -3137,16 +4120,16 @@ mod tests {
         fn record_401(
             &self,
             consumer: crate::attribution::SamplingConsumer,
-            sent_bearer: Option<&str>,
+            sent_bearer: Option<&BearerFingerprint>,
         ) {
             self.invocations
                 .lock()
                 .unwrap()
-                .push((consumer, sent_bearer.map(|s| s.to_string())));
+                .push((consumer, sent_bearer.map(|s| s.as_str().to_string())));
         }
     }
 
-    /// `post()` strips the `"Bearer "` scheme prefix off `Authorization` and captures the tail fragment (see `BEARER_SUFFIX_LEN`).
+    /// `post()` strips the `"Bearer "` scheme prefix off `Authorization` and captures the bearer's fingerprint.
     #[test]
     fn post_captures_bearer_tail_for_openai_compat() {
         let cfg = SamplerConfig {
@@ -3159,14 +4142,11 @@ mod tests {
             sent_bearer: bearer,
             ..
         } = client.post("https://example.test/v1/chat/completions");
-        assert_eq!(bearer.as_deref(), Some("r-1234567890"));
-        assert_eq!(
-            bearer.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
-        );
+        assert_eq!(bearer, Some(BearerFingerprint::of("test-bearer-1234567890")));
+        assert!(!bearer.expect("captured").as_str().contains("7890"), "no fragment of the bearer");
     }
 
-    /// `post()` captures `x-api-key` for Messages-API backends and keeps the value's tail fragment.
+    /// `post()` captures `x-api-key` for Messages-API backends and keeps the value's fingerprint.
     #[test]
     fn post_captures_x_api_key_tail_for_messages() {
         let cfg = SamplerConfig {
@@ -3180,11 +4160,7 @@ mod tests {
             sent_bearer: bearer,
             ..
         } = client.post("https://example.test/v1/messages");
-        assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
-        assert_eq!(
-            bearer.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
-        );
+        assert_eq!(bearer, Some(BearerFingerprint::of("anthropic-key-abc123")));
     }
 
     /// `post()` captures `None` when the request carries no auth header.
@@ -3235,14 +4211,14 @@ mod tests {
         *resolver.0.lock().unwrap() = "fresh-token-newtail99".to_string();
 
         assert_eq!(
-            sent_at_build.as_deref(),
-            Some("ken-oldtail1"),
+            sent_at_build,
+            Some(BearerFingerprint::of("rejected-token-oldtail1")),
             "attribution must describe the bearer the rejected request carried"
         );
         // A record-time re-read would report the rotated token instead:
         assert_eq!(
-            client.current_sent_bearer_suffix().as_deref(),
-            Some("en-newtail99"),
+            client.current_sent_bearer_fingerprint(),
+            Some(BearerFingerprint::of("fresh-token-newtail99")),
             "sanity: the build-time capture and a live re-read now differ"
         );
     }
@@ -3316,7 +4292,7 @@ mod tests {
         assert!(request.headers().get(AUTHORIZATION).is_none());
     }
 
-    /// The callback receives the `post()`-captured fragment only; the full bearer never crosses the crate boundary.
+    /// The callback receives the `post()`-captured fingerprint only; neither the bearer nor a fragment crosses the crate boundary.
     #[test]
     fn record_401_attribution_invokes_callback_with_captured_bearer() {
         let cb = std::sync::Arc::new(CountingCallback::default());
@@ -3333,7 +4309,7 @@ mod tests {
             client.post("https://example.test/v1/chat/completions");
         client.record_401_attribution(
             crate::attribution::SamplingConsumer::ChatCompletionsStream,
-            sent_bearer.as_deref(),
+            sent_bearer.as_ref(),
         );
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -3341,11 +4317,11 @@ mod tests {
             calls[0].0,
             crate::attribution::SamplingConsumer::ChatCompletionsStream
         );
-        assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
-            calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
+            calls[0].1.as_deref(),
+            Some(fuigo_auth::bearer_fingerprint("the-bearer-1234567890-extra-tail").as_str())
         );
+        assert!(!calls[0].1.as_deref().unwrap_or_default().contains("tail"), "no fragment of the bearer");
     }
 
     /// When a bearer_resolver is wired but returns `None`, attribution must report no sent bearer (not the construction-time default header seed).
@@ -3367,7 +4343,7 @@ mod tests {
         };
         let client = SamplingClient::new(cfg).expect("client should build");
         assert_eq!(
-            client.current_sent_bearer_suffix(),
+            client.current_sent_bearer_fingerprint(),
             None,
             "resolver None must not attribute a stripped default seed"
         );
@@ -3404,6 +4380,220 @@ mod tests {
         );
     }
 
+    /// An unknown top-level `type` is benign and must be SKIPPED, not fatal.
+    /// OpenAI emits `keepalive` during long reasoning turns; before this, one such frame
+    /// aborted the whole turn with `unknown variant `keepalive``, so the failure selected
+    /// for the longest and most expensive turns.
+    #[test]
+    fn unknown_stream_event_type_is_skipped_not_fatal() {
+        for raw in [
+            r#"{"type":"keepalive"}"#,
+            r#"{"type":"keepalive","sequence_number":7}"#,
+            r#"{"type":"response.some_future_event","whatever":{"nested":true}}"#,
+        ] {
+            let parsed = deserialize_response_event(raw);
+            assert!(
+                matches!(parsed, Ok(None)),
+                "expected {raw} to be skipped, got {:?}",
+                parsed.map(|e| e.is_some())
+            );
+        }
+    }
+
+    /// The converse, and the reason the check probes the tag alone: a KNOWN event type whose
+    /// body is malformed must still fail closed. Silently dropping a corrupt terminal event
+    /// would strand the stream with no `response.completed`, which
+    /// `stream::responses`'s `missing_completed_event_yields_failed` shows surfaces as an
+    /// opaque `Failed { status: 500 }` -- the real parse error, which names the offending
+    /// field, is strictly more useful than that.
+    #[test]
+    fn known_stream_event_type_with_bad_body_still_errors() {
+        let raw = r#"{"type":"response.completed","response":"not-an-object"}"#;
+        assert!(
+            deserialize_response_event(raw).is_err(),
+            "a known event type with a malformed body must not be silently skipped"
+        );
+    }
+
+    /// The Messages backend has the same open vocabulary as the Responses backend: Anthropic ships
+    /// new SSE event types without a version bump, and modelling them as a closed enum turns the
+    /// next such release into a dead turn. This exercises the REAL parse the stream performs.
+    #[test]
+    fn unknown_messages_stream_event_type_is_skipped_not_fatal() {
+        for raw in [
+            r#"{"type":"keepalive"}"#,
+            r#"{"type":"message_heartbeat","sequence":3}"#,
+            r#"{"type":"container_start","container":{"id":"c_1"}}"#,
+            r#"{"type":"some_future_event","whatever":{"nested":true}}"#,
+        ] {
+            let parsed = parse_sse_event::<messages::MessageStreamEvent>("messages", raw);
+            assert!(
+                matches!(parsed, Ok(None)),
+                "expected {raw} to be skipped, got {:?}",
+                parsed.map(|e| e.is_some())
+            );
+        }
+    }
+
+    /// The converse for the Messages backend: a MODELLED event type whose body is malformed must
+    /// still fail closed. Skipping it would strand the stream with no terminal event, which
+    /// surfaces later as an opaque failure instead of the parse error that names the bad field.
+    #[test]
+    fn known_messages_stream_event_type_with_bad_body_still_errors() {
+        for raw in [
+            // `message_start` requires a `message` object
+            r#"{"type":"message_start","message":"not-an-object"}"#,
+            // `content_block_delta` requires `index` and `delta`
+            r#"{"type":"content_block_delta","index":"zero","delta":{"type":"text_delta","text":"hi"}}"#,
+            // `message_delta` is missing `usage` entirely
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+        ] {
+            assert!(
+                parse_sse_event::<messages::MessageStreamEvent>("messages", raw).is_err(),
+                "a modelled event type with a malformed body must not be silently skipped: {raw}"
+            );
+        }
+    }
+
+    /// Level two of the same policy: the `content_block` discriminator nested inside a MODELLED
+    /// `content_block_start` is its own open vocabulary (`server_tool_use`,
+    /// `web_search_tool_result`, `mcp_tool_use`, …). An unmodelled block is preserved verbatim
+    /// instead of killing the turn, and re-serializes faithfully so logs stay true to the wire.
+    #[test]
+    fn unknown_messages_content_block_type_is_preserved_not_fatal() {
+        for (raw, tag) in [
+            (
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}"#,
+                "server_tool_use",
+            ),
+            (
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]}}"#,
+                "web_search_tool_result",
+            ),
+        ] {
+            let event = parse_sse_event::<messages::MessageStreamEvent>("messages", raw)
+                .expect("an unmodelled content block must not fail the event parse")
+                .expect("an unmodelled content block is not an unmodelled EVENT type");
+            let messages::MessageStreamEvent::ContentBlockStart { content_block, .. } = event
+            else {
+                panic!("expected ContentBlockStart for {raw}");
+            };
+            assert_eq!(
+                content_block.unknown_tag(),
+                Some(tag),
+                "the wire tag must be preserved, not discarded"
+            );
+            // Faithful re-serialization: the raw payload round-trips unchanged.
+            let reserialized = serde_json::to_value(&content_block).expect("re-serialize");
+            let expected: serde_json::Value = serde_json::from_str(raw).expect("raw json");
+            assert_eq!(reserialized, expected["content_block"]);
+        }
+    }
+
+    /// The line between "unknown variant" and "corrupt payload", at the NESTED level. A
+    /// `tool_use` block that is missing its `id` is not a new block type; it is a broken one, and
+    /// tolerating it would make a tool call vanish with no error at all -- strictly worse than
+    /// today's abort, which is at least loud.
+    #[test]
+    fn known_messages_content_block_with_bad_body_still_errors() {
+        for raw in [
+            // modelled `tool_use`, missing the required `id`
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"do_thing","input":{}}}"#,
+            // modelled `text`, `text` is the wrong JSON type
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":42}}"#,
+            // modelled `text_delta`, missing the required `text`
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta"}}"#,
+        ] {
+            assert!(
+                parse_sse_event::<messages::MessageStreamEvent>("messages", raw).is_err(),
+                "a modelled content block with a malformed body must still fail closed: {raw}"
+            );
+        }
+    }
+
+    /// The Chat Completions payload has no top-level `type` tag, so its open vocabularies are the
+    /// nested string enums: `finish_reason` and the response-side `role`. Either one aborting the
+    /// terminal chunk discards a response that has already streamed and already been billed.
+    #[test]
+    fn unknown_chat_completion_vocabularies_are_tolerated() {
+        for (raw, expected_finish) in [
+            (
+                r#"{"id":"c1","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":"guardrail_intervened"}]}"#,
+                "guardrail_intervened",
+            ),
+            (
+                r#"{"id":"c2","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"model","content":"hi"},"finish_reason":"eos"}]}"#,
+                "eos",
+            ),
+        ] {
+            let chunk = serde_json::from_str::<ChatCompletionChunk>(raw)
+                .unwrap_or_else(|e| panic!("chunk must parse: {e}\n{raw}"));
+            let finish = chunk.choices[0]
+                .finish_reason
+                .as_ref()
+                .expect("finish_reason present");
+            assert_eq!(
+                finish.wire_str(),
+                expected_finish,
+                "the wire finish_reason must be preserved verbatim"
+            );
+            // An unmodelled response role normalizes to the only role a response can carry.
+            assert_eq!(
+                chunk.choices[0].delta.role,
+                Some(fuigo_sampling_types::Role::Assistant)
+            );
+        }
+    }
+
+    /// SSE *comment* lines are the next instance of this class in the wild: OpenRouter's keepalive
+    /// is a literal `: OPENROUTER PROCESSING`, which is a comment, not a payload. This asserts the
+    /// transport already drops them (and `id:` / `retry:` / unknown fields with it), so no guard is
+    /// needed at the JSON boundary -- and pins that property against a future transport swap.
+    #[tokio::test]
+    async fn sse_comments_and_unknown_fields_never_reach_the_json_parser() {
+        let raw: &[&str] = &[
+            ": OPENROUTER PROCESSING\n\n",
+            "id: 1\nretry: 5000\nx-trace: abc\n\n",
+            ":\n\n",
+            "event: message\ndata: {\"type\":\"ping\"}\n\n",
+            "data: [DONE]\n\n",
+        ];
+        // `Vec<u8>` rather than `bytes::Bytes` so this test adds no dependency.
+        let byte_stream = futures_util::stream::iter(
+            raw.iter()
+                .map(|s| Ok::<Vec<u8>, std::io::Error>(s.as_bytes().to_vec())),
+        );
+        let payloads: Vec<String> = byte_stream
+            .eventsource()
+            .map(|e| e.expect("no transport error").data)
+            .collect()
+            .await;
+        assert_eq!(
+            payloads,
+            vec!["{\"type\":\"ping\"}".to_owned(), "[DONE]".to_owned()],
+            "only `data:` payloads may reach the JSON parser"
+        );
+    }
+
+    /// The converse for Chat Completions: a structurally broken chunk must still fail. Tolerating
+    /// open string vocabularies must not turn into tolerating a corrupt envelope.
+    #[test]
+    fn malformed_chat_completion_chunk_still_errors() {
+        for raw in [
+            // `choices` is not an array
+            r#"{"id":"c1","object":"chat.completion.chunk","created":0,"model":"m","choices":"none"}"#,
+            // required `model` missing
+            r#"{"id":"c1","object":"chat.completion.chunk","created":0,"choices":[]}"#,
+            // `delta.tool_calls` is the wrong shape
+            r#"{"id":"c1","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"tool_calls":"nope"}}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ChatCompletionChunk>(raw).is_err(),
+                "a structurally broken chunk must still fail: {raw}"
+            );
+        }
+    }
+
     /// `response.completed` carrying `usage.context_details.{input_tokens, output_tokens}` rewrites `usage.total_tokens` in place.
     /// The new value is the live context length (`ctx.input + ctx.output`).
     /// Billing fields stay on the wire's cumulative values.
@@ -3432,7 +4622,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3469,7 +4659,7 @@ mod tests {
             )
         };
 
-        let event = deserialize_response_event(&make(78)).expect("parse");
+        let event = deserialize_response_event(&make(78)).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3483,7 +4673,7 @@ mod tests {
         );
 
         // The REST mapper backfills 0 for unbilled requests: no stash.
-        let event = deserialize_response_event(&make(0)).expect("parse");
+        let event = deserialize_response_event(&make(0)).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3513,7 +4703,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3547,7 +4737,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse).expect("parse").expect("event");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -3567,7 +4757,9 @@ mod tests {
             "delta": "hello",
             "logprobs": []
         }"#;
-        let event = deserialize_response_event(sse).expect("non-terminal event parses");
+        let event = deserialize_response_event(sse)
+            .expect("non-terminal event parses")
+            .expect("event");
         assert!(matches!(
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
@@ -3676,5 +4868,120 @@ mod tests {
         request.suppress_reasoning_summary = true;
         client.apply_response_defaults(&mut request).unwrap();
         assert_eq!(request.inner.reasoning, None);
+    }
+}
+
+#[cfg(test)]
+mod env_header_resolver_tests {
+    use super::*;
+
+    /// Stands in for the shell's resolver: one name answered from memory, every other name from the environment.
+    fn in_memory_first(var: &str) -> Option<String> {
+        if var == "P08_SAMPLER_KEY_VAR" {
+            Some("p08-sampler-runtime-FAKE".to_owned())
+        } else {
+            std::env::var(var).ok()
+        }
+    }
+
+    /// P08 (Astra r3): `env_http_headers` resolves through the installed resolver, so a header mapped to a
+    /// first-party key name carries the in-memory runtime key rather than an ambient env value.
+    #[test]
+    fn env_http_headers_resolve_through_the_installed_resolver() {
+        install_env_header_resolver(in_memory_first);
+        let mut mapping = IndexMap::new();
+        mapping.insert("x-api-key".to_owned(), "P08_SAMPLER_KEY_VAR".to_owned());
+        let mut headers = HeaderMap::new();
+        apply_env_http_headers(&mapping, resolve_env_header_var, &mut headers);
+        assert_eq!(
+            headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+            Some("p08-sampler-runtime-FAKE")
+        );
+        assert_eq!(resolve_env_header_var("P08_SAMPLER_UNSET_VAR_FOR_TEST"), None);
+    }
+}
+
+#[cfg(test)]
+mod p70b_body_preview_tests {
+    use super::*;
+
+    /// P70b: the 500-char error-log preview never cuts through a credential this client sent, so the log writer's
+    /// exact-match scrub finds it whole instead of logging a prefix of it.
+    #[test]
+    fn the_error_log_preview_never_cuts_through_a_sent_credential() {
+        let _g = crate::sent_credentials::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let cred = "p70b-preview-cred-0123456789";
+        fuigo_secrets::sent_credentials::record(cred);
+        let body = format!("{}{cred} trailing text", "y".repeat(495));
+        let preview = SamplingClient::body_preview(body.as_bytes());
+        assert!(preview.ends_with(cred), "{preview}");
+        assert_eq!(
+            fuigo_secrets::sent_credentials::scrub(&preview),
+            format!("{}<redacted>", "y".repeat(495))
+        );
+        // Text with no credential at the cut is capped exactly as before.
+        let plain = "z".repeat(800);
+        assert_eq!(
+            SamplingClient::body_preview(plain.as_bytes())
+                .chars()
+                .count(),
+            500
+        );
+    }
+
+    /// Through the production constructor and the dispatch recorder: a header configured under a client-written
+    /// name that the client does NOT replace is recorded on every request; one the client replaces is never sent
+    /// and never recorded; nothing is recorded before a request exists.
+    #[test]
+    fn configured_headers_are_recorded_iff_they_are_really_sent() {
+        use fuigo_secrets::sent_credentials::{clear_for_tests, scrub};
+        let _g = crate::sent_credentials::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        clear_for_tests();
+        let mut cfg = SamplerConfig {
+            base_url: "https://example.invalid/v1".to_string(),
+            model: "test-model".to_string(),
+            ..SamplerConfig::default()
+        };
+        // `traceparent` is a client-written name (the injector stamps it), but this client has no injector, so
+        // the configured value is what goes on the wire.
+        cfg.extra_headers.insert(
+            "traceparent".to_owned(),
+            "p70b-configured-agent-id".to_owned(),
+        );
+        // The client always replaces a configured User-Agent: this value never reaches the wire.
+        cfg.extra_headers.insert(
+            "user-agent".to_owned(),
+            "p70b-never-sent-user-agent".to_owned(),
+        );
+        // A configured protocol constant under its own header is not a credential.
+        cfg.extra_headers.insert(
+            ANTHROPIC_VERSION_HEADER.to_owned(),
+            ANTHROPIC_VERSION.to_owned(),
+        );
+        let client = SamplingClient::new(cfg).expect("client");
+        assert_eq!(
+            client.configured_header_values,
+            vec!["p70b-configured-agent-id".to_owned()]
+        );
+        assert_eq!(
+            scrub("p70b-configured-agent-id"),
+            "p70b-configured-agent-id"
+        );
+        let request = client
+            .post("https://example.invalid/v1/chat/completions")
+            .builder
+            .build()
+            .expect("request");
+        crate::sent_credentials::record_request(&request, &client.configured_header_values);
+        assert_eq!(scrub("p70b-configured-agent-id"), "<redacted>");
+        assert_eq!(
+            scrub("p70b-never-sent-user-agent"),
+            "p70b-never-sent-user-agent"
+        );
+        clear_for_tests();
     }
 }

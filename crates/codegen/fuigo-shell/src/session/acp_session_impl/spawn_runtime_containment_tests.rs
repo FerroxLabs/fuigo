@@ -2,6 +2,9 @@
 //!
 //! Cases run in a re-exec'd child (the `fuigo-gix-status` pattern) so parallel tests are unaffected.
 //! Stdout markers distinguish skip (unenforceable environment) from pass/fail.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use super::build_session_runtime;
 use fuigo_tty_utils::runtime::MAX_BLOCKING_THREADS;

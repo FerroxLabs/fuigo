@@ -1,5 +1,5 @@
 //! Controls which environment variables agent subprocesses (bash tool,
-//! terminals) inherit. Always excludes ambient known provider credentials; enforced at the
+//! terminals) inherit. Always excludes ambient known provider credentials and Fuigo's own; enforced at the
 //! shell spawn sites on macOS, Linux, and Windows.
 
 use serde::Deserialize;
@@ -119,27 +119,14 @@ impl ShellEnvironmentPolicy {
     }
 }
 
-/// Ambient provider credentials never cross a subprocess boundary implicitly.
-pub const PROVIDER_CREDENTIAL_NAMES: &[&str] = &[
-    "FUIGO_API_KEY",
-    "FUIGO_CODE_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "XAI_API_KEY",
-    "GROK_API_KEY",
-    "GROQ_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "MISTRAL_API_KEY",
-];
-
-pub fn is_provider_credential(name: &str) -> bool {
-    PROVIDER_CREDENTIAL_NAMES
-        .iter()
-        .any(|known| known.eq_ignore_ascii_case(name))
-}
+// The credential registry lives in `fuigo-secrets` (P120) so the leaf crates that spawn git (`fuigo-tty-utils`,
+// `fuigo-fast-worktree`) apply the SAME filter; it is re-exported here under its old path.
+pub use fuigo_secrets::child_env::{
+    FUIGO_INTERNAL_CREDENTIAL_ENV_VARS, credential_denylist_fence, credential_denylist_generation,
+    config_registered_names, credential_env_names, inherited_fuigo_owned_secret_names,
+    inherited_fuigo_secret_names, is_fuigo_owned_secret, is_fuigo_secret, is_provider_credential,
+    provider_key_env_vars, register_credential_env_names,
+};
 
 /// Built-in secret excludes applied when `ignore_default_excludes` is false.
 /// Shared by the base-env build and the login-capture filter so they can't drift.
@@ -271,7 +258,7 @@ pub(crate) fn t05_fresh_process(test_name: &str) -> bool {
         .env("FUIGO_HOME", home.path().join(".fuigo"))
         .env("SHELL", "/bin/bash")
         .env("FUIGO_LOGIN_ENV", "1");
-    for name in PROVIDER_CREDENTIAL_NAMES {
+    for name in credential_env_names() {
         cmd.env(name, "fake-t05-ambient");
     }
     let output = cmd.output().unwrap();
@@ -279,6 +266,87 @@ pub(crate) fn t05_fresh_process(test_name: &str) -> bool {
         output.status.success(),
         "isolated T05 child test failed: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+    true
+}
+
+/// P86: credential names the parent-environment probes plant in the PARENT process. Literal on
+/// purpose: a probe that read the denylist to decide what to plant would plant nothing once the
+/// denylist was emptied, and pass. `FLUX_API_KEY` (FluxRouter, the lead provider) and
+/// `ANTHROPIC_AUTH_TOKEN` are the two CB-1 found missing.
+#[cfg(test)]
+pub(crate) const P86_PLANTED: &[&str] = &[
+    "FLUX_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "FUIGO_API_KEY",
+    "OPENAI_API_KEY",
+    P86_CONFIGURED,
+];
+
+/// A name no provider uses: on the denylist only because the probe child registers it, the way
+/// the config loader registers a user's `env_key`.
+#[cfg(test)]
+pub(crate) const P86_CONFIGURED: &str = "P86_CORP_KEY";
+
+/// Shell test a P86 probe child runs: the benign parent variable arrived (so the probe really
+/// inherits the parent environment) and none of [`P86_PLANTED`] did.
+#[cfg(test)]
+pub(crate) const P86_CHILD_CHECK: &str = "test \"$P86_BENIGN\" = kept && test -z \"${FLUX_API_KEY+x}${ANTHROPIC_AUTH_TOKEN+x}${FUIGO_API_KEY+x}${OPENAI_API_KEY+x}${P86_CORP_KEY+x}\"";
+
+/// Re-run `test_name` in a fresh test process whose OWN environment holds every
+/// [`P86_PLANTED`] credential plus `P86_BENIGN=kept` (returns `true` in the parent, which must
+/// then return; `false` in the child, which runs the body). The child's `HOME` is a temp dir
+/// whose `.bashrc` (sourced by `.bash_profile`) exports `GROQ_API_KEY` and `P86_RC_BENIGN=kept`,
+/// so the login-capture and persistent routes see an rc-only credential too.
+/// The parent asserts the child ran exactly one test, so a filter that matched nothing cannot
+/// pass vacuously.
+#[cfg(test)]
+pub(crate) fn p86_parent_env(test_name: &str) -> bool {
+    if std::env::var("P86_CHILD_TEST").as_deref() == Ok(test_name) {
+        register_credential_env_names([P86_CONFIGURED]);
+        return false;
+    }
+    let home = tempfile::tempdir().unwrap();
+    // `GROQ_API_KEY` is exported ONLY by the rc file (not planted in the parent), so the
+    // login-capture and persistent-shell filters are what must drop it; `P86_RC_BENIGN` proves the
+    // rc file was really read. `.bash_profile` because the persistent shell starts as a login shell.
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "export GROQ_API_KEY=fake-p86-rc\nexport P86_RC_BENIGN=kept\n",
+    )
+    .unwrap();
+    std::fs::write(home.path().join(".bash_profile"), ". \"$HOME/.bashrc\"\n").unwrap();
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.arg(test_name)
+        .args(["--test-threads=1", "--nocapture"])
+        .env("P86_CHILD_TEST", test_name)
+        .env("HOME", home.path())
+        .env("FUIGO_HOME", home.path().join(".fuigo"))
+        .env("SHELL", "/bin/bash")
+        .env("FUIGO_LOGIN_ENV", "1")
+        .env("P86_BENIGN", "kept")
+        // In the parent env but registered by no one until a test does so mid-run.
+        .env("P86_LATE_KEY", "fake-p86-ambient")
+        // Only the rc file may provide these, whatever the runner's environment holds.
+        .env_remove("GROQ_API_KEY")
+        .env_remove("P86_RC_BENIGN");
+    for name in P86_PLANTED {
+        cmd.env(name, "fake-p86-ambient");
+    }
+    let output = cmd.output().unwrap();
+    let stdout = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .replace("fake-p86-", "[redacted]-");
+    assert!(
+        output.status.success(),
+        "isolated P86 child test failed: {stdout}"
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "the P86 child must run exactly one test: {stdout}"
     );
     true
 }

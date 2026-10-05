@@ -1,0 +1,44 @@
+Astra round 1 (codex 0.160.0, model gpt-6-astra, read-only) on 8b1a0192..4c990764 -- final report only.
+Raw transcript (7010 lines) not committed; sha256 ff02f9c089d3c49474a233025480052f56badd7583f1167de1db75b1b69d00f3
+
+Audited `8b1a0192..4c990764` at HEAD `4c990764ca7022e3c35ed17340fb62e5beb4ed47`. Read-only; no builds or tests run. **Three findings prevent landing.**
+
+1. **HIGH — Moving an initialized agent still invalidates every bound pointer.**  
+   [local_ref.rs:140](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:140)
+
+   `spawn_bound(&self)` records the agent’s current address without enforcing address stability. The public `acp::Agent::initialize(&self)` starts bound tasks, yet callers can subsequently move the `MvpAgent` into another allocation, return it from a helper, or swap it with another agent.
+
+   Concrete scenario: initialize a boxed agent, move its contents into another box, release the original allocation, then let the announcement timer fire. `LocalRef::get()` dereferences the original address. `BoundTasks` moved with the agent, so its ownership provides no protection.
+
+   This is a **retained soundness hole**, rather than a newly introduced move capability. The inspected ACP and pager production entrypoints establish stable ownership before initialization, but the public by-value API does not require it. Rust permits relocation on ownership transfers; a local variable alone is insufficient. [Rust pinning documentation](https://doc.rust-lang.org/std/pin/index.html#what-is-moving)
+
+   **Tests:** Not caught. The by-value teardown test calls `drop(agent)` at line 176, but its probe never dereferences the agent; `_agent_ref` is unused. Require stable internal storage or enforced pinning, plus a relocation regression.
+
+2. **HIGH — A destructor panic abandons the remaining bound futures, reopening use-after-free.**  
+   [local_ref.rs:95](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:95), particularly `drop(future)` at line 110.
+
+   Concrete scenario under unwinding: register pending futures A and B; A contains a destructor that panics, while B holds an agent reference or guard. Dropping the agent removes the entire weak-slot vector, then drops A. Its panic exits the loop. Unwinding drops the remaining **weak references**, while B’s driver still strongly owns B’s slot. The agent’s remaining fields are destroyed, but B can subsequently run or be dropped with dangling references.
+
+   Tokio catches task teardown panics, so an owner-task cancellation can leave the LocalSet running after this failure. Ordinary `panic = "abort"` distribution builds terminate instead; this remains relevant to unwind-enabled builds and tests.
+
+   **Tests:** Not caught. All probes have non-panicking destructors. Teardown must drain safely despite a destructor panic, or reliably abort before unwinding can abandon outstanding futures.
+
+3. **MEDIUM — Agent teardown does not wake emptied drivers; JoinHandles can hang indefinitely.**  
+   [local_ref.rs:110](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:110) and [local_ref.rs:122](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:122)
+
+   Concrete scenario: poll a bound future waiting on a channel or `pending()` until it returns `Pending`, then drop the agent while retaining its JoinHandle and running the LocalSet. Teardown clears the slot but stores no driver waker and issues no wake. The driver therefore need never observe `None`, and awaiting its handle need never return `Ok(())`.
+
+   This contradicts the stated `finish_deferred_recovery` completion guarantee. Removing the inner future may also remove its timer/channel wake registration. A future becoming ready does not itself schedule another poll. [Rust Future contract](https://doc.rust-lang.org/std/future/trait.Future.html#the-poll-method)
+
+   **Tests:** Not caught. The probe helper discards the JoinHandle. Retain and wake the driver when clearing its slot; test completion after a confirmed pending poll.
+
+The remaining checks support these narrower conclusions:
+
+- **Field order is correct:** `bound_tasks` is first, and Rust drops struct fields in declaration order. [Rust destructor rules](https://doc.rust-lang.org/reference/destructors.html)
+- **No escaped pointer found in the migrated call sites:** coordinator run/validate/describe futures remain in its `FuturesUnordered` collections. Worker and detached upload tasks receive owned snapshots. The synthetic loop and individual traces are bound. Confinement remains a caller convention, not something the factory signature enforces.
+- **Ordinary borrow handling looks consistent:** polling holds the slot borrow; nested spawning borrows the separate registry. Teardown releases both borrows before invoking destructors. Dropping the owner during an active poll takes the explicit process-abort path.
+- **The vector is not an accumulating completed-task leak:** each spawn prunes dead weak slots. It retains peak capacity and scans live slots per spawn.
+- **The no-op mutation is discriminated:** the owner-drop probe would immediately observe `None` instead of `Some(true)` if `BoundTasks::drop` did nothing. That proves synchronous draining, but not pointer validity, panic safety, or JoinHandle completion.
+
+**DO-NOT-LAND**
+exit=0

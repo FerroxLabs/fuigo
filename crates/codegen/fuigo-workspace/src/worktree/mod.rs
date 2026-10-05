@@ -2245,7 +2245,23 @@ async fn apply_file_content(dest: &Path, content: Option<&String>) -> bool {
             if let Some(parent) = dest.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            tokio::fs::write(dest, data).await.is_ok()
+            // Replaced, not rewritten in place: a reader in the main checkout
+            // (an editor, a build, a watcher) sees the whole old file or the
+            // whole new one, never a truncated one. `write_through` keeps what
+            // the in-place write kept: the mode (executable bit included),
+            // owner, ACLs, write-through symlinks (dangling ones too), and the
+            // refusal of a read-only file. A new file gets `0o666 & !umask`,
+            // as `write` gave it.
+            let (dest, data) = (dest.to_path_buf(), data.clone());
+            tokio::task::spawn_blocking(move || {
+                fuigo_config::write_through::replace_file_contents(
+                    &dest,
+                    data.as_bytes(),
+                    fuigo_config::write_through::NewFileMode::Default,
+                )
+            })
+            .await
+            .is_ok_and(|r| r.is_ok())
         }
         None => {
             let _ = tokio::fs::remove_file(dest).await;
@@ -2828,6 +2844,167 @@ pub fn build_candidate_list(
 
 #[cfg(test)]
 mod tests {
+    // ---- P49: apply_file_content replaces atomically ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn applied_content_replaces_the_file_and_keeps_its_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("run.sh");
+        std::fs::write(&dest, "old\n").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let ino = std::fs::metadata(&dest).unwrap().ino();
+        assert!(apply_file_content(&dest, Some(&"new\n".to_string())).await);
+        let md = std::fs::metadata(&dest).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new\n");
+        assert_eq!(md.permissions().mode() & 0o7777, 0o751, "mode kept");
+        assert_ne!(md.ino(), ino, "replaced, not rewritten in place");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["run.sh"], "no temp left behind");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn applied_content_writes_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&real, "old").unwrap();
+        std::os::unix::fs::symlink("real.txt", &link).unwrap();
+        assert!(apply_file_content(&link, Some(&"new".to_string())).await);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+    }
+
+    /// A dangling symlink is written through atomically too: its target is
+    /// created (through a temp) where it points, and the link kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn applied_content_creates_the_target_of_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink("missing.txt", &link).unwrap();
+        assert!(apply_file_content(&link, Some(&"new".to_string())).await);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(dir.path().join("missing.txt")).unwrap(), "new");
+        let temps = fuigo_config::write_through::fault::temps_under(dir.path());
+        assert_eq!(temps.len(), 1, "went through a temp: {temps:?}");
+    }
+
+    /// Replacing an existing file stages it owner-only (`0600`) while it fills,
+    /// whatever the umask; the real mode is applied after the write. A new file
+    /// gets exactly what `std::fs::write` would have given it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_temp_is_owner_only_and_a_new_file_gets_the_default_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("secret.txt");
+        std::fs::write(&dest, "old").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(apply_file_content(&dest, Some(&"new".to_string())).await);
+        let temps = fuigo_config::write_through::fault::temps_under(dir.path());
+        assert_eq!(temps.len(), 1, "{temps:?}");
+        assert_eq!(temps[0].1, Some(0o600), "temp must be owner-only while it fills");
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+
+        let control = dir.path().join("control.txt");
+        std::fs::write(&control, "x").unwrap();
+        let fresh = dir.path().join("fresh.txt");
+        assert!(apply_file_content(&fresh, Some(&"x".to_string())).await);
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o7777,
+            std::fs::metadata(&control).unwrap().permissions().mode() & 0o7777,
+            "a new file gets what std::fs::write gives it"
+        );
+    }
+
+    /// When the owner/group cannot be carried over (a non-root process
+    /// rewriting someone else's file; simulated), the replacement is refused
+    /// and the file left exactly as it was: no wrong-group publication, and no
+    /// non-atomic in-place rewrite either.
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_that_cannot_be_kept_refuses_the_replacement() {
+        use fuigo_config::write_through::{NewFileMode, fault, replace_file_contents};
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("theirs.txt");
+        std::fs::write(&dest, "old old old").unwrap();
+        let ino = std::fs::metadata(&dest).unwrap().ino();
+        fault::CHOWN_FAILS.with(|c| c.set(true));
+        let result = replace_file_contents(&dest, b"new", NewFileMode::Default);
+        fault::CHOWN_FAILS.with(|c| c.set(false));
+        let err = result.expect_err("must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old old old");
+        assert_eq!(std::fs::metadata(&dest).unwrap().ino(), ino, "untouched");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "temp removed: {names:?}");
+    }
+
+    /// A file whose name is near the 255-byte limit is applied too (its temp
+    /// name is bounded).
+    #[tokio::test]
+    async fn a_long_file_name_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("{}.txt", "a".repeat(246));
+        let dest = dir.path().join(&name);
+        std::fs::write(&dest, "old").unwrap();
+        assert!(apply_file_content(&dest, Some(&"new".to_string())).await);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn applied_content_creates_a_new_file_and_none_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a/b/new.txt");
+        assert!(apply_file_content(&dest, Some(&"x".to_string())).await);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "x");
+        assert!(apply_file_content(&dest, None).await);
+        assert!(!dest.exists());
+    }
+
+    /// A reader polling the file while it is applied never sees a partial file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_concurrent_reader_never_sees_a_partial_applied_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("big.txt");
+        let a = "a".repeat(512 * 1024);
+        let b = "b".repeat(512 * 1024);
+        std::fs::write(&dest, &a).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (dest, stop) = (dest.clone(), stop.clone());
+            let (a, b) = (a.clone(), b.clone());
+            std::thread::spawn(move || {
+                let mut reads = 0usize;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) || reads < 50 {
+                    let got = std::fs::read_to_string(&dest).unwrap();
+                    assert!(got == a || got == b, "partial file of {} bytes", got.len());
+                    reads += 1;
+                }
+                reads
+            })
+        };
+        for i in 0..60 {
+            let next = if i % 2 == 0 { &b } else { &a };
+            assert!(apply_file_content(&dest, Some(next)).await);
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(reader.join().unwrap() >= 50);
+    }
+
     use super::*;
     use std::time::Duration;
 
@@ -3082,6 +3259,9 @@ mod tests {
 
     #[test]
     fn touch_worktree_for_cwd_sets_last_accessed_for_nested_cwd() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let temp = tempfile::TempDir::new().unwrap();
         let (_env, home, wt) = worktree_db_fixture(&temp);
 
@@ -3102,6 +3282,9 @@ mod tests {
 
     #[test]
     fn touch_worktree_for_cwd_ignores_non_worktree_paths() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let temp = tempfile::TempDir::new().unwrap();
         let (_env, home, _wt) = worktree_db_fixture(&temp);
 
@@ -3123,6 +3306,9 @@ mod tests {
 
     #[test]
     fn lookup_worktree_label_resolves_from_nested_cwd() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let temp = tempfile::TempDir::new().unwrap();
         let (_env, _home, wt) = worktree_db_fixture(&temp);
 

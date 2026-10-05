@@ -1,0 +1,19 @@
+# Astra (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null), P74 round 3
+# raw transcript sha256 (not committed: contains the tool session log): 44bbaebb641942e435f580b3ee08ef335ac0eb70de39fd1064c40a2fab91896c
+## Brief
+Round 3 audit of Fuigo packet P74 in the current directory (branch strike/p74). Round 2 (on bb23dc8a) verdict was PASS WITH LOWS, asking to correct the PROTOC workaround note in crates/build/fuigo-proto-build/src/lib.rs. Commit 57047bd8 is a comment-only fix. Verify `git diff bb23dc8a 57047bd8` is comment-only and correct, and re-confirm there is no BLOCKER/HIGH in the full packet diff `git diff bc739009 57047bd8`. List remaining findings with severity and file:line. End with exactly one line: VERDICT: PASS | VERDICT: PASS WITH LOWS -- <reason> | VERDICT: FAIL -- <reason>. Do not modify files.
+## Final answer
+Verified `HEAD=57047bd8` on `strike/p74`.
+
+`bb23dc8a..57047bd8` changes exactly two Rust documentation-comment lines. The correction is accurate: neither `PATH` nor `PROTOC` is registered as an environment rerun trigger. The clean workaround matches [Cargo’s change-detection rules](https://doc.rust-lang.org/cargo/reference/build-scripts.html#change-detection).
+
+Reviewed all four files in `bc739009..57047bd8`. No BLOCKER/HIGH findings.
+
+Remaining finding:
+
+- **LOW — [crates/build/fuigo-proto-build/src/lib.rs:196](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:196):** Switching compiler selection through `PATH` or `PROTOC` can retain previously generated output until another tracked input changes. This deliberate limitation is now correctly documented; use `cargo clean -p <generating-crate>` when switching.
+
+`git diff --check`, `bash -n`, and `actionlint` passed. Rust tests and CI were not rerun under the read-only constraint. No files modified.
+
+VERDICT: PASS WITH LOWS -- documented compiler-selection invalidation limitation remains; no BLOCKER/HIGH findings
+exit=0

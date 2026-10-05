@@ -866,6 +866,62 @@ pub fn process_has_exited_without_reap(pid: u32, label: &str) -> io::Result<bool
     Ok(unsafe { info.si_pid() } != 0)
 }
 
+/// What `kill(pid, 0)` says about a process. [`PidLiveness::Unknown`] must be treated as alive by cleanup
+/// code: only a definite "no such process" proves a PID is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidLiveness {
+    /// The process exists (`kill` succeeded, or `EPERM`: it exists but belongs to someone else).
+    Alive,
+    /// `ESRCH`: no such process.
+    Gone,
+    /// Any other answer, or a PID that cannot name exactly one process (0, or beyond `pid_t`).
+    Unknown,
+}
+
+/// Probe `pid` with `kill(pid, 0)`: a direct syscall that never blocks, so it is bounded by
+/// construction (no helper subprocess whose wait could hang). PID 0 and PIDs beyond `pid_t` are refused
+/// as [`PidLiveness::Unknown`] rather than probed, because `kill(0, …)` addresses a whole process group.
+/// A zombie still counts as [`PidLiveness::Alive`] until its parent reaps it.
+#[cfg(unix)]
+pub fn pid_liveness(pid: u32) -> PidLiveness {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return PidLiveness::Unknown;
+    }
+    // SAFETY: signal 0 performs an existence/permission check only; the PID is a single positive pid_t.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    classify_kill_zero(if result == 0 {
+        None
+    } else {
+        io::Error::last_os_error().raw_os_error()
+    })
+}
+
+/// Map the outcome of `kill(pid, 0)` (`None` = success, else the errno) to a [`PidLiveness`].
+/// Split out so every branch is unit-testable, including `EPERM`, which a root test runner cannot provoke.
+#[cfg(unix)]
+pub fn classify_kill_zero(errno: Option<i32>) -> PidLiveness {
+    match errno {
+        None => PidLiveness::Alive,
+        Some(code) if code == libc::EPERM => PidLiveness::Alive,
+        Some(code) if code == libc::ESRCH => PidLiveness::Gone,
+        Some(_) => PidLiveness::Unknown,
+    }
+}
+
+/// Send `SIGKILL` to one process (`group == false`) or to the process group it leads (`group == true`), by
+/// direct syscall, never blocking. Returns whether the kernel accepted the signal.
+/// Refused (`false`, nothing sent): PID 0 (the caller's own group), PID 1 (init, and with `group == true`
+/// `kill(-1, …)` would broadcast to every process the caller may signal), and PIDs beyond `pid_t`.
+#[cfg(unix)]
+pub fn sigkill(pid: u32, group: bool) -> bool {
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
+    }
+    let target = if group { -(pid as libc::pid_t) } else { pid as libc::pid_t };
+    // SAFETY: SIGKILL to a single pid >= 2, or to the group it names (target <= -2); never 0, 1 or -1.
+    unsafe { libc::kill(target, libc::SIGKILL) == 0 }
+}
+
 fn spawn_capture<R>(mut reader: R, tail: OutputTail) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -937,6 +993,46 @@ fn sanitize_output(output: &str, redactions: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod pid_liveness_tests {
+        use super::super::{PidLiveness, classify_kill_zero, pid_liveness, sigkill};
+
+        #[test]
+        fn esrch_is_gone_eperm_is_alive_success_is_alive_anything_else_is_unknown() {
+            assert_eq!(classify_kill_zero(None), PidLiveness::Alive);
+            assert_eq!(classify_kill_zero(Some(libc::EPERM)), PidLiveness::Alive);
+            assert_eq!(classify_kill_zero(Some(libc::ESRCH)), PidLiveness::Gone);
+            assert_eq!(classify_kill_zero(Some(libc::EINVAL)), PidLiveness::Unknown);
+        }
+
+        #[test]
+        fn pid_zero_and_out_of_range_are_never_probed_or_signalled() {
+            assert_eq!(pid_liveness(0), PidLiveness::Unknown);
+            assert_eq!(pid_liveness(u32::MAX), PidLiveness::Unknown);
+            assert!(!sigkill(0, false) && !sigkill(0, true) && !sigkill(u32::MAX, true));
+            // PID 1: init, and as a group `kill(-1, SIGKILL)` would broadcast. Refused before any syscall.
+            // (A mutant removing this guard is deliberately never executed: on a root runner it would
+            // SIGKILL every process on the host.)
+            assert!(!sigkill(1, true) && !sigkill(1, false));
+        }
+
+        #[test]
+        fn a_live_process_is_alive_and_a_killed_reaped_one_is_gone() {
+            assert_eq!(pid_liveness(std::process::id()), PidLiveness::Alive);
+            #[allow(clippy::disallowed_methods)] // test-owned child, killed and reaped right here
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn sleep");
+            let pid = child.id();
+            assert_eq!(pid_liveness(pid), PidLiveness::Alive);
+            assert!(sigkill(pid, false), "SIGKILL to a live child must be accepted");
+            child.wait().expect("reap the child");
+            assert_eq!(pid_liveness(pid), PidLiveness::Gone);
+        }
+    }
+
     use super::*;
 
     #[cfg(unix)]

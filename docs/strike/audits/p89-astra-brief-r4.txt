@@ -1,0 +1,20 @@
+You are an independent adversarial code auditor. Read-only: do not build, run tests or modify files.
+Repository: the git worktree in the current directory. Audit fc3ccb94..HEAD (branch strike/p89, now rebased
+onto integration fc3ccb94; the integration commits since 84569ea8 touch only fuigo-extra-ca and docs), round 4.
+
+Context and the change: docs/strike/audits/p89-astra-brief-r1.txt. Earlier reports:
+docs/strike/audits/p89-astra-r1.txt, -r2.txt, -r3.txt (briefs alongside).
+
+Since round 3: r3 finding 1 (HIGH, widened: a resend that supersedes a pending attempt with no usage lifts a
+token-budgeted terminal record's refusal) -- `Change::Supersede` on a TERMINAL record with `usage: None` now
+sets `unknown_usage` (fail closed), so `exhaustion()` keeps refusing (`TokenUsageUnknown`); a Working record
+keeps the deliberate empty-reply policy. A test pins both outcomes. r3 finding 2 (rewind cancel) was judged
+pre-existing and not widened; it goes to a separate packet. r3 finding 3 (LOW) unchanged.
+
+Verify the r3 fix, check it does not break the background-grant continuation after a SUCCESSFUL terminal
+(`background_grant_may_continue`) beyond failing closed under a token budget, and look for any other path by
+which a token-budgeted terminal record can lose a pending attempt without its usage (Abandon, the sweep,
+ChildAdmit/ChildTools, Reconcile, EditedPaths, Reopen itself). Then a final pass over the whole change.
+Report BLOCKER / HIGH / MEDIUM / LOW with file:line and a concrete scenario, distinguishing "introduced or
+widened by this change" from "pre-existing". End with a one-line verdict: whether any BLOCKER/HIGH introduced
+or widened by this change remains.
